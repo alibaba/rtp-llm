@@ -143,6 +143,7 @@ def install():
         if (
             self.prefix.startswith(("model.", "mtp.", "language_model."))
             and ".experts" not in self.prefix
+            and not self.prefix.endswith(".conv1d")
         ):
             block_quant = "attn" in self.prefix and self.prefix.endswith(
                 (
@@ -179,6 +180,7 @@ def quantize_compute_views(model):
                 or (
                     name == "weight"
                     and getattr(module, "quant_method", None) is not None
+                    and not getattr(module, "prefix", "").endswith(".conv1d")
                 )
             ):
                 continue
