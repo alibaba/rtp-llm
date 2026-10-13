@@ -3396,6 +3396,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    EXPECT_FALSE(processor->mtpCapability().requires_executor_thread);
     stream->sampling_state_.logits_processors.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
@@ -4630,6 +4631,7 @@ TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalComm
     EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
 }
 
+#if USING_CUDA
 TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
     /** Rejected rows must not advance state; derive sequence lengths and hidden indexes from accepted counts. */
     const int64_t batch_size = 8;
@@ -4641,11 +4643,9 @@ TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
     auto next_seq_len = torch::empty({batch_size}, cuda_i32);
     auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
 
-#if USING_CUDA
     invokeMtpDispatchStatePrepare(
         accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
     cudaDeviceSynchronize();
-#endif
 
     auto expected_next = (prev_seq_len + accept_len).cpu();
     auto actual_next   = next_seq_len.cpu();
@@ -4659,6 +4659,7 @@ TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {
                                                         << actual_idx << "\nvs expected:\n"
                                                         << expected_idx;
 }
+#endif
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     // Micro-benchmark: compare per-stream scalar ops vs batched approach

@@ -139,11 +139,14 @@ cc_test(
             "RTP_LLM_STREAM_ASYNC": "0",
             "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
         },
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
     exec_properties = select({
         "@//:using_ppu": {"gpu": "PPU-ZW810E"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {"gpu": "L20_CU13"},
     }),
-    tags = ["L20_CU13", "PPU-ZW810E"],
+    # Bazel tags are not configurable; exec_properties selects the actual GPU.
+    tags = ["L20_CU13", "PPU-ZW810E", "MI308X-ROCM7"],
 )
