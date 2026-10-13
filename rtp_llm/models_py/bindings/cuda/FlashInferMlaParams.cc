@@ -5,8 +5,11 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mha_paged_attn_plan.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include <cstdint>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <numeric>
 #include <cuda_runtime.h>
 using namespace torch_ext;
@@ -44,6 +47,122 @@ torch::Tensor toDeviceContiguousI32(const torch::Tensor& tensor) {
     }
     return t.is_contiguous() ? t : t.contiguous();
 }
+
+// One active host->device extent per mirror tensor of FlashInferMlaAttnParams.
+struct ActiveExtent {
+    torch::Tensor* host;
+    torch::Tensor* dev;
+    int64_t        elems;
+};
+constexpr size_t kMaxActiveExtents = 10;
+
+// One checked cudaMemcpyAsync per active extent; check_cuda_value throws with
+// file:line like the other CUDA calls in the bindings.
+void copyActiveExtents(const ActiveExtent* extents, size_t num, cudaStream_t stream) {
+    for (size_t i = 0; i < num; ++i) {
+        check_cuda_value(cudaMemcpyAsync(extents[i].dev->data_ptr(),
+                                         extents[i].host->data_ptr(),
+                                         static_cast<size_t>(extents[i].elems) * sizeof(int32_t),
+                                         cudaMemcpyHostToDevice,
+                                         stream));
+    }
+}
+
+#if !USING_ROCM && CUDART_VERSION >= 12080
+// cudaMemcpyBatchAsync availability, mirroring the version dispatch of
+// execBatchedMemoryCopy in NoBlockCopy.cc: driver API >= 12080 (>= 13000 when
+// built against CUDA 13, whose cudaMemcpyBatchAsync ABI differs), runtime
+// >= 12080, and the runtime/compile ABI family must match. Evaluated once.
+bool mlaBatchCopySupported() {
+    static const bool supported = [] {
+        constexpr int min_driver_version = CUDART_VERSION >= 13000 ? 13000 : 12080;
+        const int     driver_version     = getCudaVersion();
+        if (driver_version < min_driver_version) {
+            RTP_LLM_LOG_WARNING(
+                "FlashInferMlaAttnParams batch copy unavailable: CUDART_VERSION=%d requires driver API version "
+                ">=%d, installed driver API version=%d; using per-tensor copies",
+                CUDART_VERSION,
+                min_driver_version,
+                driver_version);
+            return false;
+        }
+        int runtime_version = 0;
+        if (cudaRuntimeGetVersion(&runtime_version) != cudaSuccess) {
+            RTP_LLM_LOG_WARNING("FlashInferMlaAttnParams batch copy unavailable: CUDART_VERSION=%d, failed to "
+                                "query runtime version; using per-tensor copies",
+                                CUDART_VERSION);
+            return false;
+        }
+        if (runtime_version < 12080 || (CUDART_VERSION >= 13000) != (runtime_version >= 13000)) {
+            RTP_LLM_LOG_WARNING("FlashInferMlaAttnParams batch copy unavailable: CUDART_VERSION=%d, runtime "
+                                "version=%d, incompatible cudaMemcpyBatchAsync ABI; using per-tensor copies",
+                                CUDART_VERSION,
+                                runtime_version);
+            return false;
+        }
+        return true;
+    }();
+    return supported;
+}
+
+// Submits every active extent with one cudaMemcpyBatchAsync (H20 measurement:
+// ~25 us GPU / ~17 us CPU submit vs ~37 / ~28 us for 10 separate cudaMemcpyAsync
+// calls). Returns false when the batch path is unavailable or rejected so the
+// caller falls back to the checked per-tensor loop.
+bool submitActiveExtentsBatched(const ActiveExtent* extents, size_t num, cudaStream_t stream) {
+    // The batch API rejects the legacy NULL stream, and torch's default current
+    // stream is legacy; only a real stream may take this path.
+    if (stream == nullptr || stream == cudaStreamLegacy) {
+        return false;
+    }
+    // Keep capture on the per-tensor path so graph recording is unchanged.
+    if (CaptureCheck::in_cuda_graph_capture) {
+        return false;
+    }
+    if (!mlaBatchCopySupported()) {
+        return false;
+    }
+    static std::atomic<bool> submit_healthy{true};
+    if (!submit_healthy.load(std::memory_order_relaxed)) {
+        return false;
+    }
+
+    void*  dsts[kMaxActiveExtents];
+    void*  srcs[kMaxActiveExtents];
+    size_t sizes[kMaxActiveExtents];
+    for (size_t i = 0; i < num; ++i) {
+        dsts[i]  = extents[i].dev->data_ptr();
+        srcs[i]  = extents[i].host->data_ptr();
+        sizes[i] = static_cast<size_t>(extents[i].elems) * sizeof(int32_t);
+    }
+
+    cudaMemcpyAttributes attr{};
+    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    size_t attr_idx     = 0;
+    // cuMemcpyBatchAsync_v2 is not safe under concurrent host submissions (see
+    // the same guard in NoBlockCopy.cc); serialize the runtime API entry.
+    static std::mutex submit_mutex;
+    std::lock_guard<std::mutex> lock(submit_mutex);
+    cudaError_t error = cudaSuccess;
+#if CUDART_VERSION >= 13000
+    error = cudaMemcpyBatchAsync(dsts, srcs, sizes, num, &attr, &attr_idx, 1, stream);
+#else
+    size_t fail_idx = 0;
+    error           = cudaMemcpyBatchAsync(dsts, srcs, sizes, num, &attr, &attr_idx, 1, &fail_idx, stream);
+#endif
+    if (error != cudaSuccess) {
+        // A rejected batch call also sets the sticky last-error; clear it so the
+        // failure does not resurface at the next torch op boundary.
+        cudaGetLastError();
+        RTP_LLM_LOG_WARNING("FlashInferMlaAttnParams batch copy rejected: error=%d (%s); using per-tensor copies",
+                            static_cast<int>(error),
+                            cudaGetErrorString(error));
+        submit_healthy.store(false, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+#endif
 
 }  // namespace
 
@@ -386,10 +505,44 @@ void FlashInferMlaAttnParams::refreshBuffer(
     // Get current CUDA stream
     cudaStream_t stream = GET_CURRENT_STREAM();
 
-    // Single async copy from HOST to DEVICE for the entire buffer
-    // Since all tensors are in continuous memory, we can copy the entire buffer at once
-    size_t total_bytes = buf_h.numel() * sizeof(int32_t);
-    cudaMemcpyAsync(buf_d.data_ptr(), buf_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+    // Copy only the ACTIVE extents of each host tensor to its device mirror.
+    // The buffer keeps max-size layout (graph-captured device pointers require
+    // stable offsets), so a single whole-buffer copy streams max_size bytes
+    // per call even when the current batch needs a few hundred. Regions
+    // outside the active extents are identical on both sides: the host side
+    // is written exactly when a region is active, so skipping the copy of
+    // untouched regions leaves device == host everywhere.
+    ActiveExtent extents[kMaxActiveExtents] = {
+        {&batch_indice_h, &batch_indice_d, input_token_num},
+        {&page_indice_h, &page_indice_d, page_num},
+        {&reuse_cache_page_indice_h, &reuse_cache_page_indice_d, reuse_page_num},
+        {&decode_page_indptr_h, &decode_page_indptr_d, batch_size + 1},
+        {&prefill_ragged_kv_len_indptr_h, &prefill_ragged_kv_len_indptr_d, batch_size + 1},
+        {&paged_kv_last_page_len_h, &paged_kv_last_page_len_d, batch_size},
+        {&qo_indptr_h, &qo_indptr_d, batch_size + 1},
+        {&kvlen_h, &kvlen_d, batch_size},
+        {&positions_h, &positions_d, input_token_num},
+        {&batch_reuse_info_vec_h, &batch_reuse_info_vec_d, batch_reuse_info_size},
+    };
+    size_t active_num = 0;
+    for (const auto& extent : extents) {
+        if (extent.elems > 0 && extent.host->defined() && extent.dev->defined()) {
+            extents[active_num++] = extent;
+        }
+    }
+
+    if (active_num > 0) {
+        // The batch API needs numAttrs (1) <= count, hence the non-empty guard.
+        // CUDA 12.8+ dispatch: one cudaMemcpyBatchAsync when driver, runtime and
+        // the current stream allow it; checked per-tensor copies otherwise.
+#if !USING_ROCM && CUDART_VERSION >= 12080
+        if (!submitActiveExtentsBatched(extents, active_num, stream)) {
+            copyActiveExtents(extents, active_num, stream);
+        }
+#else
+        copyActiveExtents(extents, active_num, stream);
+#endif
+    }
 
     // Update tensor shapes (without reallocating memory)
     // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef
