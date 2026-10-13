@@ -11,8 +11,6 @@ import math
 from pathlib import Path
 from statistics import median
 
-from plotly.offline import get_plotlyjs
-
 from rtp_llm.test.perf_test.cache_grid.runner.result_schema import (
     current_metrics,
     run_prefill_rt,
@@ -93,6 +91,8 @@ def analyze_results(data):
 
 
 def render_html(rows, partial=False, model_label="Model"):
+    from plotly.offline import get_plotlyjs
+
     page = r"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <title>__MODEL__ batch / cache / compute / server first-token latency</title>
 <style>
@@ -150,7 +150,7 @@ draw();
     page = page.replace("__PLOTLY__", get_plotlyjs()).replace(
         "__DATA__", json.dumps(rows, ensure_ascii=False).replace("</", "<\\/")
     )
-    return page.replace("__MODEL__", html.escape(model_label))
+    return page.replace("__MODEL__", html.escape(str(model_label)))
 
 
 def main():

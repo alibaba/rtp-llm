@@ -70,6 +70,17 @@ class GeneratePrefill3dChartTest(unittest.TestCase):
 
         self.assertIn("短序列区间无样本，未绘制插图", svg)
 
+    def test_cold_chart_labels_actual_longest_point(self):
+        rows = [{"input": 8192.0, "compute": 8192.0, "cache": 0.0, "rt": 10.0}]
+        svg = render_cold_miss_2d(rows, Path("results.json"), 1)
+        self.assertIn("最长冷点（8K）", svg)
+        self.assertNotIn("1M cold", svg)
+
+    def test_cold_chart_returns_placeholder_when_no_cold_rows(self):
+        rows = [{"input": 8192.0, "compute": 4096.0, "cache": 4096.0, "rt": 10.0}]
+        svg = render_cold_miss_2d(rows, Path("results.json"), 1)
+        self.assertIn("没有 observed cache_len=0", svg)
+
     def test_default_title_is_generic(self):
         payload = _sample_payload()
         with tempfile.TemporaryDirectory() as directory:

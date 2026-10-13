@@ -220,6 +220,11 @@ def _build_cache_resume_config(
 def _configure_cache_batch_limits(args, remaining, cases, *, cache_alignment=None):
     """Configure token capacity without changing profile admission or context limits."""
     batch_size = max(c["batch_size"] for c in cases)
+    if args.concurrency_limit < batch_size:
+        raise ValueError(
+            f"--concurrency_limit={args.concurrency_limit} cannot admit cache-grid "
+            f"batch_size={batch_size}; increase it to at least {batch_size}"
+        )
     workspace = getattr(args, "cache_workspace_tokens", None)
     if workspace is not None:
         if type(cache_alignment) is not int or cache_alignment <= 0:
@@ -370,6 +375,7 @@ def _load_materialized_case_store(
     cases: List[Dict[str, int]],
     measure_runs: int,
     grid_sha256: str,
+    profile_sha256: Optional[str] = None,
 ) -> MaterializedCaseStore:
     """Load a precomputed prompt store and prove it matches this grid."""
     store = MaterializedCaseStore(root)
@@ -383,6 +389,12 @@ def _load_materialized_case_store(
         raise ValueError(
             f"case store {root} was materialized from a different grid JSON "
             f"(sha256 {store.grid_sha256[:12]} != {grid_sha256[:12]}); "
+            "rerun --materialize_cache_cases"
+        )
+    if store.profile_sha256 != (profile_sha256 or ""):
+        raise ValueError(
+            f"case store {root} was materialized from a different profile "
+            f"(sha256 {store.profile_sha256[:12]} != {(profile_sha256 or '')[:12]}); "
             "rerun --materialize_cache_cases"
         )
 
@@ -402,6 +414,65 @@ def _load_materialized_case_store(
             "materialization. Rerun --materialize_cache_cases."
         )
     return store
+
+
+def _sanitize_nested_provenance(name: str, value: Any) -> Any:
+    """Recursively remove credentials while retaining useful configuration shape."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_nested_provenance(str(key), item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_nested_provenance(name, item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_provenance_value(name, value, allow_plaintext=True)
+    return value
+
+
+def _finalize_completed_cache_checkpoint(
+    result_dir: str, checkpoint: Dict[str, Any], cases: List[Dict[str, Any]]
+) -> None:
+    """Atomically mark an all-successful interrupted checkpoint as complete."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    total = len(cases)
+    finalized = dict(checkpoint)
+    finalized.update(
+        complete=True,
+        status="completed",
+        updated_at=now,
+        total_cases=total,
+        completed_cases=total,
+        progress={
+            "total_cases": total,
+            "attempted_cases": total,
+            "completed_cases": total,
+            "failed_or_invalid_cases": 0,
+            "pending_cases": 0,
+            "progress_pct": 100.0,
+            "last_completed_case": (
+                CacheGridRunner._case_descriptor(cases[-1]) if cases else None
+            ),
+            "next_pending_case": None,
+        },
+    )
+    root = Path(result_dir)
+    result_path = root / "cache_grid_results.json"
+    tmp = result_path.with_suffix(result_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(finalized, indent=2), encoding="utf-8")
+    os.replace(tmp, result_path)
+    progress = {
+        "schema_version": 1,
+        "mode": "prefix_cache_grid_progress",
+        "updated_at": now,
+        "resume_count": finalized.get("resume_count", 0),
+        "run_config_sha256": finalized.get("run_config_sha256"),
+        "progress": finalized["progress"],
+    }
+    progress_path = root / "cache_grid_progress.json"
+    progress_tmp = progress_path.with_suffix(progress_path.suffix + ".tmp")
+    progress_tmp.write_text(json.dumps(progress, indent=2), encoding="utf-8")
+    os.replace(progress_tmp, progress_path)
 
 
 def _write_test_info(
@@ -445,8 +516,12 @@ def _write_test_info(
             now if status == "running" else previous.get("last_attempt_started_at", now)
         ),
         "attempt_count": attempt_count,
-        "model_type": model_type,
-        "checkpoint_path": checkpoint_path,
+        "model_type": _sanitize_provenance_value(
+            "model_type", model_type, allow_plaintext=True
+        ),
+        "checkpoint_path": _sanitize_provenance_value(
+            "checkpoint_path", checkpoint_path, allow_plaintext=True
+        ),
         "tp_size": extract_arg(remaining_args, "tp_size", "1"),
         "dp_size": args.dp_size,
         "cache_grid_json": args.cache_grid_json or None,
@@ -487,7 +562,9 @@ def _write_test_info(
         info.update(
             {
                 "schema_version": 3,
-                "tokenizer_path": tokenizer_path,
+                "tokenizer_path": _sanitize_provenance_value(
+                    "tokenizer_path", tokenizer_path, allow_plaintext=True
+                ),
                 "max_seq_len": args.max_seq_len,
                 "concurrency_limit": args.concurrency_limit,
                 "decode_test_length": args.decode_test_length,
@@ -531,13 +608,19 @@ def _write_test_info(
                     else requested_cache_grpc_port
                 ),
                 "dataset_name": args.dataset_name or None,
-                "dataset_path": args.dataset_path or args.dataset or None,
+                "dataset_path": _sanitize_provenance_value(
+                    "dataset_path",
+                    args.dataset_path or args.dataset or None,
+                    allow_plaintext=True,
+                ),
                 "engine_args": _redact_argv(remaining_args),
                 "engine_env_names": sorted(engine_env_names or []),
                 "engine_environment": _capture_reproduction_env(engine_env_names),
                 "argv": _redact_argv(sys.argv),
-                "resume_config": resume_config,
-                "profile": profile,
+                "resume_config": _sanitize_nested_provenance(
+                    "resume_config", resume_config
+                ),
+                "profile": _sanitize_nested_provenance("profile", profile),
             }
         )
     tmp_path = path + ".tmp"
@@ -884,8 +967,6 @@ def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
     setup_logging()
-    _ensure_xgrammar_lib_path()
-
     args, remaining = parse_args()
     engine_env_names = _apply_engine_env(
         [
@@ -896,8 +977,8 @@ def main() -> str:
     engine_env_names = sorted(
         set(engine_env_names + _apply_engine_env(args.engine_env))
     )
+    _ensure_xgrammar_lib_path()
     _apply_run_overrides(args)
-    remaining.extend(_engine_arg_argv(args.engine_arg))
     remaining = resolve_perf_engine_paths(remaining)
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
@@ -1059,7 +1140,10 @@ def main() -> str:
             checkpoint is not None
             and checkpoint_ok_keys == planned_case_keys
             and not args.cache_profile_runs
+            and not args.materialize_cache_cases
         ):
+            if checkpoint.get("complete") is not True:
+                _finalize_completed_cache_checkpoint(args.result_dir, checkpoint, cases)
             logging.info(
                 "cache grid: checkpoint already contains all %d successful cases; "
                 "skipping tokenizer and model startup",
@@ -1147,6 +1231,7 @@ def main() -> str:
                 cases,
                 args.cache_measure_runs,
                 grid_sha256,
+                getattr(args, "_profile_sha256", None),
             )
             logging.info(
                 "cache grid: using materialized case store %s", args.cache_case_files
@@ -1228,7 +1313,10 @@ def main() -> str:
             )
             return args.result_dir
         finally:
-            server.stop()
+            try:
+                server.stop()
+            finally:
+                summarize_and_cleanup_coredumps(args.result_dir)
 
     # Phase 1: Configure
     config = prepare_config(args, remaining)

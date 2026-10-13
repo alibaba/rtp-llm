@@ -31,6 +31,7 @@ def parse_args(
     parser = argparse.ArgumentParser(
         description="RTP-LLM batch decode performance test runner. "
         "Unrecognized arguments are forwarded to the engine server.",
+        allow_abbrev=False,
     )
 
     perf = parser.add_argument_group("perf test configuration")
@@ -218,6 +219,10 @@ def parse_args(
 
     parsed_argv = sys.argv[1:] if argv is None else argv
     args, remaining = parser.parse_known_args(parsed_argv)
+    # Treat shorthand engine arguments as explicit CLI arguments before profile
+    # defaults are merged.  This both preserves CLI precedence and prevents a
+    # profile value for the same key from being forwarded alongside it.
+    remaining.extend(_engine_arg_argv(args.engine_arg))
     if any(arg.split("=", 1)[0] == "--expected_cache_block_size" for arg in remaining):
         parser.error(
             "--expected_cache_block_size was removed; set "
@@ -266,6 +271,17 @@ def parse_args(
                 else None
             ),
             3,
+        )
+        args.cache_commit_tail_tokens = resolve_int(
+            profile,
+            "cache_grid",
+            "commit_tail_tokens",
+            (
+                args.cache_commit_tail_tokens
+                if "--cache_commit_tail_tokens" in explicit_options
+                else None
+            ),
+            int(os.environ.get("CACHE_COMMIT_TAIL_TOKENS", "4096")),
         )
         for name, fallback in (
             ("dp_size", 1),

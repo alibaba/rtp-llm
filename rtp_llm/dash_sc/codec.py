@@ -1835,6 +1835,10 @@ class StreamResponseBuilder:
             )
             infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
 
+        # Engine timings evolve across streaming frames. The cached protobuf is
+        # only a structural template; always publish the current frame's values.
+        _set_aux_info_timing_parameters(infer, aux_info)
+
         if generate_think_token_num != self._template_think_token_num:
             if generate_think_token_num is None:
                 if "generate_think_token_num" in infer.parameters:

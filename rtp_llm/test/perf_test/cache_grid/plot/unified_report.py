@@ -10,6 +10,7 @@ def write_charts(rows, output, *, cards=1, partial=False, model_label="Model"):
         raise ValueError("cards must be positive")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    model_label = str(model_label or "Model")
     try:
         from plotly.offline import get_plotlyjs
     except ImportError:

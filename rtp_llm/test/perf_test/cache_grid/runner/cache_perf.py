@@ -161,7 +161,12 @@ def build_plan(args, inherited=None):
         raise ValueError("--nsys-tail-seconds must be between 0 and 60")
     source = args.result_dir.resolve()
     replay = args.mode in ("retest", "profile")
-    if args.mode == "run" and source.exists() and any(source.iterdir()):
+    if (
+        args.mode == "run"
+        and source.exists()
+        and any(source.iterdir())
+        and not getattr(args, "allow_restart_without_checkpoint", False)
+    ):
         raise ValueError("run requires an empty/new result directory; use resume")
     if args.mode == "resume" and not (source / "cache_grid_results.json").is_file():
         raise ValueError("resume requires an existing cache_grid_results.json")

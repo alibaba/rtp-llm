@@ -396,7 +396,13 @@ def render_cold_miss_2d(
         (row for row in rows if row["cache"] == 0), key=lambda row: row["input"]
     )
     if not cold:
-        raise SystemExit("no cache-miss rows for the requested batch size")
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{{font-family:Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#172033}}</style>
+<text x="60" y="75" font-size="32" font-weight="700">{html.escape(str(model_label))}：Cache miss 的 seq_len–RT 趋势</text>
+<text x="60" y="150" font-size="21">BS={batch_size} · 当前结果没有 observed cache_len=0 的有效样本</text>
+<text x="60" y="205" font-size="17" fill="#64748b">source: {html.escape(source.name)}</text>
+</svg>"""
     width, height = 1800, 1050
     x0, y0, x1, y1 = 150.0, 180.0, 1430.0, 820.0
     xmax = max(row["input"] for row in cold)
@@ -447,17 +453,9 @@ def render_cold_miss_2d(
     ]
     out.append(line(x0, y1, x1, y1, "#0f172a", 2))
     out.append(line(x0, y0, x0, y1, "#0f172a", 2))
-    for tick in (
-        0,
-        64 * 1024,
-        128 * 1024,
-        256 * 1024,
-        384 * 1024,
-        512 * 1024,
-        768 * 1024,
-        1024 * 1024,
-    ):
-        x = sx(min(tick, xmax))
+    for index in range(9):
+        tick = xmax * index / 8
+        x = sx(tick)
         out.append(line(x, y1, x, y1 + 9, "#0f172a", 1.3))
         out.append(
             f'<text x="{x:.1f}" y="{y1 + 34:.1f}" text-anchor="middle" class="tick">{esc_text(fmt_tokens(tick))}</text>'
@@ -540,12 +538,12 @@ def render_cold_miss_2d(
             f'<text x="{inset_x + inset_w / 2:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" class="note">短序列区间无样本，未绘制插图</text>'
         )
 
-    one_m = max(cold, key=lambda row: row["input"])
+    longest = max(cold, key=lambda row: row["input"])
     out.append(
-        f'<line x1="{sx(one_m["input"]):.1f}" y1="{sy(one_m["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(one_m["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
+        f'<line x1="{sx(longest["input"]):.1f}" y1="{sy(longest["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(longest["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
     )
     out.append(
-        f'<text x="{x1 - 15:.1f}" y="{sy(one_m["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">1M cold：{one_m["rt"]:.1f} ms</text>'
+        f'<text x="{x1 - 15:.1f}" y="{sy(longest["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">最长冷点（{fmt_tokens(longest["input"])}）：{longest["rt"]:.1f} ms</text>'
     )
 
     panel_x, panel_y, panel_w, panel_h = 1490.0, 150.0, 275.0, 670.0
@@ -563,7 +561,7 @@ def render_cold_miss_2d(
         f"seq 范围：{fmt_tokens(min(row['input'] for row in cold))}–{fmt_tokens(xmax)}",
         f"RT 中位数：{median_rt:.1f} ms",
         f"RT P95：{p95_rt:.1f} ms",
-        f"1M 冷点：{one_m['rt']:.1f} ms",
+        f"最长冷点（{fmt_tokens(longest['input'])}）：{longest['rt']:.1f} ms",
         "",
         "每个圆点 = 一个 seq_len",
         "蓝线 = 按 seq_len 排序",

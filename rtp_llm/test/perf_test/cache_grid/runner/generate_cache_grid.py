@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any, Iterable
@@ -113,10 +114,15 @@ def generate_cache_lengths(
     points: int,
     ratio_points: int,
     seed: int,
+    commit_tail_tokens: int | None = None,
 ) -> list[int]:
     if points < 2 or ratio_points < 0 or ratio_points > points - 2:
         raise ValueError("cache points require two boundaries and valid ratio_points")
-    max_cache = align_down(input_len - 1, alignment)
+    commit_tail_tokens = commit_tail_tokens or alignment
+    if alignment <= 0 or commit_tail_tokens <= 0:
+        raise ValueError("cache alignment and commit tail must be positive")
+    cache_step = math.lcm(alignment, commit_tail_tokens)
+    max_cache = align_down(input_len - commit_tail_tokens, cache_step)
     if max_cache <= 0:
         return [0]
     result = {0, max_cache}
@@ -128,10 +134,10 @@ def generate_cache_lengths(
         for index in range(count):
             # Pick an aligned index from the interior of each equal-width
             # stratum. Using indices avoids tokenizer/block-size assumptions.
-            lo = 1 + index * max(1, max_cache // alignment - 1) // count
-            hi = 1 + (index + 1) * max(1, max_cache // alignment - 1) // count
+            lo = 1 + index * max(1, max_cache // cache_step - 1) // count
+            hi = 1 + (index + 1) * max(1, max_cache // cache_step - 1) // count
             cache_index = rng.randrange(lo, max(lo + 1, hi))
-            value = min(cache_index * alignment, max_cache)
+            value = min(cache_index * cache_step, max_cache)
             result.add(max_cache - value if reverse else value)
 
     if ratio_points:
@@ -199,6 +205,9 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             "specify --cache-alignment or profile.cache_grid.cache_alignment explicitly"
         )
+    commit_tail_tokens = getattr(args, "commit_tail_tokens", None) or cache_alignment
+    if commit_tail_tokens <= 0:
+        raise ValueError("commit tail tokens must be positive")
     raw_compute_steps = getattr(args, "compute_step", None)
     if isinstance(raw_compute_steps, int):
         compute_steps = [raw_compute_steps]
@@ -234,7 +243,7 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
         random_count=getattr(args, "random_cache_count", None),
         minimum=min_cache_len,
         maximum=max_cache_len,
-        alignment=cache_alignment,
+        alignment=math.lcm(cache_alignment, commit_tail_tokens),
         seed=args.seed,
     )
 
@@ -242,9 +251,12 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
     seen = set()
     for cache_len in cache_lengths:
         max_compute_len = args.max_input_len - cache_len
+        first_compute_len = (
+            max(min_compute_len, commit_tail_tokens) if cache_len else min_compute_len
+        )
         for refinement_level, compute_step in enumerate(compute_steps):
             for compute_len in range(
-                min_compute_len, max_compute_len + 1, compute_step
+                first_compute_len, max_compute_len + 1, compute_step
             ):
                 input_len = cache_len + compute_len
                 geometry = (args.batch_size, input_len, cache_len)
@@ -284,6 +296,7 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
             "version": 2,
             "seed": args.seed,
             "cache_alignment": cache_alignment,
+            "commit_tail_tokens": commit_tail_tokens,
             "cache_sampling": {
                 "mode": (
                     "explicit" if getattr(args, "fixed_cache_len", None) else "random"
@@ -328,6 +341,9 @@ def build_grid(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             "specify --cache-alignment or profile.cache_grid.cache_alignment explicitly"
         )
+    commit_tail_tokens = getattr(args, "commit_tail_tokens", None) or cache_alignment
+    if commit_tail_tokens <= 0:
+        raise ValueError("commit tail tokens must be positive")
     cases = []
     for input_len in inputs:
         cache_lengths = generate_cache_lengths(
@@ -336,6 +352,7 @@ def build_grid(args: argparse.Namespace) -> dict[str, Any]:
             args.cache_points_per_input,
             args.cache_ratio_points,
             args.seed,
+            commit_tail_tokens,
         )
         for cache_len in cache_lengths:
             cases.append(
@@ -364,6 +381,7 @@ def build_grid(args: argparse.Namespace) -> dict[str, Any]:
     generator = {
         "name": "aligned_stratified_cache_grid",
         "cache_alignment": cache_alignment,
+        "commit_tail_tokens": commit_tail_tokens,
         "version": 1,
         "alignment": args.alignment,
         "seed": args.seed,
@@ -424,6 +442,15 @@ def build_parser() -> argparse.ArgumentParser:
             "(--seq_size_per_block, multiplied by CP size when "
             "PREFILL_CP_KV_CACHE_SHARDED=1) so every cache point is exactly "
             "reusable and no two points collapse onto the same block bucket."
+        ),
+    )
+    parser.add_argument(
+        "--commit-tail-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Extra tokens used to commit a seeded prefix. Defaults to profile "
+            "cache_grid.commit_tail_tokens, then cache alignment."
         ),
     )
     parser.add_argument(
@@ -492,8 +519,14 @@ def main() -> None:
         profile_cache_alignment = cache_grid.get("cache_alignment")
         if args.cache_alignment is None and profile_cache_alignment is not None:
             args.cache_alignment = int(profile_cache_alignment)
+        if args.commit_tail_tokens is None:
+            profile_commit_tail = cache_grid.get("commit_tail_tokens")
+            if profile_commit_tail is not None:
+                args.commit_tail_tokens = int(profile_commit_tail)
     if args.cache_alignment is None:
         args.cache_alignment = 0
+    if args.commit_tail_tokens is None:
+        args.commit_tail_tokens = args.cache_alignment
     payload = build_grid(args)
     if profile is not None:
         payload["profile"] = profile

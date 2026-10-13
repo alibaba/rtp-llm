@@ -60,6 +60,9 @@ from rtp_llm.test.perf_test.cache_grid.formula.restricted_symbolic_fit import (
     PARSER_PER_REQUEST_VARIABLES,
     fit_restricted_symbolic,
 )
+from rtp_llm.test.perf_test.cache_grid.runner.observations import (
+    CONTRACT as OBSERVATION_CONTRACT,
+)
 
 DEFAULT_TOKEN_UNIT = 1024
 
@@ -359,6 +362,22 @@ def write_fit_gap_svg(
 
 
 def run_fit(args: argparse.Namespace) -> int:
+    output = pathlib.Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    # Invalidate any deployable result before reading or validating new inputs.
+    # A malformed profile/input must never leave a stale accepted model behind.
+    (output / "model.json").write_text(
+        json.dumps(
+            dict(
+                schema_version=2,
+                production_acceptance=False,
+                formula=None,
+                reason="fit_started",
+                measurement_contract=OBSERVATION_CONTRACT,
+            ),
+            indent=2,
+        )
+    )
     profile = None
     profile_sha256 = None
     if getattr(args, "profile", None):
@@ -399,8 +418,6 @@ def run_fit(args: argparse.Namespace) -> int:
     rows, audit = load_observations(
         paths, batch_size=args.batch_size, estimator=args.estimator
     )
-    output = pathlib.Path(args.output_dir)
-    output.mkdir(parents=True, exist_ok=True)
     # A rejected rerun must not leave an old model marked deployable.
     (output / "model.json").write_text(
         json.dumps(

@@ -8,7 +8,10 @@ import os
 import shlex
 from pathlib import Path
 
-from rtp_llm.test.perf_test.cache_grid.config.perf_profile import load_profile
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    load_profile,
+    resolve_label,
+)
 from rtp_llm.test.perf_test.cache_grid.config.topology import profile_cards
 from rtp_llm.test.perf_test.cache_grid.runner.archive_upload import (
     create_archive,
@@ -22,6 +25,7 @@ CAPACITY_KEYS = {
     "max_context_batch_size",
     "max_batch_tokens_size",
     "concurrency_limit",
+    "workspace_tokens",
 }
 
 
@@ -51,6 +55,11 @@ def validate_merge_inputs(paths):
                     capacities[f"{section}.{key}"] = signature[section].pop(key)
         signature["cache_grid"].pop("measure_runs", None)
         run_config = copy.deepcopy(data.get("run_config", {}))
+        workload = run_config.get("workload", {})
+        if isinstance(workload, dict) and "workspace_tokens" in workload:
+            capacities["run_config.workload.workspace_tokens"] = workload[
+                "workspace_tokens"
+            ]
         # Record effective configuration too; differing keys are examined below.
         records.append(
             dict(
@@ -209,15 +218,12 @@ def run(args):
                 entry["status"] = "completed"
                 continue
             if multi and not result.exists():
-                if entry["status"] != "pending":
-                    raise ValueError(
-                        f"no resumable checkpoint in failed run: {destination}"
-                    )
                 local.mode = "run"
+                local.allow_restart_without_checkpoint = True
                 local.profile = root / "profile.snapshot.json"
                 local.grid = Path(entry["grid_json"])
                 if not state.get("launch_options"):
-                    raise ValueError("pending run has no frozen launch options")
+                    raise ValueError("run has no frozen launch options")
                 if hashlib.sha256(local.profile.read_bytes()).hexdigest() != state.get(
                     "profile_sha256"
                 ):
@@ -372,7 +378,6 @@ def run(args):
             write_scatter_svg,
         )
 
-        engine = profile.get("engine") or {}
         cards = args.cards if args.cards is not None else profile_cards(profile)
         cards = cards or 1
         charts = write_charts(
@@ -380,7 +385,7 @@ def run(args):
             report,
             cards=cards,
             partial=args.partial,
-            model_label=profile.get("model_label", engine.get("model_type", "Model")),
+            model_label=resolve_label(profile, None, "Model"),
         )
         if args.html_output:
             args.html_output.parent.mkdir(parents=True, exist_ok=True)

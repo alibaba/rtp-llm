@@ -529,6 +529,34 @@ class CachePerfPipelineTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertIsNone(profile["engine"])
 
+    def test_workspace_capacity_differences_are_audited_not_rejected(self):
+        from rtp_llm.test.perf_test.cache_grid.runner.unified_pipeline import (
+            validate_merge_inputs,
+        )
+
+        paths = []
+        for name, workspace in (("a", 1048576), ("b", 2097152)):
+            dest = self.root / name
+            dest.mkdir()
+            path = dest / "cache_grid_results.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "profile": {
+                            "schema_version": 1,
+                            "engine": {"model_type": "qwen_2"},
+                        },
+                        "run_config": {"workload": {"workspace_tokens": workspace}},
+                    }
+                )
+            )
+            paths.append(path)
+        records, _ = validate_merge_inputs(paths)
+        self.assertEqual(
+            [r["capacities"]["run_config.workload.workspace_tokens"] for r in records],
+            [1048576, 2097152],
+        )
+
     def test_pipeline_does_not_accept_profiler_mode(self):
         args = cli.parser().parse_args(self.argv("--profile-backend", "nsys"))
         with self.assertRaisesRegex(ValueError, "formal measurements"):

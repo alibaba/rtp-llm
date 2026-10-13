@@ -1778,7 +1778,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 GenerateOutput(
                     output_ids=torch.tensor([1, 2]),
                     finished=False,
-                    aux_info=AuxInfo(input_len=3, reuse_len=1),
+                    aux_info=AuxInfo(input_len=3, reuse_len=1, cost_time=1.0),
                 ),
                 None,
                 None,
@@ -1788,7 +1788,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 GenerateOutput(
                     output_ids=torch.tensor([3, 4, 5]),
                     finished=False,
-                    aux_info=AuxInfo(input_len=4, reuse_len=2),
+                    aux_info=AuxInfo(input_len=4, reuse_len=2, cost_time=2.0),
                 ),
                 7,
                 None,
@@ -1798,7 +1798,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 GenerateOutput(
                     output_ids=torch.tensor([6]),
                     finished=True,
-                    aux_info=AuxInfo(input_len=5, reuse_len=3),
+                    aux_info=AuxInfo(input_len=5, reuse_len=3, cost_time=3.0),
                 ),
                 None,
                 LLMFinishReason.LENGTH,
@@ -1845,6 +1845,10 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             self.assertEqual(
                 infer.parameters["prompt_cached_token_num"].int64_param,
                 output.aux_info.reuse_len,
+            )
+            self.assertEqual(
+                infer.parameters["engine_cost_time_us"].int64_param,
+                int(output.aux_info.cost_time * 1000),
             )
             if think_len is None:
                 self.assertNotIn("generate_think_token_num", infer.parameters)

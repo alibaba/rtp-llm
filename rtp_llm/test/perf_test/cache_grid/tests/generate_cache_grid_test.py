@@ -42,12 +42,20 @@ class GenerateCacheGridTest(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual((first[0], first[-1]), (second[0], second[-1]))
 
+    def test_cache_lengths_leave_commit_tail_and_align_to_both_units(self):
+        values = generate_cache_lengths(65536, 128, 16, 7, DEFAULT_SEED, 4096)
+        self.assertTrue(all(value % 128 == 0 for value in values))
+        self.assertTrue(all(value % 4096 == 0 for value in values))
+        self.assertTrue(all(not value or value + 4096 <= 65536 for value in values))
+        self.assertEqual(values[-1], 61440)
+
     def test_cache_alignment_governs_cache_dimension_only(self):
         args = argparse.Namespace(
             min_input_len=2048,
             max_input_len=65536,
             alignment=128,
             cache_alignment=512,
+            commit_tail_tokens=4096,
             input_points=8,
             input_mode="stratified",
             seed=DEFAULT_SEED,
@@ -61,7 +69,11 @@ class GenerateCacheGridTest(unittest.TestCase):
         plan = build_grid(args)
         for case in plan["cases"]:
             self.assertEqual(case["cache_len"] % 512, 0)
+            self.assertTrue(
+                not case["cache_len"] or case["cache_len"] + 4096 <= case["input_len"]
+            )
         self.assertEqual(plan["generator"]["cache_alignment"], 512)
+        self.assertEqual(plan["generator"]["commit_tail_tokens"], 4096)
         # The input dimension keeps its own alignment.
         inputs = {case["input_len"] for case in plan["cases"]}
         self.assertTrue(inputs)
@@ -152,6 +164,23 @@ class GenerateFixedCacheSweepTest(unittest.TestCase):
         self.assertEqual(first["cases"], second["cases"])
         self.assertEqual(len(caches), len(set(caches)))
         self.assertTrue(all(value % 4096 == 0 for value in caches))
+
+    def test_fixed_sweep_respects_larger_commit_tail(self):
+        plan = build_grid(
+            self._args(
+                max_input_len=16384,
+                cache_alignment=128,
+                commit_tail_tokens=4096,
+                fixed_cache_len=[4096],
+                compute_step=1024,
+                min_compute_len=1024,
+            )
+        )
+        self.assertTrue(plan["cases"])
+        self.assertTrue(
+            all(case["cache_len"] + 4096 <= case["input_len"] for case in plan["cases"])
+        )
+        self.assertEqual(plan["generator"]["commit_tail_tokens"], 4096)
 
     def test_compute_steps_run_coarse_to_fine_without_duplicates(self):
         plan = build_grid(

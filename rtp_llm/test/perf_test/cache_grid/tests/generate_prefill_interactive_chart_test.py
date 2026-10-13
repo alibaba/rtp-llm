@@ -597,6 +597,18 @@ class TrendGuideTest(unittest.TestCase):
             sorted(point["compute_len"] for point in points),
         )
 
+    def test_representative_slice_recomputes_tpm_for_adjusted_geometry(self):
+        enriched = apply_z_metric(self.rows, "tpm-effective", cards=2.0)
+        points = representative_slice(enriched, "cache_len", 70.0, "compute_len")
+        for point in points:
+            self.assertAlmostEqual(
+                point["tpm_effective"],
+                (point["cache_len"] + point["compute_len"])
+                * 60000.0
+                / point["prefill_rt"]
+                / 2.0,
+            )
+
 
 class NumberTest(unittest.TestCase):
     def test_finite(self):

@@ -31,6 +31,7 @@ geometry is validated; see ``cache_grid/docs/reference.md``.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -56,6 +57,15 @@ from rtp_llm.test.perf_test.cache_grid.runner.result_schema import (
     run_prefill_rt,
 )
 from rtp_llm.test.perf_test.cache_grid.runner.scheduler import configure_scheduler
+
+
+def profile_trace_name(session_id: str, case_key: str, run_index: int) -> str:
+    """Return a stable Kineto-safe trace name below the engine's 64-byte limit."""
+    case_digest = hashlib.sha256(case_key.encode("utf-8")).hexdigest()[:16]
+    name = f"cg_{session_id[:12]}_{case_digest}_r{run_index}"
+    if len(name.encode("utf-8")) > 64:
+        raise ValueError("generated profile trace name exceeds 64 bytes")
+    return name
 
 
 def normalize_cache_case(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -1310,7 +1320,7 @@ class CacheGridRunner:
             if self._checkpoint_future is not None:
                 self._checkpoint_future.result()
             self._checkpoint_future = self._checkpoint_executor.submit(
-                self._write_checkpoint, payload
+                self._write_checkpoint, copy.deepcopy(payload)
             )
             return
         if self._checkpoint_future is not None:
@@ -1996,7 +2006,7 @@ class CacheGridRunner:
                     prompts = self.factory.build_case_prompts(
                         prompt_case_id, total_len, cache_len, 1
                     )
-                    trace_name = f"cache_profile_{session_id}_{key}_run{index}"
+                    trace_name = profile_trace_name(session_id, key, index)
                     record = {
                         "case_id": int(case["case_id"]),
                         "case_key": key,

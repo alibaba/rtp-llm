@@ -87,6 +87,17 @@ def representative_slice(
         point[fixed_key] = fixed_value
         point[varying_key] = median(row[varying_key] for row in group)
         point["prefill_rt"] = median(row["prefill_rt"] for row in group)
+        point["input_len"] = point["cache_len"] + point["compute_len"]
+        divisor = point.get("_z_divisor", 1.0) or 1.0
+        if point["prefill_rt"] > 0:
+            if "tpm_compute" in point:
+                point["tpm_compute"] = (
+                    point["compute_len"] * 60000.0 / point["prefill_rt"] / divisor
+                )
+            if "tpm_effective" in point:
+                point["tpm_effective"] = (
+                    point["input_len"] * 60000.0 / point["prefill_rt"] / divisor
+                )
         points.append(point)
     return points
 
@@ -170,7 +181,7 @@ def apply_z_metric(
             continue
         if divisor and divisor != 1.0:
             value = value / divisor
-        enriched.append({**row, spec["key"]: value})
+        enriched.append({**row, spec["key"]: value, "_z_divisor": divisor or 1.0})
     return enriched
 
 

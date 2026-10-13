@@ -107,6 +107,28 @@ class MeasurementContractTest(unittest.TestCase):
 
 
 class RunFitTest(unittest.TestCase):
+    def test_invalid_input_invalidates_stale_accepted_model_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "output"
+            output.mkdir()
+            (output / "model.json").write_text(
+                json.dumps({"production_acceptance": True, "formula": "stale"})
+            )
+            args = build_parser().parse_args(
+                [
+                    "fit",
+                    "--inputs",
+                    str(Path(tmpdir) / "missing.json"),
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with self.assertRaises(FileNotFoundError):
+                run_fit(args)
+            model = json.loads((output / "model.json").read_text())
+        self.assertFalse(model["production_acceptance"])
+        self.assertEqual(model["reason"], "fit_started")
+
     def test_fit_without_profile(self):
         rows = _make_observations(40)
         with tempfile.TemporaryDirectory() as tmpdir:

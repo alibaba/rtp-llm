@@ -16,7 +16,10 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _configure_cache_batch_limits,
     _dedupe_cache_grid_cases,
     _effective_grid_max_seq_len,
+    _effective_performance_config,
     _engine_arg_argv,
+    _finalize_completed_cache_checkpoint,
+    _fingerprint_engine_env,
     _load_cache_grid_cases,
     _load_materialized_case_store,
     _parse_name_value,
@@ -35,8 +38,13 @@ from rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner import (
     _post_prefill_ids,
     build_grouped_prompts,
     normalize_cache_case,
+    profile_trace_name,
     resume_config_fingerprint,
     validate_cache_grid_resume,
+)
+from rtp_llm.test.perf_test.perf_config import _apply_run_overrides
+from rtp_llm.test.perf_test.perf_utils import (
+    write_test_info as write_standard_test_info,
 )
 from rtp_llm.test.perf_test.server import EngineServer
 
@@ -66,12 +74,19 @@ class CacheGridBatchTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "timeout=1"):
             _require_cache_grid_success([{"status": "ok"}, {"status": "timeout"}])
 
+    def test_profile_trace_name_is_engine_safe_and_stable(self):
+        name = profile_trace_name("f" * 32, "bs1_seq1048575_cache1044480", 123)
+        self.assertEqual(
+            name, profile_trace_name("f" * 32, "bs1_seq1048575_cache1044480", 123)
+        )
+        self.assertLessEqual(len(name.encode("utf-8")), 64)
+
     def test_fixed_batch_service_limits_and_dp_guard(self):
-        args = argparse.Namespace(dp_size=1, concurrency_limit=1)
+        args = argparse.Namespace(dp_size=1, concurrency_limit=4)
         remaining = ["--max_context_batch_size=1", "--max_batch_tokens_size", "32"]
         cases = [normalize_cache_case(self.case())]
         _configure_cache_batch_limits(args, remaining, cases)
-        self.assertEqual(args.concurrency_limit, 1)
+        self.assertEqual(args.concurrency_limit, 4)
         self.assertEqual(
             remaining,
             ["--max_context_batch_size=1", "--max_batch_tokens_size", "104"],
@@ -79,6 +94,29 @@ class CacheGridBatchTest(unittest.TestCase):
         args.dp_size = 2
         with self.assertRaisesRegex(ValueError, "dp_size=1"):
             _configure_cache_batch_limits(args, remaining, cases)
+
+    def test_fixed_batch_rejects_insufficient_service_concurrency(self):
+        args = argparse.Namespace(dp_size=1, concurrency_limit=3)
+        with self.assertRaisesRegex(ValueError, "at least 4"):
+            _configure_cache_batch_limits(args, [], [normalize_cache_case(self.case())])
+
+    def test_finalize_completed_checkpoint_marks_result_and_progress_complete(self):
+        case = {"case_id": 0, "batch_size": 1, "input_len": 16, "cache_len": 0}
+        checkpoint = {
+            "complete": False,
+            "status": "in_progress",
+            "resume_count": 2,
+            "run_config_sha256": "abc",
+            "metrics": [{"case_key": CacheGridRunner.case_key(case), "status": "ok"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _finalize_completed_cache_checkpoint(tmp, checkpoint, [case])
+            result = json.loads((Path(tmp) / "cache_grid_results.json").read_text())
+            progress = json.loads((Path(tmp) / "cache_grid_progress.json").read_text())
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["progress"]["pending_cases"], 0)
+        self.assertEqual(progress["progress"]["progress_pct"], 100.0)
 
     def test_cold_batch_skips_seed_and_restores_scheduler(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,6 +834,33 @@ class BatchDecodeTest(unittest.TestCase):
             _apply_engine_env(["DSV4_CHUNK_TOKENS=cli"])
             self.assertEqual(os.environ["DSV4_CHUNK_TOKENS"], "cli")
 
+    def test_run_overrides_update_only_explicit_values(self):
+        args = argparse.Namespace(warmup_runs=2, measure_runs=None, profile_runs=4)
+        with patch.dict(os.environ, {"PERF_MEASURE_RUNS": "9"}, clear=False):
+            _apply_run_overrides(args)
+            self.assertEqual(os.environ["PERF_FORMAL_WARMUP_RUNS"], "2")
+            self.assertEqual(os.environ["PERF_MEASURE_RUNS"], "9")
+            self.assertEqual(os.environ["PERF_PROFILE_RUNS"], "4")
+
+    def test_engine_env_fingerprint_excludes_secrets(self):
+        with patch.dict(
+            os.environ,
+            {"PERF_MEASURE_RUNS": "3", "PRIVATE_TOKEN": "secret"},
+            clear=True,
+        ):
+            fingerprint = _fingerprint_engine_env(["PRIVATE_TOKEN"])
+        self.assertEqual(fingerprint["PERF_MEASURE_RUNS"], "3")
+        self.assertNotIn("PRIVATE_TOKEN", fingerprint)
+
+    def test_effective_config_records_cli_precedence(self):
+        with patch.dict(os.environ, {"MAX_SEQ_LEN": "1024"}, clear=True):
+            config = _effective_performance_config(
+                ["--max_seq_len", "2048"], [], {"concurrency_limit": 8}
+            )
+        self.assertEqual(config["values"]["MAX_SEQ_LEN"], "2048")
+        self.assertEqual(config["sources"]["MAX_SEQ_LEN"], "cli")
+        self.assertEqual(config["values"]["CONCURRENCY_LIMIT"], "8")
+
     def test_parse_args_exposes_runtime_overrides(self):
         args, remaining = parse_args(
             [
@@ -809,6 +874,30 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(args.engine_env, ["FP8_KV_CACHE=1"])
         self.assertEqual(args.measure_runs, 3)
         self.assertIn("--model_type=example_model", remaining)
+
+    def test_engine_arg_shorthand_overrides_profile_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile.json"
+            profile.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "engine": {"tp_size": 8},
+                        "cache_grid": {"commit_tail_tokens": 512},
+                    }
+                )
+            )
+            args, remaining = parse_args(
+                ["--profile", str(profile), "--engine_arg=tp_size=4"]
+            )
+        self.assertEqual(args.cache_commit_tail_tokens, 512)
+        self.assertEqual(remaining.count("--tp_size"), 1)
+        self.assertEqual(remaining[remaining.index("--tp_size") + 1], "4")
+
+    def test_full_option_name_is_required_for_perf_arguments(self):
+        args, remaining = parse_args(["--cache_commit_tail_token=8"])
+        self.assertEqual(args.cache_commit_tail_tokens, 4096)
+        self.assertIn("--cache_commit_tail_token=8", remaining)
 
     def test_dsv4_profile_injects_model_identity_and_paths(self):
         profile = (
@@ -918,6 +1007,48 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(
             info["resume_config_sha256"], resume_config_fingerprint(resume_config)
         )
+
+    def test_test_info_hashes_credentials_in_nested_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, _ = parse_args(
+                [
+                    "--result_dir",
+                    tmp,
+                    "--cache_grid_json",
+                    "grid.json",
+                    "--partial",
+                    "2",
+                ]
+            )
+            args._profile = {
+                "schema_version": 1,
+                "engine": {"checkpoint_path": "https://u:p@example/model"},
+            }
+            secret = "https://example/data?token=secret"
+            _write_test_info(
+                args,
+                ["--checkpoint_path", secret, "--tokenizer_path", secret],
+                resume_config={"model": {"checkpoint_path": secret}},
+            )
+            encoded = (Path(tmp) / "test_info.json").read_text()
+        self.assertNotIn("secret", encoded)
+        self.assertNotIn("u:p", encoded)
+        self.assertIn("sha256:", encoded)
+
+    def test_standard_test_info_records_effective_service_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, _ = parse_args(["--result_dir", tmp, "--max_seq_len", "1024"])
+            write_standard_test_info(
+                args,
+                ["--model_type", "qwen_2", "--checkpoint_path", "/weights/model"],
+                effective_max_seq_len=2048,
+                service_concurrency_limit=7,
+            )
+            info = json.loads((Path(tmp) / "test_info.json").read_text())
+        self.assertEqual(info["schema_version"], 5)
+        self.assertEqual(info["requested_max_seq_len"], 1024)
+        self.assertEqual(info["effective_max_seq_len"], 2048)
+        self.assertEqual(info["service_concurrency_limit"], 7)
 
     def test_resolve_cache_block_size_requires_single_canonical_location(self):
         self.assertEqual(
@@ -1730,13 +1861,14 @@ class MaterializedStoreValidationTest(unittest.TestCase):
         {"case_id": 1, "batch_size": 1, "input_len": 100, "cache_len": 50},
     ]
 
-    def _materialize(self, tmp, run_count=3, sha="a" * 64):
+    def _materialize(self, tmp, run_count=3, sha="a" * 64, profile_sha=""):
         store = MaterializedCaseStore(tmp)
         store.materialize(
             self.CASES,
             PrefixPromptFactory(_WordTokenizer()),
             run_count,
             grid_sha256=sha,
+            profile_sha256=profile_sha,
         )
 
     def test_accepts_matching_store(self):
@@ -1765,6 +1897,12 @@ class MaterializedStoreValidationTest(unittest.TestCase):
                 ValueError, r"holds 2 cases but this run plans 1"
             ):
                 _load_materialized_case_store(tmp, other, 3, "a" * 64)
+
+    def test_rejects_profile_sha_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._materialize(tmp, profile_sha="a" * 64)
+            with self.assertRaisesRegex(ValueError, "different profile"):
+                _load_materialized_case_store(tmp, self.CASES, 3, "a" * 64, "b" * 64)
 
 
 class CacheGridRunnerStoreTest(unittest.TestCase):
