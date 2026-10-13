@@ -2147,6 +2147,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
+        .def_readwrite("decode_linear_tail_only", &PDSepConfig::decode_linear_tail_only)
         .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
         .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
@@ -2170,11 +2171,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_port_offset,
                                       self.decode_entrance,
                                       self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.prefill_prepare_resource_pool_size,
+                                      self.decode_linear_tail_only);
             },
             [](py::tuple t) {
-                if (t.size() != 19)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 19 fields, got "
+                // 19 fields = pre-linear-tail pickles; 20 = with decode_linear_tail_only.
+                if (t.size() != 19 && t.size() != 20)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 19 or 20 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
@@ -2188,15 +2191,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.prefill_retry_times                 = t[7].cast<int64_t>();
                     c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
                     c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
-                    c.decode_retry_interval_ms            = t[10].cast<int64_t>();
-                    c.decode_polling_kv_cache_step_ms     = t[11].cast<int64_t>();
+                    c.decode_retry_interval_ms             = t[10].cast<int64_t>();
+                    c.decode_polling_kv_cache_step_ms      = t[11].cast<int64_t>();
                     c.rdma_connect_retry_times            = t[12].cast<int64_t>();
-                    c.load_cache_timeout_ms               = t[13].cast<int64_t>();
-                    c.max_rpc_timeout_ms                  = t[14].cast<int64_t>();
-                    c.worker_port_offset                  = t[15].cast<int64_t>();
-                    c.decode_entrance                     = t[16].cast<bool>();
-                    c.prefill_stop_stream_wait_timeout_ms = t[17].cast<int64_t>();
-                    c.prefill_prepare_resource_pool_size  = t[18].cast<int64_t>();
+                    c.load_cache_timeout_ms                = t[13].cast<int64_t>();
+                    c.max_rpc_timeout_ms                   = t[14].cast<int64_t>();
+                    c.worker_port_offset                   = t[15].cast<int64_t>();
+                    c.decode_entrance                      = t[16].cast<bool>();
+                    c.prefill_stop_stream_wait_timeout_ms  = t[17].cast<int64_t>();
+                    c.prefill_prepare_resource_pool_size   = t[18].cast<int64_t>();
+                    if (t.size() == 20) {
+                        c.decode_linear_tail_only = t[19].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }
