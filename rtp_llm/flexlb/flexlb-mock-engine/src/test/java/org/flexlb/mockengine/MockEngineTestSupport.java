@@ -37,14 +37,28 @@ final class MockEngineTestSupport {
         return input(requestId, inputTokens, 1, null);
     }
 
+    static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        return input(Long.parseLong(requestId), inputTokens);
+    }
+
     static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort) {
         return input(requestId, inputTokens, 1, decodePort);
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort) {
+        return inputWithDecode(Long.parseLong(requestId), inputTokens, decodePort);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort, int outputTokens) {
         return input(requestId, inputTokens, outputTokens, decodePort);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort, int outputTokens) {
+        return inputWithDecode(Long.parseLong(requestId), inputTokens, decodePort, outputTokens);
     }
 
     /**
@@ -77,6 +91,11 @@ final class MockEngineTestSupport {
             input.addTokenIds(token);
         }
         return input.build();
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithBlockKeys(
+            String requestId, int inputTokens, List<Long> blockKeys) {
+        return inputWithBlockKeys(Long.parseLong(requestId), inputTokens, blockKeys);
     }
 
     private static EngineRpcService.GenerateInputPB input(
@@ -277,7 +296,8 @@ final class MockEngineTestSupport {
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0
                     && service.getRunningCount() == 0
-                    && activeDecodeRequests(service) == 0) {
+                    && activeDecodeRequests(service) == 0
+                    && service.getOccupiedKvTokens() == 0) {
                 return;
             }
             Thread.sleep(10);
@@ -290,7 +310,9 @@ final class MockEngineTestSupport {
                         + " activeDecode="
                         + activeDecodeRequests(service)
                         + " kv="
-                        + service.getActiveKvTokens());
+                        + service.getActiveKvTokens()
+                        + " occupiedKv="
+                        + service.getOccupiedKvTokens());
     }
 
     static AtomicInteger activeDecodeRequestsRef(JavaMockEngineCluster.FastRpcService service)

@@ -26,6 +26,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -182,7 +183,7 @@ public final class JavaMockEngineCluster {
             }
             writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
-            // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
+            // domain-to-host mapping for test-side discovery readers,
             // kept in sync by /add_engine + /remove_engine at runtime.
             DiscoveryFileStore discoveryFileStore =
                     config.discoveryFile != null
@@ -1104,6 +1105,8 @@ public final class JavaMockEngineCluster {
          */
         private final Object completionLock = new Object();
 
+        // Guarded by completionLock; reported active until the terminal record is published.
+        private final Map<String, EngineRpcService.TaskInfoPB> completingTasks = new HashMap<>();
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks =
                 new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>>
@@ -1637,7 +1640,9 @@ public final class JavaMockEngineCluster {
             }
             long requestedVersion = request.getLatestFinishedVersion();
             long latestVersion;
+            long visibleStatusVersion;
             List<VersionedTask> visibleCompletions = new ArrayList<>();
+            Map<String, EngineRpcService.TaskInfoPB> visibleActiveTasks = new HashMap<>();
             // Read path is cursor-filter ONLY (no destructive head-trim): each
             // caller receives exactly its own unconsumed increment (version >
             // its cursor, <= latest) while the shared backlog survives for
@@ -1655,7 +1660,15 @@ public final class JavaMockEngineCluster {
             // bookkeeping converges from the running tasks plus whatever
             // backlog slice remains inside the window.
             synchronized (completionLock) {
+                runningTasks
+                        .values()
+                        .forEach(
+                                task ->
+                                        visibleActiveTasks.put(
+                                                Long.toString(task.getRequestId()), task));
+                completingTasks.forEach(visibleActiveTasks::putIfAbsent);
                 latestVersion = completionVersion.get();
+                visibleStatusVersion = statusVersion.incrementAndGet();
                 for (VersionedTask completion : completions) {
                     if (completion.version > requestedVersion
                             && completion.version <= latestVersion) {
@@ -1664,7 +1677,7 @@ public final class JavaMockEngineCluster {
                 }
             }
             long runningCount =
-                    runningTasks.values().stream()
+                    visibleActiveTasks.values().stream()
                             .filter(
                                     task ->
                                             task.getPhase()
@@ -1701,7 +1714,7 @@ public final class JavaMockEngineCluster {
                             .setRunningQueryLen((int) runningCount)
                             .setAvailableKvCache(availableKvTokens())
                             .setTotalKvCache(totalKvTokens)
-                            .setStatusVersion(statusVersion.incrementAndGet())
+                            .setStatusVersion(visibleStatusVersion)
                             .setLatestFinishedVersion(latestVersion)
                             .setDpSize(1)
                             .setTpSize(1)
@@ -1714,7 +1727,7 @@ public final class JavaMockEngineCluster {
                             .setMaxSeqLen(1048576L)
                             .setMaxBatchTokensSize(1048576L);
             status.addAllRunningTaskInfo(
-                    runningTasks.values().stream()
+                    visibleActiveTasks.values().stream()
                             .map(FastRpcService::withLegacyTaskState)
                             .toList());
             for (VersionedTask completion : visibleCompletions) {
@@ -2229,7 +2242,7 @@ public final class JavaMockEngineCluster {
                     boolean wasQueuedDecode =
                             decodePendingQueue.removeIf(
                                     t -> t.shape().input().getRequestId() == requestId);
-                    EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                    EngineRpcService.TaskInfoPB removed = claimTaskCompletion(requestId);
                     if (removed != null) {
                         cancelledPhase = removed.getPhase();
                         pendingRequests.decrementAndGet();
@@ -2284,7 +2297,7 @@ public final class JavaMockEngineCluster {
                 // released here for BOTH queued and running members (the
                 // completion callback's alreadyCancelled release is idempotent —
                 // activeBlockLeases.remove() wins exactly once).
-                EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                EngineRpcService.TaskInfoPB removed = claimTaskCompletion(requestId);
                 if (removed != null) {
                     cancelledPhase = removed.getPhase();
                     pendingRequests.decrementAndGet();
@@ -3367,13 +3380,11 @@ public final class JavaMockEngineCluster {
                                     !alreadyCancelled
                                             && asyncFaultBudget > 0
                                             && asyncFaultCursor[0]++ < asyncFaultBudget;
-                            EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                            EngineRpcService.TaskInfoPB removed = claimTaskCompletion(requestId);
                             // status_zombie_running: re-insert the entry right after the
-                            // removal so this request keeps being reported RUNNING
-                            // forever (its completion record is dropped inside
-                            // publishCompletion). Every counter below still releases
-                            // normally — the zombie poisons only the status report,
-                            // not engine capacity.
+                            // removal so a completed request is reported FINISHED once
+                            // and then keeps being reported RUNNING. Every counter below
+                            // still releases normally; only the status view is stale.
                             if (faultConfig.isStatusZombieRunning() && removed != null) {
                                 runningTasks.put(requestId, removed);
                             }
@@ -3832,7 +3843,7 @@ public final class JavaMockEngineCluster {
                         // documents the retry-semantics divergence).
                         activeDecodeRequests.decrementAndGet();
                         pendingRequests.decrementAndGet();
-                        runningTasks.remove(requestId);
+                        claimTaskCompletion(requestId);
                         clearUpstreamOwnership(requestId);
                         publishDecodeKvFailure(
                                 requestId, shape, batchId, 0, responseQueue, "admission");
@@ -3891,7 +3902,7 @@ public final class JavaMockEngineCluster {
                                 acquireDecodeBlockLeaseDetailed(requestId, shape);
                         if (!queuedClaim.success()) {
                             countDecodeKvFailure(queuedClaim.failure());
-                            runningTasks.remove(requestId);
+                            claimTaskCompletion(requestId);
                             clearUpstreamOwnership(requestId);
                             publishDecodeKvFailure(
                                     requestId, shape, batchId, 0, responseQueue, "admission");
@@ -4088,7 +4099,7 @@ public final class JavaMockEngineCluster {
                         // freed slot loops to the NEXT queued candidate.
                         activeDecodeRequests.decrementAndGet();
                         pendingRequests.decrementAndGet();
-                        runningTasks.remove(candidateId);
+                        claimTaskCompletion(candidateId);
                         clearUpstreamOwnership(candidateId);
                         publishDecodeKvFailure(
                                 candidateId,
@@ -4145,15 +4156,14 @@ public final class JavaMockEngineCluster {
         private void claimDecodeTerminalLocked(DecodeStream stream) {
             long requestId = stream.shape.input().getRequestId();
             clearUpstreamOwnership(requestId);
-            EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+            EngineRpcService.TaskInfoPB removed = claimTaskCompletion(requestId);
             if (removed == null) {
                 return; // cancel won the terminal race; it released everything
             }
             // status_zombie_running: re-insert the entry after the removal so
-            // this request keeps being reported RUNNING forever (its completion
-            // record is dropped inside publishCompletion); the slot/KV/pending
-            // counters below still release normally so the engine keeps
-            // admitting — the zombie poisons only the status report.
+            // this request keeps being reported RUNNING after its one real
+            // terminal report. The slot/KV/pending counters below still release
+            // normally, so the fault poisons only later status snapshots.
             if (faultConfig.isStatusZombieRunning()) {
                 runningTasks.put(requestId, removed);
             }
@@ -4434,15 +4444,19 @@ public final class JavaMockEngineCluster {
             publishCompletion(task);
         }
 
+        private EngineRpcService.TaskInfoPB claimTaskCompletion(long requestId) {
+            synchronized (completionLock) {
+                EngineRpcService.TaskInfoPB task = runningTasks.remove(requestId);
+                if (task != null) {
+                    completingTasks.put(Long.toString(task.getRequestId()), task);
+                }
+                return task;
+            }
+        }
+
         private void publishCompletion(EngineRpcService.TaskInfoPB task) {
             synchronized (completionLock) {
-                // status_zombie_running: drop the completion record entirely —
-                // the request finished internally but is never reported
-                // finished (paired with the runningTasks re-insert at the
-                // completion points).
-                if (faultConfig.isStatusZombieRunning()) {
-                    return;
-                }
+                completingTasks.remove(Long.toString(task.getRequestId()));
                 long version = completionVersion.incrementAndGet();
                 completions.add(new VersionedTask(version, task));
                 // status_duplicate_finished: enqueue the SAME completion twice
@@ -5101,6 +5115,7 @@ public final class JavaMockEngineCluster {
             // Un-acked completion backlog dies too: finished-but-unreported
             // work is lost, the master's poller will never see it again.
             synchronized (completionLock) {
+                completingTasks.clear();
                 completions.clear();
             }
             // KV memory: every held block and LRU entry is gone with the process.
