@@ -89,3 +89,9 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "glm5_raw_prompt_test",
+    srcs = ["glm5_raw_prompt_test.py"],
+    deps = ["//rtp_llm:frontend", "//rtp_llm:testlib"],
+)

@@ -112,18 +112,17 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+std::shared_ptr<KVCacheManager> createPrefillWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
-    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
-                            "generation prefill CUDA graph warmup requires a positive KV block size");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
 
     // This temporary pool only supplies the KV tensor bound into the captured
     // model. The warmup config publishes complete per-group capacities before
     // KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
-    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill warmup KV cache manager failed");
     return cache_manager;
 }
 #endif
@@ -360,15 +359,14 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
             warmUpReservedBlockCount(stream->seqLength(), reserve_tokens, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
-        // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
+        // Paged prefill warmup needs a temporary real KV pool, while the
         // framework warmup stream deliberately does not allocate request KV
         // blocks. Keep the model-level KV tensor and per-request block table
         // paired by routing every logical warmup block to reserved block zero.
         // This preserves the max-length eager warmup used for memory sizing
         // without consuming or publishing any real cache block.
         const size_t seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0,
-                                "generation prefill CUDA graph warmup requires a positive KV block size");
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "prefill warmup requires a positive KV block size");
         const size_t reserved_blocks = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
@@ -450,7 +448,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                /*primary_graph_is_prefill=*/false,
                                                params.parallelism_config.role_type,
                                                params.sp_config.type);
-    if (!generation_prefill_cuda_graph_requested) {
+    // CP sparse MLA plans and gathers paged KV even during eager warmup.
+    // Reuse the temporary pool and sentinel block used by graph warmup.
+    const bool cp_sparse_warmup =
+        params.parallelism_config.prefill_cp_config.is_enabled() && params.model_config_.attn_config.is_sparse;
+    if (!generation_prefill_cuda_graph_requested && !cp_sparse_warmup) {
         rtp_llm::setTraceMemory(true);
         executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -463,13 +465,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
     }
 
-    // A normal prefill warmup historically has no CacheManager. Generation
-    // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
+    // A normal prefill warmup historically has no CacheManager. Sparse CP
+    // and generation prefill graphs need a real KV layout and reserved dummy
     // block 0 during construction. Capture against a minimal temporary pool so
     // graph-owned tensors and graph-pool reservations are included in the
     // runtime budget before the production KV pool consumes the remaining
     // memory. Speculative/MTP models stay on their independent warmup path.
-    auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+    auto warmup_cache_manager = createPrefillWarmUpCacheManager(params);
 
     const auto baseline_status    = getGpuExecStatus().device_memory_status;
     const auto baseline_allocated = cuda_graph::graphAllocatedBytes();

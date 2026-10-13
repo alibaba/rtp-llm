@@ -589,6 +589,51 @@ class DeepSeekV2(BaseModel):
         model_config.kv_cache_spec_descs = descs
 
     @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        target_config = getattr(target_model, "model_config", None)
+        if (
+            getattr(target_config, "model_type", None) != "glm_5"
+            or getattr(draft_model_config, "model_type", None) != "glm_5_mtp"
+            or getattr(draft_model_config, "mtp_layer_offset", 0) <= 0
+        ):
+            return ()
+
+        loader_config = getattr(
+            getattr(target_model, "model_weights_loader", None), "_load_config", None
+        )
+        merged_lora = getattr(loader_config, "merge_lora", None)
+        if merged_lora is None:
+            merged_lora = getattr(target_model, "merge_lora", False)
+        if merged_lora:
+            return ()
+
+        target_path = getattr(target_config, "ckpt_path", None)
+        draft_path = getattr(draft_model_config, "ckpt_path", None)
+        if (
+            not isinstance(target_path, str)
+            or not isinstance(draft_path, str)
+            or not target_path
+            or not draft_path
+            or os.path.realpath(target_path) != os.path.realpath(draft_path)
+        ):
+            return ()
+        for name, default in (
+            ("vocab_size", None),
+            ("hidden_size", None),
+            ("data_type", None),
+            ("enable_fp32_lm_head", True),
+            ("normalize_lm_head_weight", False),
+            ("logit_scale", 1.0),
+        ):
+            target_value = getattr(target_config, name, default)
+            if target_value is None or target_value != getattr(
+                draft_model_config, name, default
+            ):
+                return ()
+        return (W.embedding, W.lm_head)
+
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
         config.attn_config.head_num = 0

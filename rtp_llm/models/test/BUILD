@@ -32,3 +32,9 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
+
+py_test(
+    name = "glm5_weight_alias_test",
+    srcs = ["glm5_weight_alias_test.py"],
+    deps = ["//rtp_llm:models", "//rtp_llm:testlib"],
+)

@@ -17,12 +17,13 @@ from pydantic import BaseModel
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, RequestFormat
 from rtp_llm.distribute.distributed_server import (
     WorldInfo,
     get_dp_addrs_from_world_info,
     get_world_info,
 )
+from rtp_llm.frontend.glm5_prompt import maybe_wrap_glm5_raw_prompt
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -73,6 +74,7 @@ class FrontendWorker:
         special_tokens,
     ) -> None:
         logging.info("starting frontend worker")
+        self.model_type = model_config.model_type
 
         self.tokenizer = TokenizerFactory.create(
             model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
@@ -145,6 +147,14 @@ class FrontendWorker:
     async def batch_infer(
         self, prompts: List[str], request_id: int, generate_config: dict
     ) -> BatchPipelineResponse:
+        prompts = [
+            maybe_wrap_glm5_raw_prompt(
+                getattr(self, "model_type", ""),
+                text,
+                generate_config.get("request_format", RequestFormat.RAW),
+            )
+            for text in prompts
+        ]
         responses = await self.pipeline.batch_infer(
             prompts=prompts,
             base_request_id=request_id,
@@ -228,19 +238,25 @@ class FrontendWorker:
         )
 
     def _inference(self, request: Request, **kwargs: Any):
+        input_texts = [
+            maybe_wrap_glm5_raw_prompt(
+                getattr(self, "model_type", ""), text, config.request_format
+            )
+            for text, config in zip(request.input_texts, request.generate_configs)
+        ]
         if (
-            len(request.input_texts) > 1
+            len(input_texts) > 1
             or request.batch_infer
             or request.num_return_sequences > 0
         ):
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
-            group_size = len(request.input_texts)
+            group_size = len(input_texts)
             # Use request.request_id as group_id for all streams in the same batch
             group_id = request.request_id
             for i, (text, urls, generate_config) in enumerate(
-                zip(request.input_texts, request.input_urls, request.generate_configs)
+                zip(input_texts, request.input_urls, request.generate_configs)
             ):
                 generators.append(
                     self._yield_generate(
@@ -261,7 +277,7 @@ class FrontendWorker:
         else:
             return self._yield_generate(
                 request.request_id,
-                request.input_texts[0],
+                input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
                 **kwargs,
