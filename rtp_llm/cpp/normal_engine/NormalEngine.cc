@@ -632,7 +632,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,

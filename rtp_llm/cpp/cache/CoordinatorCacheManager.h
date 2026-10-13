@@ -33,6 +33,12 @@ struct KVCacheTokenCapacity {
     size_t available_tokens = 0;
 };
 
+struct KVCachePoolCapacity {
+    std::string tag;
+    size_t      available_blocks = 0;
+    size_t      reserve_blocks   = 0;
+};
+
 struct KVCachePoolMetricsSnapshot {
     size_t      pool_index                 = 0;
     std::string pool_name                  = "unnamed";
@@ -96,7 +102,8 @@ public:
                                     int                            reserve_step,
                                     bool                           enable_reuse_cache,
                                     int                            target_batch_size,
-                                    LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY) const;
+                                    LinearCachePolicy  linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
+                                    const std::string& pool_tag            = {}) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -158,6 +165,7 @@ public:
     virtual size_t               maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    std::vector<KVCachePoolCapacity>                poolCapacities() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 

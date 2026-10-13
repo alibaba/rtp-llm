@@ -65,6 +65,28 @@ class PDLinearTailArgumentsTest(TestCase):
 
 
 class CacheConfigArgumentsTest(TestCase):
+    def test_pool_block_weights_default_env_and_cli_precedence(self):
+        from_env = '{"full":8,"linear":1}'
+        from_cli = '{"full": 5, "linear": 2, "draft-linear": 1}'
+        for args, env, expected in (
+            ([], {}, ""),
+            (["--kv_cache_pool_block_weights", from_cli], {}, from_cli),
+            ([], {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env}, from_env),
+            (
+                ["--kv_cache_pool_block_weights", from_cli],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                from_cli,
+            ),
+            (
+                ["--kv_cache_pool_block_weights", ""],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                "",
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kv_cache_pool_block_weights, expected)
+
     def test_linear_cache_reclaim_is_opt_in_and_cli_overrides_environment(self):
         for args, env, expected in (
             ([], {}, False),
