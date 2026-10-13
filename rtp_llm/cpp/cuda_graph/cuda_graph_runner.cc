@@ -543,6 +543,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Collect a strided 2D D2D copy: copies src[0..rows, 0..cols] into dst[0..rows, 0..cols]
     // where src and dst may have different column strides (copySmallerIntoLarger semantics).
     // For 1D tensors, falls back to a contiguous D2D copy to avoid silent data loss.
+    // Every captured seed row is consumed by index_select, including dummy
+    // requests. A smaller prefill graph can have fewer TopK rows than the
+    // previous replay, so stale tail indices are not necessarily in bounds.
+    auto& seed_rows = py_model_inputs_.attention_inputs.mtp_indexer_seed_rows;
+    if (has_padded_rows && seed_rows.defined() && seed_rows.numel() > 0) {
+        seed_rows.slice(0, state.current_batch_size, selected_graph_batch_size).zero_();
+    }
     tryAddD2DCopy(inputs.attention_inputs.mtp_indexer_seed_rows,
                   py_model_inputs_.attention_inputs.mtp_indexer_seed_rows,
                   state.current_batch_size * sizeof(int32_t));

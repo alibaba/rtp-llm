@@ -143,6 +143,7 @@ class MlaAttention(nn.Module):
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
         _fuse_on = fuse_kernels_enabled(hw_kernel_config)
+        self.fuse_kernels_enabled = _fuse_on
         self._fuse_kv_a_norm = (
             _fuse_on
             and _DEVICE_TYPE == DeviceType.Cuda
@@ -344,19 +345,21 @@ class MlaAttention(nn.Module):
         else:
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = self._run_sparse_indexer(
-            hidden_states,
-            q_c,
-            q_view,
-            indexer_kv_cache,
-            indexer_fmha_impl,
-            x_fp8,
-            x_scale,
-            q_c_fp8,
-            q_c_scale,
-            prev_topk_indices,
-            force_reuse_topk_indices,
-        )
+        topk_indices = None
+        if self.attn_config.is_sparse:
+            topk_indices = self._run_sparse_indexer(
+                hidden_states,
+                q_c,
+                q_view,
+                indexer_kv_cache,
+                indexer_fmha_impl,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+            )
         # q_c and its quantized representation are Indexer-only. Releasing
         # the local references here lets SparseMLA reuse their blocks;
         # q_view, compressed_kv and k_pe must stay live through attention.

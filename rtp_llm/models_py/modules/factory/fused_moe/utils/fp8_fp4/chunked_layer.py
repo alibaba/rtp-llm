@@ -24,6 +24,34 @@ _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
 
+_MOE_DECODE_FORWARD: ContextVar[bool] = ContextVar("moe_decode_forward", default=False)
+
+
+def moe_decode_forward() -> bool:
+    return _MOE_DECODE_FORWARD.get()
+
+
+def planned_moe_tokens() -> Optional[int]:
+    return _SYNCHRONIZED_CHUNK_TOKENS.get()
+
+
+def synchronize_moe_chunk_tokens(tokens: int, device: torch.device) -> int:
+    """Use the layer-stack plan or synchronize a standalone EP invocation."""
+    if moe_decode_forward():
+        return tokens
+    planned = planned_moe_tokens()
+    if planned is not None:
+        return planned
+    if (
+        not dist.is_available()
+        or not dist.is_initialized()
+        or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+    ):
+        return tokens
+    count = torch.tensor(tokens, dtype=torch.int64, device=device)
+    dist.all_reduce(count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    return int(count.item())
+
 
 def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
     cp_size = max(int(cp_size), 1)
@@ -92,35 +120,36 @@ def _get_or_create_final_out(
 
 @contextmanager
 def synchronized_moe_chunk_plan(
-    layers: Iterable[nn.Module], tokens: int, device: torch.device
+    layers: Iterable[nn.Module],
+    tokens: int,
+    device: torch.device,
+    *,
+    is_decode_forward: bool = False,
 ):
-    """Synchronize the largest EP token count once for a prefill layer stack."""
-    if (
-        not dist.is_available()
-        or not dist.is_initialized()
-        or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
-    ):
-        yield
-        return
+    """Share one EP MAX token count across all prefill layers and recipes."""
+    from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
 
-    needs_sync = any(
-        getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
-        and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
-        and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
-        for layer in layers
-    )
-    if not needs_sync:
-        yield
-        return
-
-    token_count = torch.tensor(int(tokens), dtype=torch.int64, device=device)
-    dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-    token = _SYNCHRONIZED_CHUNK_TOKENS.set(int(token_count.item()))
+    phase_token = _MOE_DECODE_FORWARD.set(is_decode_forward)
+    plan_token = None
     try:
+        modules = (
+            getattr(layer, "ffn", getattr(layer, "mlp", layer)) for layer in layers
+        )
+        needs_sync = not is_decode_forward and any(
+            getattr(layer, "strategy_name", None) in MEGA_MOE_STRATEGIES
+            and not getattr(layer, "_is_decode_role", False)
+            and getattr(layer, "chunking_enabled", False)
+            for layer in modules
+        )
+        if needs_sync:
+            plan_token = _SYNCHRONIZED_CHUNK_TOKENS.set(
+                synchronize_moe_chunk_tokens(tokens, device)
+            )
         yield
     finally:
-        _SYNCHRONIZED_CHUNK_TOKENS.reset(token)
+        if plan_token is not None:
+            _SYNCHRONIZED_CHUNK_TOKENS.reset(plan_token)
+        _MOE_DECODE_FORWARD.reset(phase_token)
 
 
 class ChunkedFp8Fp4MoeLayer(nn.Module):
@@ -239,14 +268,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             or not dist.is_initialized()
         ):
             return tokens
-        planned_tokens = _SYNCHRONIZED_CHUNK_TOKENS.get()
-        if planned_tokens is not None:
-            return planned_tokens
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            return tokens
-        token_count = torch.tensor(tokens, dtype=torch.int64, device=device)
-        dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-        return int(token_count.item())
+        return synchronize_moe_chunk_tokens(tokens, device)
 
     def _observer(self, positions: Optional[torch.Tensor]):
         return self._observer_factory(positions) if self._observer_factory else None

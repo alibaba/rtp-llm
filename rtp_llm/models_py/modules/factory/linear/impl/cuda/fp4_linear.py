@@ -5,11 +5,13 @@ import os
 from typing import Optional
 
 import torch
+
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
 from flashinfer import autotune, fp4_quantize, mm_fp4
+
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
 from rtp_llm.ops import HWKernelConfig
 
@@ -115,7 +117,7 @@ class CudaFp4GEMMLinear(LinearBase):
                     output_dtype,
                     block_size=16,
                     use_nvfp4=True,
-                    backend="cute-dsl",
+                    backend=self.backend,
                 ).view(*output_shape)
 
         if self.bias is not None:

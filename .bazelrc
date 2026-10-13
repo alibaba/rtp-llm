@@ -198,7 +198,7 @@ test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 # ship only the CUDA toolkit, so nccl/cudnn/cublas/... come from pip_parse'd
 # wheel repos, whose per-repo runfiles layout breaks torch's co-located RPATH
 # expectation.  The wrapper locates the wheel lib dirs in the runfiles tree
-# and prepends them (plus the gcc-toolset-12 lib64 its ld needs) to
+# and prepends them (plus the selected GCC toolset lib64 its ld needs) to
 # LD_LIBRARY_PATH.  Harmless where no such repo exists (CPU/ROCm configs).
 test --run_under=//tools:nvidia_wheel_env
 
@@ -210,20 +210,20 @@ test --run_under=//tools:nvidia_wheel_env
 # The fp8_fp4_mega_moe kernel uses a C++20 floating-point non-type template
 # parameter (`float kActivationClamp`). nvcc 13.2 + gcc 10.2.1 (the system
 # /usr/bin/g++) rejects this even with -std=c++20 — the FP-NTTP feature needs
-# gcc 12+ as host. Container ships /opt/rh/gcc-toolset-12/root/usr/bin/g++
-# (gcc 12.3.0), so point the JIT at that. gcc-toolset-12 lives outside PATH
-# by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
+# gcc 12+ as host. CUDA13 dev images install gcc-toolset-13, so use
+# /opt/rh/gcc-toolset-13/root/usr/bin/g++ consistently on x86 and ARM.
+# Explicit PATH / LD_LIBRARY_PATH overrides also select its runtime libraries.
 #
 # These were previously hard-coded into smoke defs.bzl pointing at user-
 # private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
 # only worked on those specific dev boxes. Centralize here so every cu13
 # test sees the same toolchain.
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 # The toolset lib64 must lead LD_LIBRARY_PATH: the JIT link lines use the
 # toolset's ld, which needs its own libctf (LIBCTF_1.1) ahead of the system
 # one.  test_env (not the run_under wrapper) carries this because remotely
@@ -236,21 +236,21 @@ test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda31
 # prepends those) -- an image-preinstalled torch ahead of the runfiles torch
 # would shadow it and ABI-skew torch plugins (libtorch_nvshmem's
 # materialize_cow_storage mismatch on ut-sm9x).
-test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
+test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-13/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 # The toolset lib64 must lead LD_LIBRARY_PATH (its ld needs libctf LIBCTF_1.1
 # ahead of the system one); test_env carries it because remotely executed
 # tests honor test_env unconditionally.  Images without preinstalled NVIDIA
 # wheels additionally get the run_under wrapper's runfiles lib dirs (see the
 # top of this section).  The torch lib dir is appended LAST (preload
 # resolution without shadowing the runfiles torch -- see cuda13_arm note).
-test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
+test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
 test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 

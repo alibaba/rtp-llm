@@ -9,7 +9,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
@@ -116,18 +116,15 @@ def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     return ws
 
 
-def _fp8_mqa_logits_chunk_rows() -> int:
-    """Rows per FP8 MQA logits chunk.
+def _fp8_mqa_logits_chunk_rows(num_rows: int, num_keys: int) -> int:
+    """Bound the FP32 score workspace to 256 MiB using padded key columns.
 
-    Long-context CP prefill can otherwise materialize a [local_q, full_k]
-    logits matrix. Keep this opt-in for the shared base indexer path; the GLM5
-    smoke target enables it explicitly with the same env used by DSV4.
+    The shared indexer chooses its own memory plan. DSV4's separate indexer
+    retains its existing deployment override and is unaffected.
     """
-    return dsv4_chunk_tokens_from_env(
-        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
-        default=0,
-        min_value=0,
-    )
+    columns = max(256, (int(num_keys) + 255) // 256 * 256)
+    budget_rows = max(1, (256 * 1024 * 1024) // (4 * columns))
+    return min(max(int(num_rows), 1), budget_rows)
 
 
 def _fp8_prefill_topk_force_radix_sort() -> bool:
@@ -293,6 +290,7 @@ class IndexerOp(nn.Module):
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
         stable_topk: bool = False,
+        enable_fuse_kernels: bool = True,
     ):
         """
         Initialize IndexerOp.
@@ -317,42 +315,18 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.enable_fuse_kernels = enable_fuse_kernels
 
-        glm5_topk_backend = (
-            os.environ.get(
-                "GLM5_INDEXER_TOPK_BACKEND",
-                "topk_v3_tie_break" if stable_topk else "dsv4_persistent",
-            )
-            .strip()
-            .lower()
+        # The stable TopK kernel is compiled for SM10x only. Other architectures
+        # retain the existing paged and prefill backends.
+        stable_topk = stable_topk and is_sm10x()
+        self._paged_topk_backend = (
+            "topk_v3_tie_break" if stable_topk else "dsv4_persistent"
         )
-        if glm5_topk_backend not in ("dsv4_persistent", "topk_v3", "topk_v3_tie_break"):
-            raise ValueError(
-                "GLM5_INDEXER_TOPK_BACKEND must be 'dsv4_persistent', 'topk_v3_tie_break' or "
-                f"'topk_v3', got {glm5_topk_backend!r}"
-            )
-        self._paged_topk_backend = glm5_topk_backend
-        self._paged_topk_op = (
-            rtp_llm_ops.topk_v3
-            if glm5_topk_backend == "topk_v3"
-            else rtp_llm_ops.dsv4_persistent_topk
+        self._paged_topk_op = rtp_llm_ops.dsv4_persistent_topk
+        self._prefill_topk_backend = (
+            "topk_v3_tie_break" if stable_topk else "dsv4_per_row"
         )
-
-        prefill_topk_backend = (
-            os.environ.get(
-                "GLM5_PREFILL_INDEXER_TOPK_BACKEND",
-                "topk_v3_tie_break" if stable_topk else "dsv4_per_row",
-            )
-            .strip()
-            .lower()
-        )
-        if prefill_topk_backend not in ("topk_v3_tie_break", "dsv4_per_row"):
-            raise ValueError(
-                "GLM5_PREFILL_INDEXER_TOPK_BACKEND must be "
-                "'topk_v3_tie_break' or 'dsv4_per_row', "
-                f"got {prefill_topk_backend!r}"
-            )
-        self._prefill_topk_backend = prefill_topk_backend
 
     def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
         entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4
@@ -438,13 +412,17 @@ class IndexerOp(nn.Module):
         """
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Empirical: 2.35x at T=4096, up to 4.2x at T=16384 on DSV3.2 (eager mode).
-        fused = _try_fused_prefill_rope_hadamard_qk(
-            q,
-            k,
-            positions,
-            self.cos_sin_cache,
-            self.rope_head_dim,
-            self.is_neox_style,
+        fused = (
+            _try_fused_prefill_rope_hadamard_qk(
+                q,
+                k,
+                positions,
+                self.cos_sin_cache,
+                self.rope_head_dim,
+                self.is_neox_style,
+            )
+            if self.enable_fuse_kernels
+            else None
         )
         if fused is not None:
             return fused
@@ -863,22 +841,36 @@ class IndexerOp(nn.Module):
                 has_schedule_metadata = schedule_metadata.numel() > 0
             except RuntimeError:
                 has_schedule_metadata = False
-        if not has_schedule_metadata:
-            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+        if (
+            not is_sm10x()
+            or deep_gemm is None
+            or not hasattr(deep_gemm, "fp8_paged_mqa_logits")
+        ):
+            logits = _fp8_paged_mqa_logits_compat(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
                 kvlen_2d,
+                block_table,
                 self.blocksize,
-                deep_gemm.get_num_sms(),
+                max_seq_len,
             )
-
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8.unsqueeze(1),
-            kv_cache_fp8.view(dtype=torch.uint8),
-            weights,
-            kvlen_2d,
-            block_table,
-            schedule_metadata,
-            max_seq_len,
-        )
+        else:
+            if not has_schedule_metadata:
+                schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                    kvlen_2d,
+                    self.blocksize,
+                    deep_gemm.get_num_sms(),
+                )
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+            )
 
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
@@ -976,8 +968,7 @@ class IndexerOp(nn.Module):
         )
         if num_rows == 0:
             return topk_result
-        chunk_rows_env = _fp8_mqa_logits_chunk_rows()
-        chunk_rows = num_rows if chunk_rows_env <= 0 else min(chunk_rows_env, num_rows)
+        chunk_rows = _fp8_mqa_logits_chunk_rows(num_rows, total_kv_tokens)
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
@@ -1184,8 +1175,7 @@ class IndexerOp(nn.Module):
             )
             if nr == 0:
                 return topk_result
-            chunk_rows_env = _fp8_mqa_logits_chunk_rows()
-            chunk_rows = nr if chunk_rows_env <= 0 else min(chunk_rows_env, nr)
+            chunk_rows = _fp8_mqa_logits_chunk_rows(nr, total_kv_tokens)
             row_start = 0
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)

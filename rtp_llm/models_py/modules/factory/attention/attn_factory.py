@@ -105,9 +105,9 @@ def get_mla_impl(
     # the same KV cache → divergent main-model predictions and wrong response.
     is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
     is_draft_extend = bool(getattr(attn_inputs, "is_draft_extend", False))
-    # Only sparse/DSA draft extend uses paged multi-token decode. Dense MLA
-    # draft extend remains a prefill-shaped input and keeps the prefill impl.
-    use_decode_mla = is_target_verify or (is_draft_extend and attn_configs.is_sparse)
+    # Only sparse/DSA target verify and draft extend use paged multi-token decode.
+    # Dense MLA keeps the prefill impl for these prefill-shaped inputs.
+    use_decode_mla = (is_target_verify or is_draft_extend) and attn_configs.is_sparse
 
     mla_impls = (
         PREFILL_MLA_IMPS
@@ -375,6 +375,7 @@ class AttnImplFactory(object):
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+        hw_kernel_config=None,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
@@ -394,6 +395,9 @@ class AttnImplFactory(object):
             parallelism_config,
             cuda_graph_selection_mode,
         )
+        configure_fusion = getattr(instance, "configure_fusion", None)
+        if configure_fusion is not None:
+            configure_fusion(hw_kernel_config)
         if not is_cuda_graph and str(getattr(model_config, "model_type", "")) in (
             "glm_5",
             "glm_5_mtp",

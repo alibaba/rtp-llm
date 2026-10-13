@@ -5,7 +5,6 @@ Mirrors flashmla_sparse_impl.py but with all-gather + restore + zig-zag q split.
 
 import copy
 import logging
-import os
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -715,9 +714,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 )
             self.full_rope_pos_ids = None
 
-        # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
+        # Sharded prefill caches require gathering before attention.
         gather_enabled = (
-            (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
+            self.kv_cache_sharded
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
             and (not self.use_cuda_graph or self.kv_cache_sharded)

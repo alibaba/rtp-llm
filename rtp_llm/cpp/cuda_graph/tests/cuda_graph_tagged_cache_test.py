@@ -101,6 +101,17 @@ class StaticInputTailModel:
         return PyModelOutputs(inputs.input_hiddens + tail_signature)
 
 
+class MtpSeedRowsModel:
+    """Expose every captured seed row without poisoning CUDA on stale indices."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        rows = inputs.attention_inputs["full"].mtp_indexer_seed_rows
+        return PyModelOutputs(inputs.input_hiddens + rows.sum())
+
+
 class StaticTokenMetadataTailModel:
     """Expose stale token, MRoPE-position and hidden rows after graph shrink."""
 
@@ -1502,7 +1513,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # The shared staging row is wider than the model-local capture row.
         # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=KERNEL_BLOCK_TABLE_WIDTH + 2,
         )
         self.assertTrue(runner.canRun(inputs))
         self.assertTrue(runner.canPrepare(inputs))
@@ -1511,18 +1525,34 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
     def test_topology_real_and_fake_allocator_bounds(self) -> None:
         # Enum values: LINEAR=0, FULL=1, SWA=2. Only FULL expands physical IDs.
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40])
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40]
+        )
         self.assertEqual(CudaGraphRunner.topologyWidths([8], [8], [1], 1, 0, 0), [1, 1])
         for sequence, reserve, fake in ((0, 0, 1), (2**63 - 1, 1, 1), (1, 0, 2**63)):
             with self.subTest(sequence=sequence, reserve=reserve, fake=fake):
                 with self.assertRaises(RuntimeError):
-                    CudaGraphRunner.topologyWidths([8], [2], [1], sequence, reserve, fake)
+                    CudaGraphRunner.topologyWidths(
+                        [8], [2], [1], sequence, reserve, fake
+                    )
 
     def test_topology_width_end_to_end_preserves_last_column(self) -> None:
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
@@ -1530,7 +1560,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
                     spans = {"full": 8, "aux": 32}
                     real_width, fake_width = CudaGraphRunner.topologyWidths(
-                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                        [spans[tag] for tag in tags],
+                        [8, 8],
+                        [1, 1],
+                        64,
+                        reserve,
+                        fake_count,
                     )
                     self.assertEqual(max(real_width, fake_width), width)
                     runner = CudaGraphRunner()
@@ -1554,12 +1589,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 runner.init_decode(
                     TaggedBlockTableModel(), HIDDEN_SIZE, 64, width, [4], GROUP_TAGS
                 )
-                inputs = _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width)
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width
+                )
                 self._assert_replay_signature(runner, inputs, 53)
 
         with self.assertRaisesRegex(RuntimeError, "positive kernel block table width"):
             runner = CudaGraphRunner()
-            runner.init_decode(TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS)
+            runner.init_decode(
+                TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS
+            )
 
     def test_generation_prefill_keeps_host_width_gate(self) -> None:
         runner = CudaGraphRunner()
@@ -1586,7 +1625,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             wide_tags[tag] = attention
         wide.attention_inputs = wide_tags
         self.assertFalse(runner.canRun(wide))
-        self.assertEqual(runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch")
+        self.assertEqual(
+            runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch"
+        )
         self.assertFalse(runner.canPrepare(wide))
 
     def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:
@@ -1622,6 +1663,33 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             output.hidden_states,
             expected_signature.unsqueeze(0).expand_as(output.hidden_states),
         )
+
+    def test_prefill_clears_mtp_seed_rows_after_graph_shrink(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            MtpSeedRowsModel(),
+            4,
+            24,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [6, 24],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        for lengths, expected in (([6, 6, 6, 6], 56), ([6], 5)):
+            inputs = _build_prefill_inputs(
+                GROUP_TAGS, {"full": 2, "aux": 1}, seq_len=lengths
+            )
+            tagged = inputs.attention_inputs
+            rows = (
+                torch.tensor(lengths, dtype=torch.int32, device="cuda").cumsum(
+                    0, dtype=torch.int32
+                )
+                - 1
+            )
+            for attention in tagged.values():
+                attention.mtp_indexer_seed_rows = rows
+            inputs.attention_inputs = tagged
+            self._assert_replay_signature(runner, inputs, expected)
 
     def test_decode_clears_hidden_rows_after_batch_shrink(self) -> None:
         runner = CudaGraphRunner()

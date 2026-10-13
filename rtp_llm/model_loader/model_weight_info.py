@@ -7,6 +7,8 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
+
+from rtp_llm.config.mega_moe import FP4_MEGA_MOE_STRATEGIES, FUSED_SHARED_STRATEGIES
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -85,6 +87,7 @@ def _apply_mega_moe_fp4_wrappers(
     weight_info: "ModelWeightInfo",
     database: Optional[BaseDatabase] = None,
     quant_config: Optional[QuantizationConfig] = None,
+    moe_strategy: str = "auto",
 ) -> "ModelWeightInfo":
     """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
     load-time quantizers when a MegaMoE strategy is selected.
@@ -109,17 +112,15 @@ def _apply_mega_moe_fp4_wrappers(
         wrap_for_offline_fp4,
     )
     from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
-        is_mega_moe_fused_strategy,
-        is_mega_moe_strategy,
         wrap_moe_for_mega_moe,
     )
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
-    if not is_mega_moe_strategy():
+    if moe_strategy not in FP4_MEGA_MOE_STRATEGIES:
         return weight_info
 
     is_offline = is_offline_mega_moe_fp4_ckpt(database)
-    include_shared_expert = is_mega_moe_fused_strategy()
+    include_shared_expert = moe_strategy in FUSED_SHARED_STRATEGIES
     scale_dtype = (
         PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
         if is_offline
@@ -294,10 +295,12 @@ class ModelDeployWeightInfo:
         hw_kernel_config: "HWKernelConfig",
         kv_cache_config: "KVCacheConfig",
         merge_lora: bool = False,
+        moe_strategy: str = "auto",
         **kwargs,
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
+        self.moe_strategy = moe_strategy
         self.merge_lora = merge_lora
         # Model-specific descriptor builders may use the serving role to retain
         # only tensors reachable by a role-specialized execution graph.
@@ -468,6 +471,20 @@ class ModelDeployWeightInfo:
                 weight_info
             )
 
+        is_glm = self.model_config.model_type in {"glm_5", "glm_5_mtp"}
+        # For an online source, select the MoE destination format before the
+        # generic FP8 pass. QuantWeight leaves these prepared descriptors alone,
+        # avoiding a lossy BF16 -> FP8 -> FP4 round trip without a skip_moe flag.
+        online_source = (
+            self._quant_config is None or not self._quant_config.is_quanted()
+        )
+        if is_glm and online_source:
+            weight_info = _apply_mega_moe_fp4_wrappers(
+                weight_info,
+                database=database,
+                quant_config=self._quant_config,
+                moe_strategy=self.moe_strategy,
+            )
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
@@ -477,15 +494,14 @@ class ModelDeployWeightInfo:
             )
             self._validate_output_vocab_sources(weight_info)
 
-        # MegaMoE strategies force load-time FP4 quantization for MoE weights
-        # regardless of whether a quant_config is set. This must run
-        # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
-        # MoE wrapper with the FP8→FP4 variant. `database` / `quant_config`
-        # auto-detect offline FP4 MoE (`expert_dtype=fp4` or legacy
-        # `experts.*.weight_scale`) and pick UE8M0 vs float32 scale dtype.
-        if getattr(self.model_config, "model_type", "") in {"glm_5", "glm_5_mtp"}:
+        # Offline FP8 sources first acquire their checkpoint scale descriptors;
+        # the selected FP4 recipe then converts them once during loading.
+        if is_glm and not online_source:
             weight_info = _apply_mega_moe_fp4_wrappers(
-                weight_info, database=database, quant_config=self._quant_config
+                weight_info,
+                database=database,
+                quant_config=self._quant_config,
+                moe_strategy=self.moe_strategy,
             )
 
         if self.tie_word_embeddings:
@@ -894,6 +910,7 @@ class ModelDeployWeightInfo:
 
         load_config = LoadConfig(
             database=database,
+            moe_strategy=self.moe_strategy,
             num_layers=self._num_layers,
             hidden_size=self._hidden_size,
             head_num=self._head_num,

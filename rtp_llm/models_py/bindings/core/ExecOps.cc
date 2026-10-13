@@ -123,9 +123,7 @@ void popCudaGraphCaptureForwardFlag() {
 }
 
 bool cudaGraphCaptureForwardEnabled() {
-    const char* value       = std::getenv("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD");
-    const bool  env_enabled = value && *value && std::string(value) != "0";
-    return env_enabled || g_cuda_graph_capture_forward_depth > 0;
+    return g_cuda_graph_capture_forward_depth > 0;
 }
 
 int64_t getDeviceId() {

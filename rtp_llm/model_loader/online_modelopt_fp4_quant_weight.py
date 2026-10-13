@@ -17,6 +17,7 @@ executors fall back to dynamic per-block activation quantization.
 from typing import Any, Dict, Optional
 
 import torch
+
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
@@ -284,7 +285,7 @@ def quantize_moe_weight_to_fp4_ue8m0(
 ):
     """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to NVFP4
     + UE8M0 scale, matching the per-expert loop in
-    ``GLM5MegaMoE.setup_weights_from_bf16``.
+    ``MegaMoeBackend.setup_weights_from_bf16``.
 
     Returns:
         packed: int8 ``[E, N, K // 2]``
@@ -401,7 +402,7 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
     """Load-time FP4+UE8M0 quantizer for mega-MoE stacked MoE weights
     (``moe_w1`` = gate||up, ``moe_w2`` = down) starting from BF16.
 
-    Output layout matches ``GLM5MegaMoE.setup_weights_from_bf16`` bit for bit.
+    Output layout matches ``MegaMoeBackend.setup_weights_from_bf16`` bit for bit.
     Doing the work here lets the BF16 tensor be released as soon as it lands
     on the GPU, instead of staying resident until ``MegaMoeWrapper.__init__``.
 
@@ -490,7 +491,7 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
 
     Takes FP8 per-block quantized weights (``float8_e4m3fn`` kernel +
     ``float32`` scale) and produces FP4 packed int8 + fp32 UE8M0 scale at
-    load time, matching ``GLM5MegaMoE.setup_weights_from_fp8`` numerically.
+    load time, matching ``MegaMoeBackend.setup_weights_from_fp8`` numerically.
 
     Wired in by ``apply_mega_moe_fp4_wrappers`` when a MegaMoE strategy is selected
     and the original MoE weight was a ``PerBlockFp8Weight``.
@@ -677,57 +678,6 @@ class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
         return self.kernel.get_tensor_names(layer_id, load_config)
-
-
-def is_mega_moe_strategy() -> bool:
-    """Return True when a MegaMoE strategy is set in the env."""
-    import os
-
-    return os.environ.get("MOE_STRATEGY") in {
-        "mega_moe",
-        "mega_moe_se",
-        "mega_moe_fused",
-    }
-
-
-def is_mega_moe_fused_strategy() -> bool:
-    """Return True when the selected FP8xFP4 kernel consumes shared weights."""
-    import os
-
-    return os.environ.get("MOE_STRATEGY") in {"mega_moe_se", "mega_moe_fused"}
-
-
-def is_online_fp4gemm_enabled() -> bool:
-    """Return True when USE_ONLINE_FP4GEMM=1 is set in the env."""
-    import os
-
-    return os.environ.get("USE_ONLINE_FP4GEMM", "0") == "1"
-
-
-def mxfp4_quantize_linear_weight(weight: torch.Tensor):
-    """Quantize a 2D BF16/FP16 weight ``[K, N]`` to MXFP4 (block=32, UE8M0).
-
-    Returns the transposed FP4 packed weight (uint8) and transposed scale
-    tensor consumed by ``flashinfer.mm_fp4(backend='cute-dsl', block_size=32,
-    use_nvfp4=False)`` from the linear's forward path.
-
-    Numerically and layout-wise identical to the original inline code in
-    ``CudaOnlineMxfp4Linear.__init__``. **Do not** call ``.contiguous()`` on
-    the returned tensors — ``mm_fp4`` expects the strided
-    transposed view (``stride[0]==1``, ``stride[1]==K_packed``) and rejects
-    a row-major contiguous version with a "Mismatched strides" error. The
-    BF16 source tensor is released internally.
-    """
-    from flashinfer import mxfp4_quantize
-
-    assert weight.dim() == 2, f"expected 2D, got {tuple(weight.shape)}"
-    K, _N = weight.shape
-    assert K % 128 == 0, f"K={K} must be divisible by 128 for MXFP4"
-
-    w = weight.T.to(torch.bfloat16).contiguous()  # [N, K]
-    w_fp4, w_sf = mxfp4_quantize(w, backend="cute-dsl")
-    del w
-    return w_fp4.T, w_sf.T
 
 
 def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:

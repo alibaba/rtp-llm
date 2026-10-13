@@ -23,7 +23,6 @@ class Glm5KVCacheTest(TestCase):
 
     def test_pd_topology_contains_only_written_indexer_keys(self):
         config = self.config()
-        config.enable_glm52_shared_indexer_kv_cache = False
         expected = [
             ["default", "indexer_kv"],
             ["default", "indexer_kv"],

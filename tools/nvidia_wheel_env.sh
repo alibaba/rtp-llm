@@ -6,7 +6,7 @@
 # pip_parse'd wheel repos.  torch's .so RPATHs ($ORIGIN/../../nvidia/*/lib)
 # expect pip's co-located site-packages layout, which the per-repo runfiles
 # layout does not provide, so locate the wheel lib dirs in the runfiles tree
-# and prepend them to LD_LIBRARY_PATH.  The gcc-toolset-12 lib64 goes ahead
+# and prepend them to LD_LIBRARY_PATH.  The selected GCC toolset lib64 goes ahead
 # of the system dirs as well: the JIT link lines use its ld, which needs its
 # own libctf (LIBCTF_1.1).
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +30,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     [ "$root" = "/" ] && break
 done
 
-base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 /opt/conda310/lib /usr/local/nvidia/lib64 /usr/lib64)
+# Follow the compiler selected by test_env; keep the existing default for
+# configurations that do not explicitly select a GCC toolset.
+toolset_lib=/opt/rh/gcc-toolset-12/root/usr/lib64
+case "${CXX:-}" in
+    /opt/rh/gcc-toolset-*/root/usr/bin/*)
+        toolset_lib="${CXX%/bin/*}/lib64"
+        ;;
+esac
+base_paths=("$toolset_lib" /usr/local/cuda/lib64 /opt/conda310/lib /usr/local/nvidia/lib64 /usr/lib64)
 prefix="$(IFS=:; echo "${base_paths[*]}")"
 if [ "${#wheel_lib_dirs[@]}" -gt 0 ]; then
     prefix="$(IFS=:; echo "${wheel_lib_dirs[*]}"):$prefix"

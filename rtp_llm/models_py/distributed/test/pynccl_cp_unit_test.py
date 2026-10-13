@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from rtp_llm.models_py.distributed import pynccl_cp
 
 
@@ -46,8 +47,6 @@ class PyncclCPUnitTest(unittest.TestCase):
         nccl_lib = MagicMock()
 
         with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
-            pynccl_cp, "_PYNCCL_VALIDATE", False
-        ), patch.object(
             pynccl_cp,
             "_resolve_process_group",
             return_value=process_group,

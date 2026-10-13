@@ -7,6 +7,7 @@ from typing import List
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.output_vocab_config import OUTPUT_TOKENS_FILENAME
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, PreShardedTensor
 from rtp_llm.model_loader.load_config import LoadConfig
@@ -557,6 +558,7 @@ def make_minimal_configs(
         enable_eplb=lambda: False, phy_exp_num=lambda expert_num: expert_num
     )
     model_config = SimpleNamespace(
+        model_type="test",
         qk_norm=False,
         hidden_size=4,
         quant_algo=FakeQuantAlgo(),
@@ -620,6 +622,61 @@ def make_lm_head(ckpt_names=("lm_head.weight",)):
         lambda tensors: tensors[0],
         data_type=torch.float16,
     )
+
+
+class MegaMoeLoadRecipeTest(unittest.TestCase):
+    def test_resolved_strategy_selects_conversion_before_online_fp8(self):
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            OnlineMegaMoeFp4FromFp8Weight,
+        )
+        from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+            LoadQuantPerBlockFp8Weight,
+            PerBlockFp8Weight,
+        )
+
+        class Deploy(MinimalLmHeadDeployWeightInfo):
+            def _get_weight_info(self):
+                return ModelWeightInfo(
+                    [],
+                    [
+                        [
+                            MoeAtomicWeight(
+                                W.moe_w1,
+                                [
+                                    CkptWeightInfo(
+                                        "layers.{i}.experts.{expert_id}.weight"
+                                    )
+                                ],
+                                data_type=torch.bfloat16,
+                            )
+                        ]
+                    ],
+                )
+
+        for offline in (False, True):
+            for strategy in ("mega_moe", "mega_moe_fp8", "auto"):
+                with self.subTest(offline=offline, strategy=strategy):
+                    configs = make_minimal_configs()
+                    configs[0].model_type = "glm_5"
+                    deploy = Deploy(configs, [])
+                    deploy.moe_strategy = strategy
+                    deploy._quant_config = Fp8BlockWiseQuantConfig(is_quanted=offline)
+                    deploy._quant_algo = SimpleNamespace(isQuant=lambda: True)
+                    with patch.dict(os.environ, {"MOE_STRATEGY": "mega_moe_fused"}):
+                        result = deploy.get_weight_info().layer_weights[0][0]
+                    expected = (
+                        (
+                            OnlineMegaMoeFp4FromFp8Weight
+                            if offline
+                            else OnlineMegaMoeFp4Weight
+                        )
+                        if strategy == "mega_moe"
+                        else (
+                            PerBlockFp8Weight if offline else LoadQuantPerBlockFp8Weight
+                        )
+                    )
+                    self.assertIsInstance(result, expected)
 
 
 class GetWeightInfoOutputVocabPipelineTest(unittest.TestCase):

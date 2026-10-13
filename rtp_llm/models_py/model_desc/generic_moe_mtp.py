@@ -1,8 +1,9 @@
-import os
 from collections.abc import Mapping
 from typing import Any
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
@@ -12,17 +13,10 @@ from rtp_llm.models_py.modules import LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
 _MTP_INDEXER_ROLE_REUSE = 2
-
-
-def _mtp_indexer_share_enabled() -> bool:
-    # Hard, process-wide opt-in. Model metadata must not silently enable an
-    # experimental execution path.
-    return os.getenv("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") == "1"
 
 
 def _mtp_indexer_share_active(
@@ -34,8 +28,7 @@ def _mtp_indexer_share_active(
     cp_config = getattr(parallelism_config, "prefill_cp_config", None)
     context_parallel_enabled = bool(cp_config is not None and cp_config.is_enabled())
     return bool(
-        _mtp_indexer_share_enabled()
-        and getattr(model_config, "index_share_for_mtp_iteration", False)
+        getattr(model_config, "index_share_for_mtp_iteration", False)
         and not context_parallel_enabled
         and layer_num == 1
         and topk > 0

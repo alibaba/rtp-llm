@@ -740,11 +740,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
     const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
     const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
-    const char* share_env      = std::getenv("RTP_LLM_ENABLE_MTP_INDEXER_SHARE");
     mtp_indexer_share_enabled_ =
-        !is_dspark_ && share_env && std::string(share_env) == "1" && !params.py_sp_model.is_none()
-        && pythonDraftSupportsMtpIndexerShare(params.py_sp_model) && params.hw_kernel_config.enable_cuda_graph
-        && !params.device_resource_config.enable_layer_micro_batch
+        !is_dspark_ && !params.py_sp_model.is_none() && pythonDraftSupportsMtpIndexerShare(params.py_sp_model)
+        && params.hw_kernel_config.enable_cuda_graph && !params.device_resource_config.enable_layer_micro_batch
         && !params.parallelism_config.prefill_cp_config.is_enabled() && !draft_parallel.prefill_cp_config.is_enabled()
         && draft_config.index_share_for_mtp_iteration && draft_config.num_layers == 1
         && draft_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
@@ -994,21 +992,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                         prefill_py_model = prefill_py_model.attr("clone_for_cuda_graph")();
                     }
                 }
-                const bool mega_ep = !is_dspark_ && params.moe_config.moe_strategy.rfind("mega_moe", 0) == 0
-                                     && params.parallelism_config.ep_size > 1;
-                const bool disable_prefill_graph =
-                    autil::EnvUtil::getEnv("DISABLE_SP_PREFILL_CUDA_GRAPH", false)
-                    || (mega_ep && !mtp_indexer_share_enabled_
-                        && !autil::EnvUtil::getEnv("RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH", false));
-                RTP_LLM_CHECK_WITH_INFO(!mtp_indexer_share_enabled_ || !disable_prefill_graph,
-                                        "MTP index sharing requires the draft-extend graph");
                 sp_prefill_draft_model_.reset(
                     new PyWrappedModel(model_params,
                                        prefill_py_model,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed && !disable_prefill_graph,
+                                       draft_graph_allowed,
                                        dspark_prefill_commit_only_,
                                        mtp_indexer_share_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL));
             }

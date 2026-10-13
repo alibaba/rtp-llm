@@ -1,9 +1,9 @@
 import copy
 import functools
-import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -926,7 +926,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            skip_moe_scale_repack = os.environ.get("MOE_STRATEGY") in (
+            skip_moe_scale_repack = load_config.moe_strategy in (
                 "mega_moe_fp8",
                 "mega_moe_fp8_se",
             ) and self.kernel.name in (W.moe_w1, W.moe_w2)
@@ -958,16 +958,6 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
             return False
-        # skip_moe normally leaves MoE w1/w2 in compute dtype so the FP8->FP4
-        # mega_moe path can quantize them itself.  The FP8 mega kernel consumes
-        # checkpoint FP8 per-block weights directly, so keep the FP8 loader on.
-        if getattr(quant_config, "skip_moe", False) and isinstance(
-            src_weight_info, MoeAtomicWeight
-        ):
-            return os.environ.get("MOE_STRATEGY") in (
-                "mega_moe_fp8",
-                "mega_moe_fp8_se",
-            )
         return True
 
     def __init__(
