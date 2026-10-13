@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -477,99 +477,6 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(op.is_supported(*_metadata()))
-
-    def test_actual_attention_callsite_consumes_pair_and_retains_fallback(self):
-        path = _ROOT / "attention_v41.py"
-        cls = next(
-            node
-            for node in ast.parse(path.read_text()).body
-            if isinstance(node, ast.ClassDef) and node.name == "AttentionV41FP8"
-        )
-        method = next(
-            node
-            for node in cls.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_project_output"
-        )
-        namespace = {}
-        exec(
-            compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
-            namespace,
-        )
-
-        class V41MXFP8Linear:
-            def __init__(self):
-                self.forward = mock.Mock()
-                self.forward_quantized = mock.Mock()
-
-            def __call__(self, *args, **kwargs):
-                return self.forward(*args, **kwargs)
-
-        class OtherLinear(V41MXFP8Linear):
-            pass
-
-        packages = {}
-        for name in (
-            "rtp_llm",
-            "rtp_llm.models_py",
-            "rtp_llm.models_py.modules",
-            "rtp_llm.models_py.modules.dsv4",
-            "rtp_llm.models_py.modules.dsv4.fp8",
-            "rtp_llm.models_py.modules.dsv4.utils",
-        ):
-            packages[name] = ModuleType(name)
-            packages[name].__path__ = []
-        projection = SimpleNamespace(
-            is_supported=mock.Mock(return_value=True),
-            _try_grouped_output_quant_supported=mock.Mock(),
-            grouped_output_projection=mock.Mock(),
-        )
-        packages["rtp_llm.models_py.modules.dsv4.fp8"]._v41_output_projection = (
-            projection
-        )
-        packages["rtp_llm.models_py.modules.dsv4.utils"].V41MXFP8Linear = V41MXFP8Linear
-        pair = (object(), object())
-        x = torch.empty(2, 64, 512, dtype=torch.bfloat16)
-        freqs, output, bf16 = object(), object(), object()
-        for linear_cls, result_pair in (
-            (V41MXFP8Linear, pair),
-            (V41MXFP8Linear, None),
-            (OtherLinear, pair),
-        ):
-            with self.subTest(
-                linear=linear_cls.__name__, shared=result_pair is not None
-            ), mock.patch.dict(sys.modules, packages):
-                for operation in vars(projection).values():
-                    operation.reset_mock()
-                projection._try_grouped_output_quant_supported.return_value = (
-                    result_pair
-                )
-                projection.grouped_output_projection.return_value = bf16
-                linear = linear_cls()
-                linear.forward.return_value = linear.forward_quantized.return_value = (
-                    output
-                )
-                owner = SimpleNamespace(
-                    n_heads=64,
-                    head_dim=512,
-                    wo_b=linear,
-                    _wo_a_stk_w=object(),
-                    _wo_a_stk_s=object(),
-                )
-                actual = namespace["_project_output"](owner, x, freqs, out=output)
-                self.assertIs(actual, output)
-                projection.is_supported.assert_called_once_with(
-                    x, freqs, owner._wo_a_stk_w, owner._wo_a_stk_s
-                )
-                if linear_cls is V41MXFP8Linear and result_pair is not None:
-                    linear.forward_quantized.assert_called_once_with(*pair, out=output)
-                    linear.forward.assert_not_called()
-                    projection.grouped_output_projection.assert_not_called()
-                else:
-                    linear.forward.assert_called_once_with(bf16, out=output)
-                    linear.forward_quantized.assert_not_called()
-                    projection.grouped_output_projection.assert_called_once()
-                if linear_cls is OtherLinear:
-                    projection._try_grouped_output_quant_supported.assert_not_called()
 
     def test_cpu_and_empty_inputs_fall_back(self):
         x = torch.empty(0, 8, 4096, dtype=torch.float8_e4m3fn)

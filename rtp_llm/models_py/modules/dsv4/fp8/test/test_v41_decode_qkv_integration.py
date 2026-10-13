@@ -179,11 +179,17 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(418)
 
-    def run_path(self, attn, x, positions, slots, pool, enabled):
+    def run_path(self, attn, x, positions, slots, pool, enabled, *, apply_q_rope=True):
         with patch.dict(os.environ, flags(enabled)):
             converted, freqs = decode_rope_metadata({}, attn.freqs_cis, positions)
             result = compute_qkv.decode_compute_qkv(
-                attn, x, converted, freqs_cis=freqs, swa_pool=pool, swa_slots=slots
+                attn,
+                x,
+                converted,
+                freqs_cis=freqs,
+                swa_pool=pool,
+                swa_slots=slots,
+                apply_q_rope=apply_q_rope,
             )
             if not result.swa_written:
                 from rtp_llm.models_py.modules.dsv4.fp8._v41_swa_triton import (
@@ -262,13 +268,13 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
             torch.testing.assert_close(index_q, expected_index_q, rtol=0, atol=0)
 
     @torch.no_grad()
-    def test_attention_body_falls_back_for_strided_slots_without_double_write(self):
+    def test_mega_attention_body_preserves_kv_write_for_strided_slots(self):
         from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
 
         attn, x, positions, slots = native_attention(4, 6)
         attn.compress_ratio = 0
-        attn._forward_decode_swa_only = lambda q, *_args: q
-        attn._project_output = lambda q, _freqs: q[:, :, 0, :].contiguous()
+        attn._mega_attention = SimpleNamespace(decode=lambda _attn, q, *_args: q)
+        attn._project_output = lambda q: q[:, :, 0, :].contiguous()
         attn._prefill_output_all_reduce = lambda _out: None
         original_compute = compute_qkv.decode_compute_qkv
         for strided in (False, True):
@@ -282,11 +288,16 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 current_slots = slots
             pool = torch.full((2, 134, 528), 173, device="cuda", dtype=torch.uint8)
             reference_pool = pool.clone()
-            expected = self.run_path(attn, x, positions, slots, reference_pool, False)
+            expected = self.run_path(
+                attn, x, positions, slots, reference_pool, False, apply_q_rope=False
+            )
             attn._pool_view_3d_fp8 = lambda _region: pool
             metadata = SimpleNamespace(
                 position_ids=positions,
                 pool_write_slot_mappings={SWA_KV: current_slots},
+                swa_global_slots=torch.zeros(
+                    positions.numel(), 128, device="cuda", dtype=torch.int32
+                ),
             )
             computed = []
 

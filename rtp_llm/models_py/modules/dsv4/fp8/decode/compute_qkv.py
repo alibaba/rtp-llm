@@ -73,7 +73,7 @@ def decode_compute_qkv(
     *,
     swa_pool: torch.Tensor | None = None,
     swa_slots: torch.Tensor | None = None,
-    mega_attention=None,
+    apply_q_rope: bool = True,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -99,19 +99,13 @@ def decode_compute_qkv(
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
     else:
         qr = fused_qkv[0]
-    if mega_attention is not None:
-        # The caller selected the complete mega path before preparing Q.
-        q = mega_attention.project_q(attn.wq_b, qr, qr_quantized).view(
-            *qr.shape[:-1], attn.n_heads, attn.head_dim
-        )
-    else:
-        q = (
-            attn._lin(attn.wq_b, qr)
-            if qr_quantized is None
-            else attn.wq_b.forward_quantized(*qr_quantized)
-        ).unflatten(
-            -1, (attn.n_heads, attn.head_dim)
-        )  # [B, S, H, D]
+    q = (
+        attn._lin(attn.wq_b, qr)
+        if qr_quantized is None
+        else attn.wq_b.forward_quantized(*qr_quantized)
+    ).unflatten(
+        -1, (attn.n_heads, attn.head_dim)
+    )  # [B, S, H, D]
     raw_kv = attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1]
     if (
         getattr(attn, "skip_post_q_norm", False)
@@ -133,15 +127,11 @@ def decode_compute_qkv(
             swa_slots,
             eps=attn.eps,
             freqs_cis=freqs_cis,
-            **(
-                {"apply_q_rope": False, "pad_query_heads": mega_attention.padded_heads}
-                if mega_attention is not None
-                else {}
-            ),
+            apply_q_rope=apply_q_rope,
         )
         if fused is not None:
             return DecodeQKV(qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True)
-    if mega_attention is None:
+    if apply_q_rope:
         if getattr(attn, "skip_post_q_norm", False):
             _apply_v41_q_rope(q, freqs_cis, rd)
         else:

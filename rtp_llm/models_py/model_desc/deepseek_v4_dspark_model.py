@@ -793,7 +793,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         ):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
-            qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
+            mega = getattr(attn, "_mega_attention", None)
+            qkv = decode_compute_qkv(
+                attn,
+                x,
+                query_positions.reshape(-1),
+                apply_q_rope=mega is None,
+            )
             query_slots, global_indices, topk_length = self._proposal_metadata(
                 query_positions,
                 prefix_lengths,
@@ -814,6 +820,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
+
+            if mega is not None:
+                output = mega.decode(attn, qkv.q, query_positions, pool, global_indices)
+                projected = attn._project_output(output)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
 
             sched_meta = get_or_build_sched_meta(
                 graph_metadata,

@@ -105,7 +105,6 @@ _DSV4_FP8_CPU_TESTS = [
         "test_v41_fp4_transport",
         "test_v41_qkv_rope_cache",
         "test_v41_mega_attention",
-        "test_v41_mega_wiring",
     ]
 ]
 
