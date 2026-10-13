@@ -26,7 +26,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", reservable=" << policy.reservable << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
-       << ", active_tail_blocks=" << policy.active_tail_blocks
+       << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
        << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
        << '}';
@@ -131,7 +131,7 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
-           && lhs.sliding_window_size == rhs.sliding_window_size;
+           && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {

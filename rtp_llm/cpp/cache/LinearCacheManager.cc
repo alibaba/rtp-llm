@@ -186,11 +186,15 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
     }
 
     for (const size_t position : required_positions) {
-        if (position >= static_cast<size_t>(common_slots)) {
+        if (position >= static_cast<size_t>(total_slots)) {
             continue;
         }
-        if (!common_required(static_cast<int>(position)) || static_cast<int>(position) == reused_tail_pos) {
-            ++info.common_blocks;
+        if (position < static_cast<size_t>(common_slots)) {
+            if (!common_required(static_cast<int>(position)) || static_cast<int>(position) == reused_tail_pos) {
+                ++info.common_blocks;
+            }
+        } else if (!final_required(static_cast<int>(position))) {
+            ++info.extra_blocks;
         }
     }
 
