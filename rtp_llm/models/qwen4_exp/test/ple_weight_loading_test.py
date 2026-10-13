@@ -76,6 +76,68 @@ def _ngram_weight(**kwargs):
 
 
 class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
+    def test_fp8_residency_keeps_table_bytes_and_global_scale(self):
+        class Fp8Source(_RecordingTensorSource):
+            def load_tensor(self, name, data_type=torch.float16):
+                if name == "scale":
+                    self.requests.append(name)
+                    return [torch.tensor([0.25], dtype=data_type)]
+                return super().load_tensor(name, data_type)
+
+        loaded = _ngram_weight(
+            preserve_fp8=True, scale_weight=CkptWeightInfo("scale")
+        ).load(Fp8Source(), 1, "cuda:0", _load_config(8, 3))
+        self.assertEqual(loaded[W.qwen4_ple_ngram_scale].item(), 0.25)
+        for index in range(48, 64):
+            shard = loaded[f"{W.qwen4_ple_ngram_shards}.{index}"]
+            self.assertEqual(shard.dtype, torch.float8_e4m3fn)
+            self.assertEqual(shard.element_size(), 1)
+            self.assertEqual(shard.device.type, "cpu")
+
+    def test_scratch_fp8_scale_preserves_cpu_residency(self):
+        loader = object.__new__(ModelLoader)
+        weight = _ngram_weight(preserve_fp8=True, scale_weight=CkptWeightInfo("scale"))
+        loader._model_weights_info = SimpleNamespace(
+            weights=[], layer_weights=[[weight]]
+        )
+        loader._misc_weights_info = []
+        model_weights = mock.Mock()
+        scale = torch.tensor([0.25])
+        with mock.patch.object(
+            loader, "_create_model_weights", return_value=model_weights
+        ), mock.patch.object(
+            loader, "_choose_weight_convert_device", return_value="cpu"
+        ), mock.patch.object(
+            loader,
+            "prepare_weights",
+            return_value=iter(
+                [
+                    (0, W.qwen4_ple_ngram_scale, scale),
+                    (0, "auxiliary", torch.ones(1)),
+                ]
+            ),
+        ):
+            loader._load_from_scratch("meta")
+        scale_call, auxiliary_call = model_weights.set_layer_weight.call_args_list
+        self.assertIs(scale_call.args[2], scale)
+        self.assertEqual(scale_call.args[2].device.type, "cpu")
+        self.assertEqual(auxiliary_call.args[2].device.type, "meta")
+
+    def test_device_table_still_keeps_fp8_scale_on_cpu(self):
+        class Source(_RecordingTensorSource):
+            def load_tensor(self, name, data_type=torch.float16):
+                if name == "scale":
+                    return [torch.tensor([0.25], dtype=data_type)]
+                return super().load_tensor(name, data_type)
+
+        loaded = _ngram_weight(
+            cpu_offload=False,
+            preserve_fp8=True,
+            scale_weight=CkptWeightInfo("scale"),
+        ).load(Source(), 1, "meta", _load_config())
+        self.assertEqual(loaded[W.qwen4_ple_ngram_scale].device.type, "cpu")
+        self.assertEqual(loaded[f"{W.qwen4_ple_ngram_shards}.0"].device.type, "meta")
+
     def test_default_offload_never_transfers_table_to_execution_device(self):
         source = _RecordingTensorSource()
         # CUDA deliberately need not exist: touching the requested execution

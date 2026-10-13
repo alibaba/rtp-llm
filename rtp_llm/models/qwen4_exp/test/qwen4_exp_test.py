@@ -191,6 +191,35 @@ class Qwen4ExpTest(unittest.TestCase):
                 self.assertTrue(cfg._qwen4_attention_fp8)
                 self.assertTrue(cfg._qwen4_moe_only_fp4)
 
+    def test_official_fp8_nvfp4_source_survives_post_build_config(self):
+        data = self._config()
+        data["quantization_config"] = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+        }
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        Path(self._temp_dir.name, "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}})
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_FULL_FP8_NVFP4_EXPERIMENTAL": "1",
+                "RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL": "0",
+                "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
+            },
+        ), mock.patch(
+            "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
+        ) as validate:
+            cfg = Qwen4Exp.create_config(self._temp_dir.name)
+        validate.assert_called_once()
+        self.assertTrue(cfg._qwen4_fp8_source)
+        self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
+        self.assertTrue(cfg._qwen4_attention_fp8)
+        self.assertEqual(cfg.quant_config.source_fp8_block_size, 128)
+        self.assertEqual(cfg.quant_config.group_size(), 16)
+
     def test_attention_fp8_requires_bf16_source_and_online_moe_fp4(self):
         for moe_enabled, attention_enabled in (("1", "1"), ("0", "1"), ("0", "0")):
             with self.subTest(
