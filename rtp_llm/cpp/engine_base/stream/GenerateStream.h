@@ -213,8 +213,8 @@ public:
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
-    int                  estimateInitialNeedBlocks() const;
-    int                  estimatePeakNeedBlocks(int remaining_tokens) const;
+    int                  estimateInitialNeedBlocks(const std::string& pool_tag = {}) const;
+    int                  estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag = {}) const;
     // Scheduler boundary: commit pending output work, then expose reclaimed
     // history through the allocator's real available-block count for admission.
     void                 drainLinearHistoryForAdmission();
@@ -959,8 +959,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int estimateKVNeedBlocks(int remaining_tokens, int target_batch_size, const std::string& pool_tag = {}) const;
+    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);

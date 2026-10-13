@@ -1058,7 +1058,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                           warm_up_result,
                                                                           sp_config,
                                                                           &block_tree_layout->crc_workspaces);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
         const auto                capacity =
