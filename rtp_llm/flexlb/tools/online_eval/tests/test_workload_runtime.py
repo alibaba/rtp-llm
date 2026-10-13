@@ -138,6 +138,8 @@ def test_teardown_collects_queries_without_materializing_metrics():
     policy.monitors = {1: monitor}
     policy.options = {"capture_metrics": False, "collector_shutdown_s": 5}
     policy.events = []
-    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0)
+    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0,
+                          stage_deadline=mock.Mock(expires_at=60))
     policy.before_stage(ctx, {"id": "stop", "action": "teardown"})
-    monitor.stop.assert_called_once_with(5, materialize=False)
+    monitor.stop.assert_called_once_with(5, export=True, materialize=False,
+                                         archive_timeout=55, deadline=ctx.stage_deadline)

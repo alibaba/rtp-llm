@@ -76,10 +76,18 @@ class WorkloadPolicy:
                 )
         self.final_snapshots.add(epoch)
 
+    def _stop_monitor(self, ctx, source, deadline):
+        shutdown = self.options["collector_shutdown_s"]
+        remaining = max(0, deadline.expires_at - ctx.clock())
+        source.stop(
+            shutdown, export=remaining > 0, materialize=False,
+            archive_timeout=max(0, remaining - shutdown), deadline=deadline,
+        )
+
     def before_stage(self, ctx, spec):
         if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
             # Stop the monitoring interval before intentional target teardown.
-            self.monitors[ctx.env_epoch].stop(self.options["collector_shutdown_s"], materialize=False)
+            self._stop_monitor(ctx, self.monitors[ctx.env_epoch], ctx.stage_deadline)
         if (
             spec["action"] == "teardown"
             and ctx.env is not None
@@ -173,11 +181,7 @@ class WorkloadPolicy:
         # Register cleanup before startup so a failed start cannot leak a process.
         def stop_source(deadline):
             window["ended_epoch_s"] = time.time()
-            remaining = max(0, deadline.expires_at - ctx.clock())
-            source.stop(
-                min(self.options["collector_shutdown_s"], remaining),
-                export=remaining > 0, materialize=False,
-            )
+            self._stop_monitor(ctx, source, deadline)
 
         ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)
         from artifacts.startup import startup_phase

@@ -121,7 +121,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 收尾与持久化
 
-`execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；所有实例的压缩工件交付受 `archive_timeout_s` 约束，父 runner 的进程预算包含这些收尾时间。执行、取证或报告失败后仍尝试归档已有证据；归档失败只影响交付状态，不修改门禁与运行有效性。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。
+`execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；所有实例的压缩工件交付受 `archive_timeout_s` 约束，父 runner 的进程预算包含这些收尾时间。执行、取证或报告失败后仍尝试归档已有证据；归档失败只影响交付状态，不修改门禁与运行有效性。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。 Prometheus 原始查询归档使用 teardown/cleanup 的剩余预算，并预留 `collector_shutdown_s` 给独立的进程关闭期限；归档失败仍尝试关闭、升级终止和回收进程，保留查询错误及原有运行有效性判定。
 
 清理结束后立即原子保存 `result.json`，每段收尾前后保存检查点。未完成的检查点使用 `status: FINALIZING`，不能作为终态 PASS；`execution_status` 保留阶段与清理的结果，`finalization` 保存各段预算、状态、耗时和错误。最终 `duration_ms` 包含执行、清理、证据和报告。证据阶段失败使 runtime validity 为 INVALID，并阻止报告阶段；报告失败记录 report status，保留已有 runtime validity 和独立门禁结果。整体执行器结果仍报告交付失败，调用方不能把未完成的交付当成成功。
 

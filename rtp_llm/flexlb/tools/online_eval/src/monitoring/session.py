@@ -251,14 +251,30 @@ class PrometheusSession:
                 deadline.check()
             raise RuntimeError("incomplete Prometheus archive")
 
-    def stop(self, timeout=10, export=True, *, materialize=True):
-        deadline = Deadline(time.monotonic() + timeout)
-        operations = [(name, lambda probe=probe: probe.stop(deadline=deadline))
+    def stop(self, timeout=10, export=True, *, materialize=True,
+             archive_timeout=None, deadline=None):
+        # The enclosing cleanup budget bounds the whole operation. Query export
+        # cannot spend the time reserved for terminating and reaping Prometheus.
+        archive_timeout = timeout if archive_timeout is None else archive_timeout
+        clock = deadline.clock if deadline is not None else time.monotonic
+
+        def bounded(seconds, reserve=0):
+            expires = clock() + max(0, seconds)
+            if deadline is not None:
+                expires = min(expires, deadline.expires_at - reserve)
+            return Deadline(expires, clock=clock,
+                            cancelled=deadline.cancelled if deadline is not None else None)
+
+        probe_deadline = bounded(timeout)
+        operations = [(name, lambda probe=probe: probe.stop(deadline=probe_deadline))
                       for name, probe in self.probes.items()]
         if not self.closed and export and (self.process is not None and self.process.poll() is None
                 or self.started is not None and not any(self.query_plan["sources"].values())):
-            operations.append(("Prometheus archive", lambda: self.archive(materialize=materialize, deadline=deadline)))
-        operations.append(("Prometheus process", lambda: self._stop_process(deadline)))
+            operations.append(("Prometheus archive", lambda: self.archive(
+                materialize=materialize, deadline=bounded(archive_timeout, reserve=timeout))))
+        # Construct this deadline when shutdown starts, after archive succeeds
+        # or fails, so query time never consumes the process shutdown allowance.
+        operations.append(("Prometheus process", lambda: self._stop_process(bounded(timeout))))
         if self.log:
             operations.append(("Prometheus log", self.log.close))
         try:

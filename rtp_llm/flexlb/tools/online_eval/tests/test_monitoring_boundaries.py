@@ -130,19 +130,19 @@ def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
     calls = []
     def query(endpoint, **kwargs):
         calls.append(kwargs)
-        assert kwargs['deadline'] is deadline
+        assert kwargs['deadline'].expires_at == 1.0
         now[0] += .6
         return {'result': []}
-    with patch('monitoring.session.Deadline', return_value=deadline), \
+    with patch('monitoring.session.time.monotonic', side_effect=lambda: now[0]), \
          patch.object(session.client, 'api', side_effect=query):
         with pytest.raises(TimeoutError):
-            session.stop(materialize=False)
+            session.stop(timeout=1, materialize=False)
     assert len(calls) == 2  # Later chunks and queries do not get fresh budgets.
     archive = json.loads((tmp_path / 'queries.json').read_text())
     assert archive['errors'] and not (tmp_path / 'metrics.json').exists()
     session.process.terminate.assert_called_once()
-    session.process.kill.assert_called_once()
-    session.process.wait.assert_called_once_with(timeout=1)
+    session.process.kill.assert_not_called()
+    session.process.wait.assert_called_once_with(timeout=pytest.approx(1))
     session.log.close.assert_called_once()
     assert session.closed
 
@@ -371,3 +371,59 @@ def test_rollback_failure_is_frozen_as_an_archive_error(tmp_path):
         session.archive()
     errors = MetricStore.read(tmp_path).document['errors']
     assert any('registration rollback failed' in error['error'] for error in errors)
+
+
+def test_archive_has_cleanup_budget_and_shutdown_keeps_reserved_time(tmp_path):
+    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'},
+                                target_kinds={'mock': 'mock'})
+    session.process = Mock()
+    session.process.poll.return_value = None
+    now = [0.0]
+    parent = Deadline(30, clock=lambda: now[0])
+    observed = []
+
+    def archive(**kwargs):
+        observed.append(kwargs['deadline'].expires_at)
+        # Query collection legitimately takes longer than process shutdown.
+        now[0] = 19
+        kwargs['deadline'].check()
+
+    with patch.object(session, 'archive', side_effect=archive):
+        session.stop(10, materialize=False, archive_timeout=100, deadline=parent)
+    assert observed == [20]  # Outer cleanup budget reserves the final 10s.
+    session.process.wait.assert_called_once_with(timeout=10)
+    session.process.kill.assert_not_called()
+
+
+def test_archive_expiry_preserves_error_and_fresh_shutdown_budget(tmp_path):
+    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'},
+                                target_kinds={'mock': 'mock'})
+    session.process = Mock()
+    session.process.poll.return_value = None
+    now = [0.0]
+    parent = Deadline(30, clock=lambda: now[0])
+
+    def archive(**kwargs):
+        now[0] = kwargs['deadline'].expires_at
+        kwargs['deadline'].check()
+
+    with patch.object(session, 'archive', side_effect=archive), \
+         pytest.raises(TimeoutError, match='Prometheus archive') as exc:
+        session.stop(10, archive_timeout=100, deadline=parent)
+    assert 'Prometheus process' not in str(exc.value)
+    session.process.wait.assert_called_once_with(timeout=10)
+    session.process.kill.assert_not_called()
+    assert session.closed
+
+
+def test_expired_outer_budget_does_not_refresh_shutdown_allowance(tmp_path):
+    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'},
+                                target_kinds={'mock': 'mock'})
+    session.process = Mock()
+    session.process.poll.return_value = None
+    parent = Deadline(0, clock=lambda: 1)
+    with pytest.raises(TimeoutError, match='shutdown budget'):
+        session.stop(10, export=False, deadline=parent)
+    session.process.terminate.assert_called_once()
+    session.process.kill.assert_called_once()
+    session.process.wait.assert_called_once_with(timeout=1)
