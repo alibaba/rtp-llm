@@ -968,7 +968,7 @@ public final class JavaLoadClient {
         }
         RoleType domainRole = RoleTypeProtoConverter.fromProto(roleType);
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(domainRole))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(domainRole))
                 .setRoleStr(domainRole.getCode())
                 .setIp(addr.substring(0, colon))
                 .setHttpPort(0)
@@ -1090,7 +1090,7 @@ public final class JavaLoadClient {
             };
             modified.getGenerateConfigBuilder().addRoleAddrs(
                     EngineRpcService.RoleAddrPB.newBuilder()
-                            .setRole(RoleTypeProtoConverter.toLegacyProto(
+                            .setRole(RoleTypeProtoConverter.toRoleAddrProto(
                                     RoleTypeProtoConverter.fromProto(roleType)))
                             .setRoleStr(RoleTypeProtoConverter.fromProto(roleType).getCode())
                             .setIp(status.getServerIp())
