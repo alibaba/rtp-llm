@@ -634,6 +634,7 @@ std::string PDSepConfig::to_string() const {
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
         << "decode_entrance: " << decode_entrance << "\n"
+        << "decode_linear_tail_only: " << decode_linear_tail_only << "\n"
         << "prefill_prepare_resource_pool_size: " << prefill_prepare_resource_pool_size << "\n"
         << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms;
     return oss.str();

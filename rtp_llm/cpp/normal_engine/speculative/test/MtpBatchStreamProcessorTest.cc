@@ -1968,6 +1968,155 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
     EXPECT_TRUE(torch::equal(actual, expected));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testSparseLinearSnapshotCommitsAcceptedStateAcrossEveryBlockBoundary) {
+    constexpr int32_t block_size  = 64;
+    constexpr int32_t verify_size = 8;
+    constexpr int64_t group_count = 3;
+    constexpr int64_t block_count = 16;
+    constexpr int64_t batch_size  = block_size * verify_size;
+    constexpr int32_t first_write = block_count - verify_size;
+    constexpr int32_t first_tail  = first_write - 2;
+    constexpr int32_t null_block  = -1;
+
+    auto                 current = torch::full({group_count, batch_size, block_count}, null_block, torch::kInt32);
+    std::vector<int32_t> previous_lengths;
+    std::vector<int32_t> accept_lengths;
+    // A physical state's payload is represented by the number of tokens it
+    // incorporates. This checks the decode contract independently of the
+    // host/GPU swap-index helpers, including rejected speculative states.
+    std::vector<int32_t> state_tokens(group_count * batch_size * block_count + 1, -1);
+    previous_lengths.reserve(batch_size);
+    accept_lengths.reserve(batch_size);
+    for (int32_t offset = 0; offset < block_size; ++offset) {
+        for (int32_t accept = 1; accept <= verify_size; ++accept) {
+            const int64_t batch  = offset * verify_size + accept - 1;
+            const int32_t cached = first_write * block_size + offset;
+            previous_lengths.push_back(cached + 1);
+            accept_lengths.push_back(accept);
+            for (int64_t group = 0; group < group_count; ++group) {
+                auto*         row   = current.select(0, group).select(0, batch).data_ptr<int32_t>();
+                const int32_t begin = group == 1 ? 0 : first_tail;
+                for (int32_t slot = begin; slot < block_count; ++slot) {
+                    row[slot] = static_cast<int32_t>((group * batch_size + batch) * block_count + slot + 1);
+                    state_tokens[row[slot]] = (slot + 1) * block_size;
+                }
+                if (group == 1) {
+                    continue;
+                }
+                // The current recurrent state may live in the previous block
+                // at an exact 64-token boundary. Verify writes one state per
+                // token, starting at the current block, never in old history.
+                const int32_t read_slot = (cached - 1) / block_size;
+                ASSERT_GT(row[read_slot], 0);
+                state_tokens[row[read_slot]] = cached;
+                for (int32_t token = 0; token < verify_size; ++token) {
+                    ASSERT_GT(row[first_write + token], 0);
+                    state_tokens[row[first_write + token]] = cached + token + 1;
+                }
+            }
+        }
+    }
+
+    auto device_current = current.to(torch::kCUDA);
+    auto actual         = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+                      device_current,
+                      torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
+                      torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
+                      {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR},
+                      block_size)
+                      .cpu();
+
+    EXPECT_TRUE(torch::equal(device_current.cpu(), current));
+    EXPECT_TRUE(torch::equal(actual.select(0, 1), current.select(0, 1)));
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+        const int32_t cached      = previous_lengths[batch] - 1;
+        const int32_t accept      = accept_lengths[batch];
+        const int32_t next_cached = cached + accept;
+        SCOPED_TRACE(::testing::Message() << "cached=" << cached << " accept=" << accept);
+        for (const int64_t group : {0L, 2L}) {
+            const auto*   row       = actual.select(0, group).select(0, batch).data_ptr<int32_t>();
+            const int32_t next_read = (next_cached - 1) / block_size;
+            ASSERT_GT(row[next_read], 0);
+            EXPECT_EQ(state_tokens[row[next_read]], next_cached);
+            // Every completed boundary reached in this round must still be a
+            // valid prefix checkpoint, even when a later candidate is rejected.
+            const int32_t boundary = (cached / block_size + 1) * block_size;
+            if (boundary <= next_cached) {
+                const int32_t checkpoint = boundary / block_size - 1;
+                ASSERT_GT(row[checkpoint], 0);
+                EXPECT_EQ(state_tokens[row[checkpoint]], boundary);
+            }
+            if (cached % block_size == 0) {
+                const int32_t checkpoint = cached / block_size - 1;
+                ASSERT_GT(row[checkpoint], 0);
+                EXPECT_EQ(state_tokens[row[checkpoint]], cached);
+            }
+            for (int32_t slot = 0; slot < first_tail; ++slot) {
+                EXPECT_EQ(row[slot], null_block);
+            }
+            for (int32_t slot = first_tail; slot < block_count; ++slot) {
+                EXPECT_GT(row[slot], 0);
+            }
+            if (accept == 1) {
+                EXPECT_TRUE(
+                    torch::equal(actual.select(0, group).select(0, batch), current.select(0, group).select(0, batch)));
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSparseSnapshotOverlayDoesNotResurrectHostHistory) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    model_config.max_seq_len                 = 2048;
+    model_config.vocab_size                  = 8;
+    model_config.num_layers                  = 1;
+    sp_config.gen_num_per_cycle              = 7;
+
+    ResourceContext resource_context;
+    auto            steady = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto            fresh  = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    steady->setIsContextStream(false);
+    fresh->setIsContextStream(false);
+
+    constexpr int64_t block_count = 16;
+    constexpr int64_t first_tail  = 6;
+    auto              physical    = torch::arange(1, block_count + 1, torch::kInt32).reshape({1, 1, block_count});
+    auto              kernel      = physical + 100;
+    physical.narrow(2, 0, first_tail).fill_(-1);
+    kernel.narrow(2, 0, first_tail).fill_(-1);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_kv_cache_block_id_gpu        = physical.to(torch::kCUDA);
+    state.next_kv_cache_kernel_block_id_gpu = kernel.to(torch::kCUDA);
+    steady->setMtpAsyncDeviceState(std::move(state));
+
+    GptModelInputs model_input;
+    const auto     pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    // The host view intentionally disagrees with the committed device snapshot.
+    model_input.kv_cache_block_id        = torch::full({1, 2, block_count}, 71, pinned_i32);
+    model_input.kv_cache_kernel_block_id = torch::full({1, 2, block_count}, 171, pinned_i32);
+    const auto fresh_physical            = model_input.kv_cache_block_id.select(1, 1).clone();
+    const auto fresh_kernel              = model_input.kv_cache_kernel_block_id.select(1, 1).clone();
+
+    TestableMtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder holder;
+    processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), model_input, holder);
+    // The asynchronous overlay owns its source tensors even after a later
+    // allocator boundary invalidates the stream's published snapshot.
+    steady->clearMtpCacheSnapshot();
+
+    EXPECT_FALSE(steady->hasMtpCacheSnapshot());
+    EXPECT_TRUE(torch::equal(model_input.kv_cache_block_id.select(1, 0).cpu(), physical.select(1, 0)));
+    EXPECT_TRUE(torch::equal(model_input.kv_cache_kernel_block_id.select(1, 0).cpu(), kernel.select(1, 0)));
+    EXPECT_TRUE(torch::equal(model_input.kv_cache_block_id.select(1, 1).cpu(), fresh_physical));
+    EXPECT_TRUE(torch::equal(model_input.kv_cache_kernel_block_id.select(1, 1).cpu(), fresh_kernel));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

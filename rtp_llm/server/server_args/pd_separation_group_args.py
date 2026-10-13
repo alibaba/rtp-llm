@@ -117,6 +117,15 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--decode_linear_tail_only",
+        env_name="DECODE_LINEAR_TAIL_ONLY",
+        bind_to=(pd_separation_config, "decode_linear_tail_only"),
+        type=str2bool,
+        default=False,
+        help="PD decode handoff keeps only active linear states while retaining full-attention prefix reuse",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_entrance",
         env_name="DECODE_ENTRANCE",
         bind_to=(pd_separation_config, "decode_entrance"),
