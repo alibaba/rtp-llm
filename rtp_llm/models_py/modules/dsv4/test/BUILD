@@ -209,6 +209,15 @@ py_test(
 )
 
 py_test(
+    name = "test_gate_routing_metadata",
+    srcs = ["test_gate_routing_metadata.py", "test_prefill_fast_path.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

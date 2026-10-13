@@ -492,11 +492,21 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
+        from rtp_llm.models_py.modules.dsv4.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
+
+        routing_metadata = prepare_model_gate_routing_metadata(self, input_ids_2d)
+        routing_kwargs = (
+            {"routing_metadata": routing_metadata}
+            if routing_metadata is not None
+            else {}
+        )
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
                 h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache, **routing_kwargs
                 )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -607,6 +617,16 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
+        from rtp_llm.models_py.modules.dsv4.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
+
+        routing_metadata = prepare_model_gate_routing_metadata(self, input_ids_flat)
+        routing_kwargs = (
+            {"routing_metadata": routing_metadata}
+            if routing_metadata is not None
+            else {}
+        )
         layer_forward_range = _profiler.make_layer_forward_range()
         for li, layer in enumerate(self.layers):
             with layer_forward_range(li):
@@ -617,6 +637,7 @@ class V4Transformer(nn.Module):
                     cu_seqlens,
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
+                    **routing_kwargs,
                 )
                 if _rt_on:
                     _rt.record(f"layer{li:02d}_out", h_flat)

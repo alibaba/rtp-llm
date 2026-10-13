@@ -377,11 +377,13 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 try_select_sparse_tokens=Mock(return_value=selected),
             ),
             _v41_indexer_q_triton=SimpleNamespace(
-                is_supported=lambda *args: True,
-                try_fused_indexer_q=lambda *args: (
-                    torch.zeros(1, 1, 32, 64),
-                    torch.ones(1, 1, 32),
-                    torch.ones(1, 1, 32),
+                is_supported=lambda *args, **kwargs: True,
+                try_fused_indexer_q=Mock(
+                    side_effect=lambda *args, weights_out_dtype=torch.float32: (
+                        torch.zeros(1, 1, 32, 64),
+                        torch.ones(1, 1, 32),
+                        torch.ones(1, 1, 32, dtype=weights_out_dtype),
+                    )
                 ),
             ),
             _v41_prefill_candidates=SimpleNamespace(),
@@ -435,6 +437,21 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
             )
             meta.try_score_bounds.assert_called_once()
+            fused_calls = (
+                package._v41_indexer_q_triton.try_fused_indexer_q.call_args_list
+            )
+            self.assertEqual(
+                [
+                    call.kwargs.get("weights_out_dtype", torch.float32)
+                    for call in fused_calls
+                ],
+                [torch.float32, torch.bfloat16],
+            )
+            self.assertEqual(
+                indexer.score_indexer_chunk.call_args.args[4].dtype, torch.float32
+            )
+            for call in sparse.score.call_args_list:
+                self.assertEqual(call.args[3].dtype, torch.bfloat16)
             capability.assert_called_once_with("cpu")
             grouped_bounds.launch.assert_called_once()
             grouped_score.assert_called_once()

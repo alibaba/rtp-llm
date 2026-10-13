@@ -5,9 +5,10 @@ optional shared weights.  This strategy is enabled by default and can be
 disabled via ``DSV4_USE_MEGA_MOE_SE=0``.  It owns independent
 buffer/packer/warmup state from the routed-only Mega path.
 
-Native V4.1 group-32 weights additionally require the decode-only opt-in
-``DSV41_MEGA_SHARED_EXPERT=1``. The fused activation/combine rounding differs
-from the standalone BF16 shared expert, so this opt-in defaults to off.
+Native V4.1 group-32 weights additionally require the opt-in
+``DSV41_MEGA_SHARED_EXPERT=1`` for both prefill and decode. The fused
+activation/combine rounding differs from the standalone BF16 shared expert,
+so this opt-in defaults to off.
 """
 
 from __future__ import annotations
@@ -104,10 +105,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             and cfg.shared_fp8_block_size in _SHARED_RECIPES
             and (
                 cfg.shared_fp8_block_size != 32
-                or (
-                    cfg.is_decode_role
-                    and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
-                )
+                or os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
             )
             and _mega_moe_se_enabled()
         )
@@ -326,7 +324,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
         )
 
-    def _resolve_jit_warmup_token_counts(self, num_sms: int, deep_gemm=None) -> list[int]:
+    def _resolve_jit_warmup_token_counts(
+        self, num_sms: int, deep_gemm=None
+    ) -> list[int]:
         cfg = self.cfg
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         override = parse_mega_moe_se_jit_warmup_tokens_override()

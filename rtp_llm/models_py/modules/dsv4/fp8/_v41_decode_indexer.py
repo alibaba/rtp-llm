@@ -148,21 +148,36 @@ def prepare_indexer_q_and_weights(
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
     rope_head_dim: int = 64,
+    *,
+    weights_out_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare Q from raw head weights and a complete frequency lookup table.
 
     Unsupported query layouts retain the gather/cast/scale/clone/RoPE/quant
     chain; CUDA/JIT errors in the supported fused path still propagate.
+    Keep FP32 weights for dense paged decode. BF16 is available for sparse
+    consumers, with the same post-scaling rounding in the fallback.
     """
     from ._v41_indexer_q_triton import try_fused_indexer_q
 
-    result = try_fused_indexer_q(q, weights, freqs_cis, positions, rope_head_dim)
+    if weights_out_dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError("indexer weights must use torch.float32 or torch.bfloat16")
+    result = try_fused_indexer_q(
+        q,
+        weights,
+        freqs_cis,
+        positions,
+        rope_head_dim,
+        weights_out_dtype=weights_out_dtype,
+    )
     if result is not None:
         return result
     scaled_weights = weights.float() * (q.shape[-1] * q.shape[-2]) ** -0.5
     payload, sf = prepare_indexer_q(
         q, scaled_weights, freqs_cis[positions], rope_head_dim
     )
+    if weights_out_dtype != torch.float32:
+        scaled_weights = scaled_weights.to(weights_out_dtype)
     return payload, sf, scaled_weights
 
 
@@ -218,7 +233,12 @@ def score_decode_indexer(
         q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
     else:
         q_payload, q_sf, weights = prepare_indexer_q_and_weights(
-            q, weights, freqs_cis, positions, rope_head_dim
+            q,
+            weights,
+            freqs_cis,
+            positions,
+            rope_head_dim,
+            weights_out_dtype=torch.float32,
         )
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)

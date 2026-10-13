@@ -1757,6 +1757,9 @@ class CedCandidatePublicationTest(_SingleThreadTest):
 
             state = dict(
                 layer_calls=[layer(i) for i in range(40)],
+                routing_metadata=None,
+                routing_kwargs={},
+                engram_prefetch=None,
                 ced_in_l20=False,
                 ced_tail=None if absent else plan,
                 prefill_write_by_region=None,
@@ -2212,6 +2215,13 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
             )
+            owner._gate_pack_views = lambda tokens: (
+                buf.x[:tokens],
+                buf.x_sf[:tokens],
+                buf.topk_idx[:tokens],
+                buf.topk_weights[:tokens],
+                owner._mega_y[:tokens],
+            )
             gate = self._gate()
             scores = torch.full((4, 3), 7, dtype=torch.bfloat16)
             gate._ced_row_projection = mock.Mock(return_value=scores)
@@ -2478,6 +2488,9 @@ class CedL20SplitTest(_SingleThreadTest):
         rebuild = mock.Mock()
         state = dict(
             layer_calls=[layer(i) for i in range(40)],
+            routing_metadata=None,
+            routing_kwargs={},
+            engram_prefetch=None,
             ced_in_l20=True,
             ced_tail=plan,
             prefill_write_by_region=None,

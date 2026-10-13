@@ -22,6 +22,111 @@ _DENSE_WARMED: set[tuple] = set()
 _SHARED_WARMED: set[tuple] = set()
 _ENGRAM_WARMED: set[tuple] = set()
 _DECODE_QUERY_WARMED: set[tuple] = set()
+_MEGA_WARMED: set[tuple] = set()
+
+
+@torch.inference_mode()
+def warmup_v41_mega_jit(model, *, max_m, device, decode):
+    """Warm native module loading and reachable GEMM/insert specializations.
+
+    Every launch uses private KV/output allocations. Include the CUDA stream
+    and the real SWA page size so later cache binding cannot reuse an incomplete
+    pre-cache warmup entry.
+    """
+    if (
+        not model_warm_up_enabled()
+        or os.environ.get("DSV41_MEGA_ATTENTION", "0") != "1"
+        or not common._is_cuda_device(device)
+        or max_m <= 0
+    ):
+        return
+    common._assert_not_capturing()
+    from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+    from rtp_llm.models_py.modules.dsv4.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
+    from rtp_llm.models_py.modules.dsv4.fp8 import _v41_mega_attention
+    from rtp_llm.models_py.modules.dsv4.fp8.attention import _ATTN_TYPE_ENUM_BY_INT
+
+    max_m = int(max_m) if decode else min(int(max_m), FLASH_MLA_SPARSE_Q_CHUNK)
+    cache = getattr(model, "kv_cache", None)
+    stream = torch.cuda.current_stream(device).cuda_stream
+    sms = common._get_deep_gemm_num_sms(device)
+    pending = {}
+    for name, attn in model.named_modules():
+        state = getattr(attn, "_mega_attention", None)
+        if state is None:
+            continue
+        entries = 32
+        if decode and cache is not None:
+            base = cache.get_layer_cache(
+                attn.layer_id, _ATTN_TYPE_ENUM_BY_INT[SWA_KV]
+            ).kv_cache_base
+            if base is None or base.ndim != 2:
+                raise RuntimeError("Mega attention warmup requires allocated SWA pages")
+            entries = base.shape[1] * base.element_size() // 528
+        grid = tuple(
+            sorted(
+                set(_dense_m_grid(max_m, state.heads * 512, attn.wq_b.K, sms))
+                | set(
+                    _dense_m_grid(
+                        max_m, attn.o_lora_rank, 4096, sms, groups=state.groups
+                    )
+                )
+                | set(_dense_m_grid(max_m, attn.wo_b.N, attn.wo_b.K, sms))
+            )
+        )
+        key = (
+            str(device),
+            stream,
+            decode,
+            entries,
+            grid,
+            state.heads,
+            state.groups,
+            attn.wq_b.K,
+            attn.o_lora_rank,
+            attn.window_size,
+            attn.index_topk if attn.compress_ratio else 0,
+            attn.wo_b.N,
+            attn.wo_b.K,
+            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto"),
+        )
+        if key not in _MEGA_WARMED:
+            pending.setdefault(key, (name, attn, entries, grid))
+
+    def launch():
+        for key, (name, attn, entries, grid) in pending.items():
+            for rows in grid:
+
+                def call():
+                    if not _v41_mega_attention.warmup(
+                        attn, rows=rows, decode=decode, swa_entries=entries
+                    ):
+                        raise RuntimeError("Mega attention rejected its startup warmup")
+
+                common._run_deepgemm_warmup_launch_with_retry(
+                    "DSV41 MegaAttention",
+                    f"{name} M={rows}",
+                    partial(
+                        common._run_triton_warmup_launch_with_retry,
+                        "DSV41 MegaAttention",
+                        f"{name} M={rows}",
+                        call,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            common._sync_cuda(device)
+            _MEGA_WARMED.add(key)
+            logging.info(
+                "[DSV41 MegaAttention] %s decode=%s SWA_entries=%d M=%s ready",
+                name,
+                decode,
+                entries,
+                grid,
+            )
+
+    if pending:
+        common._run_deepgemm_warmup_launches_serialized("DSV41 MegaAttention", launch)
 
 
 def collect_v41_dense_shapes(model):
@@ -484,6 +589,7 @@ def warmup_v41_decode_jit(model, *, device):
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
     warmup_v41_decode_query_jit(model, max_m=max_m, device=device)
+    warmup_v41_mega_jit(model, max_m=max_m, device=device, decode=True)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(
@@ -587,6 +693,7 @@ def warmup_v41_prefill_jit(model, *, device):
         device=device,
         kv_cache=model.kv_cache,
     )
+    warmup_v41_mega_jit(model, max_m=max_m, device=device, decode=False)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(

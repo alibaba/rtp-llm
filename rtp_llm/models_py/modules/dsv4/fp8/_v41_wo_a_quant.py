@@ -72,7 +72,12 @@ def is_supported(a, weight):
         aq.device == sa.device == w.device
         and aq.dtype == torch.float8_e4m3fn
         and aq.shape == (m, 8, 4096)
-        and aq.stride() == (4096, m * 4096, 1)
+        # The driver encodes both runtime strides in its A-side TMA map.
+        # The inverse-RoPE quantizer emits group-major [G,M,K]; native mega
+        # attention emits token-major [M,G,K]. Both keep K contiguous and
+        # require no copy or different CUDA specialization. Other padded,
+        # overlapping or broadcast layouts remain outside the contract.
+        and aq.stride() in ((4096, m * 4096, 1), (32768, 4096, 1))
         and sa.dtype == torch.int32
         and sa.shape == (m, 8, 32)
         and sa.stride() == (1, stride * 32, stride)

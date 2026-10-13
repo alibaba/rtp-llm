@@ -859,7 +859,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         from rtp_llm.models_py.modules.dsv4.hc.decode_transition import (
             forward_decode_layer,
         )
+        from rtp_llm.models_py.modules.dsv4.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
 
+        routing_metadata = prepare_model_gate_routing_metadata(self.v4, query_ids)
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
                 hidden = forward_decode_layer(
@@ -867,6 +871,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     hidden,
                     attn_metadata=None,
                     input_ids=query_ids,
+                    routing_metadata=routing_metadata,
                     next_layer=(
                         self.v4.layers[layer_idx + 1]
                         if layer_idx + 1 < len(self.v4.layers)

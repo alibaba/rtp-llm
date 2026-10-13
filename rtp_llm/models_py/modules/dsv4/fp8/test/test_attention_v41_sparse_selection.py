@@ -319,6 +319,166 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
             with self.subTest(ratio=ratio):
                 self._check_selection(True, ratio)
 
+    def _check_weight_routing(self, *, layer, sparse_supported, batched=False):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_batched_prefill_select
+
+        rows, count = 4, 1025
+        slices = [slice(0, 2), slice(2, 4)] if batched else [slice(0, rows)]
+        keys = attention.prefill_indexer.PrefillIndexerKeys(
+            torch.zeros(count, 64, dtype=torch.int8),
+            torch.zeros(count, dtype=torch.int32),
+        )
+        shared = {
+            "global": {20: [(None, keys) for _ in slices]},
+            "candidates": torch.zeros(rows, 128, dtype=torch.int32),
+        }
+        attn = SimpleNamespace(
+            is_index_source=True,
+            index_source_layer_id=layer,
+            kv_source_layer_id=20,
+            layer_id=layer,
+            index_topk=512,
+            index_n_heads=32,
+            index_head_dim=128,
+            rope_head_dim=64,
+            compress_ratio=1,
+            index_wq=None,
+            index_weights=torch.linspace(0.99, 1.01, 32).view(32, 1),
+            freqs_cis=torch.ones(2048, 32, dtype=torch.complex64),
+            _lin=lambda weight, value: torch.zeros(rows, 32 * 128),
+            v41_config=dict(
+                candidate_source_layer_id=20,
+                candidate_topk_blocks=128,
+                candidate_block_size=8,
+            ),
+            _shared_attention=shared,
+        )
+        x = torch.arange(1, rows + 1).float()[:, None]
+        raw_scaled = torch.nn.functional.linear(x, attn.index_weights) / 64
+        # Ensure an incorrect BF16 -> FP32 fallback cannot pass this test.
+        self.assertFalse(torch.equal(raw_scaled, raw_scaled.bfloat16().float()))
+        consumed = []
+
+        def prepare(q, weights, freqs, positions, rope_dim, *, weights_out_dtype):
+            return (
+                torch.zeros(rows, 1, 32, 64, dtype=torch.int8),
+                torch.zeros(rows, 1, 32, dtype=torch.int32),
+                (weights.float() / 64).to(weights_out_dtype),
+            )
+
+        def sparse_score(q, sf, keys, weights, plan):
+            consumed.append(weights.clone())
+            return torch.zeros(len(weights), 512)
+
+        def dense_score(q, sf, kp, ks, weights, visible, **kwargs):
+            consumed.append(weights.clone())
+            return torch.zeros(len(weights), count)
+
+        with ExitStack() as stack:
+            prepared = stack.enter_context(
+                patch.object(
+                    attention.indexer_q_fusion,
+                    "try_fused_indexer_q",
+                    side_effect=prepare,
+                )
+            )
+            batch = stack.enter_context(
+                patch.object(
+                    _v41_batched_prefill_select,
+                    "try_select_batched",
+                    return_value=False,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_deepselect, "is_available", return_value=True
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.sparse_prefill_indexer,
+                    "is_supported",
+                    return_value=sparse_supported,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_metadata, "try_score_bounds", return_value=None
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention,
+                    "_prefill_sparse_plan",
+                    return_value=SimpleNamespace(end=torch.full((rows,), 512)),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.sparse_prefill_indexer, "score", side_effect=sparse_score
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_deepselect,
+                    "try_select_sparse_tokens",
+                    side_effect=lambda logits, end: torch.zeros_like(
+                        logits, dtype=torch.int32
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.sparse_prefill_indexer,
+                    "remap",
+                    side_effect=lambda selected, plan, *, logits, out: out.copy_(
+                        selected
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_indexer,
+                    "score_indexer_chunk",
+                    side_effect=dense_score,
+                )
+            )
+            stack.enter_context(patch.object(attention, "_apply_prefill_candidates"))
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_topk,
+                    "try_select_tokens",
+                    side_effect=lambda logits, visible, k, *, bounds, out: out.zero_(),
+                )
+            )
+            attention.AttentionV41FP8._select_indices(
+                attn,
+                x,
+                x,
+                torch.full((rows,), 1024, dtype=torch.int64),
+                torch.tensor([0, 0, 1, 1] if batched else [0] * rows),
+                request_row_slices=slices,
+            )
+        requested = torch.bfloat16 if layer > 20 else torch.float32
+        self.assertEqual(prepared.call_args.kwargs["weights_out_dtype"], requested)
+        if batched:
+            self.assertEqual(batch.call_args.args[3].dtype, requested)
+        expected = (
+            raw_scaled.bfloat16() if sparse_supported and layer > 20 else raw_scaled
+        )
+        actual = torch.cat(consumed)
+        self.assertEqual(actual.dtype, expected.dtype)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_sparse_consumer_receives_fused_bf16_weights(self):
+        self._check_weight_routing(layer=26, sparse_supported=True)
+
+    def test_rejected_batched_sparse_restores_original_fp32_weights(self):
+        self._check_weight_routing(layer=26, sparse_supported=False, batched=True)
+
+    def test_candidate_source_keeps_fp32_weights(self):
+        self._check_weight_routing(layer=20, sparse_supported=False)
+
 
 if __name__ == "__main__":
     unittest.main()

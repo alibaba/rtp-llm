@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4.moe.routing_metadata import GateRoutingMetadata
+
 # P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
@@ -194,7 +196,11 @@ class Gate(nn.Module):
         return scores
 
     def forward(
-        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        *,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -246,35 +252,52 @@ class Gate(nn.Module):
             _rt.record_if_level(2, f"{_dbg}_activated_scores", scores)
 
         original_scores = scores
-        image_mask = (
-            input_ids.reshape(-1) >= self.vocab_size
-            if self.bias_vl is not None
+        has_visual_tokens = (
+            self.bias_vl is not None
             and input_ids is not None
             and getattr(self, "_has_visual_tokens", False)
-            else None
         )
+        if has_visual_tokens and routing_metadata is not None:
+            image_mask = routing_metadata.image_mask
+            image_mask_column = routing_metadata.image_mask_column
+        else:
+            image_mask = (
+                input_ids.reshape(-1) >= self.vocab_size if has_visual_tokens else None
+            )
+            image_mask_column = (
+                image_mask.unsqueeze(-1) if image_mask is not None else None
+            )
         if self.bias is not None:
             if image_mask is None:
                 scores = scores + self.bias
             else:
                 scores = scores + torch.where(
-                    image_mask.unsqueeze(-1), self.bias_vl, self.bias
+                    image_mask_column, self.bias_vl, self.bias
                 )
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_biased_scores", scores)
 
         if self.hash:
-            flat_ids = input_ids.reshape(-1)
+            flat_ids = (
+                routing_metadata.input_ids
+                if routing_metadata is not None
+                else input_ids.reshape(-1)
+            )
             if image_mask is None:
                 indices = self.tid2eid[flat_ids].long()
             else:
-                indices = self.tid2eid[torch.where(image_mask, 0, flat_ids)].long()
+                safe_ids = (
+                    routing_metadata.safe_hash_input_ids
+                    if routing_metadata is not None
+                    else None
+                )
+                if safe_ids is None:
+                    safe_ids = torch.where(image_mask, 0, flat_ids)
+                indices = self.tid2eid[safe_ids].long()
                 vision_indices = (original_scores + self.bias_vl).topk(
                     self.topk, dim=-1
                 )[1]
-                indices = torch.where(
-                    image_mask.unsqueeze(-1), vision_indices.long(), indices
-                )
+                indices = torch.where(image_mask_column, vision_indices.long(), indices)
         else:
             indices = None
 

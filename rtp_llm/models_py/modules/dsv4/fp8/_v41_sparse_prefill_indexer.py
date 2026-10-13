@@ -452,8 +452,9 @@ def score(
     """Compute BF16 sparse logits; padding outside plan.end is not a valid score.
 
     FP4 payload and packed group-32 UE8M0 scales are consumed unchanged.
-    Head weights are converted to BF16 (not multiplied by Q scales). This
-    precision change follows vLLM's sparse contract and is intentional.
+    Head weights use BF16 (not multiplied by Q scales), usually emitted
+    directly by fused Q preparation. Legacy FP32 callers retain the explicit
+    conversion; the sparse precision contract remains unchanged.
     """
     if not (
         isinstance(plan, SparsePrefillPlan)
@@ -472,7 +473,7 @@ def score(
     return _get_deep_gemm().fp8_fp4_sparse_mqa_logits(
         (q_payload, q_sf),
         (keys.quant, keys.scale),
-        weights.to(torch.bfloat16),
+        weights if weights.dtype == torch.bfloat16 else weights.to(torch.bfloat16),
         plan.metadata,
         plan.sparse_indices.shape[1],
         plan.block_size,

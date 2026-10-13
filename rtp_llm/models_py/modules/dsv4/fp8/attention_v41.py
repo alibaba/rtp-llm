@@ -570,6 +570,8 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
     plan = sparse_prefill_indexer.prepare_plan(
         candidates, visible, key_count, block_size
     )
+    if plan is None:
+        raise RuntimeError("sparse index plan rejected a supported request")
     limit = max(
         0, int(os.environ.get("DSV41_SPARSE_PREFILL_PLAN_MAX_BYTES", 256 * 1024**2))
     )
@@ -654,6 +656,47 @@ class AttentionV41FP8(AttentionFP8):
                     self.wo_a_s[begin // scale_block : end // scale_block].contiguous(),
                 )
             )
+
+        # Construction may run under torch.device("meta"). Prepare derived
+        # weights only after the authoritative device/RoPE initialization.
+        self._mega_attention = None
+
+    def init_rope_cache(self, device=None):
+        super().init_rope_cache(device=device)
+        from ._v41_mega_attention import prepare
+
+        self._mega_attention = prepare(self, shared=self._shared_attention)
+
+    def reload_sleep_computed_weights(self, seen_freqs=None, seen_cos_sin=None):
+        super().reload_sleep_computed_weights(seen_freqs, seen_cos_sin)
+        mega = getattr(self, "_mega_attention", None)
+        if mega is not None:
+            mega.reload_weights(self)
+
+    def _mega_position_chunks(self, positions, rows, chunk):
+        # All layers consume the same absolute query positions. Keep conversion
+        # and chunk views within this forward, including during graph capture.
+        cache = self._shared_attention.setdefault("mega_positions", {})
+        key = (
+            positions.data_ptr(),
+            positions.shape,
+            positions.stride(),
+            positions.dtype,
+            positions.device,
+            rows,
+            chunk,
+        )
+        entry = cache.get(key)
+        if entry is None:
+            converted = positions.reshape(-1)[:rows].to(dtype=torch.int32).contiguous()
+            if converted.numel() != rows:
+                raise ValueError(
+                    "Mega attention requires one absolute position per query"
+                )
+            chunks = (converted,) if rows <= chunk else converted.split(chunk)
+            entry = (positions, chunks)
+            cache[key] = entry
+        return entry[1]
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -939,6 +982,30 @@ class AttentionV41FP8(AttentionFP8):
         )
         qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
         out_chunks = (out,) if rows <= chunk else out.split(chunk)
+        mega = getattr(self, "_mega_attention", None)
+        if (
+            mega is not None
+            and mega.supports_query(qkv.qr)
+            and mega.supports_prefill(kv, indices, topk_length)
+        ):
+            positions = (
+                common.cp_ctx.global_positions if common.cp_on else common.position_ids
+            )
+            position_chunks = self._mega_position_chunks(positions, rows, chunk)
+            for qr, target, indices_chunk, lengths, pos in zip(
+                qr_chunks, out_chunks, index_chunks, length_chunks, position_chunks
+            ):
+                q_out, _, _ = common.workspace.prefill_q_head_views(
+                    qr.shape[0], self.n_heads, self.head_dim, self.rope_head_dim
+                )
+                with record_function_range("dsv41.prefill.q_lora_b_mega"):
+                    q = mega.project_q(self.wq_b, qr, out=q_out)
+                with record_function_range("dsv41.prefill.mega_attention"):
+                    pair = mega.prefill(q, kv, indices_chunk, pos, lengths)
+                with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                    mega.project_output(pair, self.wo_b, out=target)
+            self._prefill_output_all_reduce(out)
+            return out
         for qr, target, freqs, indices_chunk, lengths in zip(
             qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
         ):
@@ -988,6 +1055,7 @@ class AttentionV41FP8(AttentionFP8):
             # stale entry.
             self._shared_attention.pop("prefill_meta_common", None)
             self._shared_attention.pop("decode_rope_metadata", None)
+            self._shared_attention.pop("mega_positions", None)
             self._shared_attention.pop("source_pool_views", None)
 
     def _owner(self):
@@ -1760,6 +1828,17 @@ class AttentionV41FP8(AttentionFP8):
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
+            # Only candidate consumers use BF16 sparse reduction. The source
+            # indexer and every dense fallback retain their FP32 arithmetic.
+            sparse_weights = (
+                fused_indexer
+                and shared.get("candidates") is not None
+                and candidate_source >= 0
+                and self.layer_id > candidate_source
+                and candidate_size == 8
+                and self.index_topk == 512
+                and prefill_deepselect.is_available(x.device)
+            )
             prepared = (
                 indexer_q_fusion.try_fused_indexer_q(
                     q.unsqueeze(1),
@@ -1767,6 +1846,9 @@ class AttentionV41FP8(AttentionFP8):
                     self.freqs_cis,
                     positions,
                     self.rope_head_dim,
+                    weights_out_dtype=(
+                        torch.bfloat16 if sparse_weights else torch.float32
+                    ),
                 )
                 if fused_indexer
                 else None
@@ -1783,6 +1865,7 @@ class AttentionV41FP8(AttentionFP8):
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
                 else:
                     q = fp8_roundtrip(q)
+            dense_weights = weights if weights.dtype == torch.float32 else None
             if fused_indexer and len(globals_by_req) > 1:
                 from ._v41_batched_prefill_select import try_select_batched
 
@@ -1923,6 +2006,14 @@ class AttentionV41FP8(AttentionFP8):
                                 out[output_rows] = mapped
                         continue
                     if fused_indexer:
+                        if dense_weights is None:
+                            # A sparse layout can be rejected per request. Do
+                            # not upcast rounded BF16 weights: recover exactly
+                            # the original FP32 scaling from the projection.
+                            dense_weights = (
+                                raw_weights.float()
+                                * (self.index_head_dim * self.index_n_heads) ** -0.5
+                            )
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
                         ):
@@ -1931,7 +2022,7 @@ class AttentionV41FP8(AttentionFP8):
                                 q_sf[chunk],
                                 keys.quant,
                                 keys.scale,
-                                weights[chunk],
+                                dense_weights[chunk],
                                 visible,
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
@@ -2774,6 +2865,27 @@ class AttentionV41FP8(AttentionFP8):
         positions, freqs = decode_rope_metadata(
             self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
         )
+        swa_pool = self._pool_view_3d_fp8(SWA_KV)
+        mega = getattr(self, "_mega_attention", None)
+        mega_swa = metadata.swa_global_slots[:T] if mega is not None else None
+        mega_global = (
+            self._source_pool(self._global_region())
+            if mega is not None and self.compress_ratio
+            else None
+        )
+        if mega is not None and not (
+            mega.supports_input(x)
+            and mega.supports_decode(swa_pool, mega_swa)
+            and (
+                not self.compress_ratio
+                or (
+                    self.index_topk > 0
+                    and self.index_topk % 128 == 0
+                    and mega.supports_pool(mega_global, FP4_GLOBAL_ENTRY_BYTES)
+                )
+            )
+        ):
+            mega = None
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
         if self.compress_ratio and self.is_kv_source:
@@ -2790,14 +2902,41 @@ class AttentionV41FP8(AttentionFP8):
                 x,
                 positions,
                 freqs_cis=freqs,
-                swa_pool=self._pool_view_3d_fp8(SWA_KV),
+                swa_pool=swa_pool,
                 swa_slots=None if swa_slots is None else swa_slots[:T],
+                **({"mega_attention": mega} if mega is not None else {}),
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
         finally:
             if global_work is not None:
                 global_work.finish()
+        if mega is not None:
+            slots = None
+            if self.compress_ratio:
+                if self.is_kv_source and global_work is None:
+                    self._produce_global_decode(x, positions, req, starts)
+                selected = self._select_indices_decode(
+                    x, qkv.qr, positions, qkv.qr_quantized
+                )
+                slots = (
+                    self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+                    .to(dtype=torch.int32)
+                    .contiguous()
+                )
+            mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
+            with record_function_range("dsv41.decode.mega_attention"):
+                pair = mega.decode(
+                    qkv.q,
+                    swa_pool,
+                    mega_swa,
+                    mega_positions,
+                    extra_pool=mega_global,
+                    extra_indices=slots,
+                )
+            out = mega.project_output(pair, self.wo_b)
+            self._prefill_output_all_reduce(out)
+            return out.view(B, S, self.dim)
         if not self.compress_ratio:
             o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
         else:

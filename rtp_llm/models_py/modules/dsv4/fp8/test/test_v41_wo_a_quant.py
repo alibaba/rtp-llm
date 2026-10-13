@@ -27,7 +27,7 @@ def _load(name, path):
 op = _load("v41_wo_a_contract", _ROOT / "_v41_wo_a_quant.py")
 
 
-def _metadata(m=33):
+def _metadata(m=33, *, row_major=False):
     device = torch.device("cuda:0")
 
     def tensor(shape, stride, dtype):
@@ -45,7 +45,11 @@ def _metadata(m=33):
 
     aligned = (m + 3) // 4 * 4
     return (
-        tensor((m, 8, 4096), (4096, m * 4096, 1), torch.float8_e4m3fn),
+        tensor(
+            (m, 8, 4096),
+            (32768, 4096, 1) if row_major else (4096, m * 4096, 1),
+            torch.float8_e4m3fn,
+        ),
         tensor((m, 8, 32), (1, aligned * 32, aligned), torch.int32),
     ), (
         tensor((8, 1024, 4096), (1024 * 4096, 4096, 1), torch.float8_e4m3fn),
@@ -389,7 +393,10 @@ class WoAQuantCPUContractTest(unittest.TestCase):
     def test_incompatible_layout_dtype_device_and_alignment_fall_back(self):
         changes = (
             (0, "shape", (33, 2, 4096)),
-            (0, "stride", lambda: (32768, 4096, 1)),
+            (0, "stride", lambda: (32784, 4096, 1)),
+            (0, "stride", lambda: (32768, 4096, 2)),
+            (0, "stride", lambda: (0, 4096, 1)),
+            (0, "stride", lambda: (4096, 4096, 1)),
             (0, "dtype", torch.bfloat16),
             (0, "requires_grad", True),
             (1, "stride", lambda: (256, 32, 1)),
@@ -405,6 +412,54 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     a, w = _metadata()
                     setattr((*a, *w)[index], attr, value)
                     self.assertFalse(op.is_supported(a, w))
+
+    def test_token_major_metadata_and_runtime_tma_strides(self):
+        for m in (4, 24, 4096, 12288):
+            with self.subTest(m=m):
+                a, weight = _metadata(m, row_major=True)
+                output = (
+                    SimpleNamespace(data_ptr=lambda: 512),
+                    SimpleNamespace(data_ptr=lambda: 768),
+                )
+                for tensor in (*a, *weight, *output):
+                    tensor.record_stream = mock.Mock()
+                lib = SimpleNamespace(
+                    v41_wo_a_is_current=mock.Mock(return_value=1),
+                    v41_wo_a_launch=mock.Mock(return_value=0),
+                )
+                handle = object()
+                stream = SimpleNamespace(cuda_stream=123)
+                with mock.patch.dict(
+                    op._READY, {0: (lib, handle)}, clear=True
+                ), mock.patch.object(
+                    op, "_device_supported", return_value=True
+                ), mock.patch.object(
+                    torch.cuda, "device"
+                ), mock.patch.object(
+                    torch.cuda, "current_stream", return_value=stream
+                ), mock.patch.object(
+                    op, "_output"
+                ) as allocate:
+                    self.assertTrue(op.is_supported(a, weight))
+                    self.assertIs(
+                        op.try_grouped_quant(a, weight, out=output, quant_kernel="v2"),
+                        output,
+                    )
+                allocate.assert_not_called()
+                lib.v41_wo_a_launch.assert_called_once_with(
+                    handle,
+                    256,
+                    256,
+                    256,
+                    256,
+                    512,
+                    768,
+                    m,
+                    32768,
+                    4096,
+                    False,
+                    123,
+                )
 
     def test_unverified_architecture_and_sms_fall_back(self):
         for major, minor, sms in (
@@ -689,6 +744,66 @@ class WoAQuantCudaTest(unittest.TestCase):
                         op.try_grouped_quant(a, (self.w, self.sw)),
                         self.baseline(a, mode),
                     )
+
+    @torch.inference_mode()
+    def test_token_major_mega_layout_is_bitexact_without_repacking(self):
+        for m in (4, 24, 257, 4096, 12288):
+            original = self.pair(m)
+            token_major = (original[0].contiguous(), original[1])
+            self.assertEqual(token_major[0].stride(), (32768, 4096, 1))
+            self.assertTrue(op.is_supported(token_major, (self.w, self.sw)))
+            for mode in ("legacy", "v2", "auto"):
+                with self.subTest(m=m, mode=mode):
+                    actual = op.try_grouped_quant(
+                        token_major, (self.w, self.sw), quant_kernel=mode
+                    )
+                    self.assert_pair(
+                        actual,
+                        op.try_grouped_quant(
+                            original, (self.w, self.sw), quant_kernel=mode
+                        ),
+                    )
+                    self.assert_pair(actual, self.baseline(original, mode))
+            # Neither accepted ordering implies support for an overlapping
+            # group layout or incorrectly packed scales.
+            bad_layout = token_major[0].as_strided((m, 8, 4096), (32768, 0, 1))
+            self.assertIsNone(
+                op.try_grouped_quant((bad_layout, token_major[1]), (self.w, self.sw))
+            )
+            self.assertIsNone(
+                op.try_grouped_quant(
+                    (token_major[0], token_major[1].contiguous()), (self.w, self.sw)
+                )
+            )
+
+    @torch.inference_mode()
+    def test_token_major_graph_replay_reads_updated_data_and_scales(self):
+        for m in (4, 24):
+            with self.subTest(m=m):
+                pair = self.pair(m)
+                pair = (pair[0].contiguous(), pair[1])
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    self.assertIsNotNone(
+                        op.try_grouped_quant(pair, (self.w, self.sw), quant_kernel="v2")
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        captured = op.try_grouped_quant(
+                            pair, (self.w, self.sw), quant_kernel="v2"
+                        )
+                    self.assertIsNotNone(captured)
+                    replacement = self.pair(m, exponent=-3)
+                    pair[0].copy_(replacement[0])
+                    pair[1].copy_(replacement[1])
+                    graph.replay()
+                torch.cuda.current_stream().wait_stream(stream)
+                group_major = (
+                    pair[0].transpose(0, 1).contiguous().transpose(0, 1),
+                    pair[1],
+                )
+                self.assert_pair(captured, self.baseline(group_major, "v2"))
 
     @torch.inference_mode()
     def test_nondefault_stream_and_graph_replay(self):

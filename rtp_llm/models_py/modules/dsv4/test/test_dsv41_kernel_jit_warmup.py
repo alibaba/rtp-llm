@@ -55,6 +55,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.stack.enter_context(
             mock.patch.object(warmup, "_DECODE_QUERY_WARMED", set())
         )
+        self.stack.enter_context(mock.patch.object(warmup, "_MEGA_WARMED", set()))
         # Fail immediately if this test accidentally touches the CUDA runtime.
         for name in ("_lazy_init", "init", "synchronize", "current_device"):
             self.stack.enter_context(
@@ -78,6 +79,194 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertFalse(warmup._SHARED_WARMED)
         self.assertFalse(warmup._ENGRAM_WARMED)
         self.assertFalse(warmup._DECODE_QUERY_WARMED)
+
+    def mega_fixture(self):
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        operation = mock.Mock(return_value=True)
+        package_name = "rtp_llm.models_py.modules.dsv4.fp8"
+        mega_name = package_name + "._v41_mega_attention"
+        attention_name = package_name + ".attention"
+        mega = fake_module(mega_name, warmup=operation)
+        package = fake_module(package_name, _v41_mega_attention=mega)
+        package.__path__ = []
+        attention = fake_module(attention_name, _ATTN_TYPE_ENUM_BY_INT={SWA_KV: "swa"})
+        self.stack.enter_context(
+            mock.patch.dict(
+                sys.modules,
+                {
+                    package_name: package,
+                    mega_name: mega,
+                    attention_name: attention,
+                },
+            )
+        )
+        self.stack.enter_context(
+            mock.patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "1"})
+        )
+        self.stack.enter_context(
+            mock.patch.object(warmup.common, "_assert_not_capturing")
+        )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup.common,
+                "_is_cuda_device",
+                side_effect=lambda device: torch.device(device).type == "cuda",
+            )
+        )
+        self.stack.enter_context(
+            mock.patch.object(warmup.common, "_get_deep_gemm_num_sms", return_value=148)
+        )
+        sync = self.stack.enter_context(mock.patch.object(warmup.common, "_sync_cuda"))
+        for name in (
+            "_run_deepgemm_warmup_launch_with_retry",
+            "_run_triton_warmup_launch_with_retry",
+        ):
+            self.stack.enter_context(
+                mock.patch.object(
+                    warmup.common,
+                    name,
+                    side_effect=lambda label, description, launch, **kwargs: launch(),
+                )
+            )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup.common,
+                "_run_deepgemm_warmup_launches_serialized",
+                side_effect=lambda label, launch: launch(),
+            )
+        )
+        stream = self.stack.enter_context(
+            mock.patch.object(
+                torch.cuda,
+                "current_stream",
+                return_value=types.SimpleNamespace(cuda_stream=11),
+            )
+        )
+        grid = self.stack.enter_context(
+            mock.patch.object(warmup, "_dense_m_grid", return_value=(1, 3))
+        )
+        layers = [
+            types.SimpleNamespace(
+                _mega_attention=types.SimpleNamespace(heads=16, groups=2),
+                layer_id=i,
+                wq_b=types.SimpleNamespace(N=8192, K=1536),
+                wo_b=types.SimpleNamespace(N=5120, K=2048),
+                o_lora_rank=1024,
+                window_size=128,
+                index_topk=128,
+                compress_ratio=0,
+            )
+            for i in range(2)
+        ]
+        model = types.SimpleNamespace(
+            named_modules=lambda: [("l0", layers[0]), ("l1", layers[1])], kv_cache=None
+        )
+        return model, layers, operation, stream, grid, sync
+
+    def test_mega_gate_skips_before_cuda_or_private_warmup(self):
+        for env, device, max_m in (
+            ({}, "cuda:0", 8),
+            ({"DSV41_MEGA_ATTENTION": "0"}, "cuda:0", 8),
+            ({"DSV41_MEGA_ATTENTION": "1", "MODEL_WARM_UP": "0"}, "cuda:0", 8),
+            ({"DSV41_MEGA_ATTENTION": "1", "WARM_UP": "0"}, "cuda:0", 8),
+            ({"DSV41_MEGA_ATTENTION": "1"}, "cpu", 8),
+            ({"DSV41_MEGA_ATTENTION": "1"}, "cuda:0", 0),
+        ):
+            with self.subTest(env=env, device=device, max_m=max_m), mock.patch.dict(
+                os.environ, env, clear=True
+            ):
+                warmup.warmup_v41_mega_jit(
+                    object(), max_m=max_m, device=device, decode=False
+                )
+        self.assertFalse(warmup._MEGA_WARMED)
+
+    def test_mega_deduplicates_shapes_per_stream_and_actual_swa_page_entries(self):
+        model, layers, operation, stream, _, _ = self.mega_fixture()
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(
+            operation.call_args_list,
+            [
+                mock.call(layers[0], rows=1, decode=True, swa_entries=32),
+                mock.call(layers[0], rows=3, decode=True, swa_entries=32),
+            ],
+        )
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(operation.call_count, 2)
+        stream.return_value.cuda_stream = 12
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(operation.call_count, 4)
+        base = torch.empty(1, 64 * 528, dtype=torch.uint8)
+        model.kv_cache = types.SimpleNamespace(
+            get_layer_cache=mock.Mock(
+                return_value=types.SimpleNamespace(kv_cache_base=base)
+            )
+        )
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(operation.call_count, 6)
+        self.assertEqual(operation.call_args.kwargs["swa_entries"], 64)
+        self.assertEqual(
+            model.kv_cache.get_layer_cache.call_args_list,
+            [mock.call(0, "swa"), mock.call(1, "swa")],
+        )
+        self.assertEqual(len(warmup._MEGA_WARMED), 3)
+
+    def test_mega_prefill_grid_uses_attention_chunk_and_separates_global_shapes(self):
+        from rtp_llm.models_py.modules.dsv4.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
+
+        model, layers, operation, _, grid, _ = self.mega_fixture()
+        layers[1].compress_ratio = 2
+        warmup.warmup_v41_mega_jit(model, max_m=65536, device="cuda:0", decode=False)
+        self.assertEqual(grid.call_args.args[0], FLASH_MLA_SPARSE_Q_CHUNK)
+        self.assertEqual(operation.call_count, 4)
+        self.assertIs(operation.call_args.args[0], layers[1])
+        self.assertEqual(len(warmup._MEGA_WARMED), 2)
+
+    def test_mega_failed_private_kernel_or_sync_does_not_mark_ready(self):
+        model, _, operation, _, _, sync = self.mega_fixture()
+        for failure in ("kernel", "sync"):
+            with self.subTest(failure=failure):
+                operation.side_effect = (
+                    RuntimeError("mega compile failed") if failure == "kernel" else None
+                )
+                sync.side_effect = (
+                    RuntimeError("mega sync failed") if failure == "sync" else None
+                )
+                with self.assertRaisesRegex(RuntimeError, "mega .* failed"):
+                    warmup.warmup_v41_mega_jit(
+                        model, max_m=8, device="cuda:0", decode=True
+                    )
+                self.assertFalse(warmup._MEGA_WARMED)
+        operation.side_effect = sync.side_effect = None
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(len(warmup._MEGA_WARMED), 1)
+
+    def test_mega_grid_covers_q_grouped_wo_a_and_wo_b_signatures(self):
+        model, _, operation, _, grid, _ = self.mega_fixture()
+        grid.side_effect = lambda max_m, n, k, sms, groups=1: (
+            (1,) if groups > 1 else (2,) if n == 8192 else (3,)
+        )
+        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        self.assertEqual(
+            [call.kwargs["rows"] for call in operation.call_args_list], [1, 2, 3]
+        )
+        signatures = {
+            (call.args[1], call.args[2], call.kwargs.get("groups", 1))
+            for call in grid.call_args_list
+        }
+        self.assertEqual(
+            signatures, {(8192, 1536, 1), (1024, 4096, 2), (5120, 2048, 1)}
+        )
+
+    def test_mega_invalid_bound_swa_cache_fails_before_private_launch(self):
+        model, _, operation, _, _, _ = self.mega_fixture()
+        model.kv_cache = types.SimpleNamespace(
+            get_layer_cache=lambda *args: types.SimpleNamespace(kv_cache_base=None)
+        )
+        with self.assertRaisesRegex(RuntimeError, "allocated SWA pages"):
+            warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        operation.assert_not_called()
+        self.assertFalse(warmup._MEGA_WARMED)
 
     def test_cpu_and_decode_skip_before_launch(self):
         model = types.SimpleNamespace(_is_decode_role=False)

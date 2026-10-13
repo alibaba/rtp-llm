@@ -22,7 +22,7 @@ A model can override the auto-pick via:
   - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
   - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
-  - ``DSV41_MEGA_SHARED_EXPERT=1`` to opt native group-32 decode into Mega-SE
+  - ``DSV41_MEGA_SHARED_EXPERT=1`` to opt native group-32 prefill/decode into Mega-SE
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
 """
@@ -264,11 +264,10 @@ def select_strategy(
 
     # Native shared activations use K32 for both weight recipes. V4.1's
     # 32x32 checkpoint scales need a different weight layout from V4's
-    # block-128 scales. Keep its new fusion opt-in and decode-only.
+    # block-128 scales. Keep its new fusion opt-in for both prefill and decode.
     separate_shared = cfg.shared_fp8_block_size == 32
     native_shared_enabled = (
         separate_shared
-        and cfg.is_decode_role
         and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
         and os.environ.get("DSV4_USE_MEGA_MOE_SE", "1") != "0"
     )
@@ -279,7 +278,7 @@ def select_strategy(
         )
     if separate_shared and forced == "mega_se" and not native_shared_enabled:
         raise ValueError(
-            "V4.1 MegaMoE-SE requires a decode role, "
+            "V4.1 MegaMoE-SE requires "
             "DSV41_MEGA_SHARED_EXPERT=1 and DSV4_USE_MEGA_MOE_SE!=0"
         )
     if (
