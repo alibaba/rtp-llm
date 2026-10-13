@@ -66,6 +66,30 @@ class Qwen4MoeFp4Test(unittest.TestCase):
         for actual, original in zip(out.layer_weights[0][4:], exceptions):
             self.assertIs(actual, original)
 
+    def test_gdn_bf16_keeps_full_attention_fp8_and_routed_nvfp4(self):
+        cfg = MoeConfig(expert_num=2)
+        routed = MoeWeight(
+            sub_weights=[
+                MoeAtomicWeight(n, [CkptWeightInfo(n)], config=cfg)
+                for n in (W.moe_w1, W.moe_w2)
+            ],
+            config=cfg,
+        )
+        names = (W.attn_qkv_w, W.attn_o_w, W.linear_attn_qkvz_w, W.linear_attn_out_w)
+        linears = [AtomicWeight(n, [CkptWeightInfo(n)]) for n in names]
+        info = Qwen4MoeFp4WeightInfo(
+            [], [[*linears, routed]], attention_fp8=True, gdn_fp8=False
+        )
+        out = info.to_quant_weight_info(
+            ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
+        ).layer_weights[0]
+        for weight in out[:2]:
+            self.assertIsInstance(weight, LoadQuantPerBlockFp8Weight)
+        for actual, original in zip(out[2:4], linears[2:]):
+            self.assertIs(actual, original)
+        for name in (W.moe_w1, W.moe_w2):
+            self.assertIsInstance(out[4].sub_weights[name], OnlineModelOptFp4MoeWeight)
+
     def test_refuses_prequantized_or_wrong_block(self):
         for group, pre in ((32, False), (16, True)):
             with self.assertRaisesRegex(ValueError, "BF16 source and block16"):

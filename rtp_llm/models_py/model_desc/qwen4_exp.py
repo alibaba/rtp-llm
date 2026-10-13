@@ -415,6 +415,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = Qwen4ExpFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
+        if (
+            bool(getattr(config, "_qwen4_gdn_bf16", False))
+            and getattr(self, "layer_type", None) == HybridAttentionType.LINEAR
+        ):
+            return super()._attention_quant_config(config, weights)
         if bool(getattr(config, "_qwen4_attention_fp8", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 

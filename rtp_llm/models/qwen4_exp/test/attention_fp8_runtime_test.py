@@ -28,6 +28,28 @@ class QwenAttentionFp8RuntimeTest(unittest.TestCase):
         cfg._qwen4_attention_fp8 = True
         self.assertIs(base._attention_quant_config(cfg, {}), original)
 
+    def test_gdn_bf16_override_preserves_full_attention_fp8(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
+        from rtp_llm.ops import HybridAttentionType
+
+        original = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
+        cfg = SimpleNamespace(
+            quant_config=original, _qwen4_attention_fp8=True, _qwen4_gdn_bf16=True
+        )
+        layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
+        layer.layer_type = HybridAttentionType.LINEAR
+        self.assertIs(layer._attention_quant_config(cfg, {}), original)
+        layer.layer_type = HybridAttentionType.NONE
+        self.assertEqual(
+            layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
+        )
+        self.assertIs(cfg.quant_config, original)
+        cfg._qwen4_gdn_bf16 = False
+        layer.layer_type = HybridAttentionType.LINEAR
+        self.assertEqual(
+            layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
+        )
+
     def test_missing_optional_fp4_does_not_block_fp8_registration(self):
         from rtp_llm.models_py.modules.factory.linear import LinearFactory
         from rtp_llm.models_py.modules.factory.linear.impl import cuda
