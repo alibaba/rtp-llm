@@ -59,6 +59,15 @@ exports_files([
     "data/prompt_candidates.json",
 ])
 
+# NemotronH (Nemotron-3.5-Lightning-30B mini checkpoint): single startup
+# covering greedy HF-oracle agreement and the required reuse-cache scenarios.
+custom_smoke_test(
+    name = "nemotron_h_e2e",
+    main = "nemotron_h_e2e_test.py",
+    smoke_args = "--act_type BF16 --warm_up 0 --tp_size 1 --ssm_state_dtype fp32 --max_seq_len 4096 --reserver_runtime_mem_mb 8192",
+    gpu_type = ["L20_CU13"],
+)
+
 filegroup(
     name = "smoke_model_configs",
     srcs = glob(["data/model/**/*.json"]),
@@ -181,7 +190,7 @@ custom_smoke_test(
 custom_smoke_test(
     name = "deepseek_v41_flash_tp4_ep4_graph_sm100_arm",
     main = "deepseek_v41_contract_test.py",
-    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 2048 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768",
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract"],
     data = ["//rtp_llm:sdk"],
@@ -199,7 +208,7 @@ custom_smoke_test(
 custom_smoke_test(
     name = "deepseek_v41_flash_dspark_tp4_ep4_graph_sm100_arm",
     main = "deepseek_v41_dspark_contract_test.py",
-    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3 --decode_capture_config 1,2,4",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 2048 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3 --decode_capture_config 1,2,4",
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],

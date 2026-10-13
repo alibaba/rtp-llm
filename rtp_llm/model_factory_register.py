@@ -343,6 +343,16 @@ def _register_builtin_lazy_models() -> None:
         ["KimiLinearForCausalLM"],
     )
     register_lazy_model(
+        "nemotron_h",
+        "rtp_llm.models.nemotron_h.nemotron_h",
+        ["NemotronHForCausalLM"],
+    )
+    register_lazy_model(
+        "nemotron_h_mtp",
+        "rtp_llm.models.nemotron_h.nemotron_h_mtp",
+        ["NemotronHForCausalLMNextN"],
+    )
+    register_lazy_model(
         "gpt_bigcode", "rtp_llm.models.starcoder", ["GPTBigCodeForCausalLM"]
     )
     register_lazy_model("wizardcoder", "rtp_llm.models.starcoder")

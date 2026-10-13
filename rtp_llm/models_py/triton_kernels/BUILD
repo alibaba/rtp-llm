@@ -47,6 +47,15 @@ py_library(
     visibility = ["//visibility:public"]
 )
 
+# Mamba-2 SSD (chunked selective state scan) + selective_state_update decode
+# kernels, ported from vLLM's mamba ops (see file headers for porting notes).
+py_library(
+    name = "mamba2",
+    srcs = glob(["mamba2/*.py"]),
+    deps = [":autotune_cache"],
+    visibility = ["//visibility:public"]
+)
+
 py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
@@ -74,6 +83,7 @@ py_library(
         ":fla",
         ":kimi_kda",
         ":causal_conv1d",
+        ":mamba2",
         ":moe",
         ":common",
         ":sparse_mla",
