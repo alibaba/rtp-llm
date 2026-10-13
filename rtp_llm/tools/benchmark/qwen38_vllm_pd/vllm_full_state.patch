@@ -127,7 +127,7 @@
                  "Fallback to default kv cache layout."
              )
 +            return None
-+        if vllm_config.model_config.hf_text_config.model_type == "qwen4_exp":
++        if vllm_config.model_config.hf_text_config.model_type in ("qwen4_exp", "qwen4_exp_text"):
 +            # Keep the packed QSA/Mamba layout selected by the cache planner.
              return None
          use_mla = vllm_config.model_config.use_mla

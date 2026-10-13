@@ -10,7 +10,7 @@
     {
       "path": "distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
       "source_sha256": "266939229bb5080c6bffbb03209c28ada916687e76ce2d5927c645b952f8ddc5",
-      "patched_sha256": "25c50616a42308dc81136dd15e561dfb52b243b70e8e3d467a21a2850cd55e49"
+      "patched_sha256": "b04b1a010f2c42c9687069e0dd3b3a2ab7d2ea874efa5307449f9b8cb1a5d3e2"
     },
     {
       "path": "models/qwen4_exp/nvidia/qsa.py",
