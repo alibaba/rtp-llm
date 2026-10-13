@@ -1,10 +1,18 @@
 package org.flexlb.util;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import org.flexlb.exception.FlexLBException;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JsonUtilsTest {
 
@@ -22,6 +30,32 @@ class JsonUtilsTest {
                 JsonUtils.toString(payload));
     }
 
+    @Test
+    void nullInputReportsItsCause() {
+        FlexLBException error = assertThrows(FlexLBException.class,
+                () -> JsonUtils.toObject((Object) null, Payload.class));
+        assertTrue(error.getMessage().contains("Input must not be null"));
+    }
+
+    @Test
+    void deserializerErrorsAreNotWrappedAsJsonFailures() {
+        assertThrows(AssertionError.class,
+                () -> JsonUtils.toObject((Object) "{}", ErrorPayload.class));
+        assertThrows(AssertionError.class,
+                () -> JsonUtils.toObject("{}", ErrorPayload.class));
+    }
+
     private record Payload(String name, String absent, LocalDateTime at, Object empty) {
+    }
+
+    @JsonDeserialize(using = FatalErrorDeserializer.class)
+    private static class ErrorPayload {
+    }
+
+    public static class FatalErrorDeserializer extends JsonDeserializer<ErrorPayload> {
+        @Override
+        public ErrorPayload deserialize(JsonParser parser, DeserializationContext context) throws IOException {
+            throw new AssertionError("fatal deserializer error");
+        }
     }
 }

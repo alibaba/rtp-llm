@@ -6,7 +6,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.*;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.AggregateFuncNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.ConstantNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Function;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.VariableNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.binary;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.function;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.unary;
 
 /** Recursive-descent grammar and binding/aggregate validation. */
 final class ArithmeticFormulaParser {

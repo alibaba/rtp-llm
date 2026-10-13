@@ -3,6 +3,7 @@ package org.flexlb.dao.master;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
@@ -57,25 +58,37 @@ public class WorkerStatus {
             String ip,
             int port,
             int grpcPort,
-            String site) {
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
+
+        public TopologySnapshot(
+                String group,
+                String ip,
+                int port,
+                int grpcPort,
+                String site) {
+            this(group, ip, port, grpcPort, site, null, 0, 1);
+        }
     }
 
     /** Deeply immutable copy of the task fields reported by one status RPC. */
-    public record TaskObservation(
-            long requestId,
-            long prefixLength,
-            long prefillTime,
-            long inputLength,
-            long waitingTime,
-            long iterateCount,
-            long endTimeMs,
-            long dpRank,
-            long errorCode,
-            String errorMessage,
-            long batchId,
-            TaskPhase phase,
-            long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+    public record TaskObservation(String requestId,
+                                  long prefixLength,
+                                  long prefillTime,
+                                  long inputLength,
+                                  long waitingTime,
+                                  long iterateCount,
+                                  long endTimeMs,
+                                  long dpRank,
+                                  long errorCode,
+                                  String errorMessage,
+                                  long batchId,
+                                  TaskPhase phase,
+                                  long executionTimeMs,
+                                  PriorityPreemptionProgress priorityPreemptionProgress,
+                                  TaskTelemetry telemetry) {
 
         /** A pending observation that reports only priority cancellation progress. */
         @JsonIgnore
@@ -84,6 +97,56 @@ public class WorkerStatus {
                     || priorityPreemptionProgress == PriorityPreemptionProgress.CANCELED)
                     && phase == TaskPhase.PENDING;
         }
+    }
+
+    /**
+     * Immutable request telemetry retained from the Engine status RPC.
+     * Nullable prefill progress values preserve omitted protobuf fields.
+     */
+    public record TaskTelemetry(boolean prefixLengthValid,
+                                long requestReceivedTimeMs,
+                                long inputQueueEnqueueTimeMs,
+                                long inputQueueDrainTimeMs,
+                                long waitingEnteredTimeMs,
+                                long runningEnteredTimeMs,
+                                long remoteKvWaitMs,
+                                long firstTokenTimeMs,
+                                long hbmLocalMatchTokens,
+                                long remoteKvAddedMatchTokens,
+                                long firstPrefillStepId,
+                                long lastPrefillStepId,
+                                long prefillStepCount,
+                                long prefillNonfinalChunkTokensMin,
+                                long prefillNonfinalChunkTokensMax,
+                                Long completedPrefillTokens,
+                                Long remainingPrefillTokens,
+                                Long lastCompletedPrefillStepId) {
+
+        public TaskTelemetry(boolean prefixLengthValid,
+                             long requestReceivedTimeMs,
+                             long inputQueueEnqueueTimeMs,
+                             long inputQueueDrainTimeMs,
+                             long waitingEnteredTimeMs,
+                             long runningEnteredTimeMs,
+                             long remoteKvWaitMs,
+                             long firstTokenTimeMs,
+                             long hbmLocalMatchTokens,
+                             long remoteKvAddedMatchTokens,
+                             long firstPrefillStepId,
+                             long lastPrefillStepId,
+                             long prefillStepCount,
+                             long prefillNonfinalChunkTokensMin,
+                             long prefillNonfinalChunkTokensMax) {
+            this(prefixLengthValid, requestReceivedTimeMs, inputQueueEnqueueTimeMs, inputQueueDrainTimeMs,
+                    waitingEnteredTimeMs, runningEnteredTimeMs, remoteKvWaitMs, firstTokenTimeMs,
+                    hbmLocalMatchTokens, remoteKvAddedMatchTokens, firstPrefillStepId, lastPrefillStepId,
+                    prefillStepCount, prefillNonfinalChunkTokensMin, prefillNonfinalChunkTokensMax,
+                    null, null, null);
+        }
+    }
+
+    public record StepMetrics(long stepId, long completedTimeMs, long totalScheduledTokens,
+                              long prefillRequestCount, long prefillTokens, long tokenBudget, double budgetFillRatio) {
     }
 
     /**
@@ -102,14 +165,56 @@ public class WorkerStatus {
             long dpSize,
             long tpSize,
             long dpRank,
+            long blockSize,
+            int blockHashLookaheadTokens,
+            int cacheMatchRollbackBlocks,
+            KvCacheGroupMode kvCacheGroupMode,
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
-            long waitingQueryLen) {
+            long waitingQueryLen,
+            StepMetrics lastStepMetrics) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
+            kvCacheGroupMode = kvCacheGroupMode == null
+                    ? KvCacheGroupMode.UNSPECIFIED : kvCacheGroupMode;
             runningTaskList = Map.copyOf(runningTaskList);
+        }
+
+        public EngineObservation(RoleType role,
+                                 Long availableConcurrency,
+                                 long availableKvCacheTokens,
+                                 long totalKvCacheTokens,
+                                 Map<String, TaskObservation> runningTaskList,
+                                 double stepLatencyMs,
+                                 long iterateCount,
+                                 long dpSize,
+                                 long tpSize,
+                                 long dpRank,
+                                 long maxSeqLen,
+                                 long maxBatchTokensSize,
+                                 long runningQueryLen,
+                                 long waitingQueryLen) {
+            this(role,
+                    availableConcurrency,
+                    availableKvCacheTokens,
+                    totalKvCacheTokens,
+                    runningTaskList,
+                    stepLatencyMs,
+                    iterateCount,
+                    dpSize,
+                    tpSize,
+                    dpRank,
+                    0L,
+                    0,
+                    0,
+                    KvCacheGroupMode.UNSPECIFIED,
+                    maxSeqLen,
+                    maxBatchTokensSize,
+                    runningQueryLen,
+                    waitingQueryLen,
+                    null);
         }
     }
 
@@ -205,7 +310,10 @@ public class WorkerStatus {
             return latestFinishedVersion;
         }
 
-        public Map<String, TaskObservation> runningTasks() {
+        /**
+         * Returns all active task phases reported in running_task_info.
+         */
+        public Map<String, TaskObservation> activeTasks() {
             return engine.runningTaskList();
         }
 
@@ -249,6 +357,8 @@ public class WorkerStatus {
     }
 
     private final AtomicReference<TopologySnapshot> topology;
+
+    private final WorkerIdentity workerIdentity;
 
     private final AtomicReference<CommittedWorkerStatus> committedStatus;
 
@@ -376,6 +486,8 @@ public class WorkerStatus {
             TopologySnapshot initialTopology,
             EngineObservation initialStatus) {
         topology = new AtomicReference<>(initialTopology);
+        workerIdentity = new WorkerIdentity(
+                initialTopology.ip(), initialTopology.port(), initialTopology.engineIndex());
         committedStatus = new AtomicReference<>(new CommittedWorkerStatus(
                 initialStatus,
                 new AppliedStatusCursor(-1L, -1L)));
@@ -389,14 +501,45 @@ public class WorkerStatus {
             int port,
             int grpcPort,
             String site) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, null);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, deploymentName, 0, 1);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
             throw new IllegalArgumentException(
                     "worker ports must be positive");
         }
+        if (engineIndex < 0 || multiEngineNum <= 0 || engineIndex >= multiEngineNum) {
+            throw new IllegalArgumentException("invalid logical worker index");
+        }
         return new WorkerStatus(
-                new TopologySnapshot(group, ip, port, grpcPort, site),
+                new TopologySnapshot(
+                        group, ip, port, grpcPort, site, deploymentName,
+                        engineIndex, multiEngineNum),
                 new EngineObservation(
                         role,
                         null,
@@ -555,9 +698,22 @@ public class WorkerStatus {
 
     /** Atomically refresh discovery-owned placement labels for this generation. */
     public void updateDiscoveryLabels(String site, String group) {
+        updateDiscoveryLabels(site, group, topology.get().deploymentName());
+    }
+
+    public void updateDiscoveryLabels(
+            String site, String group, String deploymentName) {
+        requireGenerationLock();
         requireActiveGeneration();
         topology.updateAndGet(current -> new TopologySnapshot(
-                group, current.ip(), current.port(), current.grpcPort(), site));
+                group,
+                current.ip(),
+                current.port(),
+                current.grpcPort(),
+                site,
+                deploymentName,
+                current.engineIndex(),
+                current.multiEngineNum()));
     }
 
     public RoleType getRole() {
@@ -578,6 +734,10 @@ public class WorkerStatus {
 
     public int getGrpcPort() {
         return topology.get().grpcPort();
+    }
+
+    public String getDeploymentName() {
+        return topology.get().deploymentName();
     }
 
     public String getSite() {
@@ -652,6 +812,18 @@ public class WorkerStatus {
 
     public long getDpRank() {
         return committedStatus.get().fields().dpRank();
+    }
+
+    public int getBlockHashLookaheadTokens() {
+        return committedStatus.get().fields().blockHashLookaheadTokens();
+    }
+
+    public int getCacheMatchRollbackBlocks() {
+        return committedStatus.get().fields().cacheMatchRollbackBlocks();
+    }
+
+    public KvCacheGroupMode getKvCacheGroupMode() {
+        return committedStatus.get().fields().kvCacheGroupMode();
     }
 
     /** Model-level maximum sequence length reported by the Engine. */
@@ -735,11 +907,32 @@ public class WorkerStatus {
 
     /** Get the HTTP IP:PORT address. */
     public String getIpPort() {
-        TopologySnapshot current = topology.get();
-        if (current.ip() == null) {
-            return null;
-        }
-        return current.ip() + ":" + current.port();
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public WorkerIdentity getWorkerIdentity() {
+        return workerIdentity;
+    }
+
+    public String getPhysicalIpPort() {
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public String getLogicalIpPort() {
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    @JsonIgnore
+    public String getMetricIpPort() {
+        return workerIdentity.getMetricIpPort(getMultiEngineNum());
+    }
+
+    public int getEngineIndex() {
+        return workerIdentity.getEngineIndex();
+    }
+
+    public int getMultiEngineNum() {
+        return topology.get().multiEngineNum();
     }
 
     @Override

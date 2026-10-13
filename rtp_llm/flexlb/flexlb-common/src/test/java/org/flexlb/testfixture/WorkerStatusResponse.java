@@ -1,11 +1,17 @@
 package org.flexlb.testfixture;
 
 import lombok.Data;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.Map;
 
-/** Mutable input used to assemble worker observations in tests. */
+/**
+ * @author zjw
+ * description:
+ * date: 2025/3/10
+ */
 @Data
 public class WorkerStatusResponse {
 
@@ -30,6 +36,7 @@ public class WorkerStatusResponse {
 
     private Long latestFinishedVersion = 0L;
 
+
     private double stepLatencyMs;
 
     private long iterateCount;
@@ -39,6 +46,12 @@ public class WorkerStatusResponse {
     private long tpSize;
 
     private long dpRank;
+
+    private int blockHashLookaheadTokens;
+
+    private int cacheMatchRollbackBlocks;
+
+    private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 
     private boolean alive;
 
@@ -55,4 +68,11 @@ public class WorkerStatusResponse {
      * to this value cannot be admitted by the Engine.
      */
     private long maxBatchTokensSize;
+
+    private WorkerStatus.StepMetrics lastStepMetrics;
+
+    private long version;
+
+    private String message;
+
 }

@@ -110,6 +110,31 @@ class WorkerStatusTest {
                 RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
     }
 
+    @Test
+    @DisplayName("Discovery identity keeps a physical transport address and logical engine key")
+    void discoveredWorkerSeparatesPhysicalAndLogicalIdentity() {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090,
+                "site-a", "deployment-a", 1, 2);
+
+        assertEquals("10.0.0.1:8080", status.getIpPort());
+        assertEquals("10.0.0.1:8080", status.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@1", status.getLogicalIpPort());
+        assertEquals("10.0.0.1:8080@1", status.getMetricIpPort());
+        assertEquals(1, status.getEngineIndex());
+        assertEquals(2, status.getMultiEngineNum());
+    }
+
+    @Test
+    @DisplayName("Single-engine workers retain their physical metric identity")
+    void singleEngineWorkerUsesPhysicalMetricIdentity() {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090,
+                "site-a", "deployment-a", 0, 1);
+
+        assertEquals("10.0.0.1:8080", status.getMetricIpPort());
+    }
+
     /**
      * Run one whole status transaction exactly as the production reducers do:
      * freeze the RPC response, prepare a strictly-newer committed holder under
@@ -151,7 +176,7 @@ class WorkerStatusTest {
         response.setStatusVersion(marker);
         response.setLatestFinishedVersion(marker);
         TaskInfo task = new TaskInfo();
-        task.setRequestId(marker);
+        task.setRequestId(Long.toString(marker));
         response.setRunningTaskInfo(Map.of(Long.toString(marker), task));
         return response;
     }
@@ -172,7 +197,7 @@ class WorkerStatusTest {
         assertEquals(30L + marker, fields.dpRank());
         assertEquals(40L + marker, fields.maxSeqLen());
         assertEquals(50L + marker, fields.maxBatchTokensSize());
-        assertEquals(marker,
+        assertEquals(Long.toString(marker),
                 fields.runningTaskList().get(Long.toString(marker)).requestId());
     }
 
@@ -232,7 +257,7 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             Map<String, TaskInfo> tasks = new HashMap<>();
             TaskInfo task = new TaskInfo();
-            task.setRequestId(7L);
+            task.setRequestId("7");
             tasks.put("7", task);
             WorkerStatusResponse response = responseWithMarker(7L);
             response.setRunningTaskInfo(tasks);
@@ -243,7 +268,7 @@ class WorkerStatusTest {
             Map<String, WorkerStatus.TaskObservation> published =
                     status.committedEngineObservation().runningTaskList();
             assertEquals(1, published.size());
-            assertEquals(7L, published.get("7").requestId());
+            assertEquals("7", published.get("7").requestId());
             assertThrows(UnsupportedOperationException.class,
                     () -> published.remove("7"));
         }
