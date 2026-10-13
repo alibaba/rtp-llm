@@ -49,7 +49,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertFalse(expired.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
-        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, scheduler.getTrackedRequestCount());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
         assertEquals(0, getDecodeEndpoint().getInflightCount());
