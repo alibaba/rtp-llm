@@ -261,6 +261,10 @@ public:
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
         chunk_size_ = chunk_size;
+        max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
+    }
+    int maxChunkSize() const {
+        return max_chunk_size_;
     }
     bool chunkedPrefillEnabled() const {
         return chunk_size_ > 0;
@@ -938,6 +942,7 @@ protected:
     // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
     // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
     int  chunk_size_          = 0;
+    int  max_chunk_size_      = 0;
     bool chunk_advanced_      = false;
     bool warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_

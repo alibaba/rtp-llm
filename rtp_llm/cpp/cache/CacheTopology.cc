@@ -68,6 +68,25 @@ uint32_t GroupBase::localKvHeadNum() const {
     return spec->local_kv_head_num;
 }
 
+size_t
+GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens) const {
+    if (prompt_tokens <= 0 || chunk_tokens <= 0 || policy.group_type == CacheGroupType::FULL
+        || policy.shared_chunk_state || (reuse_cache && policy.enable_prefix_reuse)) {
+        return 0;
+    }
+    const size_t block_tokens = seqSizePerBlock();
+    RTP_LLM_CHECK(block_tokens > 0 && kernelBlocksPerKvBlock() == 1);
+    const auto pages   = [block_tokens](size_t tokens) { return (tokens + block_tokens - 1) / block_tokens; };
+    size_t     history = 1;
+    if (policy.group_type == CacheGroupType::SWA) {
+        history = policy.sliding_window_size > 0 ? pages(static_cast<size_t>(policy.sliding_window_size - 1)) :
+                                                   std::max<size_t>(1, policy.active_tail_blocks);
+    }
+    const size_t write_tokens = static_cast<size_t>(chunk_tokens) + static_cast<size_t>(std::max(reserve_tokens, 0));
+    const size_t banks        = std::max(pages(write_tokens) + history, static_cast<size_t>(policy.active_tail_blocks));
+    return std::min(pages(static_cast<size_t>(prompt_tokens)), banks);
+}
+
 size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
     const auto& cache_group            = group(group_tag);
     const auto  kv_block_stride_bytes  = cache_group.kvBlockStrideBytes();

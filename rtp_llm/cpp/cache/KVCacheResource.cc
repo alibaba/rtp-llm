@@ -104,11 +104,40 @@ const BlockIndicesType& BlockIds::blocks() const {
 }
 
 const BlockIndicesType& BlockIds::kernelBlocks() const {
+    if (cyclic_bank_count_ > 0) {
+        syncKernelBlocks();
+    }
     return kernel_block_indices_;
+}
+
+void BlockIds::copySharedKernelBlocks(size_t prompt_tail, size_t chunk_tail, BlockIdxType* destination) const {
+    RTP_LLM_CHECK(kernel_blocks_per_kv_block_ == 1 && prompt_tail < blocksNum() && chunk_tail <= prompt_tail
+                  && block_indices[prompt_tail] > 0);
+    std::fill_n(destination, prompt_tail + 1, NULL_BLOCK_IDX);
+    destination[chunk_tail] = block_indices[prompt_tail];
+    std::copy(block_indices.begin() + prompt_tail + 1, block_indices.end(), destination + prompt_tail + 1);
 }
 
 size_t BlockIds::kernelBlocksPerKvBlock() const {
     return kernel_blocks_per_kv_block_;
+}
+
+void BlockIds::copyCyclicKernelBlocks(size_t prompt_tail, size_t bank_count, BlockIdxType* destination) const {
+    RTP_LLM_CHECK(kernel_blocks_per_kv_block_ == 1 && prompt_tail < blocksNum() && bank_count > 0
+                  && bank_count <= prompt_tail + 1);
+    if (cyclic_prompt_tail_ != prompt_tail || cyclic_bank_count_ != bank_count) {
+        const size_t bank_begin = prompt_tail + 1 - bank_count;
+        for (size_t pos = bank_begin; pos <= prompt_tail; ++pos) {
+            RTP_LLM_CHECK(block_indices[pos] > 0);
+        }
+        kernel_block_indices_ = block_indices;
+        for (size_t pos = 0; pos <= prompt_tail; ++pos) {
+            kernel_block_indices_[pos] = block_indices[prompt_tail - (prompt_tail - pos) % bank_count];
+        }
+        cyclic_prompt_tail_ = prompt_tail;
+        cyclic_bank_count_  = bank_count;
+    }
+    std::copy(kernel_block_indices_.begin(), kernel_block_indices_.end(), destination);
 }
 
 BlockIdxType BlockIds::popBack() {
@@ -116,6 +145,9 @@ BlockIdxType BlockIds::popBack() {
     const BlockIdxType val = block_indices.back();
     block_indices.pop_back();
     kernel_block_indices_.resize(block_indices.size() * kernel_blocks_per_kv_block_);
+    if (cyclic_bank_count_ > 0) {
+        syncKernelBlocks();
+    }
     return val;
 }
 
@@ -175,6 +207,9 @@ void BlockIds::setAt(size_t pos, BlockIdxType val) {
 
 void BlockIds::resize(size_t new_size, BlockIdxType value) {
     const size_t old_size = block_indices.size();
+    if (new_size != old_size && cyclic_bank_count_ > 0) {
+        syncKernelBlocks();
+    }
     block_indices.resize(new_size, value);
     kernel_block_indices_.resize(new_size * kernel_blocks_per_kv_block_);
     for (size_t i = old_size; i < new_size; ++i) {
@@ -182,7 +217,10 @@ void BlockIds::resize(size_t new_size, BlockIdxType value) {
     }
 }
 
-void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) {
+void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) const {
+    if (cyclic_bank_count_ > 0) {
+        syncKernelBlocks();
+    }
     const size_t bpk      = kernel_blocks_per_kv_block_;
     const size_t base_pos = pos * bpk;
     RTP_LLM_CHECK_WITH_INFO(base_pos + bpk <= kernel_block_indices_.size(),
@@ -203,7 +241,8 @@ void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) {
     }
 }
 
-void BlockIds::syncKernelBlocks() {
+void BlockIds::syncKernelBlocks() const {
+    cyclic_bank_count_ = 0;
     const size_t n   = block_indices.size();
     const size_t bpk = kernel_blocks_per_kv_block_;
     kernel_block_indices_.resize(n * bpk);

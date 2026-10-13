@@ -434,6 +434,7 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = token_budget;
     auto stream                                                    = std::make_shared<NormalGenerateStream>(
         generate_input, model_config_, stream_runtime_config, resource_context, nullptr, 0, true);
+    stream->setIsFakeStream(true);
     if (token_budget > 0 && !stream->chunkedPrefillEnabled()) {
         return absl::FailedPreconditionError("chunked prefill warmup stream is not chunk-enabled");
     }

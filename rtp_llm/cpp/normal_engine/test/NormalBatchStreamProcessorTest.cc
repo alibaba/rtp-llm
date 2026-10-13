@@ -2473,7 +2473,6 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
     auto chunk_stream =
         makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
-    setKvCacheBlocks(chunk_stream, {1, 2, 3});
     chunk_stream->setReuseLength(8);
 
     StreamGroups stream_groups({chunk_stream});

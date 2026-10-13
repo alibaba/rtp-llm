@@ -62,6 +62,8 @@ struct CacheGroupPolicy {
     // Model-derived SWA attention window in tokens. Zero means no bounded
     // window is configured and remains the default for non-SWA groups.
     int sliding_window_size = 0;
+    // Share one state bank across logical blocks during chunked prefill.
+    bool shared_chunk_state = false;
 };
 
 // One cache-store registration step: pair a cache key from the full logical
