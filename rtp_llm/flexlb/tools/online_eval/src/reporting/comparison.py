@@ -1,6 +1,7 @@
 """Compare frozen bundles and experiment ZIPs without rerunning gates."""
 import argparse
 import copy
+import colorsys
 import json
 import math
 from pathlib import Path
@@ -12,11 +13,34 @@ from reporting.core import table
 from reporting.catalog import series_color
 from reporting.comparison_inputs import load_snapshot
 from reporting.comparison_model import ChartSeries
+from reporting.comparison_colors import run_color as _run_color
 from reporting.pairing import event_anchor, shifted_panel
 
-# Solid, dashed, dotted, dash-dot, dash-dot-dot, long dash, short dash, long dash with three dots.
-RUN_LINE_STYLES = ((), (12, 5), (2, 4), (12, 4, 2, 4), (12, 4, 2, 4, 2, 4),
-                   (20, 7), (5, 3), (20, 4, 2, 4, 2, 4, 2, 4))
+# Hue identifies the metric; lightness and sparse point shapes identify runs.
+RUN_MARKERS = ('circle', 'rect', 'triangle', 'rectRot', 'star', 'cross', 'crossRot')
+
+
+def _metric_colors(panels):
+    """Keep existing metric hues where possible; separate near hues within a plot."""
+    registry, colors = {}, {}
+    for panel in panels:
+        used = []
+        for n, curve in enumerate(panel.get('series', [])):
+            identity = json.dumps(ChartSeries.read(curve, panel.get('unit')).signature(), sort_keys=True)
+            if identity == 'null':
+                identity = (panel['id'], n)
+            color = registry.get(identity) or curve.get('color') or series_color(curve.get('tone'), n)
+            value = color.lstrip('#')
+            hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k:k+2], 16)/255 for k in (0, 2, 4)))
+            distance = lambda h: min((min(abs(h-u), 1-abs(h-u)) for u in used), default=1)
+            if identity not in registry and saturation >= .10 and distance(hue) < .07:
+                hue = max(((hue + k/24) % 1 for k in range(24)), key=distance)
+                color = '#' + ''.join(f'{round(v*255):02x}' for v in colorsys.hls_to_rgb(hue, lightness, saturation))
+            registry.setdefault(identity, color)
+            colors[panel['id'], n] = color
+            if saturation >= .10:
+                used.append(hue)
+    return colors
 
 
 def _leaves(value, prefix=''):
@@ -25,6 +49,20 @@ def _leaves(value, prefix=''):
             yield from _leaves(item, prefix + '/' + key.replace('~', '~0').replace('/', '~1'))
     else:
         yield prefix, value
+
+
+def _original_result(run):
+    """Read the frozen gate and validity separately from execution status."""
+    analysis, execution = run.analysis, run.execution
+    outcome = analysis.get('outcome') or {}
+    executed = execution.get('outcome') or {}
+    workload = analysis.get('workload') or {}
+    return dict(
+        verdict=outcome.get('gate') or executed.get('gate') or analysis.get('verdict'),
+        validity=outcome.get('validity') or executed.get('validity') or
+                 analysis.get('runtime_validity') or workload.get('runtime_validity') or
+                 execution.get('workload', {}).get('runtime_validity'),
+        status=execution.get('status') or analysis.get('status'))
 
 
 def _matrix(runs, labels):
@@ -70,6 +108,7 @@ def _time_origin(run, index):
 def _pair(prepared, labels, origins, *, baseline_index, include_original_panels):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
+    metric_colors = _metric_colors(prepared[baseline_index])
     for original in prepared[baseline_index]:
         if original.get('type', 'line') != 'line' or not original.get('timeX'):
             continue
@@ -112,15 +151,18 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
             curve = copy.deepcopy(source['series'][n])
             name = curve['name']
             curve['name'] = labels[i] + ' · ' + name
-            curve['dash'] = list(RUN_LINE_STYLES[i % len(RUN_LINE_STYLES)])
+            curve['dash'] = []
+            curve['point_style'] = RUN_MARKERS[i % len(RUN_MARKERS)]
+            curve['marker_count'] = 12
             curve['group'] = labels[i]
             # Metric colors and visibility follow the reference report.
             key = _series_key(source, curve, origins[i])
             reference = next((c for c in original['series']
                 if key is not None and _series_key(original, c, origins[baseline_index]) == key), None)
             if reference is not None:
-                curve['color'] = reference.get('color') or series_color(reference.get('tone'), original['series'].index(reference))
+                curve['color'] = metric_colors[original['id'], original['series'].index(reference)]
                 curve['hidden'] = reference.get('hidden', False)
+            curve['color'] = _run_color(curve.get('color') or series_color(None, n), i, len(labels))
             panel['series'].append(curve)
             panel['presets'].setdefault('run · ' + labels[i], []).append(curve['name'])
             metric_names.setdefault(name, []).append(curve['name'])
@@ -133,7 +175,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
         for i, source in candidates:
             if any(entry[0] == i for entry in entries):
                 panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name']) for e in source.get('events', []))
-        panel['caption'] = original.get('caption', '') + ' 保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
+        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，全部为连续实线。保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
         overlays.append(panel)
         pairing.append(dict(panel=original['id'], status='PAIRED', metrics=records))
     separate = []
@@ -218,11 +260,11 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
                 continue
             if len(json.dumps(section, ensure_ascii=False)) <= 65536:
                 sections.append(dict(copy.deepcopy(section), title=label + ' · ' + section.get('title', '')))
-        kpis.append(dict(label=label + ' · 原始判定',
-                         value=run.analysis.get('verdict') or run.execution.get('status') or '未知'))
+        original = _original_result(run)
+        kpis.append(dict(label=label + ' · 原始判定', value=original['verdict'] or '未知'))
         overview.append([label, spec.run_meta.get('identity'), run.input_kind, run.view,
-                         run.analysis.get('verdict'), run.analysis.get('runtime_validity') or run.execution.get('workload', {}).get('runtime_validity'),
-                         run.execution.get('status'), run.execution.get('duration_ms'), run.execution.get('cleanup'), list(spec.kpis)])
+                         original['verdict'], original['validity'], original['status'],
+                         run.execution.get('duration_ms'), run.execution.get('cleanup'), list(spec.kpis)])
         panels = [shifted_panel(panel.to_dict(), shift) for panel in spec.panels]
         display = dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0)) if (
             spec.time_min is not None and spec.time_max is not None) else None

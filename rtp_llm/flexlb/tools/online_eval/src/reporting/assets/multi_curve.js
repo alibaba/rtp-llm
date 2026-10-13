@@ -36,7 +36,10 @@
     wrap.appendChild(box); wrap.appendChild(hover); wrap.appendChild(legendHeading); wrap.appendChild(legend); parent.appendChild(wrap);
     const datasets = panel.series.map(s => ({label:s.name, description:s.description||'', group:s.group||'其他',
       data:s.points, yAxisID:s.axis || 'y', unit:s.unit || '',
-      borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2, pointRadius:0,
+      borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2,
+      pointStyle:s.point_style||'circle', markerStyle:s.point_style,
+      pointRadius:s.marker_count ? (ctx=>ctx.dataIndex % Math.max(1,Math.ceil(s.points.length/s.marker_count)) === 0 ? 2 : 0) : 0,
+      pointHoverRadius:3,
       tension:0, spanGaps:false}));
     datasets.forEach((dataset,i)=>dataset.statistics=statistics(dataset.data,panel.series[i].statistics_samples));
     const scales = {x:{type:'linear',min:context.timeAxis.min,max:context.timeAxis.max,title:{display:true,text:'时间 / 秒'}}};
@@ -104,7 +107,18 @@
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 48 12');svg.setAttribute('aria-hidden','true');
       const stroke=document.createElementNS('http://www.w3.org/2000/svg','line');
       for(const [key,value] of Object.entries({x1:0,y1:6,x2:48,y2:6,stroke:d.baseColor,'stroke-width':2,'stroke-dasharray':d.borderDash.join(' ')}))stroke.setAttribute(key,String(value));
-      svg.appendChild(stroke);line.appendChild(svg);item.appendChild(line);
+      svg.appendChild(stroke);
+      if(d.markerStyle){
+        const shapes={circle:['circle',{cx:24,cy:6,r:3}],rect:['rect',{x:21,y:3,width:6,height:6}],
+          triangle:['polygon',{points:'24,2 28,9 20,9'}],rectRot:['polygon',{points:'24,2 28,6 24,10 20,6'}],
+          star:['polygon',{points:'24,1 25,4 29,4 26,6 28,10 24,8 20,10 22,6 19,4 23,4'}],
+          cross:['path',{d:'M20 6H28M24 2V10'}],crossRot:['path',{d:'M21 3L27 9M21 9L27 3'}]};
+        const [tag,attrs]=shapes[d.markerStyle]||shapes.circle;
+        const marker=document.createElementNS('http://www.w3.org/2000/svg',tag);
+        Object.entries({...attrs,transform:'translate(24 6) scale(.75) translate(-24 -6)',fill:d.baseColor,stroke:d.baseColor,'stroke-width':1.5}).forEach(([k,v])=>marker.setAttribute(k,String(v)));
+        svg.appendChild(marker);
+      }
+      line.appendChild(svg);item.appendChild(line);
       const name=document.createElement('span');name.className='multi-legend-name';name.textContent=d.label;item.appendChild(name);
       const values=document.createElement('span');values.className='multi-legend-values';
       const current=document.createElement('span'),average=document.createElement('span');values.append(current,average);item.appendChild(values);valueCells.push({current,average});

@@ -192,3 +192,14 @@ def test_selected_baseline_sets_layout_and_display_range(tmp_path):
     assert result['timeAxis'] == {'min': 3, 'max': 15}
     assert len(result['panels']) == 1
     assert len(result['panels'][0]['series']) == 3
+
+
+def test_original_gate_is_not_inferred_from_execution_status():
+    from types import SimpleNamespace
+    from reporting.comparison import _original_result
+    snapshot = SimpleNamespace(analysis={'status': 'PASS', 'outcome': {'gate': 'FAIL', 'validity': 'VALID'}}, execution={})
+    assert _original_result(snapshot) == {'verdict': 'FAIL', 'validity': 'VALID', 'status': 'PASS'}
+    snapshot = SimpleNamespace(analysis={}, execution={'status': 'PASS', 'outcome': {'gate': 'PASS', 'validity': 'VALID'}})
+    assert _original_result(snapshot) == {'verdict': 'PASS', 'validity': 'VALID', 'status': 'PASS'}
+    snapshot = SimpleNamespace(analysis={}, execution={'status': 'PASS'})
+    assert _original_result(snapshot)['verdict'] is None

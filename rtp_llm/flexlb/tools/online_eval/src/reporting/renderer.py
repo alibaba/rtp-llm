@@ -188,6 +188,8 @@ def render(spec):
                         "description": s.get("description", ""),
                         "hidden": s.get("hidden", False),
                         "dash": s.get("dash", []),
+                        "point_style": s.get("point_style"),
+                        "marker_count": s.get("marker_count", 0),
                         "color": s.get("color") or series_color(s.get("tone"), i),
                     }
                     for i, s in enumerate(p.get("series", []))

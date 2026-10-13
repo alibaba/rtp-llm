@@ -31,7 +31,7 @@ require('../../src/reporting/assets/multi_curve');
 const root=new Element('root');
 const points=[{x:0,y:70},{x:1,y:null},{x:3,y:20}];
 const chart=FlexMultiCurve.mount(root,{title:'test',caption:'test',axes:{pct:{title:'%'},queue:{title:'requests'}},
- series:[{name:'hit',axis:'pct',unit:'%',points,color:'#123456',dash:[6,4]},
+ series:[{name:'hit',axis:'pct',unit:'%',points,color:'#123456',dash:[6,4],point_style:'triangle',marker_count:2},
          {name:'queue',axis:'queue',unit:'requests',points:[{x:0,y:1000}],hidden:true,color:'#65432180'}],
  presets:{Queue:['queue']}},{timeAxis:{min:0,max:10},events:[]});
 assert.equal(chart.options.scales.pct.display,true);
@@ -39,8 +39,13 @@ assert.equal(chart.options.scales.queue.display,false);
 assert.equal(chart.data.datasets[0].data[1].y,null);
 assert.equal(chart.data.datasets[1].data[0].y,1000); // never silently normalize units
 assert.deepEqual(chart.data.datasets[0].borderDash,[6,4]);
+assert.equal(chart.data.datasets[0].pointStyle,'triangle');
+assert.equal(chart.data.datasets[0].pointRadius({dataIndex:0}),2);
+assert.equal(chart.data.datasets[0].pointRadius({dataIndex:1}),0);
+assert.equal(chart.data.datasets[0].pointRadius({dataIndex:2}),2);
 const panel=root.children[0],legend=panel.children.find(c=>c.className==='multi-legend'),hover=panel.children.find(c=>c.className==='multi-hover');
 assert.equal(legend.children[0].children[0].children[0].children[0].attributes['stroke-dasharray'],'6 4');
+assert.equal(legend.children[0].children[0].children[0].children[1].tag,'polygon');
 assert.equal(legend.children[1].children[0].children[0].children[0].attributes['stroke-dasharray'],'');
 assert.equal(legend.children[1].classes.has('is-muted'),true);
 assert.notEqual(legend.children[1].hidden,true); // disabled curve remains clickable
