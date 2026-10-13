@@ -1,0 +1,98 @@
+#pragma once
+
+#include <cstdint>
+#include <algorithm>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheSpec.h"
+
+namespace rtp_llm {
+
+// Immutable cache-group configuration published by CacheConfig. The tag is
+// the semantic identity; numeric group ids are private CacheTopology indices.
+struct GroupBase {
+    std::string                        tag;
+    std::shared_ptr<const KVCacheSpec> spec;
+    CacheGroupPolicy                   policy;
+
+    uint32_t block_num = 0;
+
+    size_t   seqSizePerBlock() const;
+    size_t   kernelSeqSizePerBlock() const;
+    size_t   kernelBlocksPerKvBlock() const;
+    size_t   kvBlockStrideBytes() const;
+    size_t   kvScaleStrideBytes() const;
+    size_t   cacheKeyTokenStride() const;
+    size_t   reuseBlockCount(size_t matched_block_count) const;
+    uint32_t localKvHeadNum() const;
+};
+
+// Order is deterministic but carries no business meaning.
+struct LayerBase {
+    int                      layer_id = -1;
+    std::vector<std::string> group_tags;
+};
+
+struct CacheTopology {
+public:
+    using GroupRefs = std::vector<std::reference_wrapper<const GroupBase>>;
+
+    static std::shared_ptr<const CacheTopology> create(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
+
+    const std::vector<GroupBase>& groups() const {
+        return groups_;
+    }
+
+    // References remain valid for the lifetime of this immutable topology.
+    const std::vector<std::string>& groupTags() const {
+        return group_tags_;
+    }
+
+    const std::vector<LayerBase>& layers() const {
+        return layers_;
+    }
+
+    const GroupBase& group(std::string_view tag) const;
+    const LayerBase& layer(int layer_id) const;
+    GroupRefs        groupsForLayer(int layer_id) const;
+    const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
+    const GroupBase& soleGroupForLayer(int layer_id) const;
+
+    bool   hasSingleGlobalGroup() const;
+    bool   hasOneGroupPerLayer() const;
+
+    // Canonical topology geometry. A merged MTP CacheConfig may have child-owned
+    // physical strides; its callers must use CacheConfig::{blockSizeBytesForGroup,
+    // totalGroupBlockSizeBytes} instead.
+    size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const;
+
+    size_t maxKernelBlocksPerKvBlock() const {
+        size_t result = 1;
+        for (const auto& group : groups_) {
+            result = std::max(result, group.kernelBlocksPerKvBlock());
+        }
+        return result;
+    }
+
+private:
+    size_t           groupIdForTag(std::string_view tag) const;
+    const GroupBase& groupById(size_t group_id) const;
+
+    CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
+    void validateAndBuildIndex();
+
+    std::vector<GroupBase> groups_;
+    std::vector<LayerBase> layers_;
+    std::vector<std::string> group_tags_;
+
+    std::unordered_map<std::string, size_t> tag_to_group_id_;
+};
+
+}  // namespace rtp_llm

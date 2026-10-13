@@ -1,5 +1,103 @@
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu", "torch_deps")
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
+
+[
+    cuda13_cc_test(
+        name = "cuda_graph_replay_retry_integration_test_" + platform["suffix"],
+        timeout = "short",
+        srcs = ["cuda_graph_replay_retry_integration_test.cc"],
+        copts = copts(),
+        exec_properties = {"gpu": platform["gpu"]},
+        tags = [platform["gpu"]],
+        target_compatible_with = select({
+            platform["config"]: [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        deps = [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "//rtp_llm/cpp/utils:torch_cuda_oom",
+            "@com_google_googletest//:gtest_main",
+        ] + torch_deps(),
+    )
+    for platform in [
+        {
+            "config": "//:using_cuda13_arm",
+            "gpu": "SM100_ARM_CU13",
+            "suffix": "arm",
+        },
+        {
+            "config": "//:using_cuda13_x86",
+            "gpu": cuda13_x86_test_gpu(),
+            "suffix": "x86",
+        },
+    ]
+]
+
+cc_test(
+    name = "combo_position_ids_validation_test",
+    srcs = ["combo_position_ids_validation_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "cuda_graph_copy_kernel_test_rocm",
+    main = "cuda_graph_copy_kernel_test.py",
+    srcs = ["cuda_graph_copy_kernel_test.py"],
+    data = ["//:th_transformer"],
+    deps = ["//rtp_llm/test/model_test/test_util"],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+cc_test(
+    name = "prepared_attention_inputs_guard_test",
+    srcs = ["prepared_attention_inputs_guard_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "generation_prefill_cuda_graph_replay_metadata_test",
+    srcs = ["generation_prefill_cuda_graph_replay_metadata_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:generation_prefill_cuda_graph_replay_metadata",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cuda_graph_prepare_fill_rocm_test",
+    srcs = ["cuda_graph_prepare_fill_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_rocm//rocm:hip",
+        "@local_config_rocm//rocm:rocm_headers",
+    ],
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
 
 cc_library(
     name = "test_cuda_graph_runner_libs",
@@ -29,7 +127,8 @@ py_library(
     name = "cuda_graph_test_utils",
     srcs = ["cuda_graph_test_utils.py"],
     deps = [
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/models_py:utils",
+        "//rtp_llm/test/model_test/test_util",
     ],
     visibility = ["//visibility:public"],
 )
@@ -45,7 +144,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -54,8 +153,8 @@ py_test(
         "HACK_LAYER_NUM": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -69,7 +168,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ],
     env = {
         "LOAD_METHOD": "scratch",
@@ -79,8 +178,106 @@ py_test(
         "SEQ_SIZE_PER_BLOCK": "64",
         "ACT_TYPE": "BF16",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    tags = ["H20_CU13"],
+    # Back on H20 after measuring on sm86. Passes on H20 (ut-sm9x, run
+    # 69503829); on sm86 it fails deterministically, 2 of 2, during unittest
+    # collection: py_flashinfer_mha.py:369 raises "kv_cache is required for
+    # paged attention" from __init__ -> init_prefill. A different fmha backend
+    # is selected below sm90 and this fixture does not supply a kv_cache for it.
+    # Which selection branch diverges is not yet pinned down -- the is_sm90()
+    # gate at py_flashinfer_mha.py:135 is FP8-Q-only, so it is not that one.
+    exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
+    name = "cuda_graph_tagged_cache_test",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "cuda_graph_tagged_cache_test_rocm",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "cuda_graph_dirty_capture_test",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    args = ["TestCudaGraphTaggedCache.test_dirty_capture_failure_is_fail_closed"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
+    name = "cuda_graph_dirty_capture_test_rocm",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    args = ["TestCudaGraphTaggedCache.test_dirty_capture_failure_is_fail_closed"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
 py_test(
@@ -92,7 +289,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ],
     env = {
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -101,6 +298,23 @@ py_test(
         "CUDA_LAUNCH_BLOCKING": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "cuda_graph_compiled_warmup_test",
+    srcs = ["cuda_graph_compiled_warmup_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )

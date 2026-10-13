@@ -170,7 +170,8 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
 
     __syncwarp();
 
-    if (head_idx >= head_dim || token_idx >= num_tokens) {
+    // CUDA Graph outputs can have spare capacity beyond the live batch lengths.
+    if (head_idx >= head_dim || token_idx >= num_tokens || token_idx >= cu_seq_lens[batch_size]) {
         return;
     }
     const int     inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];

@@ -2,7 +2,12 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
-exports_files(["requirements_base.txt"])
+exports_files([
+    "http.bzl",
+    "requirements_base.txt",
+    "requirements_lock_rocm.txt",
+    "requirements_rocm.txt",
+])
 
 py_package(
     name = "extension_package",
@@ -62,6 +67,18 @@ compile_pip_requirements(
     tags = ["manual"],
 )
 
+sh_binary(
+    name = "requirements_torch_gpu_cuda13.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["x86"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_overrides.txt",
+        "requirements_torch_gpu_cuda13.txt",
+    ],
+    tags = ["manual"],
+)
+
 compile_pip_requirements(
     name = "requirements_cuda12_arm",
     src = "requirements_cuda12_arm.txt",
@@ -69,6 +86,24 @@ compile_pip_requirements(
     extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_cuda12_arm.txt",
     tags = ["manual"],
+)
+
+sh_binary(
+    name = "requirements_cuda13_arm.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["arm"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_arm.txt",
+        "requirements_cuda13_overrides.txt",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "update_cuda13_locks_test",
+    srcs = ["update_cuda13_locks_test.sh"],
+    data = ["update_cuda13_locks.sh"],
 )
 
 compile_pip_requirements(

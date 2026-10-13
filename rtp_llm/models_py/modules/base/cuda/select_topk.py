@@ -13,11 +13,11 @@ class SelectTopk(nn.Module):
 
     def forward(
         self,
-        router_logits_fp32: torch.Tensor,
+        router_logits: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        self.select_topk_op.forward(router_logits_fp32, topk_ids, topk_weights)
+        self.select_topk_op.forward(router_logits.float(), topk_ids, topk_weights)
 
 
 class GroupTopK(nn.Module):
@@ -37,7 +37,7 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
-        scores = scores.sigmoid()
+        scores = scores.float().sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
         self.group_topk_op.forward(
             topk_weights,

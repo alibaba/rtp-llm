@@ -3,7 +3,6 @@
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
-#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
@@ -11,7 +10,6 @@
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
 // #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
-#include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
@@ -21,6 +19,12 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
+#ifndef USE_PPU
+#include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
+#endif
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 
 using namespace rtp_llm;
 
@@ -37,40 +41,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("n"),
                   py::arg("row_len"),  // Will use data.sizes()[1] if 0
                   py::arg("info_id"));
-
-    rtp_ops_m.def("write_cache_store",
-                  &WriteCacheStoreOp,
-                  "WriteCacheStoreOp kernel",
-                  py::arg("input_lengths"),
-                  py::arg("prefix_lengths"),
-                  py::arg("kv_cache_block_id_host"),
-                  py::arg("cache_store_member"),
-                  py::arg("kv_cache"));
-
-    rtp_ops_m.def("rmsnorm",
-                  &rmsnorm,
-                  "RMSNorm kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("weight"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
-
-    rtp_ops_m.def("fused_add_rmsnorm",
-                  &fused_add_rmsnorm,
-                  "Fused Add RMSNorm kernel",
-                  py::arg("input"),
-                  py::arg("residual"),
-                  py::arg("weight"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
-
-    rtp_ops_m.def("silu_and_mul",
-                  &silu_and_mul,
-                  "SiLU and Multiply kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("cuda_stream") = 0);
 
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,
@@ -217,6 +187,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("lengths"),
                   py::arg("row_starts") = py::none());
 
+    rtp_ops_m.def("fast_topk_v2_variable",
+                  &fast_topk_v2_variable,
+                  "Fast TopK v2 kernel with selectable TopK",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts"),
+                  py::arg("top_k"));
+
     rtp_ops_m.def("fast_topk_transform_fused",
                   &fast_topk_transform_fused,
                   "Fast TopK Transform Fused kernel",
@@ -235,6 +214,62 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("topk_indices_ragged"),
                   py::arg("topk_indices_offset"),
                   py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("persistent_topk",
+                  &persistent_topk,
+                  "Persistent TopK kernel",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    // Vendored from vLLM (csrc/persistent_topk.cuh + csrc/topk.cu @ b55d830).
+    // DSv4-specific variant of the radix-select TopK kernel registered above:
+    // writes -1 padding past per-row ``lengths`` directly into the output
+    // buffer (folds the previous fill_/copy_/masked_fill_ chain). Used by
+    // the FP8 indexer decode hot path; see kernels/dsv4_persistent_topk.h.
+    rtp_ops_m.def("dsv4_persistent_topk",
+                  &dsv4_persistent_topk,
+                  "DSv4 persistent radix-select TopK (K∈{512,1024,2048})",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+#ifndef USE_PPU
+    rtp_ops_m.def("topk_v3",
+                  &topk_v3,
+                  "DeepSeek V4 decode indexer exact SGLang radix-select TopK",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+#endif  // !USE_PPU
+
+    // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
+    // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
+    // are relative to row_starts[r], padded with -1 past the per-row
+    // valid count. CUDA-only.
+    rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
+    rtp_ops_m.def("deepselect_bf16", &deepselect_bf16, py::arg("logits"), py::arg("ends"), py::arg("output"));
+    rtp_ops_m.def("dsv4_top_k_per_row_prefill",
+                  &dsv4_top_k_per_row_prefill,
+                  "Per-row TopK for DSv4 indexer prefill",
+                  py::arg("logits"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("indices_out"),
+                  py::arg("num_rows"),
+                  py::arg("stride0"),
+                  py::arg("stride1"),
+                  py::arg("top_k"),
+                  py::arg("force_radix_sort") = false);
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,

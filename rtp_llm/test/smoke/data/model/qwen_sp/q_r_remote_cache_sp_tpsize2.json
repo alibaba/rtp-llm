@@ -34,12 +34,13 @@
                     "total_tokens": 1009,
                     "completion_tokens": 911
                 },
-                "aux_info": {
-                    "iter_count": 906,
+                "aux_info": null
+            },
+            "compare_config": {
+                "skip_choices": true,
+                "skip_usage": true,
+                "required_aux_info": {
                     "input_len": 98,
-                    "output_len": 911,
-                    "step_output_len": 911,
-                    "pd_sep": false,
                     "reuse_len": 0,
                     "local_reuse_len": 0,
                     "remote_reuse_len": 0,
@@ -127,7 +128,14 @@
                     "decode_remote_reuse_len": 0,
                     "decode_memory_reuse_len": 0,
                     "role_addrs": [],
-                    "aux_string": ""
+                    "aux_string": "",
+                    "speculative_draft_rounds": 861,
+                    "speculative_accepted_tokens_per_pos": [
+                        6,
+                        0,
+                        0,
+                        0
+                    ]
                 },
                 "extra_outputs": null
             }

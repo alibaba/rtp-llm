@@ -1,7 +1,6 @@
 #include "rtp_llm/models_py/bindings/rocm/Norm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
-#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
@@ -13,15 +12,6 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
-    rtp_ops_m.def("write_cache_store",
-                  &WriteCacheStoreOp,
-                  "WriteCacheStoreOp kernel",
-                  py::arg("input_lengths"),
-                  py::arg("prefix_lengths"),
-                  py::arg("kv_cache_block_id_host"),
-                  py::arg("cache_store_member"),
-                  py::arg("kv_cache"));
-
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
                   "Fused Add LayerNorm kernel",

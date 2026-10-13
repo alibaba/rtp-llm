@@ -1,68 +1,135 @@
 package org.flexlb.service;
 
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-
+import com.google.protobuf.ByteString;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
-import org.flexlb.balance.scheduler.QueueManager;
-import org.flexlb.balance.scheduler.Router;
-import org.flexlb.config.ConfigService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.telemetry.FlexlbTrace;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
+
+import java.util.concurrent.CompletableFuture;
 
 @Component
 public class RouteService {
 
-    private final ConfigService configService;
-    private final Router router;
-    private final QueueManager queueManager;
+    private final RequestScheduler requestScheduler;
+    @Autowired
+    private DefaultRouter router;
+    private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        DefaultRouter defaultScheduler,
-                        QueueManager queueManager) {
-        this.configService = configService;
-        this.router = defaultScheduler;
-        this.queueManager = queueManager;
+    public RouteService(RequestScheduler requestScheduler,
+                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
+        this.requestScheduler = requestScheduler;
+        this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
     /**
-     * Route request to appropriate workers
+     * Route request to appropriate workers based on the deployment-level schedule mode.
      * @param balanceContext Load balancing context
      * @return Routing result
      */
-    public Mono<Response> route(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        balanceContext.setConfig(flexlbConfig);
-
-        Mono<Response> resultMono;
-        if (flexlbConfig.isEnableQueueing()) {
-            resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
-        } else {
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
+    public CompletableFuture<Response> route(BalanceContext balanceContext) {
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
+            return CompletableFuture.completedFuture(router == null
+                    ? Response.error(StrategyErrorType.NO_VIT_WORKER) : router.routeVit(balanceContext));
         }
+        // Reject stale metadata before the scheduler creates request lifecycle ownership.
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().getSelectedVit() != null
+                && getRequestState(balanceContext.getRequestId(), 0) == null
+                && (router == null || !router.selectedVitIsValid(balanceContext))) {
+            return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+        }
+        FlexlbConfig flexlbConfig = balanceContext.getConfig();
+        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
+                FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
+                        : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
+                                ? "BATCH" : "QUEUE");
 
-        return resultMono.doOnSuccess(result -> {
-            balanceContext.setResponse(result);
+        CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
+
+        // Observe the scheduler-owned future without replacing it with a
+        // dependent stage. Returning the exact source preserves external
+        // cancel propagation and keeps one publication owner end to end.
+        resultFuture.whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                return;
+            }
+            try {
+                balanceContext.setResponse(result);
+                if (result != null && result.isSuccess() && !balanceContext.getRequest().isVitRouteOnly()) {
+                    recentCacheKeyTraceReporter.report(balanceContext);
+                }
+            } catch (RuntimeException completionSideEffectFailure) {
+                Logger.warn("Route completion side effect failed: request_id={}",
+                        balanceContext.getRequestId(), completionSideEffectFailure);
+            }
         });
+        return resultFuture;
+    }
+
+    private CompletableFuture<Response> routeScheduled(BalanceContext balanceContext) {
+        if (requestScheduler == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "RequestScheduler is required for the configured scheduling path"));
+        }
+        if (!balanceContext.getRequest().isVitRouteOnly()
+                && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
+                && !hasValidGenerateInput(balanceContext)) {
+            Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
+                    balanceContext.getConfig().getDispatcher().typeName(),
+                    balanceContext.getRequestId());
+            return CompletableFuture.completedFuture(
+                    Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
+                            "missing serialized generate_input for batch dispatch"));
+        }
+        return submitScheduled(balanceContext);
     }
 
     /**
-     * Cancel a specified request
-     * @param balanceContext Load balancing context
+     * Submit to the common scheduler. Route-decision requests intentionally do
+     * not require generate_input: Master selects endpoints but the frontend
+     * remains responsible for sending the original request to the engine.
      */
-    public void cancel(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        if (flexlbConfig.isEnableQueueing()) {
-            balanceContext.cancel();
-            CompletableFuture<Response> future = balanceContext.getFuture();
-            if (future != null) {
-                future.completeExceptionally(new CancellationException("Request cancelled by client"));
-            }
+    private CompletableFuture<Response> submitScheduled(BalanceContext balanceContext) {
+        if (requestScheduler == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "RequestScheduler is required for the configured scheduling path"));
         }
-        balanceContext.setSuccess(false);
-        balanceContext.setErrorMessage("request cancelled");
+        CompletableFuture<Response> resultFuture = requestScheduler.submit(balanceContext);
+        balanceContext.setFuture(resultFuture);
+        return resultFuture;
+    }
+
+    private boolean hasValidGenerateInput(BalanceContext ctx) {
+        ByteString generateInput = ctx.getGenerateInputPb();
+        return generateInput != null && !generateInput.isEmpty();
+    }
+
+    public RequestState getRequestState(long requestId,
+                                                    long expectedBatchId) {
+        return requestScheduler == null ? null
+                : requestScheduler.getRequestState(requestId, expectedBatchId);
+    }
+
+    /**
+     * Cancel one scheduler-owned request generation.
+     *
+     * <p>The scheduler is the only lifecycle and resource owner.  Keeping the
+     * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
+     * same idempotency and generation-fencing semantics.</p>
+     */
+    public RequestState cancelRequest(long requestId,
+                                                   long expectedBatchId,
+                                                   CancelReason reason) {
+        return requestScheduler == null ? null
+                : requestScheduler.cancelRequest(requestId, expectedBatchId, reason);
     }
 }

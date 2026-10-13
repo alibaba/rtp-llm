@@ -1,175 +1,177 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.resource.DynamicWorkerManager;
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.service.monitor.RoutingQueueReporter;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-
-import org.flexlb.dao.loadbalance.StrategyErrorType;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
- * Includes configurable max retry count to prevent infinite retry loops.
+ * Request submission facade for DIRECT and QUEUE.
  *
- * @author saichen.sm
- * @since 2025/12/23
+ * <p>Both modes register one canonical request. DIRECT selects and commits on
+ * ingress; QUEUE defers selection to the global ordered queue. Endpoint
+ * batchers own only delivery after the selected route is committed.</p>
  */
 @Component
-public class RequestScheduler {
+public final class RequestScheduler {
 
-    private final Router router;
-    private final ConfigService configService;
-    private final QueueManager queueManager;
-    private final DynamicWorkerManager dynamicWorkerManager;
-    private final RoutingQueueReporter metrics;
+    private final DefaultRouter router;
+    private final EndpointRegistry endpointRegistry;
+    private final RequestRegistry requestRegistry;
+    private final GlobalQueueCoordinator globalQueue;
 
-    // Worker thread pool
-    private ExecutorService workerExecutor;
-    private volatile boolean running = true;
-
-    public RequestScheduler(Router router,
-                            ConfigService configService,
-                            QueueManager queueManager,
-                            DynamicWorkerManager dynamicWorkerManager,
-                            RoutingQueueReporter metrics) {
-        this.router = router;
-        this.configService = configService;
-        this.queueManager = queueManager;
-        this.dynamicWorkerManager = dynamicWorkerManager;
-        this.metrics = metrics;
+    @Autowired
+    RequestScheduler(
+            ConfigService configService,
+            DefaultRouter router,
+            EndpointRegistry endpointRegistry,
+            BatchSchedulerReporter reporter,
+            EvictionManager evictionManager,
+            RequestRegistry requestRegistry,
+            PlacementAvailability placementAvailability) {
+        Objects.requireNonNull(configService, "configService");
+        this.router = Objects.requireNonNull(router, "router");
+        this.endpointRegistry = Objects.requireNonNull(
+                endpointRegistry, "endpointRegistry");
+        this.requestRegistry = Objects.requireNonNull(requestRegistry, "lifecycle");
+        FlexlbConfig startupConfig = configService.loadBalanceConfig();
+        this.globalQueue = startupConfig != null && startupConfig.isQueue()
+                ? new GlobalQueueCoordinator(
+                        configService,
+                        Objects.requireNonNull(router, "router"),
+                        Objects.requireNonNull(reporter, "reporter"),
+                        Objects.requireNonNull(evictionManager, "evictionManager"),
+                        this.requestRegistry,
+                        Objects.requireNonNull(
+                                placementAvailability, "placementAvailability"))
+                : null;
     }
 
-    @PostConstruct
-    public void start() {
-        FlexlbConfig config = configService.loadBalanceConfig();
-
-        // Start worker thread pool
-        this.workerExecutor = Executors.newFixedThreadPool(config.getScheduleWorkerSize(), r -> {
-            Thread t = new Thread(r, "routing-queue-worker");
-            t.setDaemon(true);
-            return t;
-        });
-
-        // Submit worker tasks
-        for (int i = 0; i < config.getScheduleWorkerSize(); i++) {
-            workerExecutor.submit(this::workerLoop);
+    /** Register once, then enter direct admission or the ordered global queue. */
+    public CompletableFuture<Response> submit(BalanceContext context) {
+        if (context == null || context.getRequest() == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.INVALID_REQUEST, null));
         }
-
-        Logger.info("RequestScheduler Worker thread pool started, worker count: {}", config.getScheduleWorkerSize());
-    }
-
-    /**
-     * Worker thread main loop
-     * <p>
-     * Workflow:
-     *   1. Wait for resource availability (acquire permit with timeout)
-     *   2. Take request from queue
-     *   3. Process request
-     * <p>
-     * Both steps use timeouts to avoid blocking indefinitely and to allow
-     * graceful shutdown checks.
-     */
-    private void workerLoop() {
-        Logger.info("Worker thread started, ready to process requests...");
-
-        while (running && !Thread.currentThread().isInterrupted()) {
-            try {
-                // Step 1: Wait for resource permit (with timeout to avoid indefinite blocking)
-                boolean acquired = dynamicWorkerManager.tryAcquirePermit(500, TimeUnit.MILLISECONDS);
-                if (!acquired) {
-                    continue;
-                }
-
-                try {
-                    // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(true, 500);
-                    if (ctx == null) {
-                        continue; // permit released in finally
-                    }
-
-                    // Step 3: Process request
-                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
-                    processRequest(ctx);
-                } finally {
-                    dynamicWorkerManager.releasePermit();
-                }
-            } catch (Exception e) {
-                Logger.error("Worker thread encountered error", e);
-            }
+        // Vision lookup owns no request generation, admission, queue or KV reservation.
+        if (context.getRequest().isVitRouteOnly()) {
+            CompletableFuture<Response> future =
+                    CompletableFuture.completedFuture(router.routeVit(context));
+            context.setFuture(future);
+            return future;
         }
-
-        Logger.info("Worker thread stopped");
-    }
-
-    private void processRequest(BalanceContext ctx) {
+        FlexlbConfig requestConfig = context.getConfig();
+        if (requestConfig.isQueue() && globalQueue == null) {
+            return CompletableFuture.completedFuture(error(StrategyErrorType.DISPATCH_FAILED,
+                    "QUEUE configuration was enabled after scheduler startup"));
+        }
+        CompletableFuture<Response> future = requestRegistry.register(context);
+        context.setFuture(future);
+        if (future.isDone()) {
+            return future;
+        }
+        if (requestConfig.isDirect()) {
+            submitDirect(context);
+            return future;
+        }
         try {
-            Response response = router.route(ctx);
-            handleRoutingResult(ctx, response);
-        } catch (Exception e) {
-            Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
-            ctx.getFuture().completeExceptionally(e);
-        }
-    }
-
-    private void handleRoutingResult(BalanceContext ctx, Response response) {
-        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
-        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
-        if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
-            ctx.incrementRetryCount();
-            Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
-                    ctx.getRequestId(),
-                    response.getCode(),
-                    ctx.getRetryCount());
-            metrics.reportRoutingFailureQps(response.getCode());
-
-            queueManager.offerToHead(ctx);
-        } else {
-            if (!response.isSuccess() && !retryAllowed) {
-                Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
-                        maxRetry, ctx.getRequestId());
+            if (!globalQueue.offer(context, future, context.getPriority())) {
+                future.complete(error(StrategyErrorType.DISPATCH_FAILED,
+                        "request scheduler is shutting down"));
             }
-            ctx.getFuture().complete(response);
-            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+        } catch (Throwable failure) {
+            future.complete(error(StrategyErrorType.DISPATCH_FAILED,
+                    "Queue submission failed: " + failure.getMessage()));
         }
+        return future;
     }
 
-    /**
-     * Determine if request should be retried
-     * <p>
-     * Only resource-unavailable errors should trigger retry to avoid ineffective retry attempts
-     *
-     * @param response Routing response
-     * @return true if request should be retried, false otherwise
-     */
-    private boolean shouldRetry(Response response) {
-        StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
-        return errorType != null && errorType.isCanRetry();
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        running = false;
-        if (workerExecutor != null && !workerExecutor.isShutdown()) {
-            workerExecutor.shutdown();
-            try {
-                if (!workerExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                    workerExecutor.shutdownNow();
+    private void submitDirect(BalanceContext context) {
+        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        try {
+            PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
+            context.setSchedulingDiagnostics(selection.diagnostics());
+            switch (selection.status()) {
+                case SUCCESS -> {
+                    try (RouteAdmission admission = selection.value()) {
+                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
+                        failure = switch (committed.status()) {
+                            case SUCCESS -> {
+                                var delivery = committed.value();
+                                requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
+                                yield null;
+                            }
+                            case REJECTED -> committed.failure();
+                            case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                            case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                        };
+                    }
                 }
-                Logger.info("RequestScheduler Worker thread pool stopped");
-            } catch (InterruptedException e) {
-                workerExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
+                case BLOCKED -> failure = selection.failure() != null
+                        ? selection.failure() : Response.error(selection.blocker().role().getErrorType());
+                case REJECTED -> failure = selection.failure();
+                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+            }
+        } catch (RuntimeException selectionFailure) {
+            Logger.warn("DIRECT admission failed: request_id={}", context.getRequestId(), selectionFailure);
+        } finally {
+            if (failure != null) {
+                requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
             }
         }
+    }
+
+    public RequestState cancelRequest(
+            long requestId,
+            long expectedBatchId,
+            CancelReason reason) {
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
+    }
+
+    public int getInflightSize() {
+        return requestRegistry.liveRequestCount();
+    }
+
+    public int getQueuedRequestCount() {
+        long queued = globalQueue == null ? 0L : globalQueue.size();
+        for (PrefillEndpoint endpoint
+                : endpointRegistry.snapshotPrefillEndpoints().values()) {
+            queued += endpoint.queuedRequestCount();
+            if (queued >= Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+        }
+        return (int) queued;
+    }
+
+    public List<RequestState> snapshotActiveRequests() {
+        return requestRegistry.snapshotActiveRequests();
+    }
+
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
+        return requestRegistry.getRequestState(requestId, expectedBatchId);
+    }
+
+    public void closePlacement() {
+        if (globalQueue != null) {
+            globalQueue.close();
+        }
+    }
+
+    private static Response error(StrategyErrorType type, String detail) {
+        return Response.buildErrorResponse(type, detail);
     }
 }

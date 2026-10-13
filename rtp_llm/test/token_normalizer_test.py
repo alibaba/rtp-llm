@@ -64,6 +64,32 @@ class TestTokenNormalizer(unittest.TestCase):
         self.tokenizer = MockTokenizer()
         self.normalizer = TokenNormalizer(self.tokenizer)
 
+    def test_yielded_length_includes_leading_orphan_in_decoded_offset(self):
+        """A leading orphan byte must not make complete suffix text replay."""
+        prev_tokens = [4, 1]  # "\uFFFDHello "
+
+        self.assertEqual(self.tokenizer.decode(prev_tokens), "\uFFFDHello ")
+        self.assertEqual(
+            self.normalizer._calculate_yielded_length(prev_tokens),
+            len("\uFFFDHello "),
+        )
+
+    def test_yielded_length_excludes_only_trailing_incomplete_utf8(self):
+        """Keep a leading orphan in the offset while excluding a pending tail."""
+        prev_tokens = [4, 1, 2]  # "\uFFFDHello \uFFFD"
+
+        self.assertEqual(self.tokenizer.decode(prev_tokens), "\uFFFDHello \uFFFD")
+        self.assertEqual(
+            self.normalizer._calculate_yielded_length(prev_tokens),
+            len("\uFFFDHello "),
+        )
+
+    def test_leading_orphan_context_does_not_replay_complete_prefix(self):
+        """Emit only new text when previous decode starts with an orphan byte."""
+        deltas = list(self.normalizer.normalize_tokens([4, 1], [1, 1]))
+
+        self.assertEqual(deltas, ["Hello ", "Hello "])
+
     def test_normal_single_byte_tokens(self):
         """Test normal case: single-byte tokens without UTF-8 issues."""
         # Token 1: "Hello "

@@ -67,10 +67,11 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         assert w2_input_scale is not None
         assert w2_weight_scale_2 is not None
 
-        self.expert_x_scale = 1 / w13_input_scale
-        self.g1_alphas = w13_input_scale * w13_weight_scale_2
-        self.g2_alphas = w2_input_scale * w2_weight_scale_2
-        self.g1_scale_c = self.g1_alphas / w2_input_scale
+        shared_input_scale = w13_input_scale.max().to(torch.float32)
+        self.expert_x_scale = shared_input_scale.reciprocal().reshape(1)
+        self.g1_alphas = (shared_input_scale * w13_weight_scale_2).to(torch.float32)
+        self.g2_alphas = (w2_input_scale * w2_weight_scale_2).to(torch.float32)
+        self.g1_scale_c = (self.g1_alphas / w2_input_scale).to(torch.float32)
 
         self.global_num_experts = config.expert_num
         self._enable_pdl = device_support_pdl(self.w1.device)

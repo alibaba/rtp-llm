@@ -50,6 +50,17 @@ static std::string mlaOpsTypeToString(MlaOpsType mla_ops_type) {
     }
 }
 
+static std::string hiddenStateCaptureDtypeToString(HiddenStateCaptureDtype capture_dtype) {
+    switch (capture_dtype) {
+        case HiddenStateCaptureDtype::BF16:
+            return "bf16";
+        case HiddenStateCaptureDtype::FP8_E4M3:
+            return "fp8_e4m3";
+        default:
+            return "UNKNOWN(" + std::to_string(static_cast<int>(capture_dtype)) + ")";
+    }
+}
+
 static std::string quantMethodToString(QuantMethod quant_method) {
     switch (quant_method) {
         case QuantMethod::None:
@@ -72,6 +83,8 @@ static std::string quantMethodToString(QuantMethod quant_method) {
             return "FP8PTPC";
         case QuantMethod::W4A8INT4PTPC:
             return "W4A8INT4PTPC";
+        case QuantMethod::W8A8INT8PTPC:
+            return "W8A8INT8PTPC";
         case QuantMethod::ModelOptFP4:
             return "ModelOptFP4";
         default:
@@ -184,7 +197,11 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
 
     // if qk_norm or use embedding model, fuse add bias in gemm
     config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
-
+    // Skip rope+bias+transpose kernel entirely for embedding models (no RoPE, no KV cache).
+    // The GEMM epilogue already handles bias, and PACKED_QKV layout matches FMHA input directly.
+    if (config.rope_config.style == RopeStyle::No && !use_kvcache) {
+        config.need_rope_kv_cache = false;
+    }
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
 
@@ -203,6 +220,15 @@ std::string ModelConfig::to_string() const {
     // Model variant params
     oss << "num_layers: " << num_layers << "\n"
         << "hidden_size: " << hidden_size << "\n"
+        << "hidden_state_capture_layer_ids: [";
+    for (size_t i = 0; i < hidden_state_capture_layer_ids.size(); ++i) {
+        if (i > 0) {
+            oss << ", ";
+        }
+        oss << hidden_state_capture_layer_ids[i];
+    }
+    oss << "]\n"
+        << "hidden_state_capture_dtype: " << hiddenStateCaptureDtypeToString(hidden_state_capture_dtype) << "\n"
         << "attn_config: {\n"
         << attn_config.DebugAttentionConfigStr() << "\n}\n"
         << "mla_ops_type: " << mlaOpsTypeToString(mla_ops_type) << "\n"
@@ -226,6 +252,8 @@ std::string ModelConfig::to_string() const {
         << "use_norm_attn_out_residual: " << use_norm_attn_out_residual << "\n"
         << "max_seq_len: " << max_seq_len << "\n"
         << "vocab_size: " << vocab_size << "\n"
+        << "output_vocab_size: " << output_vocab_ids.size() << "\n"
+        << "output_vocab_padded_size: " << output_vocab_padded_size << "\n"
         << "input_vocab_size: " << input_vocab_size << "\n"
         << "type_vocab_size: " << type_vocab_size << "\n"
         << "embedding_size: " << embedding_size << "\n"

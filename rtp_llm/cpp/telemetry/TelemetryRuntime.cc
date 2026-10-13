@@ -1,0 +1,467 @@
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
+
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
+#include <utility>
+
+#include "opentelemetry/context/propagation/global_propagator.h"
+#include "opentelemetry/context/propagation/text_map_propagator.h"
+#include "opentelemetry/exporters/otlp/otlp_http.h"
+#include "opentelemetry/exporters/otlp/otlp_http_exporter_factory.h"
+#include "opentelemetry/exporters/otlp/otlp_http_exporter_options.h"
+#include "opentelemetry/sdk/resource/resource.h"
+#include "opentelemetry/sdk/resource/resource_detector.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_options.h"
+#include "opentelemetry/sdk/trace/provider.h"
+#include "opentelemetry/sdk/trace/samplers/parent.h"
+#include "opentelemetry/sdk/trace/samplers/trace_id_ratio.h"
+#include "opentelemetry/sdk/trace/tracer_provider.h"
+#include "opentelemetry/sdk/trace/tracer_provider_factory.h"
+#include "opentelemetry/trace/noop.h"
+#include "opentelemetry/trace/propagation/http_trace_context.h"
+#include "opentelemetry/trace/provider.h"
+
+#include "rtp_llm/cpp/utils/Logger.h"
+
+namespace rtp_llm {
+namespace telemetry {
+
+namespace {
+
+namespace trace_api = opentelemetry::trace;
+namespace trace_sdk = opentelemetry::sdk::trace;
+namespace otlp      = opentelemetry::exporter::otlp;
+namespace otel_ctx  = opentelemetry::context;
+namespace resource  = opentelemetry::sdk::resource;
+namespace nostd     = opentelemetry::nostd;
+
+struct RuntimeGlobals {
+    std::mutex     mutex;
+    TelemetryState state = TelemetryState::UNINITIALIZED;
+    // Lock-free fast path mirror of (state == ACTIVE) for per-request checks
+    // on hot RPC paths (avoids a process-wide mutex hotspot).
+    std::atomic<bool>                          active{false};
+    std::shared_ptr<trace_sdk::TracerProvider> provider;
+    // Engine identity replayed onto every synthesized phase span. Atomic for the
+    // same reason as `active`: it is read once per phase span on the per-request
+    // path, and config is long gone by then. Published before the `active`
+    // release store, so any reader that observes ACTIVE also observes this rank.
+    std::atomic<int64_t> world_rank{0};
+    std::string          scope_version;
+};
+
+RuntimeGlobals& globals() {
+    static RuntimeGlobals instance;
+    return instance;
+}
+
+// Export-failure accounting wrapper around the OTLP exporter. Queue overflow
+// is already reported by the upstream BSP; this wrapper covers the separate
+// exporter-side failure channel with rate-limited cumulative diagnostics.
+class DiagnosticSpanExporter final: public trace_sdk::SpanExporter {
+public:
+    explicit DiagnosticSpanExporter(std::unique_ptr<trace_sdk::SpanExporter> inner): inner_(std::move(inner)) {}
+
+    std::unique_ptr<trace_sdk::Recordable> MakeRecordable() noexcept override {
+        return inner_->MakeRecordable();
+    }
+
+    opentelemetry::sdk::common::ExportResult
+    Export(const nostd::span<std::unique_ptr<trace_sdk::Recordable>>& spans) noexcept override {
+        auto result = inner_->Export(spans);
+        total_batches_.fetch_add(1, std::memory_order_relaxed);
+        if (result != opentelemetry::sdk::common::ExportResult::kSuccess) {
+            auto failed_batches = failed_batches_.fetch_add(1, std::memory_order_relaxed) + 1;
+            auto failed_spans =
+                failed_spans_.fetch_add((int64_t)spans.size(), std::memory_order_relaxed) + (int64_t)spans.size();
+            int64_t now_s =
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            int64_t last_s = last_log_s_.load(std::memory_order_relaxed);
+            if (now_s - last_s >= kLogIntervalS
+                && last_log_s_.compare_exchange_strong(last_s, now_s, std::memory_order_relaxed)) {
+                RTP_LLM_LOG_WARNING("telemetry span export failing: result=%d (cumulative %ld/%ld batches failed, "
+                                    "%ld spans lost; next warning suppressed for %lds)",
+                                    (int)result,
+                                    (long)failed_batches,
+                                    (long)total_batches_.load(std::memory_order_relaxed),
+                                    (long)failed_spans,
+                                    (long)kLogIntervalS);
+            }
+        }
+        return result;
+    }
+
+    bool ForceFlush(std::chrono::microseconds timeout) noexcept override {
+        return inner_->ForceFlush(timeout);
+    }
+
+    bool Shutdown(std::chrono::microseconds timeout) noexcept override {
+        auto failed_batches = failed_batches_.load(std::memory_order_relaxed);
+        if (failed_batches > 0) {
+            RTP_LLM_LOG_WARNING("telemetry exporter shutdown: %ld/%ld batches failed, %ld spans lost",
+                                (long)failed_batches,
+                                (long)total_batches_.load(std::memory_order_relaxed),
+                                (long)failed_spans_.load(std::memory_order_relaxed));
+        }
+        return inner_->Shutdown(timeout);
+    }
+
+private:
+    static constexpr int64_t                 kLogIntervalS = 60;
+    std::unique_ptr<trace_sdk::SpanExporter> inner_;
+    std::atomic<int64_t>                     total_batches_{0};
+    std::atomic<int64_t>                     failed_batches_{0};
+    std::atomic<int64_t>                     failed_spans_{0};
+    std::atomic<int64_t>                     last_log_s_{0};
+};
+
+std::string getEnvString(const char* name, const std::string& default_value) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+    return std::string(value);
+}
+
+// Host identity comes from gethostname(2), never from $HOSTNAME. The env var is
+// a snapshot of whoever launched the process: an outer shell can overwrite it
+// with a different machine's name (observed: a docker-exec session leaking the
+// physical host name into a container whose PID 1 had the correct value) or omit
+// it entirely, and either way the resulting host.ip/host.name would be silently
+// wrong or silently absent. The syscall always reports this UTS namespace and
+// tracks a hostname that changes at runtime. Same source as the Python runtime's
+// socket.gethostname() and the dashlog reference SDK. Returns empty only when
+// the syscall itself fails.
+std::string readHostname() {
+    char buffer[256] = {0};
+    if (gethostname(buffer, sizeof(buffer) - 1) != 0) {
+        return "";
+    }
+    return std::string(buffer);
+}
+
+// 通过 SDK 的显式构造入口绕过环境 Resource 探测。
+class ExplicitResourceDetector final: public resource::ResourceDetector {
+public:
+    explicit ExplicitResourceDetector(const resource::ResourceAttributes& attributes): attributes_(attributes) {}
+    resource::Resource Detect() override {
+        return resource::Resource::GetDefault().Merge(Create(attributes_));
+    }
+
+private:
+    resource::ResourceAttributes attributes_;
+};
+
+void setGlobalNoop() {
+    std::shared_ptr<trace_api::TracerProvider> none;
+    trace_sdk::Provider::SetTracerProvider(none);
+}
+
+}  // namespace
+
+bool TelemetryRuntime::initInternal(std::unique_ptr<trace_sdk::SpanExporter> exporter, const TelemetryConfig& config) {
+    // Caller holds globals().mutex.
+    auto& g = globals();
+    // Single derivation point shared by BOTH entry points (init() and
+    // initWithExporter()). Role-split components: an empty service_name derives
+    // from the deployment role (rtp_llm_prefill / rtp_llm_decode /
+    // rtp_llm_pdfusion) so the Unitrace topology shows P/D as separate nodes;
+    // An explicit internal config can override the name; JSON uses the role default.
+    // here rather than in init() keeps the test entry on the same contract as
+    // production, so a broken derivation can no longer pass the tests.
+    const std::string service_name = !config.service_name.empty() ?
+                                         config.service_name :
+                                         (config.role.empty() ? std::string("rtp_llm") : "rtp_llm_" + config.role);
+    try {
+        // 1. Resource: process identity shared by every span this process
+        // exports.
+        //
+        // host.ip deliberately carries "{hostname}-{pid}" rather than the pod
+        // IP. The platform's per-instance request/error/latency panels key off
+        // host.ip, and a pod IP is not process-unique: one RTP-LLM pod runs the
+        // frontend, the backend and every DP rank side by side, so an IP-valued
+        // host.ip collapses them into a single bucket. The real address is still
+        // reported, under rtp_llm.pod_ip. Neither host.ip nor host.name is
+        // synthesized when the hostname is unknown -- exporting "unknown-<pid>"
+        // would pollute exactly the aggregation this field exists to serve.
+        const std::string            hostname = readHostname();
+        resource::ResourceAttributes attributes{
+            {"service.name", service_name},
+            // Keeps the historical "unknown" fallback so the instance id stays
+            // present on every span even if the hostname lookup fails.
+            {"service.instance.id",
+             (hostname.empty() ? std::string("unknown") : hostname) + "-" + std::to_string(getpid())},
+            {"process.pid", (int64_t)getpid()},
+            {"rtp_llm.role", config.role},
+            // Fixed marker the platform's GenAI statistics match on. It names the
+            // instrumentation contract being followed, not a linked library, so
+            // it is a literal rather than a version of anything we build.
+            {"gen_ai.instrumentation.sdk.name", "loongsuite-genai-utils"},
+            // rtp_llm.tp_rank is intentionally NOT a resource attribute: the
+            // rank0-only gate makes it constantly 0 on every exported span
+            // (zero information). tp_rank stays an init() gate parameter only.
+            // Replica identity: every DP group's tp_rank0 produces spans with
+            // otherwise identical resources (same role/tp_rank/ip), so dp_rank
+            // and world_rank are the semantic keys telling replicas apart.
+            {"rtp_llm.dp_rank", config.dp_rank},
+            {"rtp_llm.world_rank", config.world_rank},
+        };
+        if (!hostname.empty()) {
+            attributes.SetAttribute("host.name", opentelemetry::nostd::string_view(hostname));
+            const std::string host_ip = hostname + "-" + std::to_string(getpid());
+            attributes.SetAttribute("host.ip", opentelemetry::nostd::string_view(host_ip));
+        }
+        std::string pod_ip = getEnvString("POD_IP", "");
+        if (!pod_ip.empty()) {
+            attributes.SetAttribute("rtp_llm.pod_ip", opentelemetry::nostd::string_view(pod_ip));
+        }
+        auto res = ExplicitResourceDetector(attributes).Detect();
+
+        // 2. Sampler: ParentBased(TraceIdRatio) trusts the upstream sampled flag.
+        auto delegate = std::make_shared<trace_sdk::TraceIdRatioBasedSampler>(config.sampler_ratio);
+        auto sampler  = std::unique_ptr<trace_sdk::Sampler>(new trace_sdk::ParentBasedSampler(delegate));
+
+        // 3. Bounded BSP, queue-full drops silently (fail-open).
+        trace_sdk::BatchSpanProcessorOptions bsp_options;
+        bsp_options.max_queue_size        = config.max_queue_size;
+        bsp_options.schedule_delay_millis = std::chrono::milliseconds(config.schedule_delay_ms);
+        bsp_options.max_export_batch_size = config.max_export_batch_size;
+        auto processor = trace_sdk::BatchSpanProcessorFactory::Create(std::move(exporter), bsp_options);
+
+        // 4. TracerProvider
+        auto provider_unique = trace_sdk::TracerProviderFactory::Create(std::move(processor), res, std::move(sampler));
+        g.provider           = std::shared_ptr<trace_sdk::TracerProvider>(provider_unique.release());
+        std::shared_ptr<trace_api::TracerProvider> api_provider = g.provider;
+        trace_sdk::Provider::SetTracerProvider(api_provider);
+
+        // 5. Global W3C TraceContext propagator, set explicitly: without it the
+        // default no-op propagator silently drops cross-process context.
+        otel_ctx::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
+            nostd::shared_ptr<otel_ctx::propagation::TextMapPropagator>(
+                new trace_api::propagation::HttpTraceContext()));
+
+        g.scope_version = config.scope_version;
+        g.state         = TelemetryState::ACTIVE;
+        g.world_rank.store(config.world_rank, std::memory_order_relaxed);
+        g.active.store(true, std::memory_order_release);
+        RTP_LLM_LOG_INFO("telemetry runtime active: role=%s tp_rank=%ld source=%s root_ratio=%f parent_based=true",
+                         config.role.c_str(),
+                         (long)config.tp_rank,
+                         config.source.c_str(),
+                         config.sampler_ratio);
+        return true;
+    } catch (const std::exception&) {
+        g.state = TelemetryState::INIT_FAILURE;
+        g.provider.reset();
+        setGlobalNoop();
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=initialization_failed role=%s", config.role.c_str());
+        return false;
+    } catch (...) {
+        g.state = TelemetryState::INIT_FAILURE;
+        g.provider.reset();
+        setGlobalNoop();
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=initialization_failed role=%s", config.role.c_str());
+        return false;
+    }
+}
+
+bool TelemetryRuntime::init(
+    const TelemetryConfig& input, const std::string& role, int64_t tp_rank, int64_t dp_rank, int64_t world_rank) {
+    auto&                       g = globals();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    if (g.state == TelemetryState::ACTIVE) {
+        return true;
+    }
+
+    if (g.state != TelemetryState::UNINITIALIZED) {
+        return false;
+    }
+    TelemetryConfig config = input;
+    config.role            = role;
+    config.tp_rank         = tp_rank;
+    config.dp_rank         = dp_rank;
+    config.world_rank      = world_rank;
+
+    if (!config.enabled) {
+        g.state = TelemetryState::DISABLED;
+        RTP_LLM_LOG_INFO("telemetry disabled: JSON configuration disabled (role=%s)", role.c_str());
+        return false;
+    }
+    // Only tp_rank==0 owns request spans.
+    if (tp_rank != 0) {
+        g.state = TelemetryState::DISABLED;
+        RTP_LLM_LOG_INFO("telemetry disabled on tp_rank %ld (only rank0 produces spans)", (long)tp_rank);
+        return false;
+    }
+    if (config.endpoint.empty() || config.headers.empty() || !std::isfinite(config.sampler_ratio)
+        || config.sampler_ratio < 0 || config.sampler_ratio > 1 || config.max_queue_size == 0
+        || config.max_export_batch_size == 0 || config.max_export_batch_size > config.max_queue_size
+        || config.schedule_delay_ms <= 0 || config.http_timeout_ms <= 0) {
+        g.state = TelemetryState::DISABLED;
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=config reason=invalid_resolved_config role=%s", role.c_str());
+        return false;
+    }
+
+    std::unique_ptr<trace_sdk::SpanExporter> exporter;
+    try {
+        otlp::OtlpHttpExporterOptions exporter_options;
+        exporter_options.url          = config.endpoint;
+        exporter_options.content_type = otlp::HttpRequestContentType::kBinary;
+        exporter_options.timeout      = std::chrono::milliseconds(config.http_timeout_ms);
+        // 显式覆盖构造器的全部环境敏感字段，不让旧配置参与导出。
+        exporter_options.http_headers.clear();
+        for (const auto& header : config.headers) {
+            exporter_options.http_headers.emplace(header.first, header.second);
+        }
+        exporter_options.ssl_insecure_skip_verify = false;
+        exporter_options.ssl_ca_cert_path         = config.certificate;
+        exporter_options.ssl_ca_cert_string.clear();
+        exporter_options.ssl_client_key_path.clear();
+        exporter_options.ssl_client_key_string.clear();
+        exporter_options.ssl_client_cert_path.clear();
+        exporter_options.ssl_client_cert_string.clear();
+        exporter_options.ssl_min_tls.clear();
+        exporter_options.ssl_max_tls.clear();
+        exporter_options.ssl_cipher.clear();
+        exporter_options.ssl_cipher_suite.clear();
+        exporter_options.compression.clear();
+        exporter_options.retry_policy_max_attempts       = 5;
+        exporter_options.retry_policy_initial_backoff    = std::chrono::duration<float>{1.0f};
+        exporter_options.retry_policy_max_backoff        = std::chrono::duration<float>{5.0f};
+        exporter_options.retry_policy_backoff_multiplier = 1.5f;
+        if (config.endpoint.rfind("https", 0) == 0 && exporter_options.ssl_ca_cert_path.empty()) {
+            static const char* kCaBundleCandidates[] = {
+                "/etc/pki/tls/certs/ca-bundle.crt",    // RHEL / Alibaba Cloud Linux
+                "/etc/ssl/certs/ca-certificates.crt",  // Debian / Ubuntu
+                "/etc/ssl/certs/ca-bundle.crt",
+                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            };
+            for (const char* candidate : kCaBundleCandidates) {
+                if (access(candidate, R_OK) == 0) {
+                    exporter_options.ssl_ca_cert_path = candidate;
+                    RTP_LLM_LOG_INFO("telemetry auto-detected system CA bundle for HTTPS export: %s", candidate);
+                    break;
+                }
+            }
+            if (exporter_options.ssl_ca_cert_path.empty()) {
+                RTP_LLM_LOG_WARNING("telemetry HTTPS endpoint but no CA bundle found; export will likely fail "
+                                    "(configure certificate in JSON)");
+            }
+        }
+        exporter = otlp::OtlpHttpExporterFactory::Create(exporter_options);
+        // Production wire path only; initWithExporter (test injection) stays
+        // unwrapped so tests assert against their exporter directly.
+        exporter = std::make_unique<DiagnosticSpanExporter>(std::move(exporter));
+    } catch (const std::exception&) {
+        g.state = TelemetryState::INIT_FAILURE;
+        RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=exporter_failed role=%s", role.c_str());
+        return false;
+    }
+    return initInternal(std::move(exporter), config);
+}
+
+bool TelemetryRuntime::initWithExporter(std::unique_ptr<trace_sdk::SpanExporter> exporter,
+                                        const TelemetryConfig&                   config) {
+    auto&                       g = globals();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    if (g.state == TelemetryState::ACTIVE) {
+        RTP_LLM_LOG_WARNING("telemetry initWithExporter called while ACTIVE, call shutdown first");
+        return false;
+    }
+    return initInternal(std::move(exporter), config);
+}
+
+bool TelemetryRuntime::shutdown(int64_t deadline_ms) {
+    std::shared_ptr<trace_sdk::TracerProvider> provider;
+    {
+        auto&                       g = globals();
+        std::lock_guard<std::mutex> lock(g.mutex);
+        if (g.state != TelemetryState::ACTIVE) {
+            g.state =
+                (g.state == TelemetryState::UNINITIALIZED) ? TelemetryState::UNINITIALIZED : TelemetryState::SHUTDOWN;
+            return true;
+        }
+        provider = std::move(g.provider);
+        g.provider.reset();
+        g.state = TelemetryState::SHUTDOWN;
+        g.active.store(false, std::memory_order_release);
+        // Detach the old provider while holding the same mutex used by init().
+        // Otherwise a concurrent init can publish a new provider here and then
+        // be overwritten by the old shutdown's delayed no-op assignment.
+        setGlobalNoop();
+    }
+
+    // Bounded shutdown: flush + shutdown on a detached thread. BSP destruction
+    // joins its worker thread indefinitely, so on deadline expiry we leak the
+    // provider intentionally and let the detached thread block forever; the OS
+    // reclaims it at process exit.
+    auto done   = std::make_shared<std::promise<void>>();
+    auto future = done->get_future();
+    std::thread([provider, done, deadline_ms]() mutable {
+        try {
+            provider->ForceFlush(std::chrono::microseconds(deadline_ms * 1000));
+            provider->Shutdown();
+        } catch (...) {
+            // swallow everything: telemetry must never break shutdown
+        }
+        provider.reset();
+        done->set_value();
+    }).detach();
+
+    if (future.wait_for(std::chrono::milliseconds(deadline_ms)) != std::future_status::ready) {
+        RTP_LLM_LOG_WARNING("telemetry shutdown exceeded deadline %ld ms, remaining spans dropped", (long)deadline_ms);
+        return false;
+    }
+    return true;
+}
+
+bool TelemetryRuntime::resetForTest() {
+    if (!shutdown(5000)) {
+        return false;
+    }
+    auto&                       g = globals();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    g.state = TelemetryState::UNINITIALIZED;
+    return true;
+}
+
+bool TelemetryRuntime::isActive() {
+    // Lock-free: called once per request on RPC hot paths even when telemetry
+    // is disabled; the mutex-guarded state stays authoritative for init/shutdown.
+    return globals().active.load(std::memory_order_acquire);
+}
+
+TelemetryState TelemetryRuntime::state() {
+    auto&                       g = globals();
+    std::lock_guard<std::mutex> lock(g.mutex);
+    return g.state;
+}
+
+int64_t TelemetryRuntime::worldRank() {
+    // Lock-free: read once per synthesized phase span. Pairs with the release
+    // store in initInternal via the `active` flag callers already checked.
+    return globals().world_rank.load(std::memory_order_relaxed);
+}
+
+nostd::shared_ptr<trace_api::Tracer> TelemetryRuntime::tracer() {
+    {
+        auto&                       g = globals();
+        std::lock_guard<std::mutex> lock(g.mutex);
+        if (g.state == TelemetryState::ACTIVE && g.provider) {
+            return g.provider->GetTracer("rtp_llm", g.scope_version);
+        }
+    }
+    static nostd::shared_ptr<trace_api::TracerProvider> noop_provider(new trace_api::NoopTracerProvider());
+    return noop_provider->GetTracer("rtp_llm_noop", "");
+}
+
+}  // namespace telemetry
+}  // namespace rtp_llm

@@ -83,6 +83,12 @@ class BaseRotaryEmbeddingOp(ABC):
             key: Key tensor to apply RoPE to
             rope_params: Parameters containing position IDs
         """
+        # narrow() to query.size(0) — no-op when fillParams already shrank
+        # positions_d to nnz, correct slice when fill_params_mha_device left
+        # the buffer at its alloc-time size.
+        nnz = query.size(0)
+        pos_ids = rope_params.positions_d.narrow(0, 0, nnz)
+
         if self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(  # type: ignore
                 q=query,
@@ -90,15 +96,17 @@ class BaseRotaryEmbeddingOp(ABC):
                 q_rope=query,
                 k_rope=key,
                 cos_sin_cache=self.cos_sin_cache,
-                pos_ids=rope_params.positions_d,
+                pos_ids=pos_ids,
                 interleave=self.is_neox_style,
             )
         else:
             rope_theta = (
                 self.rope_config.base if self.rope_config is not None else 10000
             )
+            # MRoPE has no precomputed cache and may rotate only part of a head.
+            rotary_dim = self.rope_config.dim if self.rope_config is not None else None
             flashinfer.apply_rope_pos_ids_inplace(
-                query, key, rope_params.positions_d, rope_theta=rope_theta
+                query, key, pos_ids, rotary_dim=rotary_dim, rope_theta=rope_theta
             )
 
     def _prepare_warmup_cache_indices(

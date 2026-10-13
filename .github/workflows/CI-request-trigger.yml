@@ -53,6 +53,7 @@ permissions:
   pull-requests: read
   contents: read
   statuses: write
+  actions: read
 
 concurrency:
   group: >-
@@ -110,6 +111,7 @@ jobs:
             --event-head-sha "${{ github.event.pull_request.head.sha }}" \
             --event-pr-number "${{ github.event.pull_request.number }}" \
             --event-clone-url "${{ github.event.pull_request.head.repo.clone_url }}" \
+            --run-id "${{ github.run_id }}" \
             --output-file "$GITHUB_OUTPUT"
 
       - name: Set pending commit status

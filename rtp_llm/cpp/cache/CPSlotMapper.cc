@@ -1,0 +1,184 @@
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+
+namespace rtp_llm {
+
+CPSlotMapper::CPSlotMapper(): cp_rank_(0), cp_size_(1), block_size_(1), virtual_block_size_(1) {}
+
+CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
+    cp_rank_(cp_rank), cp_size_(cp_size), block_size_(block_size), virtual_block_size_(0) {
+    if (cp_size <= 0) {
+        throw std::invalid_argument("CPSlotMapper cp_size must be positive");
+    }
+    if (block_size <= 0) {
+        throw std::invalid_argument("CPSlotMapper block_size must be positive");
+    }
+    if (cp_rank < 0 || cp_rank >= cp_size) {
+        throw std::invalid_argument("CPSlotMapper cp_rank out of range");
+    }
+    if (block_size > std::numeric_limits<int>::max() / cp_size) {
+        throw std::invalid_argument("CPSlotMapper virtual block size exceeds int range");
+    }
+    virtual_block_size_ = block_size * cp_size;
+}
+
+CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::string_view tag) const {
+    CpGroupLayout layout;
+    const auto&   group       = config.topology().group(tag);
+    const auto&   policy      = group.policy;
+    layout.active_tail_blocks = policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+    if (!isSharded()) {
+        return layout;
+    }
+    layout.mapping = policy.cp_mapping;
+    // FULL groups use page/block-level CP mapping. Byte slicing is only valid for
+    // state/SWA-style groups whose writer stores matching sliced payloads.
+    layout.slice = policy.group_type == CacheGroupType::FULL ? CpBlockSliceMode::NONE : policy.cp_slice;
+    return layout;
+}
+
+bool CPSlotMapper::blockRoundRobinGroup(const CacheConfig& config, std::string_view tag) const {
+    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+}
+
+bool CPSlotMapper::compactLastRankGroup(const CacheConfig& config, std::string_view tag) const {
+    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+}
+
+int CPSlotMapper::localBlockCount(int seq_len) const {
+    if (seq_len <= 0) {
+        return 0;
+    }
+    // All CP ranks keep the same block count = ceil(total_blocks / cp_size).
+    // rank0 is the controller: it allocates blocks and broadcasts block_ids
+    // to all ranks.  Using a uniform count simplifies KV cache management.
+    int total_blocks = (seq_len + block_size_ - 1) / block_size_;
+    return (total_blocks + cp_size_ - 1) / cp_size_;
+}
+
+int CPSlotMapper::effectiveSeqLenForAlloc(int actual_seq_len) const {
+    return localBlockCount(actual_seq_len) * block_size_;
+}
+
+int CPSlotMapper::effectiveSeqLenForAlloc(const CacheConfig& config, std::string_view tag, int seq_len) const {
+    if (!blockRoundRobinGroup(config, tag)) {
+        return seq_len;
+    }
+    return effectiveSeqLenForAlloc(seq_len);
+}
+
+size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, std::string_view tag) const {
+    if (blockRoundRobinGroup(config, tag)) {
+        return static_cast<size_t>(virtual_block_size_);
+    }
+    return config.topology().group(tag).seqSizePerBlock();
+}
+
+int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
+    const auto checked_tokens = [](size_t tokens) {
+        if (tokens == 0 || tokens > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            throw std::invalid_argument("CPSlotMapper reuse block tokens must fit a positive int");
+        }
+        return static_cast<int>(tokens);
+    };
+    if (isSharded()) {
+        for (const auto& group : config.topology().groups()) {
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                return checked_tokens(group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                                          static_cast<size_t>(virtual_block_size_) :
+                                          group.seqSizePerBlock());
+            }
+        }
+    }
+    return checked_tokens(config.seq_size_per_block);
+}
+
+CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
+    if (!isSharded()) {
+        return full_keys;
+    }
+    CacheKeysType local;
+    const int     start = cp_size_ - 1;
+    for (int i = start; i < static_cast<int>(full_keys.size()); i += cp_size_) {
+        local.push_back(full_keys[static_cast<size_t>(i)]);
+    }
+    return local;
+}
+
+std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,
+                                                              std::string_view   tag,
+                                                              size_t             total_logical_blocks,
+                                                              size_t             reuse_block_size,
+                                                              bool               use_hybrid) const {
+    auto policy = config.topology().group(tag).policy;
+    if (!isSharded()) {
+        policy.cp_mapping = CpBlockMappingMode::NONE;
+    }
+    return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
+}
+
+std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(CacheGroupType group_type,
+                                                              size_t         total_logical_blocks,
+                                                              size_t         reuse_block_size,
+                                                              bool           use_hybrid) const {
+    return buildStorePlan(defaultCacheGroupPolicy(group_type), total_logical_blocks, reuse_block_size, use_hybrid);
+}
+
+std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPolicy& policy,
+                                                              size_t                  total_logical_blocks,
+                                                              size_t                  reuse_block_size,
+                                                              bool                    use_hybrid) const {
+    return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
+}
+
+std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     config,
+                                                       std::string_view       tag,
+                                                       std::vector<BlockInfo> parts,
+                                                       size_t                 peer_idx) const {
+    const auto layout = layoutForGroup(config, tag);
+    if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
+        return parts;
+    }
+    RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "CP byte slicing expects one block part, got %zu", parts.size());
+    RTP_LLM_CHECK_WITH_INFO(
+        peer_idx < static_cast<size_t>(cp_size_), "CP slice peer_idx=%zu out of cp_size=%d", peer_idx, cp_size_);
+    const auto& spec = config.topology().group(tag).spec;
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CP slice got null spec for tag=%.*s", (int)tag.size(), tag.data());
+    auto& block = parts[0];
+    RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "CP byte slicing got null block addr");
+
+    size_t slice_bytes = 0;
+    if (layout.slice == CpBlockSliceMode::EQUAL_BYTES) {
+        RTP_LLM_CHECK_WITH_INFO(block.size_bytes % static_cast<size_t>(cp_size_) == 0,
+                                "CP block bytes %zu not divisible by cp_size %d",
+                                block.size_bytes,
+                                cp_size_);
+        slice_bytes = block.size_bytes / static_cast<size_t>(cp_size_);
+    } else {
+        const auto payload_bytes = spec->k_block_payload_bytes();
+        RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "CP payload slicing requires positive payload bytes");
+        RTP_LLM_CHECK_WITH_INFO(payload_bytes % static_cast<size_t>(cp_size_) == 0,
+                                "CP payload bytes %zu not divisible by cp_size %d",
+                                payload_bytes,
+                                cp_size_);
+        slice_bytes = payload_bytes / static_cast<size_t>(cp_size_);
+    }
+
+    const size_t slice_offset = slice_bytes * peer_idx;
+    RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,
+                            "CP slice [%zu, %zu) exceeds block bytes %zu",
+                            slice_offset,
+                            slice_offset + slice_bytes,
+                            block.size_bytes);
+    block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + slice_offset);
+    block.size_bytes = slice_bytes;
+    return parts;
+}
+
+}  // namespace rtp_llm

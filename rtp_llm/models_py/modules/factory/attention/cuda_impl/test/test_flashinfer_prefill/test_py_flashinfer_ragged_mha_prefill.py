@@ -11,9 +11,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref im
     compute_flashinfer_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
+    FP8_CACHE_DTYPES,
     BaseAttentionTest,
-    compare_tensors,
+    make_fp8_unit_scale,
 )
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -54,6 +56,10 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         )
 
         kv_cache.kv_cache_base = kv_cache_combined
+        if dtype in FP8_CACHE_DTYPES:
+            kv_cache.kv_scale_base = make_fp8_unit_scale(
+                total_blocks, num_kv_heads, seq_size_per_block, self.device
+            )
 
         # Extract separate K and V for reference computation
         k_cache = kv_cache_combined[:, 0, :, :, :]
@@ -70,6 +76,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         size_per_head: int = 128,
         seq_size_per_block: int = 64,
         causal: bool = True,
+        with_kv_cache_block_ids: bool = True,
     ):
         """Test prefill correctness by comparing with flashinfer reference implementation"""
 
@@ -82,7 +89,10 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         config.attn_configs.is_causal = causal
 
         attn_inputs = self._create_prefill_attention_inputs(
-            batch_size, sequence_lengths, config.seq_size_per_block
+            batch_size,
+            sequence_lengths,
+            config.seq_size_per_block,
+            with_kv_cache_block_ids=with_kv_cache_block_ids,
         )
 
         # Create PyFlashinferPrefillAttnOp instance
@@ -126,32 +136,35 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         k = k_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
         v = v_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
 
-        # Create KV cache
-        total_blocks = self._calculate_total_blocks(
-            sequence_lengths, config.seq_size_per_block
-        )
-        kv_cache, _, _ = self._create_kv_cache(
-            total_blocks,
-            config.seq_size_per_block,
-            config.head_num_kv,
-            config.size_per_head,
-            dtype=torch.float16,
-        )
+        kv_cache = None
+        if with_kv_cache_block_ids:
+            total_blocks = self._calculate_total_blocks(
+                sequence_lengths, config.seq_size_per_block
+            )
+            kv_cache, _, _ = self._create_kv_cache(
+                total_blocks,
+                config.seq_size_per_block,
+                config.head_num_kv,
+                config.size_per_head,
+                dtype=self.cache_dtype(config.attn_configs),
+            )
 
         # Forward pass through PyFlashinferPrefillAttnOp
-        output = attn_op.forward(qkv, kv_cache)
+        output = attn_op.forward(q, k, v, kv_cache)
 
-        # Compute reference outputs using flashinfer's single_prefill_with_kv_cache
+        # Compute reference outputs using flashinfer's single_prefill_with_kv_cache (with round-trip)
         ref_output = compute_flashinfer_prefill_reference(
-            q, k, v, attn_inputs.cu_seqlens_device, causal=causal
+            q.to(attn_op.q_dtype).to(q.dtype),
+            k.to(attn_op.kv_dtype).to(k.dtype),
+            v.to(attn_op.kv_dtype).to(v.dtype),
+            attn_inputs.cu_seqlens_device,
+            causal=causal,
         )
 
         # Compare outputs
-        compare_tensors(
+        self._assert_output_close(
             output,
             ref_output,
-            rtol=1e-2,
-            atol=1e-2,
             name=f"Prefill output (batch={batch_size}, seq_lens={sequence_lengths})",
         )
 
@@ -178,6 +191,18 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
             head_num_kv=2,
             size_per_head=64,
             causal=False,
+        )
+
+    def test_non_causal_prefill_without_kv_block_table(self):
+        """Test encoder-only ragged prefill without a paged KV block table."""
+        self._test_prefill_correctness(
+            batch_size=2,
+            sequence_lengths=[10, 20],
+            head_num=8,
+            head_num_kv=8,
+            size_per_head=128,
+            causal=False,
+            with_kv_cache_block_ids=False,
         )
 
     def test_multi_batch_prefill(self):
@@ -291,6 +316,69 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
                 sequence_lengths=[16, 128, 1024],  # 64x difference
                 size_per_head=head_dim,
             )
+
+
+class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
+    kv_cache_dtype = KvCacheDataType.FP8
+    rtol = 4e-2
+    atol = 4e-2
+    max_mismatch_rate = 5e-5
+
+    def test_out_of_fp8_range_kv(self):
+        config = self._create_config(
+            head_num=1,
+            head_num_kv=1,
+            size_per_head=64,
+            seq_size_per_block=16,
+        )
+        config.attn_configs.is_causal = False
+        attn_inputs = self._create_prefill_attention_inputs(
+            batch_size=1,
+            sequence_lengths=[2],
+            seq_size_per_block=config.seq_size_per_block,
+            with_kv_cache_block_ids=False,
+        )
+
+        attn_op = PyFlashinferPrefillAttnOp(config.attn_configs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(attn_inputs)
+        self.assertEqual(attn_op.kv_dtype, torch.float8_e4m3fn)
+
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        q = torch.full(
+            (2, config.head_num, config.size_per_head),
+            0.125,
+            dtype=torch.float16,
+            device=self.device,
+        )
+        k = torch.empty(
+            (2, config.head_num_kv, config.size_per_head),
+            dtype=torch.float16,
+            device=self.device,
+        )
+        v = torch.empty_like(k)
+        k[0].fill_(2 * fp8_max)
+        k[1].fill_(-2 * fp8_max)
+        v.copy_(k)
+
+        output = attn_op.forward(q, k, v, kv_cache=None)
+
+        saturated_k = k.clamp(-fp8_max, fp8_max).to(attn_op.kv_dtype).to(k.dtype)
+        saturated_v = v.clamp(-fp8_max, fp8_max).to(attn_op.kv_dtype).to(v.dtype)
+        ref_output = compute_flashinfer_prefill_reference(
+            q.to(attn_op.q_dtype).to(q.dtype),
+            saturated_k,
+            saturated_v,
+            attn_inputs.cu_seqlens_device,
+            causal=False,
+        )
+
+        self.assertTrue(torch.isfinite(output).all().item())
+        self._assert_output_close(
+            output,
+            ref_output,
+            name="FP8 ragged prefill output with saturated K/V",
+        )
 
 
 if __name__ == "__main__":

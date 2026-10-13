@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
 namespace rtp_llm {
@@ -10,7 +11,9 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* server_context = nullptr) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -41,10 +44,18 @@ private:
                     }
                     mm_preprocess_config.append(crop_positions);
                     mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
+                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_long_side_pixel);
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
+                auto res = mm_process_engine_.attr("mm_embedding_cpp")(
+                    urls,
+                    types,
+                    tensors,
+                    mm_preprocess_configs,
+                    request_id,
+                    dashScopeMetadata(server_context, "x-dashscope-uid"),
+                    dashScopeMetadata(server_context, "x-dashscope-service"));
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
@@ -52,7 +63,14 @@ private:
                 for (auto& emb : mm_embedding_vec) {
                     mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
-                mm_embedding_res.mm_features               = mm_features;
+                mm_embedding_res.mm_features = mm_features;
+                if (py::hasattr(res, "feature_hashes") && !res.attr("feature_hashes").is_none()) {
+                    std::vector<torch::Tensor> hashes;
+                    for (auto& value : convertPyObjectToVec(res.attr("feature_hashes"))) {
+                        hashes.emplace_back(convertPyObjectToTensor(value));
+                    }
+                    mm_embedding_res.mm_feature_hashes = std::move(hashes);
+                }
                 auto                       position_id_vec = res.attr("position_ids");
                 std::vector<torch::Tensor> position_ids;
                 if (!position_id_vec.is_none()) {
@@ -73,13 +91,27 @@ private:
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
-                if (error_msg.find("download failed") != std::string::npos) {
-                    return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
+                try {
+                    py::gil_scoped_acquire gil;
+                    py::object             exc = py::reinterpret_borrow<py::object>(e.value());
+                    if (exc && py::hasattr(exc, "exception_type")) {
+                        const auto exception_type = exc.attr("exception_type").cast<int>();
+                        const auto message = py::hasattr(exc, "message") ? exc.attr("message").cast<std::string>() :
+                                                                           py::str(exc).cast<std::string>();
+                        if (auto error_code = parseMultimodalErrorCode(exception_type)) {
+                            return ErrorInfo(*error_code, message);
+                        }
+                    }
+                } catch (...) {
+                    // Fall through to the legacy error mapping.
+                }
+                if (auto error_info = parseMultimodalErrorMessage(error_msg)) {
+                    return *error_info;
                 }
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error_msg);
             }
         } else {
-            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
+            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "no mm process engine!");
         }
     }
 };

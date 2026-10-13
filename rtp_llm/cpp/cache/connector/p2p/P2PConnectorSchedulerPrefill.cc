@@ -124,6 +124,9 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         sleep_ms = std::min(sleep_ms * 2, kBackoffCapMs);
     }
+    // The shared BroadcastManager advances done() asynchronously. Consume the
+    // completed result once more to preserve the legacy timeout exception.
+    result->checkDone();
     return cancel_result;
 }
 

@@ -65,6 +65,8 @@ Tree Decode is enabled when the model loads a valid config file (global effect; 
 
 If loaded successfully, you will see: `PrefixToCandidateTokens load [path] successfully` in logs. If not configured or failed to load, Tree Decode is disabled.
 
+Tree Decode cannot be enabled together with MTP. If MTP is configured, unset `TREE_DECODE_CONFIG`; otherwise MTP executor startup rejects the configuration.
+
 ---
 
 ### Design and best practices

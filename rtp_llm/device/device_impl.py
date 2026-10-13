@@ -12,7 +12,7 @@ from rtp_llm.ops.compute_ops import (
     preprocess_weight_scale,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
 
 
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
@@ -53,7 +53,10 @@ class ArmCpuImpl(CpuImpl):
         ]
 
     def maybe_rewrite_weight_by_key(
-        self, key: str, weight: torch.Tensor
+        self,
+        key: str,
+        weight: torch.Tensor,
+        use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         return preprocess_gemm_weight_by_key(
             key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
@@ -602,13 +605,22 @@ class CudaImpl(GpuImpl):
             *shape[:-1], shape[-1] // 16
         )  # fp8 scaling factors
 
-        weight_fp4_shuffled = []
-        scale_fp4_shuffled = []
+        if shape[0] == 0:
+            raise RuntimeError("FP4 MoE weight preparation requires at least one expert")
+
+        # Keep only one expert's scratch storage alive instead of retaining all
+        # shuffled experts and allocating another full tensor in torch.stack.
+        weight_fp4_shuffled = torch.empty(
+            weight_fp4.shape, dtype=torch.uint8, device=weight_fp4.device
+        )
+        scale_fp4_shuffled = torch.empty(
+            scale_linear_fp4.shape, dtype=torch.uint8, device=scale_linear_fp4.device
+        )
         for i in range(shape[0]):
             permute_indices = findices(
                 cache, weight_fp4[i].view(torch.uint8), epilogue_tile_m
             )
-            weight_fp4_shuffled.append(
+            weight_fp4_shuffled[i].copy_(
                 weight_fp4[i]
                 .view(torch.uint8)[permute_indices.to(weight_fp4.device)]
                 .contiguous()
@@ -620,20 +632,28 @@ class CudaImpl(GpuImpl):
                 epilogue_tile_m,
                 num_elts_per_sf=16,
             )
-            scale_fp4_shuffled.append(
-                nvfp4_block_scale_interleave(
-                    scale_linear_fp4[i]
-                    .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
-                    .contiguous()
-                )
+            scale_bytes = (
+                scale_linear_fp4[i]
+                .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
+                .contiguous()
             )
+            if scale_bytes.device.type == "cpu":
+                scale_bytes = scale_bytes.to(
+                    torch.device("cuda", torch.cuda.current_device())
+                )
+                scale_fp4_shuffled[i].copy_(
+                    nvfp4_block_scale_interleave(scale_bytes)
+                    .cpu()
+                    .reshape(scale_fp4_shuffled[i].shape)
+                )
+            else:
+                scale_fp4_shuffled[i].copy_(
+                    nvfp4_block_scale_interleave(scale_bytes).reshape(
+                        scale_fp4_shuffled[i].shape
+                    )
+                )
 
-        weight_fp4_shuffled = torch.stack(weight_fp4_shuffled)
-        scale_fp4_shuffled = (
-            torch.stack(scale_fp4_shuffled)
-            .view(torch.float8_e4m3fn)
-            .reshape(*shape[:-1], shape[-1] // 16)
-        )
+        scale_fp4_shuffled = scale_fp4_shuffled.view(torch.float8_e4m3fn)
         return weight_fp4_shuffled, scale_fp4_shuffled
 
     def maybe_prepare_static_weights_for_fp4_moe(
@@ -917,6 +937,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
@@ -927,7 +948,10 @@ class RocmImpl(GpuImpl):
         return x_
 
     def maybe_rewrite_weight_by_key(
-        self, key: str, weight: torch.Tensor
+        self,
+        key: str,
+        weight: torch.Tensor,
+        use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         is_gfx950 = self._is_gfx950()
         if key == "weight":
@@ -954,7 +978,20 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+            should_swizzle = (
+                self.py_env_configs.py_hw_kernel_config.use_swizzleA
+                if use_swizzle_a is None
+                else use_swizzle_a
+            )
+            if key == W.linear_attn_ba_w:
+                # BA remains BF16 even when qkvz is quantized. Select its
+                # physical layout from the actual TP-local shape so aligned
+                # projections keep the fast path while N=24/12 safely fall
+                # back to the raw layout.
+                should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(
+                    weight
+                )
+            if should_swizzle:
                 if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
                 else:

@@ -1,7 +1,23 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include <iostream>
+#include <utility>
 
 namespace rtp_llm {
+
+void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs) {
+    for (auto& [tag, tagged_inputs] : inputs.attention_inputs_by_tag) {
+        (void)tag;
+        auto kernel_block_id                          = tagged_inputs.kv_cache_kernel_block_id;
+        auto kernel_block_id_device                   = tagged_inputs.kv_cache_kernel_block_id_device;
+        auto block_id                                 = tagged_inputs.kv_cache_block_id;
+        auto block_id_device                          = tagged_inputs.kv_cache_block_id_device;
+        tagged_inputs                                 = inputs.attention_inputs;
+        tagged_inputs.kv_cache_kernel_block_id        = std::move(kernel_block_id);
+        tagged_inputs.kv_cache_kernel_block_id_device = std::move(kernel_block_id_device);
+        tagged_inputs.kv_cache_block_id               = std::move(block_id);
+        tagged_inputs.kv_cache_block_id_device        = std::move(block_id_device);
+    }
+}
 
 // Helper function to print tensor info and data
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size) {

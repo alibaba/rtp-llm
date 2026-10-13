@@ -2,6 +2,7 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
@@ -11,10 +12,12 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
+#include "rtp_llm/cpp/pybind/ConfigExtract.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
@@ -23,11 +26,29 @@ namespace th = torch;
 
 namespace rtp_llm {
 
+namespace {
+
+int64_t getGrpcStopTimeoutMs() {
+    constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
+    const auto        explicit_timeout_ms   = autil::EnvUtil::getEnv("RTP_LLM_STOP_TIMEOUT_MS", int64_t(0));
+    if (explicit_timeout_ms > 0) {
+        return explicit_timeout_ms;
+    }
+    const auto shutdown_timeout_s = autil::EnvUtil::getEnv("SHUTDOWN_TIMEOUT", int64_t(600));
+    if (shutdown_timeout_s <= 0) {
+        return kDefaultStopTimeoutMs;
+    }
+    return shutdown_timeout_s * 1000;
+}
+
+}  // namespace
+
 std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
     auto            sp_model = propose_model.attr("model");
     SpeculativeType sp_type  = propose_model.attr("sp_type").cast<SpeculativeType>();
-    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE);
+    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE
+                  || sp_type == SP_TYPE_DSPARK);
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -41,6 +62,45 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto         py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     const size_t weight_count          = py_layers_weights_vec.size();
     size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+
+    // Get py_eplb if available (from model)
+    py::object py_eplb = py::none();
+    if (py::hasattr(sp_model, "py_eplb")) {
+        py_eplb = sp_model.attr("py_eplb");
+    }
+
+    if (sp_type == SP_TYPE_DSPARK) {
+        // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
+        // width of its draft block, not the number of one-layer MTP modules, so
+        // it keeps the full checkpoint config instead of an MTP module plan.
+        auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
+                                                                          model_config,
+                                                                          base_params.parallelism_config,
+                                                                          base_params.runtime_config,
+                                                                          base_params.pd_sep_config,
+                                                                          base_params.concurrency_config,
+                                                                          base_params.fmha_config,
+                                                                          base_params.kv_cache_config,
+                                                                          base_params.profiling_debug_logging_config,
+                                                                          base_params.hw_kernel_config,
+                                                                          base_params.device_resource_config,
+                                                                          base_params.moe_config,
+                                                                          base_params.model_specific_config,
+                                                                          base_params.sp_config,
+                                                                          base_params.cache_store_config,
+                                                                          base_params.misc_config,
+                                                                          base_params.arpc_config,
+                                                                          base_params.grpc_config,
+                                                                          base_params.ffn_disaggregate_config,
+                                                                          base_params.vit_config,
+                                                                          std::move(*gpt_weight),
+                                                                          py::none(),
+                                                                          py_eplb)));
+        return std::move(
+            std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    }
+
     if (gen_num_per_cycle > 1 && weight_count == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
@@ -51,12 +111,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     }
     const auto module_plan = buildMTPModuleConfigPlan(model_config, weight_count, gen_num_per_cycle, sp_type);
     const auto model_num   = module_plan.module_configs.size();
-
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
 
     for (size_t i = 0; i < model_num; i++) {
         const auto source_layer = module_plan.source_layer_indices[i];
@@ -104,7 +158,8 @@ void RtpLLMOp::init(py::object model,
                     py::object vit_config,
                     py::object propose_model,
                     py::object token_processor,
-                    py::object mm_process_engine) {
+                    py::object mm_process_engine,
+                    py::object trace_config) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
@@ -119,13 +174,56 @@ void RtpLLMOp::init(py::object model,
 
     params.showDebugInfo();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model, params);
-    pybind11::gil_scoped_release                  release;
+    telemetry::TelemetryConfig                    telemetry_config;
+    // 在释放 GIL 前复制已解析配置；RPC 线程不持有 Python 配置对象。
+    if (!trace_config.is_none() && params.parallelism_config.tp_rank == 0) {
+        try {
+            if (!py::isinstance<py::bool_>(trace_config.attr("enabled"))) {
+                throw std::invalid_argument("invalid enabled type");
+            }
+            telemetry_config.enabled = trace_config.attr("enabled").cast<bool>();
+            if (telemetry_config.enabled) {
+                telemetry_config.endpoint = trace_config.attr("endpoint").cast<std::string>();
+                for (auto item : trace_config.attr("headers").attr("items")()) {
+                    auto pair = py::cast<py::tuple>(item);
+                    telemetry_config.headers.emplace(pair[0].cast<std::string>(), pair[1].cast<std::string>());
+                }
+                telemetry_config.certificate           = trace_config.attr("certificate").cast<std::string>();
+                telemetry_config.service_name          = trace_config.attr("service_name").cast<std::string>();
+                telemetry_config.scope_version         = trace_config.attr("scope_version").cast<std::string>();
+                telemetry_config.source                = trace_config.attr("source").cast<std::string>();
+                telemetry_config.sampler_ratio         = trace_config.attr("sampler_ratio").cast<double>();
+                telemetry_config.max_queue_size        = trace_config.attr("max_queue_size").cast<size_t>();
+                telemetry_config.max_export_batch_size = trace_config.attr("max_export_batch_size").cast<size_t>();
+                telemetry_config.schedule_delay_ms     = trace_config.attr("schedule_delay_ms").cast<int64_t>();
+                telemetry_config.http_timeout_ms       = trace_config.attr("http_timeout_ms").cast<int64_t>();
+            }
+        } catch (...) {
+            telemetry_config = telemetry::TelemetryConfig{};
+            RTP_LLM_LOG_WARNING("telemetry disabled: role=backend field=config reason=conversion_failed");
+        }
+    }
+
+    // engine_creator routes embedding tasks through RtpEmbeddingOp, not this generation op.
+    if (py::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
+        TORCH_CHECK(!params.py_model.is_none(), "custom output requires a Python model");
+        RTP_LLM_CHECK_WITH_INFO(params.pd_sep_config.role_type == RoleType::PDFUSION && !propose_params
+                                    && params.sp_config.type == SP_TYPE_NONE,
+                                "custom output requires PDFUSION without speculative decoding");
+        // Hidden states are replicated; only rank 0 owns response streams.
+        if (params.parallelism_config.tp_rank == 0) {
+            params.py_model.attr("custom_output_handler") = model.attr("custom_module").attr("handler");
+        }
+    }
+
+    pybind11::gil_scoped_release release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
                                       std::move(propose_params),
                                       std::move(token_processor),
-                                      std::move(mm_process_engine));
+                                      std::move(mm_process_engine),
+                                      std::move(telemetry_config));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -155,12 +253,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
         auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
         auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
+        auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
 
         // Extract vit_config
-        VitConfig vit_config_cpp;
-        if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
-        }
+        const VitConfig vit_config_cpp = extractVitConfig(vit_config);
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
         py::object py_global_weights = model.attr("weight").attr("global_weights");
@@ -202,8 +298,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
+        params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init
@@ -254,7 +352,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                                                                     py::none(),
                                                                     py_eplb);
             model_id_++;
-        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
+                   || sp_type == SP_TYPE_DSPARK) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
             if (sp_type == SP_TYPE_MTP) {
                 size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
@@ -279,7 +378,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor,
-                             py::object                                    mm_process_engine) {
+                             py::object                                    mm_process_engine,
+                             telemetry::TelemetryConfig                    trace_config) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
@@ -288,6 +388,37 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         auto    role_type                      = maga_init_params.pd_sep_config.role_type;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
+        // trace telemetry runtime: init once role/rank are known; only
+        // tp_rank==0 enables span production, and it is off unless explicitly
+        // enabled by env
+        {
+            std::string trace_role;
+            switch (role_type) {
+                case RoleType::PDFUSION:
+                    trace_role = "pdfusion";
+                    break;
+                case RoleType::PREFILL:
+                    trace_role = "prefill";
+                    break;
+                case RoleType::DECODE:
+                    trace_role = "decode";
+                    break;
+                case RoleType::VIT:
+                    trace_role = "vit";
+                    break;
+                case RoleType::FRONTEND:
+                    trace_role = "frontend";
+                    break;
+                default:
+                    trace_role = "unknown";
+                    break;
+            }
+            telemetry::TelemetryRuntime::init(trace_config,
+                                              trace_role,
+                                              maga_init_params.parallelism_config.tp_rank,
+                                              maga_init_params.parallelism_config.dp_rank,
+                                              maga_init_params.parallelism_config.world_rank);
+        }
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
@@ -312,11 +443,18 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         }
     }
     grpc::ServerBuilder builder;
-    const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
-    auto                server_config = grpc_config.get_server_config();
+    // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
+    builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
+    const GrpcConfig& grpc_config   = maga_init_params.grpc_config;
+    auto              server_config = grpc_config.get_server_config();
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
+    }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+        RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
@@ -346,14 +484,19 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
-    int64_t STOP_TIMEOUT_MS = 60 * 1000;
+    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        if (model_rpc_service_) {
+            model_rpc_service_->beginShutdown();
+        }
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s", onflight_request);
+                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
+                                 onflight_request,
+                                 stop_timeout_ms);
                 sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > STOP_TIMEOUT_MS * 1000) {
+                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
                     RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
                     break;
                 }
@@ -373,6 +516,11 @@ void RtpLLMOp::stop() {
             http_server_.reset();
         }
         is_server_shutdown_ = true;
+        // bounded flush of remaining spans; never blocks process exit
+        {
+            pybind11::gil_scoped_release release;
+            telemetry::TelemetryRuntime::shutdown();
+        }
         stopKmonitorFactory();
     }
 }
@@ -401,7 +549,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("propose_model"),
              py::arg("token_processor"),
-             py::arg("mm_process_engine"))
+             py::arg("mm_process_engine"),
+             py::arg("trace_config") = py::none())
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

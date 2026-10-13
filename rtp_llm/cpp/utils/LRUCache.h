@@ -44,6 +44,8 @@ public:
 
     std::tuple<bool, ValueType> get(const KeyType& key);
 
+    const ValueType* find(const KeyType& key) const;
+
     std::tuple<bool, ValueType> pop();
 
     std::tuple<bool, ValueType> popWithCond(const std::function<bool(const KeyType&, const ValueType&)>& cond);
@@ -51,6 +53,8 @@ public:
     void clear();
 
     bool contains(const KeyType& key) const;
+
+    const ValueType* peek(const KeyType& key) const;
 
     bool remove(const KeyType& key, ValueType* removed_value = nullptr);
 
@@ -123,6 +127,15 @@ std::tuple<bool, ValueType> LRUCache<KeyType, ValueType, Hash, Equal>::get(const
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+const ValueType* LRUCache<KeyType, ValueType, Hash, Equal>::find(const KeyType& key) const {
+    auto it = cache_items_map_.find(key);
+    if (it == cache_items_map_.end()) {
+        return nullptr;
+    }
+    return &it->second->second;
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
 std::tuple<bool, ValueType> LRUCache<KeyType, ValueType, Hash, Equal>::pop() {
     return popWithCond([](const KeyType&, const ValueType&) { return true; });
 }
@@ -163,6 +176,12 @@ template<typename KeyType, typename ValueType, typename Hash, typename Equal>
 bool LRUCache<KeyType, ValueType, Hash, Equal>::contains(const KeyType& key) const {
     auto it = cache_items_map_.find(key);
     return it != cache_items_map_.end();
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+const ValueType* LRUCache<KeyType, ValueType, Hash, Equal>::peek(const KeyType& key) const {
+    auto it = cache_items_map_.find(key);
+    return it == cache_items_map_.end() ? nullptr : &it->second->second;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

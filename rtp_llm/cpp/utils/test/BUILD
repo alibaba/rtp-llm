@@ -20,6 +20,16 @@ test_deps = [
 ]
 
 cc_test(
+    name = "block_ref_counter_test",
+    srcs = ["BlockRefCounterTest.cc"],
+    copts = test_copts,
+    deps = google_test_deps + [
+        "//rtp_llm/cpp/cache:block_ref_counter",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_test(
     name = "lru_cache_test",
     srcs = [
         "LRUCacheTest.cc",
@@ -80,4 +90,26 @@ cc_test(
     ],
     copts = copts(),
     deps = google_test_deps + ["//rtp_llm/cpp/utils:device_pin"],
+)
+
+cc_test(
+    name = "torch_cuda_oom_test",
+    srcs = ["TorchCudaOomTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
+)
+
+cc_test(
+    name = "torch_cuda_oom_diagnostics_test",
+    srcs = ["TorchCudaOomDiagnosticsTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
+    timeout = "short",
+)
+
+cc_test(
+    name = "access_logger_test",
+    srcs = ["AccessLoggerTest.cc"],
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+    copts = copts(),
 )

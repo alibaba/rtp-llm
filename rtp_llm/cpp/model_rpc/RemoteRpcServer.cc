@@ -71,7 +71,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.rdma_listen_port             = init_params.pd_sep_config.cache_store_rdma_listen_port;
     params.rdma_mode                    = init_params.pd_sep_config.cache_store_rdma_mode;
     params.thread_count                 = init_params.cache_store_config.thread_count;
-    params.queue_size                   = 500;
+    params.queue_size                   = 1000;
     params.rdma_connect_timeout_ms      = init_params.cache_store_config.rdma_connect_timeout_ms;
     params.rdma_qp_count_per_connection = init_params.cache_store_config.rdma_qp_count_per_connection;
     params.rdma_io_thread_count         = init_params.cache_store_config.rdma_io_thread_count;

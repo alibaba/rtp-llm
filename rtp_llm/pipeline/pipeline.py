@@ -3,6 +3,7 @@ import copy
 import logging
 import queue
 import threading
+from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -24,8 +25,13 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+    get_role_names,
+)
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -60,8 +66,11 @@ class Pipeline(object):
         ] = None,  # mm_related_params from ModelConfig (optional)
         grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
+        mm_model_config: Optional[Any] = None,  # mm_model_config from ModelConfig
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -80,9 +89,15 @@ class Pipeline(object):
             sp_config=sp_config,
             grpc_config=grpc_config,
             vit_separation=vit_separation,
+            mm_model_config=mm_model_config,
             server_config=server_config,
             master_config=master_config,
+            parallelism_config=parallelism_config,
+            prefill_cp_config=prefill_cp_config,
         )
+
+    async def close(self) -> None:
+        await self.backend_rpc_server_visitor.close()
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
@@ -176,6 +191,7 @@ class Pipeline(object):
         if request_id == None:
             request_id = request_counter.increment()
 
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -190,7 +206,7 @@ class Pipeline(object):
                     url,
                     MMUrlType.DEFAULT,
                     torch.empty(0),
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                    MMPreprocessConfig(),
                 )
                 for url in urls
             ]
@@ -257,7 +273,12 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.max_num_beams())
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
         return self.generate_stream(
-            request_id, token_ids, mm_inputs, generate_config, **kwargs
+            request_id,
+            token_ids,
+            mm_inputs,
+            generate_config,
+            headers=request_headers,
+            **kwargs,
         )
 
     @staticmethod
@@ -326,9 +347,14 @@ class Pipeline(object):
         tokens_lists_for_decode_input = []
         output_lens = []
         token_lists_to_decode = []
+        outputs = generate_outputs.generate_outputs
+        batched = isinstance(outputs, BatchedTerminalOutputs)
+        terminal_output = GenerateOutput(finished=True) if batched else None
         if generate_config.has_num_beams():
-            all_output_ids = torch.cat(
-                [go.output_ids for go in generate_outputs.generate_outputs], dim=0
+            all_output_ids = (
+                outputs.output_ids[:, 0, :]
+                if batched
+                else torch.cat([go.output_ids for go in outputs], dim=0)
             )
             all_output_ids_np = all_output_ids.cpu().numpy()
             if not generate_config.ignore_eos:
@@ -362,7 +388,8 @@ class Pipeline(object):
                 else:
                     tokens = tokens.reshape(-1)
                 tokens_lists_for_decode_input.append(tokens.tolist())
-        for i, generate_output in enumerate(generate_outputs.generate_outputs):
+        for i in range(len(outputs)):
+            generate_output = terminal_output if batched else outputs[i]
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))
             processed_tokens = Pipeline.process_stop_id(
@@ -379,14 +406,14 @@ class Pipeline(object):
             skip_special_tokens=generate_config.skip_special_tokens,
             **kwargs,
         )
-        newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
+        newly_decoded_texts = [text.rstrip("\ufffd") for text in decoded_batch]
         all_texts = newly_decoded_texts
 
         final_texts = []
         for i in range(len(all_texts)):
             processed_text, _ = Pipeline.process_stop_str(
                 generate_config,
-                generate_outputs.generate_outputs[i],
+                terminal_output if batched else outputs[i],
                 newly_decoded_texts[i],
                 all_texts[i],
                 stop_word_str_list,
@@ -503,7 +530,16 @@ class Pipeline(object):
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
 
+        prepared = kwargs.pop("v41_inputs", None)
+        if prepared is not None:
+            if mm_inputs:
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "typed V4.1 inputs cannot be combined with generic images",
+                )
+            token_ids = list(prepared.token_ids)
         token_ids = torch.tensor(token_ids, dtype=torch.int)
 
         input = GenerateInput(
@@ -513,8 +549,10 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            batch_group_size=kwargs.get("batch_group_size", 1),
-            batch_group_id=kwargs.get("batch_group_id", -1),
+            v41_inputs=prepared,
+            group_size=kwargs.get("group_size", 1),
+            group_id=kwargs.get("group_id", -1),
+            headers=request_headers,
         )
 
         stop_word_strs = generate_config.stop_words_str
@@ -522,17 +560,41 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = (
-            await self.backend_rpc_server_visitor.enqueue(input)
-        )
-
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
+        async def backend_stream():
+            try:
+                stream: AsyncGenerator[GenerateOutputs, None] = (
+                    await self.backend_rpc_server_visitor.enqueue(input)
+                )
+                async for generate_outputs in stream:
+                    yield generate_outputs
+            except BaseException as e:
+                aux_info = None
+                if generate_outputs_cache.generate_outputs:
+                    aux_info = generate_outputs_cache.generate_outputs[0].aux_info
+                aux_info_dict = asdict(aux_info) if aux_info is not None else {}
+                aux_info_dict.setdefault("input_len", input.prompt_length)
+                aux_info_dict.setdefault("output_len", 0)
+                aux_info_dict.setdefault("step_output_len", 0)
+                aux_info_dict.setdefault("reuse_len", 0)
+                role_addrs = input.generate_config.role_addrs or []
+                if role_addrs:
+                    aux_info_dict["role_addrs"] = [
+                        role_addr.model_dump(mode="json") for role_addr in role_addrs
+                    ]
+                    roles = get_role_names(role_addrs)
+                    aux_info_dict.setdefault(
+                        "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
+                    )
+                e.aux_info = aux_info_dict
+                raise
+
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in stream:
+        async for generate_outputs in backend_stream():
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
@@ -591,12 +653,8 @@ class Pipeline(object):
             yield GenerateResponse(
                 generate_outputs=generate_outputs_cache, generate_texts=generate_texts
             )
-            if (
-                all(
-                    output.finished
-                    for output in generate_outputs_cache.generate_outputs
-                )
-                and generate_config.aux_info
+            if generate_config.aux_info and all(
+                output.finished for output in generate_outputs_cache.generate_outputs
             ):
                 kmonitor.report(
                     GaugeMetrics.FT_ITERATE_COUNT_METRIC,

@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.triton_kernels.common.activation import (
+    MaskedSiluInputLayout,
     create_packed_scale_tensor,
     silu_and_mul_masked_post_quant_fwd,
     silu_and_mul_masked_post_quant_packed_fwd,
@@ -257,6 +258,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
                         masked_m=masked_m[start_idx:end_idx],
                         expected_m=expected_m,
+                        input_layout=MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
                         scale_ue8m0=is_deep_gemm_e8m0_used(),
                     )
 
@@ -324,6 +326,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     output=down_input,
                     masked_m=masked_m[start_idx:end_idx],
                     expected_m=expected_m,
+                    input_layout=MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
                     group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
                 )
 

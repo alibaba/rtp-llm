@@ -55,17 +55,23 @@ void CudaGraphRunner::captureDecode() {
         // calculate context_total_kv_length
         int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
         int max_prefix_len = 0;
-        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.size(0) > 0) {
+        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.numel() > 0) {
             max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
         }
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
+        // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
+        refreshTaggedAttentionInputs(inputs);
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+            prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");
+        // Retain graph-owned buffers until the first replay is known complete.
+        // A launch/synchronization failure must take the same fail-closed path
+        // as a partially captured graph instead of deleting in-flight storage.
+        capture_session_may_be_dirty_.store(false, std::memory_order_release);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
     RTP_LLM_LOG_INFO("Capture Decode End");

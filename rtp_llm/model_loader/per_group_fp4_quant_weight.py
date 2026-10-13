@@ -1,5 +1,7 @@
 import copy
+import fnmatch
 import functools
+import re
 from typing import Any, Dict, List, Union
 
 import torch
@@ -20,6 +22,8 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
+    is_v4_weight,
+    max_scalar,
     pad,
     pad_w13,
     sp_0,
@@ -30,8 +34,7 @@ from rtp_llm.utils.model_weight import (
     sp_neg1,
     stack_,
     stack_moe_w1,
-    max_scalar,
-    stack_moe_w1_s2
+    stack_moe_w1_s2,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -41,6 +44,64 @@ W_SUFFIX = ".weight"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 QS_2_SUFFIX = ".weight_scale_2"
+
+
+def _matches_excluded_module(quant_config: QuantizationConfig, name: str) -> bool:
+    matcher = getattr(quant_config, "is_module_excluded", None)
+    if matcher is not None:
+        return matcher(name)
+
+    for pattern in getattr(quant_config, "exclude_modules", ()):
+        if pattern.startswith("re:"):
+            try:
+                if re.search(pattern[3:], name):
+                    return True
+            except re.error as error:
+                raise ValueError(
+                    f"invalid compressed-tensors ignore regex {pattern!r}"
+                ) from error
+        elif pattern in name:
+            return True
+        elif "*" in pattern or "?" in pattern or "[" in pattern:
+            # ModelOpt emits module-path globs while checkpoint entries include
+            # the parameter suffix (for example `.gate_proj.weight`). Match the
+            # complete name as well as the module prefix, preserving the legacy
+            # substring behavior above.
+            if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(
+                name, pattern + "*"
+            ):
+                return True
+    return False
+
+
+def _is_fp4_weight_excluded(
+    quant_config: QuantizationConfig, src_weight_info: WeightModule
+) -> bool:
+
+    checkpoint_names = [
+        weight.name for weight in getattr(src_weight_info, "weights", [])
+    ]
+    if not checkpoint_names:
+        return False
+
+    excluded_names = [
+        name
+        for name in checkpoint_names
+        if _matches_excluded_module(quant_config, name)
+    ]
+    if not excluded_names:
+        return False
+    if len(excluded_names) == len(checkpoint_names):
+        return True
+
+    quantized_names = [name for name in checkpoint_names if name not in excluded_names]
+    raise ValueError(
+        f"Cannot partially exclude fused FP4 weight '{src_weight_info.name}': "
+        "exclude_modules matched only some checkpoint tensors/modules; "
+        f"excluded={excluded_names}, quantized={quantized_names}. "
+        "Exclude either all component names or none of them."
+    )
+
 
 def gemm_group_fp4_gpt_style_tp_strategy():
     gemm_group_fp4_weight_tp_strategy: Dict[str, Any] = {
@@ -133,7 +194,13 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w4a4_weight_list and not quant_config.mixed_attention
+        if name not in cls.w4a4_weight_list or quant_config.mixed_attention:
+            return False
+        # V4 names dispatch to V4-specific subclass (V4PerGroupFp4Weight) —
+        # exclude from base so the registry "exactly one match" check passes.
+        if is_v4_weight(src_weight_info):
+            return False
+        return not _is_fp4_weight_excluded(quant_config, src_weight_info)
 
     def __init__(
         self,
@@ -180,12 +247,12 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
         ]
-        
+
         qkv_s2_list = [
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_2_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
         ]
-        
+
         qkv_i_s_list = [
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + ACT_S_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
@@ -207,7 +274,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
-        
+
         scale_2 = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_qkv_s2,
@@ -216,7 +283,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        
+
         input_scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_qkv_i_s,
@@ -263,7 +330,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        
+
         input_scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_o_i_s,
@@ -421,6 +488,10 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        preshard = (
+            src_weight_info.enable_pure_tp_preshard
+            and not src_weight_info.stacked_ckpt_keys
+        )
         kernel = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2,
@@ -428,6 +499,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=torch.uint8,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
@@ -436,6 +508,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale_2 = create_w4a4_fp4_per_group_weight(
             src_weight_info,
@@ -457,6 +530,10 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
 
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
+        preshard = (
+            src_weight_info.enable_pure_tp_preshard
+            and not src_weight_info.stacked_ckpt_keys
+        )
         kernel = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1,
@@ -467,6 +544,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             stack_moe_w1,
             data_type=torch.uint8,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
@@ -478,6 +556,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             stack_moe_w1,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale_2 = create_w4a4_fp4_per_group_weight(
             src_weight_info,
@@ -530,3 +609,126 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             processed_res[self.scale.name] = scale_weight
 
         return processed_res
+
+
+# ---------------------------------------------------------------------------
+# DSv4 specialization (FP4 routed experts: e2m1 packed int8 + UE8M0 group=32 scale)
+# ---------------------------------------------------------------------------
+#
+# V4 ckpt format differs from ModelOpt-style FP4:
+#   * scale suffix is ``.scale`` (V4) not ``.weight_scale`` (ModelOpt).
+#   * NO ``weight_scale_2`` (per-tensor outer scale) — single-level FP4.
+#   * NO ``input_scale``     — activation_scheme='dynamic' in V4 quant config.
+#   * scale dtype is float8_e8m0fnu  shape ``[N, K/32]`` (rather than fp8e4m3 wrapped).
+#   * weight dtype is int8 packed (2 nibbles per byte) shape ``[N, K/2]``.
+#
+# DeepGEMM's ``fp8_fp4_gemm_nt`` consumes these natively, so we deliberately
+# bypass ``PerGroupFp4Weight._postprocess`` (which calls
+# ``convert_fp4_gemm_weight_params`` + ``maybe_prepare_static_weights_for_fp4_moe``
+# — those transform layouts for ModelOpt-style FP4 + static activation scaling).
+
+# V4 routed-expert MoE keys → scale keys.
+_V4_FP4_WEIGHT_LIST: Dict[str, str] = {
+    W.v4_routed_w1_w: W.v4_routed_w1_s,
+    W.v4_routed_w2_w: W.v4_routed_w2_s,
+    W.v4_routed_w3_w: W.v4_routed_w3_s,
+}
+
+PerGroupFp4Weight.w4a4_weight_list.update(_V4_FP4_WEIGHT_LIST)
+
+
+class V4PerGroupFp4Weight(PerGroupFp4Weight):
+    """V4 FP4 (e2m1 packed) per-group routed-expert weight.
+
+    Differences vs. base ``PerGroupFp4Weight``:
+      - ckpt scale suffix is ``.scale`` (V4) instead of ``.weight_scale``.
+      - no ``weight_scale_2`` (per-tensor outer scale absent).
+      - no ``input_scale``     (activation scheme is dynamic in V4).
+      - ``_postprocess`` is a no-op (only device move) — V4 ckpt weight + scale
+        layouts are directly consumed by DeepGEMM's ``fp8_fp4_gemm_nt``.
+      - ``support()`` is restricted to V4 namespace.
+    """
+
+    V4_W_SUFFIX = ".weight"
+    V4_S_SUFFIX = ".scale"
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if not quant_config.is_quanted() or not isinstance(
+            quant_config, ModelOptFp4Config
+        ):
+            return False
+        if not is_v4_weight(src_weight_info):
+            return False
+        return src_weight_info.name in _V4_FP4_WEIGHT_LIST
+
+    def __init__(
+        self,
+        src_weight_info: WeightModule,
+        quant_config: QuantizationConfig,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        scale_name = _V4_FP4_WEIGHT_LIST[src_weight_info.name]
+        kernel, scale = self._v4_build_pair(
+            src_weight_info, src_weight_info.name, scale_name
+        )
+
+        sub_weights = {kernel.name: kernel, scale.name: scale}
+        CompositeWeight.__init__(
+            self, sub_weights, quant_config=quant_config, *args, **kwargs
+        )
+        self.kernel = sub_weights[kernel.name]
+        self.scale = sub_weights[scale.name]
+        self.scale_2 = None
+        self.input_scale = None
+
+    def _v4_build_pair(
+        self,
+        src_weight_info: WeightModule,
+        weight_key: str,
+        scale_key: str,
+    ):
+        """Build kernel + scale pair for V4 routed experts.  ``src_weight_info``
+        is a ``MoeAtomicWeight`` with per-expert ckpt key templates; we keep
+        its merge_fun and just retarget ckpt names to ``.weight`` / ``.scale``.
+        """
+        kernel = create_w4a4_fp4_per_group_weight(
+            src_weight_info,
+            weight_key,
+            [
+                CkptWeightInfo(
+                    w.name[: -len(self.V4_W_SUFFIX)] + self.V4_W_SUFFIX, w.merge_fun
+                )
+                for w in src_weight_info.weights
+            ],
+            src_weight_info.process_fun,
+            data_type=torch.int8,
+            config=getattr(src_weight_info, "config", None),
+        )
+        scale = create_w4a4_fp4_per_group_weight(
+            src_weight_info,
+            scale_key,
+            [
+                CkptWeightInfo(
+                    w.name[: -len(self.V4_W_SUFFIX)] + self.V4_S_SUFFIX, w.merge_fun
+                )
+                for w in src_weight_info.weights
+            ],
+            src_weight_info.process_fun,
+            data_type=torch.float8_e8m0fnu,
+            config=getattr(src_weight_info, "config", None),
+        )
+        return [kernel, scale]
+
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        # V4 ckpt weight + UE8M0 scale layout is directly consumed by
+        # DeepGEMM's fp8_fp4_gemm_nt; skip ModelOpt-style transforms.
+        return CompositeWeight._postprocess(self, tensor, device, load_config)

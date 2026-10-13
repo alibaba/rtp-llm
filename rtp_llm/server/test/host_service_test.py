@@ -6,8 +6,7 @@ import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo
-from rtp_llm.server.host_service import MasterService
+from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
 from rtp_llm.vipserver.host import Host
 
 
@@ -33,7 +32,7 @@ class TestMasterService(unittest.TestCase):
         svc._refresh_route_snapshot(host_health_map)
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_single_host_sets_master_and_queue(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -53,7 +52,7 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_called_once()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_two_hosts_prefers_server_marked_master(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -85,7 +84,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_no_discovery_hosts_empty_snapshot(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -101,7 +100,7 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_not_called()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_failover_after_previous_master_unhealthy(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -152,7 +151,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(status["10.0.0.1:8000"]["health"], "unhealthy")
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_get_host_health_status_reads_snapshot(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -172,7 +171,7 @@ class TestMasterService(unittest.TestCase):
         self.assertTrue(status["10.0.0.1:8000"]["is_master"])
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_keeps_previous_master_when_still_healthy(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -211,7 +210,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(svc.get_slave_addr(), "10.0.0.2:8000")
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_collect_hosts_uses_refresh_discovery(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -229,7 +228,7 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_called_once()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     @patch("rtp_llm.server.host_service.time.time")
     def test_cleanup_removes_expired_unhealthy_host(
         self,

@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Tuple
 
 import torch
@@ -883,14 +884,37 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     return
 
 
-def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
-    """
-    Heuristic parameter selection based on actual test data.
-    Rules derived from parameter search analysis of 12,978 data points.
+_SKEW_HOT_LOAD_MULTIPLIER = 8
+_SKEW_TOKENS_PER_WORKER = 32
+_SKEW_MAX_WORKERS = 16
+
+
+class MaskedSiluInputLayout(Enum):
+    """Meaning of the masked SiLU input's padded-token dimension."""
+
+    PER_EXPERT_CAPACITY = "per_expert_capacity"
+    BATCH_TOKEN_ALIGNMENT = "batch_token_alignment"
+
+
+def _heuristic_params(
+    expert_num: int,
+    expected_m: int,
+    token_num_padded: int,
+    input_layout: MaskedSiluInputLayout,
+) -> Tuple[int, int, int]:
+    """Select launch parameters for the masked SiLU kernels.
+
+    The baseline rules come from a parameter search over 12,978 points. A
+    separate manual correction covers heavily skewed decode traffic measured
+    on H20 with 96 local experts, average load 43, and padded capacity 512.
 
     Args:
-        expert_num: Number of experts
-        expected_m: Expected number of tokens
+        expert_num: Number of local experts handled by this kernel invocation
+        expected_m: Expected (average) number of tokens per expert
+        token_num_padded: Size of the input's padded-token dimension
+        input_layout: Whether ``token_num_padded`` is an independently
+            provisioned capacity for every expert or an alignment derived from
+            the total contiguous token batch
 
     Returns:
         (BLOCK_NUM_PER_EXPERT, NUM_STAGES, num_warps)
@@ -907,12 +931,36 @@ def _heuristic_params(expert_num: int, expected_m: int) -> Tuple[int, int, int]:
         block_num_per_expert = 1 if expected_m < 128 else 8
 
     # NUM_STAGES heuristic rules (based on actual test data)
-    # Most cases use 4 stages according to test data
+    # The baseline search uses 2 stages below expected_m 64 and 4 otherwise.
     num_stages = 2 if expected_m < 64 else 4
 
     # num_warps heuristic rules (based on actual test data)
     # Overwhelming majority (8151/12978) use 1 warp
     num_warps = 1
+
+    # expected_m can underestimate a hot expert in skewed beam-search traffic.
+    # Only a per-expert capacity is eligible for the deployment-specific skew
+    # correction. In the hybrid executor the same dimension is instead aligned
+    # from the whole contiguous batch, so its capacity/average ratio carries no
+    # information about expert skew. Reading masked_m on the host is deliberately
+    # avoided because this selection also runs while preparing CUDA graphs.
+    hot_load_estimate = max(expected_m, 1) * _SKEW_HOT_LOAD_MULTIPLIER
+    if (
+        input_layout is MaskedSiluInputLayout.PER_EXPERT_CAPACITY
+        and expected_m < 128
+        and token_num_padded > max(128, hot_load_estimate)
+    ):
+        rounded_hot_load = hot_load_estimate + _SKEW_TOKENS_PER_WORKER - 1
+        workers_for_hot_load = max(1, rounded_hot_load // _SKEW_TOKENS_PER_WORKER)
+        # Round up to a power of two, then cap empty-expert launch overhead.
+        workers_for_hot_load = 1 << (workers_for_hot_load - 1).bit_length()
+        workers_for_hot_load = min(_SKEW_MAX_WORKERS, workers_for_hot_load)
+        if workers_for_hot_load > block_num_per_expert:
+            block_num_per_expert = workers_for_hot_load
+            # Four stages suit shorter per-worker loops; the large skew case is
+            # faster with three stages on H20.
+            skew_num_stages = 4 if hot_load_estimate <= 128 else 3
+            num_stages = max(num_stages, skew_num_stages)
 
     return (block_num_per_expert, num_stages, num_warps)
 
@@ -1001,6 +1049,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
     quant_group_size: int,
     masked_m: torch.Tensor,
     expected_m: int,
+    input_layout: MaskedSiluInputLayout = MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
     scale_ue8m0: bool = False,
 ):
     """
@@ -1013,6 +1062,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
         quant_group_size: Quantization group size
         masked_m: Mask tensor with shape [expert_num]
         expected_m: Expected number of tokens
+        input_layout: Meaning of ``input.shape[1]`` for heuristic selection
         scale_ue8m0: Whether to use ue8m0 scaling format
     """
 
@@ -1032,6 +1082,8 @@ def silu_mul_masked_fp8_post_quant_fwd(
     BLOCK_NUM_PER_EXPERT, NUM_STAGES, num_warps = _heuristic_params(
         expert_num=expert_num,
         expected_m=expected_m,
+        token_num_padded=input.shape[1],
+        input_layout=input_layout,
     )
 
     BLOCK_N = quant_group_size
@@ -1127,6 +1179,7 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
     output: torch.Tensor,
     masked_m: torch.Tensor,
     expected_m: int,
+    input_layout: MaskedSiluInputLayout = MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
     group_size: int = 256,
 ):
     """
@@ -1134,6 +1187,7 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
     output shape [expert_num, token_num_padded, hidden_dim // 2], dtype bf16
     masked_m shape [expert_num],
     expected_m int,
+    input_layout MaskedSiluInputLayout,
     group_size int,
     """
 
@@ -1152,6 +1206,8 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
     BLOCK_NUM_PER_EXPERT, NUM_STAGES, num_warps = _heuristic_params(
         expert_num=expert_num,
         expected_m=expected_m,
+        token_num_padded=input.shape[1],
+        input_layout=input_layout,
     )
 
     BLOCK_N = group_size

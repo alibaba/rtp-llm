@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -64,9 +67,57 @@ public:
         }
     }
 
-    void removeConnection(std::string peer) {
+    absl::StatusOr<Connection<T>> getReadyConnection(std::string peer, std::chrono::milliseconds timeout) {
+        return getReadyConnection(std::move(peer), std::chrono::system_clock::now() + timeout);
+    }
+
+    absl::StatusOr<Connection<T>>
+    getReadyConnection(std::string                                peer,
+                       std::chrono::system_clock::time_point       deadline,
+                       const std::function<bool()>&                is_cancelled = nullptr) {
+        auto connection_status = getConnection(peer);
+        if (!connection_status.ok()) {
+            return connection_status.status();
+        }
+
+        auto           connection = connection_status.value();
+        const auto     begin_time = std::chrono::steady_clock::now();
+        const auto     state      = connection.channel->GetState(false);
+        constexpr auto kCancellationPollInterval = std::chrono::milliseconds(10);
+        while (true) {
+            if (is_cancelled && is_cancelled()) {
+                return absl::CancelledError("grpc channel readiness wait for " + peer + " was cancelled");
+            }
+            const auto now = std::chrono::system_clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            if (connection.channel->WaitForConnected(std::min(deadline, now + kCancellationPollInterval))) {
+                return connection;
+            }
+        }
+
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin_time)
+                .count();
+        const auto final_state = connection.channel->GetState(false);
+        RTP_LLM_LOG_WARNING(
+            "grpc channel not ready, peer [%s], channel [%p], state [%d], final state [%d], elapsed [%ld]ms",
+            peer.c_str(),
+            static_cast<void*>(connection.channel.get()),
+            static_cast<int>(state),
+            static_cast<int>(final_state),
+            elapsed_ms);
+        removeConnection(peer, connection.channel);
+        return absl::UnavailableError("grpc channel for " + peer + " is not ready");
+    }
+
+    void removeConnection(const std::string& peer, const std::shared_ptr<grpc::Channel>& expected_channel) {
         std::lock_guard<std::mutex> guard(mutex_);
-        connection_pool_.erase(peer);
+        auto                        iter = connection_pool_.find(peer);
+        if (iter != connection_pool_.end() && iter->second.channel == expected_channel) {
+            connection_pool_.erase(iter);
+        }
     }
 
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed

@@ -16,6 +16,8 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.timeout.ReadTimeoutException;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
@@ -30,9 +32,8 @@ import reactor.core.scheduler.Schedulers;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -46,25 +47,25 @@ public class GeneralHttpNettyService {
 
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
+    private final ThreadPoolExecutor httpRequestExecutor;
 
-    public static final ThreadPoolExecutor httpRequestExecutor = new ThreadPoolExecutor(10 * Runtime.getRuntime()
-            .availableProcessors(), 15 * Runtime.getRuntime()
-            .availableProcessors(), 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), new NamedThreadFactory("req-thread"),
-            // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
-            new ThreadPoolExecutor.CallerRunsPolicy());
-
-    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient) {
+    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
+        FlexlbConfig config = configService.loadBalanceConfig();
+        httpRequestExecutor = new ThreadPoolExecutor(
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(
+                        config.getInternalRuntime().getHttpRequestExecutorQueueCapacity()),
+                new NamedThreadFactory("req-thread"),
+                // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
+                new ThreadPoolExecutor.CallerRunsPolicy());
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
         return this.doRequest(request, uri, path, null, responseClz);
-    }
-
-    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
@@ -125,7 +126,7 @@ public class GeneralHttpNettyService {
         request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
         if (headers == null) {
 
-            request.headers().set(HttpHeaderNames.HOST, Objects.requireNonNull(uri).getHost());
+            request.headers().set(HttpHeaderNames.HOST, uri.getHost());
             request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
             request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
             request.headers().set(HttpHeaderNames.CONTENT_LENGTH, request.content().readableBytes());

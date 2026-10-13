@@ -16,7 +16,8 @@ def init_master_group_args(parser, master_config):
         bind_to=(master_config, "master_default_timeout_ms"),
         type=int,
         default=3600000,
-        help="Master default timeout in milliseconds",
+        help="Master 调度 per-request 默认超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
+        "<=0 表示不设超时（链路不超时）；per-request 显式 timeout 优先级更高",
     )
 
     master_group.add_argument(
@@ -34,5 +35,7 @@ def init_master_group_args(parser, master_config):
         bind_to=(master_config, "master_session_timeout_s"),
         type=float,
         default=-1,
-        help="Master HTTP session total timeout in seconds. -1: auto (3600 when queue mode, 0.5 otherwise); else use this value.",
+        help="Master HTTP session total timeout (seconds). "
+        "<0: auto (3600 when queue mode, 0.5 otherwise); "
+        "==0: 不设超时（链路不超时）; >0: 使用该值",
     )

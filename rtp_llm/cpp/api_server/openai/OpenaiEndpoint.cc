@@ -53,6 +53,16 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.top_p.has_value()) {
         config.top_p = req.top_p.value();
     }
+    if (req.top_k.has_value()) {
+        // Sampler carries top_k as UINT32; a negative value would reinterpret
+        // as a huge unsigned count. Ignore invalid values (keep default 0,
+        // matching the behavior before top_k passthrough existed).
+        if (req.top_k.value() < 0) {
+            RTP_LLM_LOG_WARNING("ignore invalid negative top_k %d in chat completion request", req.top_k.value());
+        } else {
+            config.top_k = req.top_k.value();
+        }
+    }
     if (req.max_tokens.has_value()) {
         config.max_new_tokens = req.max_tokens.value();
     }

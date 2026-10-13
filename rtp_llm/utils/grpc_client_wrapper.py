@@ -17,7 +17,12 @@ from rtp_llm.utils.time_util import Timer
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int, dp_addresses: Optional[List[str]] = None):
+    def __init__(
+        self,
+        server_port: int,
+        dp_addresses: Optional[List[str]] = None,
+        client_config: Optional[Dict[str, int]] = None,
+    ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
         self.channel = None
@@ -26,15 +31,14 @@ class GrpcClientWrapper:
         self.dp_addresses = dp_addresses if dp_addresses else [self.address]
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
+        self._client_config = client_config or {}
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
         if self.channel is None or self.stub is None:
             self.channel = grpc.aio.insecure_channel(
                 self.address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=[(k, v) for k, v in self._client_config.items()],
             )
             self.stub = RpcServiceStub(self.channel)
 
@@ -43,9 +47,7 @@ class GrpcClientWrapper:
         if address not in self._dp_channels or self._dp_stubs.get(address) is None:
             self._dp_channels[address] = grpc.aio.insecure_channel(
                 address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=[(k, v) for k, v in self._client_config.items()],
             )
             self._dp_stubs[address] = RpcServiceStub(self._dp_channels[address])
 
@@ -72,6 +74,7 @@ class GrpcClientWrapper:
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:
+            await self.close()
             return {
                 "status": "error",
                 "message": e,
@@ -192,6 +195,71 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
+    async def dump_torch_allocator(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Trigger an authenticated allocator dump across every DP/TP backend."""
+        request = pb2.TorchAllocatorDumpRequestPB(
+            auth_token=str(req.get("auth_token", "")),
+            dump_id=str(req.get("dump_id", "")),
+        )
+
+        async def send_to_address(address: str):
+            await self._ensure_dp_connection(address)
+            return await self._dp_stubs[address].DumpTorchAllocator(request, timeout=90)
+
+        addresses = self.dp_addresses
+        responses = await asyncio.gather(
+            *(send_to_address(address) for address in addresses),
+            return_exceptions=True,
+        )
+
+        backends = []
+        errors = []
+        for address, response in zip(addresses, responses):
+            if isinstance(response, Exception):
+                errors.append(f"{address}: {response}")
+                continue
+            if not response.results:
+                errors.append(f"{address}: backend returned no allocator dump results")
+                continue
+            mismatched_result = next(
+                (
+                    result
+                    for result in response.results
+                    if result.dump_id != request.dump_id
+                ),
+                None,
+            )
+            if mismatched_result is not None:
+                errors.append(
+                    f"{address}/world_rank={mismatched_result.world_rank}: "
+                    "allocator dump response id mismatch"
+                )
+                continue
+            for result in response.results:
+                result_dict = {
+                    "world_rank": result.world_rank,
+                    "dp_rank": result.dp_rank,
+                    "tp_rank": result.tp_rank,
+                    "local_rank": result.local_rank,
+                    "pid": result.pid,
+                    "success": result.success,
+                    "dump_id": result.dump_id,
+                    "file_path": result.file_path,
+                    "error": result.error,
+                    "dp_address": address,
+                }
+                backends.append(result_dict)
+                if not result.success:
+                    errors.append(
+                        f"{address}/world_rank={result.world_rank}: {result.error}"
+                    )
+
+        return {
+            "status": "ok" if not errors else "error",
+            "backends": backends,
+            "errors": errors,
+        }
+
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
         """Update EPLB config - this would need to be implemented based on your requirements"""
         try:
@@ -255,6 +323,8 @@ class GrpcClientWrapper:
                 return await self.set_log_level(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
+            elif uri == "dump_torch_allocator":
+                return await self.dump_torch_allocator(req)
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

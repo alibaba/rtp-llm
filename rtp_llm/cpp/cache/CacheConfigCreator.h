@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include "absl/status/status.h"
@@ -12,27 +14,44 @@
 
 namespace rtp_llm {
 
+struct KVCacheBlockBudget {
+    size_t explicit_pool_reserve_bytes = 0;
+    size_t paged_block_bytes           = 0;
+    size_t swa_block_bytes             = 0;
+};
+
+// Returns the largest global block count whose independent-pool backing fits
+// in total_budget_bytes:
+//   explicit reserve + N * paged bytes + ceil(N / linear_step) * SWA bytes.
+uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step);
+
 class CacheConfigCreator {
 public:
-    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
+    static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          int                      gen_num_per_cycle = 0);
+    static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          const KVCacheConfig&     kv_cache_config,
+                                          int                      gen_num_per_cycle = 0);
+    // Builds main and draft layouts. Capacity is computed and finalized separately.
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
-                                    const RuntimeConfig&                             runtime_config,
                                     const KVCacheConfig&                             kv_cache_config,
-                                    const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
-    static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
-                                      const ModelConfig&                 propose_model_config,
-                                      const ParallelismConfig&           parallelism_config,
-                                      const RuntimeConfig&               runtime_config,
-                                      const KVCacheConfig&               kv_cache_config,
-                                      const SpeculativeExecutionConfig&  sp_config,
-                                      const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp,
-                                      bool                               is_eagle);
+                                    const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
+                                    const ModelConfig*                               draft_model_config = nullptr,
+                                    bool                                             is_mtp             = false,
+                                    bool                                             is_eagle           = false);
+
+    static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
+                                         const ModelConfig&                               model_config,
+                                         const RuntimeConfig&                             runtime_config,
+                                         const KVCacheConfig&                             kv_cache_config,
+                                         const ParallelismConfig&                         parallelism_config,
+                                         const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
+                                         const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
+    static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
+    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.
@@ -41,14 +60,10 @@ public:
                                                       int64_t                      expected_layer_num);
 
 private:
-    // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
-    // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
+    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
+                                         const ParallelismConfig& parallelism_config,
+                                         const KVCacheConfig&     kv_cache_config,
+                                         int                      gen_num_per_cycle);
 };
 
 }  // namespace rtp_llm

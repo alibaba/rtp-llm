@@ -7,7 +7,7 @@ from rtp_llm.vipserver.netutil import NetUtils
 from rtp_llm.vipserver.update_thread import UpdateThread
 from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
-DOMAIN_FAILED_CNT_THRESHOLD = 20
+DOMAIN_FAILED_CNT_THRESHOLD = 60
 
 
 class HostReactor:
@@ -82,7 +82,9 @@ class HostReactor:
                 "encoding": "GBK",
             }
             resp_json = self.proxy.req_api("srvIPXT", params)
-            if resp_json and "hosts" in resp_json:
+            if resp_json is None:
+                return
+            if "hosts" in resp_json:
                 hosts = []
                 for host in resp_json["hosts"]:
                     if host["valid"]:

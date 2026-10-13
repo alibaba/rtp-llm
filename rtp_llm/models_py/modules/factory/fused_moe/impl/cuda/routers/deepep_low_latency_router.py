@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -17,6 +16,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -89,9 +89,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._zero_copy = False
         self._async_finish = False
         self._return_recv_hook = False
-        self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
-        self._use_accl_ep = wrapper.use_accl_ep
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -199,9 +197,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         )
         # Check quantization
         if self._use_fp8_dispatch:
-            assert self.quant_config.is_block_quantized or (
-                self.quant_config.is_per_act_token and self._use_accl_ep
-            ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
+            assert (
+                self.quant_config.is_block_quantized
+            ), "upstream DeepEP Low-Latency only supports FP8 block quantization"
         elif self.quant_config.is_per_group_fp4:
             pass
         else:
@@ -227,8 +225,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # Set quantization config for DeepEP low latency dispatch
         if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
             dispatch_args.update({"round_scale": True, "use_ue8m0": True})
-        elif self.quant_config.is_per_act_token:
-            dispatch_args.update({"pertoken_quant": True})
 
         # Normal prepare
         expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)
@@ -248,12 +244,12 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def _finalize_post_tp_gather(
         self,
         combined_x: torch.Tensor,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         """Finalize post tp gather for DeepEP Low-Latency.
         Args:
             combined_x (torch.Tensor): Combined output from all tp ranks.
-            extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+            extra_finalize_args (Optional[FinalizeArgs]): Extra finalize arguments.
         """
         # Check input data
         assert combined_x.dim() == 2
@@ -286,7 +282,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.
@@ -310,9 +306,6 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        if self._use_accl_ep:
-            combine_args.update({"opt_level": self._opt_level})
-
         # Normal finalize
         combined_x = self._normal_finalize(combine_args)
 

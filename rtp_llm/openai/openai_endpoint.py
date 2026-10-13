@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import json
 import logging
@@ -7,7 +8,12 @@ from typing import Any, AsyncGenerator, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    ThinkingMode,
+)
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -16,6 +22,9 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -42,9 +51,17 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+
+
+def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    value = int(value)
+    return value if value > 0 else None
 
 
 class OpenaiEndpoint(object):
@@ -60,6 +77,7 @@ class OpenaiEndpoint(object):
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
         self.model_name = model_config.model_name
+        self.model_type = model_config.model_type
         self.special_tokens = model_config.special_tokens
         template_type = model_config.template_type
         ckpt_path = model_config.ckpt_path
@@ -165,11 +183,89 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    def _reasoning_format_for_prompt(
+        self,
+        config: GenerateConfig,
+        renderer: CustomChatRenderer,
+        input_ids: Optional[List[int]],
+    ) -> Optional[ReasoningFormat]:
+        if config.thinking_mode not in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ):
+            return None
+
+        base_format = renderer.get_reasoning_format()
+        if config.thinking_mode == ThinkingMode.ENABLED:
+            return base_format
+        think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
+        begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
+            think_start_tag, add_special_tokens=False
+        )
+        prompt_has_begin = bool(
+            begin_ids
+            and input_ids is not None
+            and input_ids[-len(begin_ids) :] == begin_ids
+        )
+        if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
+            config.thinking_mode = ThinkingMode.ENABLED
+            config.in_think_mode = True
+        return ReasoningFormat(
+            tag_begin="" if prompt_has_begin else think_start_tag,
+            tag_end=base_format.tag_end,
+            suffix=base_format.suffix,
+            no_think_excludes=base_format.no_think_excludes,
+        )
+
+    def _tokenize_request_stop_words(self, stop_words: List[str]) -> List[List[int]]:
+        stop_word_ids = []
+        for stop_word in stop_words:
+            # Byte-level tokenizers encode a word differently after a space.
+            variants = [stop_word]
+            if stop_word and not stop_word[0].isspace():
+                variants.append(" " + stop_word)
+            for variant in variants:
+                try:
+                    token_ids = self.tokenizer.encode(variant, add_special_tokens=False)
+                except TypeError:
+                    if not getattr(self, "_legacy_tokenizer_warned", False):
+                        self._legacy_tokenizer_warned = True
+                        logging.warning(
+                            "tokenizer %s does not accept add_special_tokens; "
+                            "stop words may pick up special tokens and never "
+                            "match in the engine",
+                            type(self.tokenizer).__name__,
+                        )
+                    token_ids = self.tokenizer.encode(variant)
+                if token_ids:
+                    stop_word_ids.append(list(token_ids))
+        return stop_word_ids
+
     def _extract_generation_config(
-        self, request: ChatCompletionRequest
+        self,
+        request: ChatCompletionRequest,
+        input_ids: Optional[List[int]] = None,
+        renderer: Optional[CustomChatRenderer] = None,
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
-        config = request.extra_configs or GenerateConfig()
+        renderer = renderer or self.chat_renderer
+        config = (
+            request.extra_configs.model_copy(deep=True)
+            if request.extra_configs is not None
+            else GenerateConfig()
+        )
+        if request.extra_configs is not None and (
+            config.response_format is not None
+            or GrammarConstraint.collect_from_config(config)
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "structured output must use top-level response_format, not extra_configs",
+            )
+        if request.response_format is not None:
+            config.response_format = request.response_format
+        elif request.json_format:
+            config.response_format = ResponseFormat(type="json_object")
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -178,23 +274,30 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
-        if request.max_tokens != None:
-            config.max_new_tokens = request.max_tokens
+        if request.top_k != None:
+            config.top_k = request.top_k
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
+        else:
+            request_stop_words_list = list(request_stop_words_list)
+        if getattr(renderer, "parses_user_stop_sequences", False):
+            # Recipe applies user stops after parsing reasoning/tool framing.
+            # Sending them to the engine would truncate protocol state early.
+            request_stop_words_list = []
+            # Even non-streaming HTTP responses need incremental backend
+            # output so the recipe parser can stop generation promptly.
+            config.is_streaming = True
+        request_stop_words_list.extend(config.stop_words_str)
         config.stop_words_str = list(
-            set(
-                self.stop_words_str_list
-                + request_stop_words_list
-                + config.stop_words_str
-            )
+            set(self.stop_words_str_list + request_stop_words_list)
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(config.stop_words_str)
+            + self.chat_renderer.tokenize_words(self.stop_words_str_list)
+            + self._tokenize_request_stop_words(request_stop_words_list)
             + config.stop_words_list
         )
         if request.chat_id != None:
@@ -236,11 +339,47 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        # add_thinking_params now accepts generate_env_config parameter
-        config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if request.thinking_budget is not None:
+            budget = int(request.thinking_budget)
+            config.max_thinking_tokens = INT32_MAX if budget < 0 else budget
+        config.thinking_mode = renderer.resolve_thinking_mode(request)
+        config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
+        if config.thinking_mode == ThinkingMode.DISABLED:
+            config.max_thinking_tokens = 0
+        max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
+        max_tokens_cap = _positive_int_or_none(request.max_tokens)
+        if max_completion_tokens is not None:
+            backend_max_new_tokens = max_completion_tokens
+            if max_tokens_cap is not None:
+                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
+            config.max_new_tokens = backend_max_new_tokens
+        elif request.max_tokens != None:
+            config.max_new_tokens = request.max_tokens
+        config.add_thinking_params(
+            self.tokenizer,
+            self.generate_env_config,
+            enable_thinking=(
+                None
+                if config.thinking_mode == ThinkingMode.ADAPTIVE
+                else config.thinking_mode == ThinkingMode.ENABLED
+            ),
+            reasoning_format=self._reasoning_format_for_prompt(
+                config, renderer, input_ids
+            ),
+        )
         if request.debug_info:
             config.return_output_ids = True
         return config
+
+    @staticmethod
+    def _apply_renderer_chat_constraints(
+        renderer,
+        request: ChatCompletionRequest,
+        config: GenerateConfig,
+    ) -> None:
+        apply_constraints = getattr(renderer, "apply_chat_completion_constraints", None)
+        if apply_constraints is not None:
+            apply_constraints(request, config)
 
     @staticmethod
     def _merge_tool_calls(
@@ -391,7 +530,17 @@ class OpenaiEndpoint(object):
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
+            if (
+                extra_outputs is not None
+                and response.extra_outputs is not None
+                and response.extra_outputs.custom_output is not None
+            ):
+                # Persistent scores must not erase prefill-only outputs.
+                extra_outputs = extra_outputs.model_copy(
+                    update=response.extra_outputs.model_dump(exclude_none=True)
+                )
+            else:
+                extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
@@ -502,30 +651,77 @@ class OpenaiEndpoint(object):
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
             chat_request.messages.pop()
+        from rtp_llm.openai.reasoning_effort import validate_reasoning_effort_for_model
+
+        try:
+            validate_reasoning_effort_for_model(
+                chat_request.reasoning_effort, self.model_type
+            )
+        except ValueError as error:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, str(error)
+            ) from error
         rendered_input = renderer.render_chat(chat_request)
         if prepopulate_str != "":
             rendered_input.rendered_prompt += prepopulate_str
-            rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
+            added_ids = self.tokenizer.encode(prepopulate_str)
+            rendered_input.input_ids += added_ids
+            if rendered_input.v41_inputs is not None:
+                rendered_input.v41_inputs = rendered_input.v41_inputs.append_text(
+                    prepopulate_str, added_ids
+                )
         return rendered_input
+
+    async def render_chat_async(self, chat_request: ChatCompletionRequest):
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
+        if getattr(renderer, "render_chat_in_thread", False):
+            return await asyncio.to_thread(self.render_chat, chat_request)
+        return self.render_chat(chat_request)
+
+    async def chat_completion_async(
+        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+    ) -> CompleteResponseAsyncGenerator:
+        rendered_input = await self.render_chat_async(chat_request)
+        return self._chat_completion_from_inputs(
+            request_id, chat_request, raw_request, rendered_input
+        )
 
     def chat_completion(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
+        rendered_input = self.render_chat(chat_request)
+        return self._chat_completion_from_inputs(
+            request_id, chat_request, raw_request, rendered_input
+        )
+
+    def _chat_completion_from_inputs(
+        self, request_id, chat_request, raw_request, rendered_input
+    ):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
 
         # 生成式推荐：chat 链路同样需要从 rendered_prompt 解析已曝光商品并填充
         # banned_combo_token_ids。函数内部做了开关与空值短路，对非推荐场景零侵入。
         parse_and_fill_banned_combo(
             rendered_input.rendered_prompt, generate_config, self.tokenizer
         )
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
-        if generate_config.return_prompt_logits and mm_inputs:
+        if generate_config.return_prompt_logits and (
+            mm_inputs
+            or (
+                rendered_input.v41_inputs is not None
+                and rendered_input.v41_inputs.images
+            )
+        ):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "prompt scoring does not support multimodal inputs",
@@ -542,6 +738,17 @@ class OpenaiEndpoint(object):
             else None
         )
 
+        # Extract QoS priority from HTTP headers and store on generate_config
+        # so it survives IPC to the dash_sc enqueue loop, where
+        # GenerateInput.headers may be absent.
+        request_headers = extract_request_headers(raw_request.headers)
+        qos_level = request_headers.get("x-dashscope-inner-qos-level")
+        if qos_level is not None:
+            try:
+                generate_config.qos_priority = int(str(qos_level).strip())
+            except (TypeError, ValueError):
+                pass
+
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
@@ -549,6 +756,12 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            headers=request_headers,
+            **(
+                {"v41_inputs": rendered_input.v41_inputs}
+                if rendered_input.v41_inputs is not None
+                else {}
+            ),
         )
 
         return self._complete_stream_response(
@@ -560,10 +773,21 @@ class OpenaiEndpoint(object):
 
         from rtp_llm.utils.base_model_datatypes import GenerateInput
 
+        renderer = (
+            self.template_renderer if chat_request.user_template else self.chat_renderer
+        )
         rendered_input = self.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
 
-        if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
+        if generate_config.return_prompt_logits and (
+            rendered_input.multimodal_inputs
+            or (
+                rendered_input.v41_inputs is not None
+                and rendered_input.v41_inputs.images
+            )
+        ):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "prompt scoring does not support multimodal inputs",
@@ -579,6 +803,7 @@ class OpenaiEndpoint(object):
             request_id=request_id,
             token_ids=input_id_tensor,
             mm_inputs=rendered_input.multimodal_inputs,
+            v41_inputs=rendered_input.v41_inputs,
             generate_config=generate_config,
             tokenizer=self.tokenizer,
         )
@@ -598,9 +823,10 @@ class OpenaiEndpoint(object):
 
         prompt_logits_data = None
         if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = (
-                await renderer._extract_prompt_logits(output_generator)
-            )
+            (
+                output_generator,
+                prompt_logits_data,
+            ) = await renderer._extract_prompt_logits(output_generator)
 
         merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
         choice_generator = renderer.render_response_stream(
@@ -644,7 +870,10 @@ class OpenaiEndpoint(object):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = renderer.render_chat(chat_request)
-        generate_config = self._extract_generation_config(chat_request)
+        rendered_input = self.render_chat(chat_request)
+        generate_config = self._extract_generation_config(
+            chat_request, rendered_input.input_ids, renderer
+        )
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

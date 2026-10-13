@@ -3,6 +3,18 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -14,12 +26,11 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + cuda13_torch_link_deps
 
 async_cache_test_deps = test_deps + [
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
 ]
 
 cc_test(
@@ -31,27 +42,14 @@ cc_test(
     copts = copts() + ["-fno-access-control"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "fifo_scheduler_cancel_test",
-    srcs = [
-        "FIFOSchedulerCancelTest.cc",
-    ],
-    data = [],
-    copts = copts() + ["-fno-access-control"],
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-    ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -65,5 +63,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

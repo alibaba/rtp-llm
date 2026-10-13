@@ -1,4 +1,13 @@
 {
+    "_comment": [
+        "Regenerated from the smoke_actual artifacts of runs 71439644 and 71441736, case",
+        "next_moe_nvfp4_cudagraph_tp2_sm100. Both runs produced the same responses after",
+        "SSM_STATE_DTYPE defaulted to auto and preserved this checkpoint's",
+        "mamba_ssm_dtype=float32 instead of overriding it with BF16.",
+        "This TP2 configuration remains batch-invariant: batch 1 and batch 3 all produce",
+        "the same completion. The DP2 sibling uses DeepEP low-latency expert dispatch and",
+        "therefore retains a separate, configuration-specific golden."
+    ],
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/smoke/Qwen3.5-35B-A3B-NVFP4-reshard",
     "query_result": [

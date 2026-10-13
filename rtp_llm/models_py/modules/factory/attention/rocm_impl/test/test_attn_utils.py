@@ -5,7 +5,6 @@ These helpers underlie every ROCm prefill path:
     * ``unpad_kv_vectorized``       — flash_attn_varlen_func K/V unpad
     * ``split_qkv_fp8``             — FP8 prefill QKV split
     * ``split_raw_qkv``             — kv_cache=None (encoder-only) QKV split
-    * ``reshape_kv_cache_vectorized`` — paged-prefill 5D layout (ASM + V1)
 
 All math is plain torch and runs on CPU; the actual attention kernels are
 covered by end-to-end model tests on real ROCm devices.
@@ -16,7 +15,6 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
-    reshape_kv_cache_vectorized,
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
@@ -235,100 +233,6 @@ class TestSplitRawQkv(unittest.TestCase):
 
     def test_gqa_split(self):
         self._check(token_num=4, head_num=32, head_num_kv=4, head_dim=128)
-
-
-# ---------------------------------------------------------------------------
-# reshape_kv_cache_vectorized — ASM + V1 paged layouts
-# ---------------------------------------------------------------------------
-
-
-class TestReshapeKvCacheVectorized(unittest.TestCase):
-    """Verify the 5D layout produced for mha_batch_prefill_func on both ASM
-    and V1 kernel write conventions.
-
-    ASM kernel writes V via templated ``getVLocalIdx<BASE>`` → already
-    vectorized ``[ps//vs, hd, vs]`` — needs only a ``view``.
-    V1 kernel writes V via non-template ``getVLocalIdx`` → linear ``[hd, ps]``
-    — needs reshape + permute to reach the same target.
-    Both K layouts are vectorized in the kernel and only need a ``view``.
-    """
-
-    def _make_kv_cache(
-        self, num_blocks, head_num_kv, tokens_per_block, head_dim, dtype
-    ):
-        elems = 2 * head_num_kv * tokens_per_block * head_dim
-        return torch.arange(num_blocks * elems, dtype=dtype).reshape(num_blocks, elems)
-
-    def test_asm_layout_shape(self):
-        num_blocks, hk, ps, hd, dtype = 4, 8, 16, 128, torch.float16
-        vs = 16 // torch.tensor([], dtype=dtype).element_size()  # = 8
-        kv_base = self._make_kv_cache(num_blocks, hk, ps, hd, dtype)
-
-        k, v = reshape_kv_cache_vectorized(kv_base, hk, ps, hd, v1_kv_layout=False)
-        # K: [num_blocks, hk, hd//vs, ps, vs]
-        self.assertEqual(k.shape, (num_blocks, hk, hd // vs, ps, vs))
-        # V (ASM): [num_blocks, hk, ps//vs, hd, vs]
-        self.assertEqual(v.shape, (num_blocks, hk, ps // vs, hd, vs))
-
-    def test_v1_layout_shape(self):
-        num_blocks, hk, ps, hd, dtype = 4, 8, 16, 128, torch.float16
-        vs = 16 // torch.tensor([], dtype=dtype).element_size()
-        kv_base = self._make_kv_cache(num_blocks, hk, ps, hd, dtype)
-
-        k, v = reshape_kv_cache_vectorized(kv_base, hk, ps, hd, v1_kv_layout=True)
-        # K layout is identical for ASM and V1 (both vectorized writes).
-        self.assertEqual(k.shape, (num_blocks, hk, hd // vs, ps, vs))
-        # V (V1, after permute): [num_blocks, hk, ps//vs, hd, vs]
-        self.assertEqual(v.shape, (num_blocks, hk, ps // vs, hd, vs))
-
-    def test_v1_permute_correctness(self):
-        """V1 path goes through a ``permute(0,1,3,2,4) + contiguous``;
-        verify the permute lands the elements in the right slots."""
-        num_blocks, hk, ps, hd, dtype = 2, 2, 8, 16, torch.float16
-        vs = 16 // torch.tensor([], dtype=dtype).element_size()  # = 8
-        kv_base = self._make_kv_cache(num_blocks, hk, ps, hd, dtype)
-
-        _, v_v1 = reshape_kv_cache_vectorized(kv_base, hk, ps, hd, v1_kv_layout=True)
-
-        # Build the same value via the documented manual sequence.
-        expected_elems = 2 * hk * ps * hd
-        flat = kv_base[:, :expected_elems].reshape(num_blocks, 2, hk, ps * hd)
-        v_linear = flat[:, 1, :, :].view(num_blocks, hk, hd, ps)
-        v_ref = (
-            v_linear.reshape(num_blocks, hk, hd, ps // vs, vs)
-            .permute(0, 1, 3, 2, 4)
-            .contiguous()
-        )
-        torch.testing.assert_close(v_v1, v_ref)
-
-    def test_asm_view_no_copy(self):
-        """ASM path uses pure ``view``; verify no copy happens (the result
-        shares storage with kv_base)."""
-        num_blocks, hk, ps, hd, dtype = 2, 2, 8, 16, torch.float16
-        kv_base = self._make_kv_cache(num_blocks, hk, ps, hd, dtype)
-
-        k, v = reshape_kv_cache_vectorized(kv_base, hk, ps, hd, v1_kv_layout=False)
-        self.assertEqual(k.data_ptr(), kv_base.data_ptr())
-        # V (ASM) starts after the K half within each block stride.
-        self.assertGreater(v.data_ptr(), kv_base.data_ptr())
-
-    def test_oversized_stride_truncated(self):
-        """Hybrid-cache buffers carry extra stride for linear-attention layers;
-        the helper must slice down to ``2*hk*ps*hd`` and ignore the tail."""
-        num_blocks, hk, ps, hd, dtype = 2, 4, 8, 32, torch.float16
-        expected_elems = 2 * hk * ps * hd
-        # Allocate with extra padding columns beyond expected_elems.
-        kv_base = torch.arange(num_blocks * (expected_elems + 64), dtype=dtype).reshape(
-            num_blocks, expected_elems + 64
-        )
-        k, v = reshape_kv_cache_vectorized(kv_base, hk, ps, hd, v1_kv_layout=False)
-        # Result must reflect only the first expected_elems per block.
-        vs = 16 // kv_base.element_size()
-        self.assertEqual(k.shape, (num_blocks, hk, hd // vs, ps, vs))
-        self.assertEqual(v.shape, (num_blocks, hk, ps // vs, hd, vs))
-        # First K element should be kv_base[0, 0] — proves we sliced from
-        # offset 0, not from somewhere inside the padding.
-        self.assertEqual(k[0, 0, 0, 0, 0].item(), kv_base[0, 0].item())
 
 
 if __name__ == "__main__":

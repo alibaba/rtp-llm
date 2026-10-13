@@ -6,7 +6,7 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+    max-in-memory-size: 5MB
 logging:
   level:
     root: info
@@ -28,22 +28,8 @@ management:
     tags:
       application: flexlb-api
 
-trace:
-  otel:
-    web:
-      filter-order: 0x7fffffff
-      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
-    config:
-      service-name: flexlb
-      instrumentation-name: trace
-    exporter:
-      otlp:
-        enabled: true
-        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
-      logging:
-        enabled: true
-        format: json
-otel:
-  exporter:
-    otlp:
-      endpoint: none
+flexlb:
+  monitor:
+    enabled: true
+    per-engine-tags: true
+    # Use --flexlb.monitor.metric-whitelist to select exposed metric prefixes.

@@ -29,6 +29,7 @@ class ModelArgs:
         "json_model_override_args",
         "phy2log_path",
         "enable_fp32_lm_head",
+        "enable_output_vocab_pruning",
     ]
 
     def __init__(self):
@@ -59,3 +60,4 @@ class ModelArgs:
 
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
+        self.enable_output_vocab_pruning: bool = False

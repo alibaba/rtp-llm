@@ -1,0 +1,106 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.6-27B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\n关于英语听力",
+                "aux_info": {
+                    "input_len": 8,
+                    "reuse_len": 0,
+                    "output_len": 8,
+                    "iter_count": 3,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\nHere's a thinking process:\n\n1.  **Understand User Query**: The",
+                "aux_info": {
+                    "input_len": 6,
+                    "reuse_len": 0,
+                    "output_len": 20,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n基本形成靠拢沈大的经济实力。国内生产总值年均增长10%以上，全面完成“\n\n",
+                "aux_info": {
+                    "input_len": 3612,
+                    "reuse_len": 0,
+                    "output_len": 20,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n基本形成靠拢沈大的经济实力。国内生产总值年均增长10%以上，全面完成“十五",
+                "aux_info": {
+                    "input_len": 3612,
+                    "reuse_len": 3072,
+                    "output_len": 20,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        }
+    ]
+}

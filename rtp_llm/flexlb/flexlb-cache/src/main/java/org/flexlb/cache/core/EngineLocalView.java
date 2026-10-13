@@ -39,7 +39,7 @@ public class EngineLocalView {
      */
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
-    
+
     /**
      * Dynamic sync interval manager
      */
@@ -81,7 +81,7 @@ public class EngineLocalView {
         addedTask.join();
         removedTask.join();
 
-        cacheMetricsReporter.reportCacheDiffMetrics(engineIPort, role, addedBlocks.size(), removedBlocks.size());
+        cacheMetricsReporter.reportCacheDiffMetrics(role, addedBlocks.size(), removedBlocks.size());
 
         // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();
@@ -194,12 +194,4 @@ public class EngineLocalView {
         return engineViews.size();
     }
 
-    /**
-     * Get all engine IP:Port set
-     *
-     * @return All engine IP:Port set
-     */
-    public Set<String> getAllEngineIpPorts() {
-        return engineViews.keySet();
-    }
 }

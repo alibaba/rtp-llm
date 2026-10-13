@@ -1,9 +1,13 @@
 #pragma once
 
+#include <string>
+#include <utility>
+
 namespace rtp_llm {
 
 enum class ErrorCode {
     NONE_ERROR                   = 0,
+    CONCURRENCY_LIMIT_ERROR      = 409,
     LONG_PROMPT_ERROR            = 511,
     UNKNOWN_ERROR                = 514,
     MALLOC_FAILED                = 602,
@@ -13,6 +17,14 @@ enum class ErrorCode {
     EXECUTION_EXCEPTION          = 606,
     EXCEEDS_KV_CACHE_MAX_LEN     = 607,
 
+    // grammar / structured-output errors (608-613)
+    GRAMMAR_PARSER_REJECTED_TOKEN     = 608,
+    GRAMMAR_NON_EOS_AFTER_TERMINAL    = 609,
+    GRAMMAR_BITMASK_BUFFER_TOO_SMALL  = 610,
+    GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB = 611,
+    GRAMMAR_EOS_OUT_OF_VOCAB          = 612,
+    GRAMMAR_VERIFY_EXCEPTION          = 613,
+
     // multimodal error
     MM_LONG_PROMPT_ERROR   = 901,
     MM_WRONG_FORMAT_ERROR  = 902,
@@ -20,13 +32,20 @@ enum class ErrorCode {
     MM_EMPTY_ENGINE_ERROR  = 904,
     MM_NOT_SUPPORTED_ERROR = 905,
     MM_DOWNLOAD_FAILED     = 906,
+    MM_REMOTE_RPC_FAILED   = 907,
+    UNSAFE_INPUT_CONTENT   = 908,
+    UNSAFE_OUTPUT_CONTENT  = 909,
 
-    // Error codes starting from 8000 can be retried
-    CANCELLED             = 8100,
-    OUT_OF_VOCAB_RANGE    = 8101,
-    OUTPUT_QUEUE_FULL     = 8102,
-    OUTPUT_QUEUE_IS_EMPTY = 8103,
-    FINISHED              = 8104,
+    // Codes starting from 8000 are historically retry-oriented. Individual
+    // domains may explicitly classify lower codes through their retry policy.
+    CANCELLED              = 8100,
+    OUT_OF_VOCAB_RANGE     = 8101,
+    OUTPUT_QUEUE_FULL      = 8102,
+    OUTPUT_QUEUE_IS_EMPTY  = 8103,
+    FINISHED               = 8104,
+    OUTPUT_QUEUE_NO_UPDATE = 8105,
+    // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
+    GRAMMAR_COMPILE_OVERLOADED = 8106,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -78,12 +97,18 @@ enum class ErrorCode {
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
     GET_ALL_NODE_STATUS_FAILED  = 8401,
+
+    // AutoTPM Cancel: victim of priority preemption.
+    // Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED upstream.
+    PRIORITY_PREEMPTED = 8429,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
     switch (code) {
         case ErrorCode::NONE_ERROR:
             return "NONE_ERROR";
+        case ErrorCode::CONCURRENCY_LIMIT_ERROR:
+            return "CONCURRENCY_LIMIT_ERROR";
         case ErrorCode::LONG_PROMPT_ERROR:
             return "LONG_PROMPT_ERROR";
         case ErrorCode::UNKNOWN_ERROR:
@@ -108,8 +133,24 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_IS_EMPTY";
         case ErrorCode::FINISHED:
             return "FINISHED";
+        case ErrorCode::OUTPUT_QUEUE_NO_UPDATE:
+            return "OUTPUT_QUEUE_NO_UPDATE";
+        case ErrorCode::GRAMMAR_COMPILE_OVERLOADED:
+            return "GRAMMAR_COMPILE_OVERLOADED";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
+        case ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN:
+            return "GRAMMAR_PARSER_REJECTED_TOKEN";
+        case ErrorCode::GRAMMAR_NON_EOS_AFTER_TERMINAL:
+            return "GRAMMAR_NON_EOS_AFTER_TERMINAL";
+        case ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL:
+            return "GRAMMAR_BITMASK_BUFFER_TOO_SMALL";
+        case ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB:
+            return "GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB";
+        case ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB:
+            return "GRAMMAR_EOS_OUT_OF_VOCAB";
+        case ErrorCode::GRAMMAR_VERIFY_EXCEPTION:
+            return "GRAMMAR_VERIFY_EXCEPTION";
         case ErrorCode::GET_HOST_FAILED:
             return "GET_HOST_FAILED";
         case ErrorCode::GET_CONNECTION_FAILED:
@@ -202,10 +243,20 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_EMPTY_ENGINE_ERROR";
         case ErrorCode::MM_NOT_SUPPORTED_ERROR:
             return "MM_NOT_SUPPORTED_ERROR";
+        case ErrorCode::MM_DOWNLOAD_FAILED:
+            return "MM_DOWNLOAD_FAILED";
+        case ErrorCode::UNSAFE_INPUT_CONTENT:
+            return "UNSAFE_INPUT_CONTENT";
+        case ErrorCode::UNSAFE_OUTPUT_CONTENT:
+            return "UNSAFE_OUTPUT_CONTENT";
+        case ErrorCode::MM_REMOTE_RPC_FAILED:
+            return "MM_REMOTE_RPC_FAILED";
         case ErrorCode::GET_PART_NODE_STATUS_FAILED:
             return "GET_PART_NODE_STATUS_FAILED";
         case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
             return "GET_ALL_NODE_STATUS_FAILED";
+        case ErrorCode::PRIORITY_PREEMPTED:
+            return "PRIORITY_PREEMPTED";
         default:
             return "Error: Unrecognized ErrorCode";
     }
@@ -215,14 +266,11 @@ class ErrorInfo {
 public:
     ErrorInfo() {}
     ErrorInfo(ErrorCode code, const std::string& message): code_(code), message_(message) {}
-    ErrorInfo(const ErrorInfo& other): code_(other.code_), message_(other.message_) {}
-    ErrorInfo& operator=(const ErrorInfo& other) {
-        if (this != &other) {
-            code_    = other.code_;
-            message_ = other.message_;
-        }
-        return *this;
-    }
+    ErrorInfo(ErrorCode code, std::string&& message): code_(code), message_(std::move(message)) {}
+    ErrorInfo(const ErrorInfo& other)            = default;
+    ErrorInfo(ErrorInfo&& other)                 = default;
+    ErrorInfo& operator=(const ErrorInfo& other) = default;
+    ErrorInfo& operator=(ErrorInfo&& other)      = default;
 
     const std::string& ToString() const {
         return message_;

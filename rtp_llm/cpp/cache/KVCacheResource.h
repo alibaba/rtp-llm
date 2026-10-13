@@ -4,12 +4,15 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+class CacheTopology;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -22,6 +25,14 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
+
+struct BlockDependency {
+    bool         has_parent{false};
+    CacheKeyType parent_key{0};
+    uint32_t     ordinal{0};
+};
+
+using BlockDependenciesType = std::vector<BlockDependency>;
 
 class BlockIds {
 public:
@@ -67,39 +78,86 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
+// Build the complete identity/row pair before publishing it through a const owner view.
+// Value copies own their index and row vector; the BlockIds holders remain shared.
+struct GroupBlockIds {
+    size_t                   size() const;
+    int                      blocksNum(std::string_view tag) const;
+    const BlockIndicesType&  blocks(std::string_view tag) const;
+    const BlockIndicesType&  kernelBlocks(std::string_view tag) const;
+    BlockIds&                mutableBlockIds(std::string_view tag);
+    const BlockIds&          blockIds(std::string_view tag) const;
+    std::vector<std::string> orderedTags() const;
+    void                     validate() const;
+
+    std::unordered_map<std::string, size_t> tag_to_index_;
+    std::vector<std::shared_ptr<BlockIds>>  rows_;
+};
 // Legacy per-layer view. Valid only when each layer maps to exactly one group.
 using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(int                                  group_num,
-                    int                                  layer_num,
-                    const std::vector<std::vector<int>>& layer_to_group_ids         = {},
-                    size_t                               kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>&   group_types                = {});
+    void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id = 0) const;
-    const BlockIndicesType& blocks(int group_id = 0) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
-    const BlockIndicesType& kernelBlocks(int group_id = 0) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
-    BlockIds&               mutableBlockIds(int group_id = 0) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
+    int                     blocksNum(std::string_view tag) const;
+    const BlockIndicesType& blocks(std::string_view tag) const;
+    const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
+    const BlockIndicesType& kernelBlocks(std::string_view tag) const;
+    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
+    BlockIds&               mutableBlockIds(std::string_view tag) const;
+    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
+    const BlockIds& blockIds(std::string_view tag) const;
+    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+
+    // Shared-row view resolved through this resource's own tag map; keeps async
+    // holders aliasing the resource rows without re-deriving a group index.
+    std::shared_ptr<BlockIds> groupBlockIds(std::string_view tag) const;
+    const GroupBlockIds&      groupBlockIds() const;
+
+    const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
+    const std::string&              soleGroupTagForLayer(int layer_id) const;
+
+    int layerNum() const;
     int groupNums() const;
 
-    GroupBlockIds&       groupBlocks();
-    const GroupBlockIds& groupBlocks() const;
+    std::vector<std::string> groupTags() const;
+    int                      maxBlocksNum() const;
+    size_t                   firstNonEmptyBlocksNum() const;
 
     LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+    void                 setCacheKeys(const CacheKeysType& keys);
+    void                 setCacheKeys(CacheKeysType&& keys);
+    bool                 cacheKeysAreCpCanonical() const;
+    void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+
+    BlockDependenciesType&       blockDependencies();
+    const BlockDependenciesType& blockDependencies() const;
+    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
+    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
+    void                         rebuildLinearBlockDependencies();
+    void                         ensureLinearBlockDependencies();
+
+    // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
+    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
+    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
+    // localCacheKeys may return fewer entries than blocks().size().  This is
+    // intentional — padding blocks carry no real data and must NOT participate in
+    // device cache insert, PD transfer, or connector operations.  Downstream code
+    // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
+    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
+        CacheKeysType local;
+        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
+            local.push_back(cache_keys[i]);
+        }
+        return local;
+    }
 
     size_t reuseBlockNum() const;
 
@@ -109,29 +167,35 @@ public:
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
-    size_t remoteReuseBlockNum() const;
-    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
+    size_t diskReuseBlockNum() const;
+    void   setDiskReuseBlockNum(size_t disk_reuse_blocks_num);
+
+    size_t storageBackendReuseBlockNum() const;
+    void   setStorageBackendReuseBlockNum(size_t storage_backend_reuse_blocks_num);
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
 
-    size_t remoteReuseBlocksNum() const;
-    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
-
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
 private:
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
-    // group_id -> block_indices
-    GroupBlockIds group_block_ids;
-    CacheKeysType cache_keys;
+    void checkLayerTag(int layer_id, std::string_view tag) const;
+    bool hasOneGroupPerLayer() const;
+
+    // Beam forks share immutable layer membership; default resources keep owning views.
+    std::shared_ptr<const CacheTopology>  topology_;
+    std::vector<std::vector<std::string>> layer_group_tags_;
+    GroupBlockIds         group_block_ids;
+    CacheKeysType         cache_keys;
+    BlockDependenciesType block_dependencies;
+    bool                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};
-    size_t remote_reuse_block_num_{0};
+    size_t disk_reuse_block_num_{0};
+    size_t storage_backend_reuse_block_num_{0};
     bool   last_block_aligned_{false};
 };
 

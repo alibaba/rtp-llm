@@ -4,12 +4,13 @@ import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
-/**
- * PV log data
- */
+import java.util.Map;
+
+/** One completed FlexLB scheduling decision written to {@code pv.log}. */
 @Data
 public class PvLogData {
 
+    // Keep the historical PV fields for downstream compatibility.
     private long requestId;
     private long seqLen;
     private Response response;
@@ -19,15 +20,45 @@ public class PvLogData {
     private long startTime;
     private long requestTimeMs;
 
-    public PvLogData(BalanceContext ctx) {
+    // Minimal gRPC scheduling fields needed for incident correlation.
+    private int code;
+    private String admissionRejectReason;
+    private String scheduleOrigin;
+    private int priority;
+    private long requestExpiresAtMs;
+    private long latencyMs;
+    private long batchId;
+    private String requestState;
+    private String realMasterHost;
+    private Map<String, Object> schedulingDiagnostics;
 
+    public PvLogData(BalanceContext ctx,
+                     int code,
+                     String admissionRejectReason,
+                     String scheduleOrigin,
+                     long batchId,
+                     String requestState,
+                     String realMasterHost,
+                     long completedAtMs) {
         this.requestId = ctx.getRequestId();
         this.seqLen = ctx.getRequest().getSeqLen();
         this.response = ctx.getResponse();
-        this.success = ctx.isSuccess();
         this.error = ctx.getErrorMessage();
+        this.success = ctx.isSuccess();
+        if (!success) {
+            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
+        }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
+        this.code = code;
+        this.admissionRejectReason = admissionRejectReason;
+        this.scheduleOrigin = scheduleOrigin;
+        this.priority = ctx.getPriority();
+        this.requestExpiresAtMs = ctx.getRequestExpiresAtMs();
+        this.latencyMs = Math.max(0, completedAtMs - ctx.getStartTime());
+        this.batchId = batchId;
+        this.requestState = requestState;
+        this.realMasterHost = realMasterHost;
     }
 }

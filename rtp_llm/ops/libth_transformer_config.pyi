@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -82,6 +82,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    v41_kv_source_layer_ids: list[int]
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
@@ -394,9 +395,12 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
+    cp_force_single_prefill: bool
     decode_prefill_ratio: str
     max_batch_tokens_size: int
+    max_batch_tokens_without_cache: int
     max_context_batch_size: int
+    max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
     def __getstate__(self) -> tuple:
         ...
@@ -406,8 +410,34 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
+
+
+class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
+    compiler_cache_bytes: int
+    constrained_json_disable_any_whitespace: bool
+    num_workers: int
+    terminate_without_stop_token: bool
+    tokenizer_info_json: str
+
+    def __getstate__(self) -> tuple:
+        ...
+
+    def __init__(self) -> None:
+        ...
+
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+
+    def to_string(self) -> str:
+        ...
+
+
 class FMHAConfig:
     absorb_opt_len: int
+    disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
     enable_flashinfer_trt_fmha_v2: bool
@@ -541,6 +571,23 @@ class FfnDisAggregateConfig:
         ...
     def to_string(self) -> str:
         ...
+class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
+    compiler_cache_bytes: int
+    constrained_json_disable_any_whitespace: bool
+    num_workers: int
+    terminate_without_stop_token: bool
+    tokenizer_info_json: str
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
 class GrpcConfig:
     def __getstate__(self) -> tuple:
         ...
@@ -563,6 +610,9 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
@@ -577,6 +627,8 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    generation_prefill_capture_token_buckets: list[int]
+    generation_prefill_cuda_graph_max_requests: int
     rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
@@ -588,10 +640,51 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
+class HiddenStateCaptureDtype:
+    """
+    Members:
+
+      BF16
+
+      FP8_E4M3
+    """
+    BF16: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.BF16: 0>
+    FP8_E4M3: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.FP8_E4M3: 1>
+    __members__: typing.ClassVar[dict[str, HiddenStateCaptureDtype]]  # value = {'BF16': <HiddenStateCaptureDtype.BF16: 0>, 'FP8_E4M3': <HiddenStateCaptureDtype.FP8_E4M3: 1>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
     hybrid_attention_types: list[HybridAttentionType]
-    def __init__(self, enable_hybrid_attention: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, enable_hybrid_attention: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -638,17 +731,60 @@ class HybridAttentionType:
 class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
-    enable_memory_cache_sm_copy: bool
+    enable_disk_cache: bool
     enable_remote_cache: bool
+    device_eviction_policy: str
+    memory_eviction_policy: str
+    disk_eviction_policy: str
+    dsv4_fixed_pool_blocks: int
+    dsv4_hca_state_pool_blocks: int
+    dsv4_fixed_pool_use_memory: bool
+    block_tree_full_prefix_scan_interval_ms: int
+    block_tree_transfer_worker_count: int
+    block_tree_business_queue_max_size: int
+    block_tree_transfer_queue_max_size: int
+    block_tree_device_evict_low_watermark_ratio: float
+    block_tree_device_evict_high_watermark_ratio: float
+    block_tree_memory_evict_low_watermark_ratio: float
+    block_tree_memory_evict_high_watermark_ratio: float
+    block_tree_disk_evict_low_watermark_ratio: float
+    block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
+    disk_cache_paths: str
+    disk_cache_size_mb: int
+    disk_cache_buffered_io: bool
+    disk_cache_sync_timeout_ms: int
+    disk_cache_staging_block_count: int
+    memory_cache_max_descriptors_per_transfer_batch: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
+    kvcm_asyncwrapper_queue_size: int
+    kvcm_asyncwrapper_thread_num: int
+    kvcm_client_config: str
+    kvcm_enable_vipserver: bool
+    kvcm_get_broadcast_timeout: int
+    kvcm_get_timeout_ms: int
+    kvcm_instance_group: str
+    kvcm_instance_id_salt: str
+    kvcm_meta_channel_call_timeout: int
+    kvcm_meta_channel_connection_timeout: int
+    kvcm_meta_channel_retry_time: int
+    kvcm_model_extra_info: str
+    kvcm_model_sdk_config: str
+    kvcm_model_user_data: str
+    kvcm_put_broadcast_timeout: int
+    kvcm_put_timeout_ms: int
+    kvcm_server_address: str
+    kvcm_storage_queue_size: int
+    kvcm_storage_thread_num: int
+    kvcm_vipserver_domain: str
+    # Legacy aliases of the canonical KVCM members.
     reco_asyncwrapper_queue_size: int
     reco_asyncwrapper_thread_num: int
     reco_client_config: str
@@ -673,10 +809,14 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
+    kv_cache_event_publisher_type: str
+    kv_cache_event_manager_endpoint: str
+    kv_cache_event_instance_group: str
+    kv_cache_event_instance_id: str
+    kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
-    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -781,10 +921,12 @@ class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
+    mm_padding_size: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
         ...
 class MMPreprocessConfig:
+    max_long_side_pixel: int
     crop_positions: list[float]
     fps: int
     height: int
@@ -796,7 +938,7 @@ class MMPreprocessConfig:
     width: int
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self, width: int, height: int, min_pixels: int, max_pixels: int, fps: int, min_frames: int, max_frames: int, crop_positions: list[float], mm_timeout_ms: int) -> None:
+    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1, max_long_side_pixel: int = -1) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
@@ -860,23 +1002,92 @@ class KVCacheSpecType:
     MHA: typing.ClassVar[KVCacheSpecType]
     MLA: typing.ClassVar[KVCacheSpecType]
     LINEAR: typing.ClassVar[KVCacheSpecType]
-
+    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
+    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
     @property
-    def name(self) -> str:
-        ...
-
+    def name(self) -> str: ...
     @property
-    def value(self) -> int:
-        ...
+    def value(self) -> int: ...
 
+class CacheGroupType:
+    LINEAR: typing.ClassVar[CacheGroupType]
+    FULL: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
+
+class CacheMemoryPlacement:
+    DEVICE: typing.ClassVar[CacheMemoryPlacement]
+    HOST: typing.ClassVar[CacheMemoryPlacement]
+    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
+
+class CpBlockMappingMode:
+    NONE: typing.ClassVar[CpBlockMappingMode]
+    BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
+    COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]
+
+class CpBlockSliceMode:
+    NONE: typing.ClassVar[CpBlockSliceMode]
+    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]
+    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]
+
+class OpaqueBlockEntryCountMode:
+    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]
+    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
+    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
+
+class CpPrefillSliceLayout:
+    NONE: typing.ClassVar[CpPrefillSliceLayout]
+    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
+    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
+
+class CacheReusePolicyDesc:
+    enable_prefix_reuse: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCapacityPolicyDesc:
+    reservable: typing.Any
+    explicit_block_num: typing.Any
+    charge_to_paged_budget: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheMemoryPolicyDesc:
+    placement: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheTailPolicyDesc:
+    active_tail_blocks: typing.Any
+    validate_tail_blocks: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCpPolicyDesc:
+    mapping: typing.Any
+    slice: typing.Any
+    scale_seq_size: typing.Any
+    align_payload: typing.Any
+    prefill_slice_layout: typing.Any
+    def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:
     tag: str
     cache_type: KVCacheSpecType
     dtype: DataType
-
-    def __init__(self) -> None:
-        ...
+    is_state_cache: bool
+    entry_elems: int
+    entry_dtype: DataType
+    entry_count_mode: OpaqueBlockEntryCountMode
+    explicit_entry_count: int
+    compression_ratio: int
+    state_ring_overlap: int
+    state_ring_include_gen_num_per_cycle: bool
+    block_stride_bytes_override: int
+    block_stride_bytes_alignment: int
+    block_stride_alignment_min_entries: int
+    group_type: typing.Any
+    reuse: typing.Any
+    capacity: typing.Any
+    memory: typing.Any
+    tail: typing.Any
+    cp: typing.Any
+    def __init__(self) -> None: ...
 
 
 class ModelConfig:
@@ -888,6 +1099,8 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    cache_min_replay_tokens: int
+    cache_key_hash_seed: int
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -896,6 +1109,8 @@ class ModelConfig:
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
     hidden_size: int
+    hidden_state_capture_dtype: HiddenStateCaptureDtype
+    hidden_state_capture_layer_ids: list[int]
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
@@ -913,7 +1128,14 @@ class ModelConfig:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    hc_eps: float
+    swiglu_limit: float
+    num_hash_layers: int
     num_layers: int
+    output_vocab_ids: list[int]
+    output_vocab_padded_size: int
     partial_rotary_factor: float
     position_ids_style: int
     pre_seq_len: int
@@ -1098,8 +1320,10 @@ class PDSepConfig:
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
     prefill_max_wait_timeout_ms: int
+    prefill_prepare_resource_pool_size: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
@@ -1126,6 +1350,7 @@ class ParallelismConfig:
     local_world_size: int
     pp_size: int
     prefill_cp_config: ...
+    role_type: RoleType
     tp_rank: int
     tp_size: int
     world_rank: int
@@ -1148,7 +1373,9 @@ class ParallelismConfig:
         ...
 class PrefillCPConfig:
     comm_buffer_size: int
+    kv_cache_sharded: bool
     method: CPRotateMethod
+    prefill_cp_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1167,6 +1394,7 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
+    enable_model_inputs_log: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
@@ -1226,6 +1454,8 @@ class QuantAlgo:
         ...
     def isW4a8Int4PTPC(self) -> bool:
         ...
+    def isW8a8Int8PTPC(self) -> bool:
+        ...
     def isWeightOnlyPerCol(self) -> bool:
         ...
     def setQuantAlgo(self, arg0: str, arg1: int, arg2: int) -> None:
@@ -1257,6 +1487,8 @@ class QuantMethod:
       ModelOptFP4
 
       QuarkMXFP4
+
+      W8A8INT8PTPC
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
     FP8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8PTPC: 8>
@@ -1269,8 +1501,9 @@ class QuantMethod:
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
     W4A8INT4PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.W4A8INT4PTPC: 9>
+    W8A8INT8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.W8A8INT8PTPC: 12>
     WeightOnlyPerCol: typing.ClassVar[QuantMethod]  # value = <QuantMethod.WeightOnlyPerCol: 1>
-    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>}
+    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>, 'QuarkMXFP4': <QuantMethod.QuarkMXFP4: 11>, 'W8A8INT8PTPC': <QuantMethod.W8A8INT8PTPC: 12>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -1367,6 +1600,7 @@ class RopeConfig:
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
+    mrope_interleaved: bool
     mscale: float
     offset: int
     scale: float
@@ -1440,6 +1674,7 @@ class RopeStyle:
     def value(self) -> int:
         ...
 class RuntimeConfig:
+    output_dispatcher_worker_count: int
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
@@ -1448,6 +1683,7 @@ class RuntimeConfig:
     use_batch_decode_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
@@ -1661,7 +1897,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
     Check if RoPE cache matches the given config
     """
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], initial_hash: int = 0) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """
@@ -1677,3 +1913,6 @@ ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WI
 DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
 PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
 UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>
+
+def get_multimodal_token_spans(token_ids: list[int], separators: list[list[int]], include_separators: bool) -> list[tuple[int, int]]:
+    ...

@@ -73,6 +73,10 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
         return nullptr;
     }
 
+    // CacheStore workers are shared across peers. Never block one of those
+    // workers behind a saturated channel: ANet reports enqueue failure through
+    // the RPC callback, and the cache-load state machine applies its bounded
+    // transfer retry policy without starving healthy peers.
     return std::shared_ptr<arpc::RPCChannelBase>(
         dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
 }

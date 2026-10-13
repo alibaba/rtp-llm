@@ -4,7 +4,9 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
@@ -20,9 +22,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 class CudaFp4NoDPStrategy(MoeStrategy):
     """CUDA FP4 PerGroup single GPU strategy"""
 
+    strategy_name = "fp4_no_dp"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
@@ -46,12 +52,16 @@ class CudaFp4NoDPStrategy(MoeStrategy):
 class CudaFp4EpLowLatencyStrategy(MoeStrategy):
     """CUDA FP4 PerGroup EP low latency strategy"""
 
+    strategy_name = "fp4_ep_low_latency"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "modelopt_fp4")
-        checker.check(config.moe_strategy == "fp4_ep_low_latency" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "fp4_ep_low_latency" or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
@@ -75,9 +85,13 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
 class CudaFp4EpNormalStrategy(MoeStrategy):
     """CUDA FP4 PerGroup EP normal mode strategy"""
 
+    strategy_name = "fp4_ep_normal"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp4_ep_normal" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == "fp4_ep_normal" or config.moe_strategy == "auto"
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (

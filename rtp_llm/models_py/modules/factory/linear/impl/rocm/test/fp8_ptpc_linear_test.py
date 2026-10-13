@@ -1,18 +1,21 @@
+import json
 import unittest
-from unittest import SkipTest
+from unittest import SkipTest, mock
 
 import torch
 import torch.nn.functional as F
-from aiter import dtypes
 
 from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 try:
     import aiter
+    from aiter import dtypes
 
     AITER_AVAILABLE = True
 except ImportError:
+    aiter = None
+    dtypes = None
     AITER_AVAILABLE = False
 
 
@@ -22,6 +25,7 @@ class _FP8PTPCQuantConfig:
 
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
+    assert dtypes is not None
     x = x.to(dtypes.fp32) * x_scale
     weight = weight.to(dtypes.fp32) * w_scale
     out = F.linear(x, weight)
@@ -271,6 +275,12 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
         self.bias = torch.randn(
             self.output_size, dtype=torch.bfloat16, device=self.device
         )
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearWithSwizzle,
+        )
+
+        RocmFp8PTPCLinearWithSwizzle._load_solution_cache.cache_clear()
+        self.addCleanup(RocmFp8PTPCLinearWithSwizzle._load_solution_cache.cache_clear)
 
     def _make_linear(self):
         from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
@@ -374,9 +384,11 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
             RocmFp8PTPCLinearWithSwizzle,
         )
 
-        RocmFp8PTPCLinearWithSwizzle._load_solution_cache.cache_clear()
         self.assertTrue(RocmFp8PTPCLinearWithSwizzle._solution_cache_path().exists())
-        cache = RocmFp8PTPCLinearWithSwizzle._load_solution_cache()
+        payload = json.loads(
+            RocmFp8PTPCLinearWithSwizzle._solution_cache_path().read_text()
+        )
+        cache = RocmFp8PTPCLinearWithSwizzle._parse_solution_cache(payload)
         self.assertEqual(len(cache), 20)
         self.assertEqual(cache.get((512, 768, 2304, "bias")), 271680)
         self.assertEqual(cache.get((1024, 768, 3072, "bias_gelu")), 271141)
@@ -390,10 +402,93 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
         self.assertNotIn((16384, 3072, 768, "bias"), cache)
         self.assertNotIn((16384, 768, 3072, "bias_gelu"), cache)
 
+        validated_versions = payload["target"]["validated_aiter_versions"]
+        self.assertIsInstance(validated_versions, list)
+        self.assertTrue(
+            all(isinstance(version, str) and version for version in validated_versions)
+        )
+        allowed_statuses = {"pending_full_sweep", "validated"}
+        for validation_name in ("correctness", "performance"):
+            validation = payload["upgrade_validation"][validation_name]
+            self.assertIn(validation["status"], allowed_statuses)
+            if validation["status"] == "validated":
+                self.assertTrue(validation["last_validated"])
+                self.assertTrue(validated_versions)
+
     def test_solution_index_falls_back_for_uncached_shape(self):
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearWithSwizzle,
+        )
+
+        RocmFp8PTPCLinearWithSwizzle._load_solution_cache.cache_clear()
         linear = self._make_linear()
         self.assertEqual(linear._get_solution_index(1, 1, 1, "bias"), -1)
         self.assertEqual(linear._get_solution_index(8192, 3072, 768, "bias"), -1)
+
+    def test_recorded_solutions_match_default_hipblaslt_solution(self):
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearWithSwizzle,
+        )
+
+        payload = json.loads(
+            RocmFp8PTPCLinearWithSwizzle._solution_cache_path().read_text()
+        )
+        for row in payload["solutions"]:
+            m, k, n = int(row["m"]), int(row["k"]), int(row["n"])
+            epilogue = str(row["epilogue"])
+            solution_index = int(row["solution_index"])
+            with self.subTest(m=m, k=k, n=n, epilogue=epilogue):
+                torch.manual_seed(20260826 + m + k + n)
+                input_bf16 = torch.randn(m, k, dtype=torch.bfloat16, device=self.device)
+                weight_bf16 = torch.randn(
+                    n, k, dtype=torch.bfloat16, device=self.device
+                )
+                bias = torch.randn(n, dtype=torch.bfloat16, device=self.device)
+                weight_q, weight_scales = rocm_per_token_quant_fp8(weight_bf16)
+                linear = RocmFp8PTPCLinearWithSwizzle(
+                    weight=swizzle_tensor(weight_q, False).T,
+                    weight_scales=weight_scales.T.contiguous(),
+                    bias=bias,
+                )
+                forced_cache = {(m, k, n, epilogue): solution_index}
+                with (
+                    mock.patch.object(
+                        RocmFp8PTPCLinearWithSwizzle,
+                        "_load_solution_cache",
+                        return_value=forced_cache,
+                    ),
+                    mock.patch.object(aiter, "hipb_mm", wraps=aiter.hipb_mm) as hipb_mm,
+                ):
+                    selected = (
+                        linear.forward_with_bias_gelu(input_bf16)
+                        if epilogue == "bias_gelu"
+                        else linear(input_bf16)
+                    )
+                    self.assertEqual(hipb_mm.call_args.args[2], solution_index)
+
+                input_q, input_scales = rocm_per_token_quant_fp8(input_bf16, eps=1e-10)
+                kwargs = {
+                    "bias": bias,
+                    "out_dtype": torch.bfloat16,
+                    "scaleA": input_scales.float(),
+                    "scaleB": linear.weight_scales,
+                    "bpreshuffle": True,
+                }
+                if epilogue == "bias_gelu":
+                    kwargs["use_gelu"] = True
+                default = aiter.hipb_mm(input_q, linear.weight, -1, **kwargs)
+                # Different valid hipBLASLt reduction orders can round a tiny
+                # fraction of BF16 outputs to adjacent representable values.
+                # One BF16 ULP is 2**-7; keep the absolute tolerance at 1e-3
+                # while allowing exactly that representation-level variance.
+                torch.testing.assert_close(
+                    selected,
+                    default,
+                    atol=1e-3,
+                    rtol=torch.finfo(torch.bfloat16).eps,
+                )
+                del default, input_bf16, input_q, linear, selected, weight_bf16
 
     def test_epilogue_name_for_solution_cache_key(self):
         from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (

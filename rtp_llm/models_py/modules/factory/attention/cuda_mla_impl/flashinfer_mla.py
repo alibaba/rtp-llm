@@ -19,6 +19,7 @@ from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 g_workspace_buffer = None
 warm_up_done = False
@@ -26,6 +27,8 @@ warm_up_done = False
 
 def warmup_flashinfer_python():
     global warm_up_done
+    if not model_warm_up_enabled():
+        return
     if warm_up_done:
         return
     warm_up_done = True

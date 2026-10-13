@@ -78,9 +78,13 @@ void LoadFlags::setReady(bool ready) {
     flag_gpu.fill_(value);
 }
 
-bool LoadFlags::isReady() {
-    // sync all ranks load_flag_tensor_
-    flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
+bool LoadFlags::isReady(size_t world_size) {
+    if (world_size > 1) {
+        // sync all ranks load_flag_tensor_
+        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
+    } else {
+        flag_sync.copy_(flag_gpu);
+    }
 
     flag_host.copy_(flag_sync);
     // Repeatedly executing “x = ReduceSum(x)” with tp8 will cause an overflow and set the value of x to 0
@@ -117,7 +121,7 @@ bool EplbController::stepAndCheckSyncStep() {
     return false;
 }
 
-EPLBConfig EplbController::getAndSyncData() {
+EPLBConfig EplbController::getAndSyncData(size_t world_size) {
     // copy control data to host buffer
     EPLBConfig cur_data;
     {
@@ -133,8 +137,9 @@ EPLBConfig EplbController::getAndSyncData() {
     // copy to device
     eplb_control_data_buf_device.copy_(eplb_control_data_buf_host, /*non_blocking=*/true);
 
-    // broadcast to all ranks
-    execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+    if (world_size > 1) {
+        execBroadcast({{eplb_control_data_buf_device}, 0, ParallelMode::DP_AND_TP});
+    }
 
     // copy to host
     eplb_control_data_buf_host.copy_(eplb_control_data_buf_device);
@@ -152,6 +157,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                size_t                       hidden_size,
                                size_t                       ep_rank,
                                size_t                       ep_size,
+                               size_t                       world_size,
                                py::object                   py_eplb,
                                DataType                     dtype,
                                QuantAlgo                    quant_algo,
@@ -161,6 +167,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     num_physic_experts_(phy_exp_num),
     ep_rank_(ep_rank),
     ep_size_(ep_size),
+    world_size_(world_size),
     metrics_reporter_(metrics_reporter),
     eplb_python_wrapper_(py_eplb) {
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
@@ -208,7 +215,7 @@ bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
 void ExpertBalancer::syncController() {
     // sync control data
     if (eplb_controller_.stepAndCheckSyncStep()) {
-        auto eplb_control_data = eplb_controller_.getAndSyncData();
+        auto eplb_control_data = eplb_controller_.getAndSyncData(world_size_);
         if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode
             || eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
             eplb_control_data_ = eplb_control_data;
@@ -312,8 +319,10 @@ void ExpertBalancer::copyToTensor(const torch::Tensor& src, torch::Tensor& dst) 
 
 void ExpertBalancer::createPlan() {
     // pre run
-    execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
-    execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    if (world_size_ > 1) {
+        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    }
 
     // copy stats gpu tensor to host tensor [implicit sync]
     stats_.log_stats.copy_(stats_.log_stats_gpu);
@@ -330,12 +339,14 @@ void ExpertBalancer::createPlan() {
         copyFromTensor(eplb_plan_tensors_.phy2log, eplb_plan_buffers_.phy2log);
     }
 
-    execBroadcast({{eplb_plan_buffers_.layer_id_buf,
-                    eplb_plan_buffers_.logic_expert_cnt,
-                    eplb_plan_buffers_.log2phy,
-                    eplb_plan_buffers_.phy2log},
-                   0,
-                   ParallelMode::DP_AND_TP});
+    if (world_size_ > 1) {
+        execBroadcast({{eplb_plan_buffers_.layer_id_buf,
+                        eplb_plan_buffers_.logic_expert_cnt,
+                        eplb_plan_buffers_.log2phy,
+                        eplb_plan_buffers_.phy2log},
+                       0,
+                       ParallelMode::DP_AND_TP});
+    }
 
     // copy plan gpu tensor to host tensor [implicit sync]
     copyToTensor(eplb_plan_buffers_.layer_id_buf, eplb_plan_tensors_.layer_id_buf);
@@ -407,7 +418,7 @@ void ExpertBalancer::applyPlanWeights(ModelBase& model) {
 }
 
 bool ExpertBalancer::syncPlanWeightsLoadStatus() {
-    return load_flags_.isReady();
+    return load_flags_.isReady(world_size_);
 }
 
 void ExpertBalancer::updateStats(OverallExpertStats& stats) {

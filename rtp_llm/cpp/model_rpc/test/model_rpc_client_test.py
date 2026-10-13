@@ -1,7 +1,11 @@
 import asyncio
+import gc
+import importlib
+import json
 import struct
 import sys
-from unittest.mock import MagicMock
+from enum import Enum
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -9,9 +13,20 @@ mock_ops = MagicMock()
 mock_comm = MagicMock()
 mock_nccl_op = MagicMock()
 mock_compute_ops = MagicMock()
+
+
+class _FakeRoleType(Enum):
+    PDFUSION = 0
+    PREFILL = 1
+    DECODE = 2
+    VIT = 3
+    FRONTEND = 4
+
+
 mock_comm.nccl_op = mock_nccl_op
 mock_ops.comm = mock_comm
 mock_ops.compute_ops = mock_compute_ops
+mock_ops.RoleType = _FakeRoleType
 sys.modules["rtp_llm.ops"] = mock_ops
 sys.modules["rtp_llm.ops.comm"] = mock_comm
 sys.modules["rtp_llm.ops.compute_ops"] = mock_compute_ops
@@ -23,26 +38,53 @@ import unittest
 from typing import AsyncGenerator
 from unittest import TestCase, main
 
+import grpc
 import torch
+from grpc import StatusCode
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    RoleAddr,
+    RoleType,
+    ThinkingMode,
+)
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _engine_reported_finished,
+    _record_client_span_latency,
+    _record_client_span_usage,
+    _request_completed_normally,
+    _settle_client_span_after_rpc,
+    _trans_rpc_error_code,
     trans_input,
     trans_output,
 )
+from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
+    ErrorCodePB,
+    ErrorDetailsPB,
+    GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
+    RoleAddrPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
+from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
+from rtp_llm.utils.grpc_util import trans_tensor
 
 
 class FakeStub:
-
     async def GenerateStreamCall(self, input: GenerateInputPB, timeout=None):
         # 1. 第一个响应：包含第一个生成的 token
         outputs_pb1 = GenerateOutputsPB()
@@ -68,6 +110,8 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        aux_info2.speculative_draft_rounds = 4
+        aux_info2.speculative_accepted_tokens_per_pos.extend([3, 2, 1])
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -83,13 +127,12 @@ class FakeStub:
 
 
 class FakeModelRpcClient(ModelRpcClient):
-
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],     # addresses: empty list for fake client
-            {},     # client_config: empty dict for fake client
-            0,      # max_rpc_timeout_ms
+            [],  # addresses: empty list for fake client
+            {},  # client_config: empty dict for fake client
+            0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -104,8 +147,262 @@ class FakeModelRpcClient(ModelRpcClient):
             yield trans_output(input_py, response_pb, stream_state)
 
 
-class ModelRpcClientTest(TestCase):
+class _FakeResponseIterator:
+    def __init__(self, responses):
+        self._responses = iter(responses)
+        self.cancelled = False
 
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._responses)
+        except StopIteration:
+            raise StopAsyncIteration
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class _FakeChannelPool:
+    def __init__(self):
+        self.targets = []
+
+    async def get(self, target_address):
+        self.targets.append(target_address)
+        return object()
+
+
+class _RoutingStub:
+    def __init__(self, fetch_responses=None, generate_responses=None):
+        self.fetch_iterator = _FakeResponseIterator(fetch_responses or [])
+        self.generate_iterator = _FakeResponseIterator(generate_responses or [])
+        self.fetch_calls = []
+        self.generate_calls = []
+
+    def FetchResponse(self, request, **kwargs):
+        self.fetch_calls.append((request, kwargs))
+        return self.fetch_iterator
+
+    def GenerateStreamCall(self, request, **kwargs):
+        self.generate_calls.append((request, kwargs))
+        return self.generate_iterator
+
+
+def _make_response(finished=True, output_len=None):
+    outputs_pb = GenerateOutputsPB()
+    outputs_pb.flatten_output.finished.extend([finished])
+    if output_len is not None:
+        outputs_pb.flatten_output.aux_info.add().output_len = output_len
+    return outputs_pb
+
+
+def _prefill_role_addr(ip="prefill", grpc_port=9000):
+    return RoleAddr(role=RoleType.PREFILL, ip=ip, http_port=8000, grpc_port=grpc_port)
+
+
+def _decode_role_addr(ip="decode", grpc_port=9001):
+    return RoleAddr(role=RoleType.DECODE, ip=ip, http_port=8001, grpc_port=grpc_port)
+
+
+class MultimodalFpsValidationTest(TestCase):
+    def test_fractional_fps_is_rejected_at_api_boundary(self):
+        from pydantic import ValidationError
+
+        from rtp_llm.models.downstream_modules.embedding.api_datatype import (
+            MMPreprocessConfigPart,
+        )
+        from rtp_llm.openai.api_datatype import (
+            MMPreprocessConfigPart as OpenAIPreprocessConfigPart,
+        )
+
+        for config in (
+            MMPreprocessConfigPart,
+            OpenAIPreprocessConfigPart,
+            GenerateConfig,
+        ):
+            with self.subTest(config=config.__module__):
+                for fps in (0.5, 1.9):
+                    with self.assertRaises(ValidationError):
+                        config(fps=fps)
+                self.assertEqual(config(fps=2).fps, 2)
+                self.assertEqual(config(fps=2.0).fps, 2)
+
+
+class BatchedTerminalOutputTest(TestCase):
+    def setUp(self):
+        self.input = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([7, 8]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                num_beams=4, num_return_sequences=4, aux_info=False, is_streaming=False
+            ),
+        )
+        self.pb = GenerateOutputsPB()
+        flat = self.pb.flatten_output
+        flat.finished.extend([True] * 4)
+        flat.output_ids.data_type = TensorPB.INT32
+        flat.output_ids.shape.extend([4, 1, 2])
+        flat.output_ids.int32_data = struct.pack("<8i", *range(8))
+
+    def test_terminal_batch_owns_storage_after_protobuf_release(self):
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, BatchedTerminalOutputs)
+        self.pb.Clear()
+        del self.pb, self.input
+        gc.collect()
+        self.assertEqual(rows.output_ids.reshape(-1).tolist(), list(range(8)))
+        self.assertEqual(rows[-1].output_ids.tolist(), [[6, 7]])
+        self.assertTrue(rows[0].finished)
+        self.assertIsNone(rows[0].aux_info)
+        self.assertEqual(rows[1:3][0].input_ids.tolist(), [[7, 8]])
+        # Reading a legacy view does not duplicate the underlying token storage.
+        self.assertEqual(rows[0].output_ids.data_ptr(), rows.output_ids.data_ptr())
+        with self.assertRaises(IndexError):
+            rows[4]
+
+    def test_terminal_finished_check_keeps_batch_intact(self):
+        result = trans_output(self.input, self.pb, StreamState())
+        with patch.object(
+            BatchedTerminalOutputs, "__getitem__", side_effect=AssertionError("unbatch")
+        ):
+            self.assertTrue(_engine_reported_finished(result))
+
+    def test_empty_responses_preserve_terminal_batching(self):
+        state = StreamState()
+        for _ in range(2):
+            empty = trans_output(self.input, GenerateOutputsPB(), state)
+            self.assertEqual(len(empty.generate_outputs), 0)
+            self.assertFalse(state.seen_output)
+
+        rows = trans_output(self.input, self.pb, state).generate_outputs
+        self.assertIsInstance(rows, BatchedTerminalOutputs)
+        self.assertEqual(rows.output_ids.reshape(-1).tolist(), list(range(8)))
+        self.assertTrue(state.seen_output)
+
+    def test_prompt_logits_are_preserved(self):
+        prompt = self.pb.flatten_output.prompt_logits
+        prompt.topk_logprobs.data_type = TensorPB.FP32
+        prompt.topk_logprobs.shape.extend([1, 1])
+        prompt.topk_logprobs.fp32_data = struct.pack("<f", -0.5)
+        prompt.topk_token_ids.data_type = TensorPB.INT32
+        prompt.topk_token_ids.shape.extend([1, 1])
+        prompt.topk_token_ids.int32_data = struct.pack("<i", 7)
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[0].prompt_logits["topk_token_ids"].tolist(), [[7]])
+
+    def test_custom_output_is_preserved(self):
+        custom = self.pb.flatten_output.custom_output
+        custom.data_type = TensorPB.FP32
+        custom.shape.extend([4, 2])
+        custom.fp32_data = struct.pack("<8f", *range(8))
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[2].custom_output.tolist(), [4.0, 5.0])
+        self.assertEqual(rows[2].output_ids.tolist(), [[4, 5]])
+        self.assertTrue(rows[2].finished)
+        self.assertIsNone(rows[2].aux_info)
+
+    def test_streaming_aux_and_partial_results_keep_legacy_representation(self):
+        config = self.input.generate_config
+        for field, value in [
+            ("is_streaming", True),
+            ("aux_info", True),
+            ("num_return_sequences", 0),
+        ]:
+            with self.subTest(field=field):
+                old = getattr(config, field)
+                setattr(config, field, value)
+                self.assertIsInstance(
+                    trans_output(self.input, self.pb, StreamState()).generate_outputs,
+                    list,
+                )
+                setattr(config, field, old)
+        self.pb.flatten_output.finished[0] = False
+        self.assertIsInstance(
+            trans_output(self.input, self.pb, StreamState()).generate_outputs, list
+        )
+
+    def test_optional_tensor_and_previous_output_keep_legacy_representation(self):
+        flat = self.pb.flatten_output
+        flat.logits.data_type = TensorPB.FP32
+        flat.logits.shape.extend([4, 1])
+        flat.logits.fp32_data = struct.pack("<4f", 1, 2, 3, 4)
+        rows = trans_output(self.input, self.pb, StreamState()).generate_outputs
+        self.assertIsInstance(rows, list)
+        self.assertEqual(rows[2].logits.tolist(), [3.0])
+        flat.ClearField("logits")
+        state = StreamState()
+        state.seen_output = True
+        self.assertIsInstance(
+            trans_output(self.input, self.pb, state).generate_outputs, list
+        )
+
+    def test_concurrent_consumers_retain_independent_result_storage(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        batches = []
+        for i in range(8):
+            self.pb.flatten_output.output_ids.int32_data = struct.pack(
+                "<8i", *([i] * 8)
+            )
+            batches.append(
+                trans_output(self.input, self.pb, StreamState()).generate_outputs
+            )
+        self.pb.Clear()
+        with ThreadPoolExecutor(4) as pool:
+            values = list(
+                pool.map(lambda rows: rows.output_ids.reshape(-1).tolist(), batches)
+            )
+        self.assertEqual(values, [[i] * 8 for i in range(8)])
+
+    def test_cancel_and_rpc_error_preserve_terminal_result_lifetime(self):
+        class Call:
+            def __init__(self, pb):
+                self.pb, self.count, self.cancelled = pb, 0, False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.count += 1
+                if self.count == 1:
+                    return self.pb
+                raise RuntimeError("test transport failure")
+
+            def cancel(self):
+                self.cancelled = True
+
+        async def exercise(fail):
+            client = ModelRpcClient(["127.0.0.1:1"], {})
+            client._channel_pool.get = AsyncMock(return_value=object())
+            call = Call(self.pb)
+            stub = MagicMock()
+            stub.GenerateStreamCall.return_value = call
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ):
+                stream = client.enqueue(self.input)
+                result = await stream.__anext__()
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "test transport failure"):
+                        await stream.__anext__()
+                else:
+                    await stream.aclose()
+            self.assertTrue(call.cancelled)
+            self.assertEqual(
+                result.generate_outputs.output_ids.reshape(-1).tolist(), list(range(8))
+            )
+
+        asyncio.run(exercise(False))
+        asyncio.run(exercise(True))
+
+
+class ModelRpcClientTest(TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         # self.client = FakeModelRpcClient()
@@ -116,6 +413,840 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_trans_input_serializes_typed_request_info(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            headers={"x-trace-id": "header-trace"},
+            request_info=RequestInfo(
+                frontend_ip="frontend-ip",
+                dash_ip="dash-ip",
+                trace_id="request-trace",
+                request_id="request-id",
+                source_role="frontend",
+            ),
+        )
+
+        request_info_pb = trans_input(input_py).request_info
+
+        self.assertEqual(request_info_pb.frontend_ip, "frontend-ip")
+        self.assertEqual(request_info_pb.dash_ip, "dash-ip")
+        self.assertEqual(request_info_pb.trace_id, "request-trace")
+        self.assertEqual(request_info_pb.request_id, "request-id")
+        self.assertEqual(request_info_pb.source_role, "frontend")
+
+    def test_trans_input_fills_request_info_from_typed_headers(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            headers={
+                "x-trace-id": "header-trace",
+                "x-request-id": "header-request-id",
+            },
+        )
+
+        request_info_pb = trans_input(input_py).request_info
+
+        self.assertEqual(request_info_pb.trace_id, "header-trace")
+        self.assertEqual(request_info_pb.request_id, "header-request-id")
+
+    def test_custom_output_without_aux_info(self):
+        request = self._make_generate_input(GenerateConfig(aux_info=False))
+        values = torch.tensor([[[2147483647, -16777217]], [[0, 1]]], dtype=torch.int32)
+        response = GenerateOutputsPB()
+        flat = response.flatten_output
+        flat.finished.extend([True, True])
+        flat.custom_output.CopyFrom(
+            TensorPB(
+                data_type=TensorPB.INT32,
+                shape=list(values.shape),
+                int32_data=values.numpy().tobytes(),
+            )
+        )
+        for output, expected in zip(
+            trans_output(request, response, StreamState()).generate_outputs, values
+        ):
+            torch.testing.assert_close(output.custom_output, expected, rtol=0, atol=0)
+            self.assertIsNone(output.aux_info)
+        flat.ClearField("custom_output")
+        self.assertTrue(
+            all(
+                output.custom_output is None
+                for output in trans_output(
+                    request, response, StreamState()
+                ).generate_outputs
+            )
+        )
+
+    @staticmethod
+    def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:
+        return GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=generate_config,
+        )
+
+    def test_nested_aux_info_survives_rpc_serialization(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        for value in (None, False, True):
+            for streaming in (False, True):
+                with self.subTest(aux_info=value, streaming=streaming):
+                    request = json.loads('{"generate_config": {"aux_info": false}}')
+                    if value is None:
+                        request["generate_config"].pop("aux_info")
+                    else:
+                        request["generate_config"]["aux_info"] = value
+                    request["generate_config"]["is_streaming"] = streaming
+                    config, _ = RequestExtractor(
+                        GenerateConfig()
+                    )._format_generate_config(request)
+                    input_pb = trans_input(self._make_generate_input(config))
+                    received = GenerateInputPB.FromString(input_pb.SerializeToString())
+
+                    self.assertTrue(received.generate_config.HasField("aux_info"))
+                    self.assertEqual(
+                        received.generate_config.aux_info.value, value is not False
+                    )
+                    self.assertEqual(received.generate_config.is_streaming, streaming)
+
+    @staticmethod
+    def _make_batch_client(max_rpc_timeout_ms: int = 0) -> ModelRpcClient:
+        channel_pool = MagicMock()
+        channel_pool.get = AsyncMock(return_value=MagicMock())
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.GrpcHostChannelPool",
+            return_value=channel_pool,
+        ):
+            return ModelRpcClient(
+                addresses=["localhost:1234"],
+                client_config={},
+                max_rpc_timeout_ms=max_rpc_timeout_ms,
+                decode_entrance=False,
+            )
+
+    def test_thinking_mode_values_match_proto_contract(self):
+        cases = (
+            (ThinkingMode.UNSPECIFIED, GenerateConfigPB.THINKING_MODE_UNSPECIFIED),
+            (ThinkingMode.DISABLED, GenerateConfigPB.THINKING_MODE_DISABLED),
+            (ThinkingMode.ADAPTIVE, GenerateConfigPB.THINKING_MODE_ADAPTIVE),
+            (ThinkingMode.ENABLED, GenerateConfigPB.THINKING_MODE_ENABLED),
+        )
+
+        for python_mode, proto_mode in cases:
+            with self.subTest(mode=python_mode):
+                self.assertEqual(int(python_mode), proto_mode)
+
+    def test_trans_input_writes_thinking_mode(self):
+        cases = (
+            (ThinkingMode.UNSPECIFIED, GenerateConfigPB.THINKING_MODE_UNSPECIFIED),
+            (ThinkingMode.DISABLED, GenerateConfigPB.THINKING_MODE_DISABLED),
+            (ThinkingMode.ADAPTIVE, GenerateConfigPB.THINKING_MODE_ADAPTIVE),
+            (ThinkingMode.ENABLED, GenerateConfigPB.THINKING_MODE_ENABLED),
+        )
+
+        for python_mode, proto_mode in cases:
+            with self.subTest(mode=python_mode):
+                config = GenerateConfig(thinking_mode=python_mode)
+                config_before_rpc = config.model_dump()
+
+                input_pb = trans_input(self._make_generate_input(config))
+
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertEqual(input_pb.generate_config.thinking_mode, proto_mode)
+
+    def _round_trip_generate_config(self, config: GenerateConfig):
+        input_pb = trans_input(self._make_generate_input(config))
+        round_tripped_input_pb = GenerateInputPB()
+        round_tripped_input_pb.ParseFromString(input_pb.SerializeToString())
+        return round_tripped_input_pb.generate_config
+
+    def test_trans_input_serializes_resolved_positive_default_max_new_tokens(self):
+        config = GenerateConfig()
+
+        self.assertGreater(config.max_new_tokens, 0)
+        config_pb = self._round_trip_generate_config(config)
+
+        self.assertEqual(config_pb.max_new_tokens, config.max_new_tokens)
+        self.assertFalse(config_pb.prefill_only)
+        self.assertIn(
+            "max_new_tokens", {field.name for field, _ in config_pb.ListFields()}
+        )
+
+    def test_trans_input_round_trips_zero_max_new_tokens_with_prefill_flag(self):
+        config_pb = self._round_trip_generate_config(GenerateConfig(max_new_tokens=0))
+
+        self.assertEqual(config_pb.max_new_tokens, 0)
+        self.assertTrue(config_pb.prefill_only)
+        fields = {field.name for field, _ in config_pb.ListFields()}
+        self.assertNotIn("max_new_tokens", fields)
+        self.assertIn("prefill_only", fields)
+
+    def test_trans_input_round_trips_prompt_logits_with_zero_max_new_tokens(self):
+        config_pb = self._round_trip_generate_config(
+            GenerateConfig(max_new_tokens=0, return_prompt_logits=True)
+        )
+
+        self.assertTrue(config_pb.return_prompt_logits)
+        self.assertEqual(config_pb.max_new_tokens, 1)
+        self.assertFalse(config_pb.prefill_only)
+
+    def test_trans_input_round_trips_prompt_logits_after_zero_token_update(self):
+        config = GenerateConfig(max_new_tokens=1, return_prompt_logits=True)
+
+        config.update({"max_new_tokens": 0})
+        config_pb = self._round_trip_generate_config(config)
+
+        self.assertTrue(config_pb.return_prompt_logits)
+        self.assertEqual(config_pb.max_new_tokens, 1)
+        self.assertFalse(config_pb.prefill_only)
+
+    def test_trans_input_round_trips_explicit_positive_max_new_tokens(self):
+        config_pb = self._round_trip_generate_config(GenerateConfig(max_new_tokens=7))
+
+        self.assertEqual(config_pb.max_new_tokens, 7)
+        self.assertFalse(config_pb.prefill_only)
+        self.assertIn(
+            "max_new_tokens", {field.name for field, _ in config_pb.ListFields()}
+        )
+
+    def test_trans_input_round_trips_return_prompt_logits(self):
+        config_pb = self._round_trip_generate_config(
+            GenerateConfig(
+                return_prompt_logits=True,
+                prompt_logits_top_k=17,
+                prompt_logits_start=2,
+                prompt_logits_end=5,
+                return_target_logprob=False,
+            )
+        )
+
+        self.assertTrue(config_pb.return_prompt_logits)
+        self.assertEqual(config_pb.prompt_logits_top_k, 17)
+        self.assertEqual(config_pb.prompt_logits_start, 2)
+        self.assertEqual(config_pb.prompt_logits_end, 5)
+        self.assertFalse(config_pb.return_target_logprob)
+
+    def test_rpc_error_code_mapping_covers_every_declared_enum(self):
+        for error_code in ErrorCodePB.values():
+            with self.subTest(error_code=ErrorCodePB.Name(error_code)):
+                exception_type = _trans_rpc_error_code(error_code)
+                self.assertIsInstance(exception_type, ExceptionType)
+                if error_code not in (
+                    ErrorCodePB.NONE_ERROR,
+                    ErrorCodePB.UNKNOWN_ERROR,
+                ):
+                    self.assertNotEqual(exception_type, ExceptionType.UNKNOWN_ERROR)
+
+    def test_rpc_error_code_overrides_preserve_client_semantics(self):
+        self.assertEqual(
+            _trans_rpc_error_code(ErrorCodePB.CANCELLED),
+            ExceptionType.CANCELLED_ERROR,
+        )
+        self.assertEqual(
+            _trans_rpc_error_code(ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED),
+            ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
+        )
+
+    def test_batch_generate_timeout_semantics(self):
+        cases = (
+            (0, [0, 0], None),
+            (0, [-1, -1000], None),
+            (0, [0, -1], None),
+            (-1000, [0, 0], None),
+            (-1000, [-1, -1000], None),
+            (-1000, [0, -1], None),
+            (0, [1000, 0], None),
+            (0, [0, 1000], None),
+            (0, [1000, 2500], 2.5),
+            (-1000, [1000, 2500], 2.5),
+            (5000, [0, -1], 5.0),
+            (5000, [1000, 2500], 2.5),
+            (1000, [2500, 0], 2.5),
+            (5000, [-1, 1], 5.0),
+        )
+        for method in ("batch_generate", "batch_enqueue"):
+            for service_timeout_ms, request_timeouts_ms, expected_timeout in cases:
+                with self.subTest(
+                    method=method,
+                    service_timeout_ms=service_timeout_ms,
+                    request_timeouts_ms=request_timeouts_ms,
+                ):
+                    client = self._make_batch_client(service_timeout_ms)
+                    inputs = [
+                        self._make_generate_input(GenerateConfig(timeout_ms=timeout_ms))
+                        for timeout_ms in request_timeouts_ms
+                    ]
+                    response = BatchGenerateOutputsPB()
+                    for _ in inputs:
+                        response.results.add().final_output.flatten_output.finished.append(
+                            True
+                        )
+                    stub = MagicMock()
+                    stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ):
+                        outputs = asyncio.run(getattr(client, method)(inputs))
+
+                    self.assertEqual(len(outputs), len(inputs))
+                    stub.BatchGenerateCall.assert_awaited_once()
+                    args, kwargs = stub.BatchGenerateCall.call_args
+                    self.assertEqual(
+                        kwargs,
+                        (
+                            {}
+                            if expected_timeout is None
+                            else {"timeout": expected_timeout}
+                        ),
+                    )
+                    expected_request_timeouts = [
+                        (
+                            timeout_ms
+                            if timeout_ms > 0 or service_timeout_ms <= 0
+                            else service_timeout_ms
+                        )
+                        for timeout_ms in request_timeouts_ms
+                    ]
+                    # Batch serialization must not normalize caller-owned configs.
+                    self.assertEqual(
+                        [inp.generate_config.timeout_ms for inp in inputs],
+                        request_timeouts_ms,
+                    )
+                    self.assertEqual(
+                        [inp.generate_config.timeout_ms for inp in args[0].inputs],
+                        expected_request_timeouts,
+                    )
+
+    def test_batch_generate_validates_copied_configs_without_mutating_callers(self):
+        client = self._make_batch_client()
+        configs = [
+            GenerateConfig(max_new_tokens=0, return_prompt_logits=True),
+            GenerateConfig(max_new_tokens=0, return_prompt_logits=True),
+        ]
+        inputs = [self._make_generate_input(config) for config in configs]
+        before = [config.model_dump() for config in configs]
+        response = BatchGenerateOutputsPB()
+        for _ in inputs:
+            response.results.add().final_output.flatten_output.finished.append(True)
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(client.batch_generate(inputs))
+
+        self.assertEqual([config.model_dump() for config in configs], before)
+        args, _ = stub.BatchGenerateCall.call_args
+        self.assertEqual(
+            [item.generate_config.max_new_tokens for item in args[0].inputs], [1, 1]
+        )
+
+    def test_batch_generate_empty_inputs_does_not_call_rpc(self):
+        client = self._make_batch_client()
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub") as stub:
+            self.assertEqual(asyncio.run(client.batch_generate([])), [])
+        client._channel_pool.get.assert_not_awaited()
+        stub.assert_not_called()
+
+    def test_batch_generate_rejects_invalid_result_cardinality(self):
+        response = BatchGenerateOutputsPB()
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+        inputs = [
+            self._make_generate_input(GenerateConfig()),
+            self._make_generate_input(GenerateConfig()),
+        ]
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(client.batch_generate(inputs))
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+        )
+        self.assertIn("received 0 results for 2 requests", context.exception.message)
+
+    def test_batch_generate_is_atomic_when_one_item_fails(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.flatten_output.finished.append(True)
+        failed = response.results.add()
+        failed.error_info.error_code = ErrorCodePB.INVALID_PARAMS
+        failed.error_info.error_message = "invalid batch item"
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+        inputs = [
+            self._make_generate_input(GenerateConfig()),
+            self._make_generate_input(GenerateConfig()),
+        ]
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(client.batch_generate(inputs))
+
+        self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn("batch item 1 failed", context.exception.message)
+
+    def test_batch_enqueue_is_compatibility_alias_for_batch_generate(self):
+        client = self._make_batch_client()
+        with patch.object(
+            client, "batch_generate", new=AsyncMock(return_value=[])
+        ) as batch:
+            self.assertEqual(asyncio.run(client.batch_enqueue([])), [])
+            batch.assert_awaited_once_with([])
+
+    def test_batch_enqueue_maps_error_codes_and_handles_missing_messages(self):
+        cases = (
+            (
+                ErrorCodePB.INVALID_PARAMS,
+                "batch error",
+                ExceptionType.INVALID_PARAMS,
+                "batch error",
+            ),
+            (
+                ErrorCodePB.CANCELLED,
+                "",
+                ExceptionType.CANCELLED_ERROR,
+                "CANCELLED",
+            ),
+            (
+                ErrorCodePB.EXECUTION_EXCEPTION,
+                "handler threw",
+                ExceptionType.EXECUTION_EXCEPTION,
+                "handler threw",
+            ),
+            (
+                ErrorCodePB.NONE_ERROR,
+                "batch error",
+                ExceptionType.UNKNOWN_ERROR,
+                "batch error",
+            ),
+        )
+
+        for (
+            error_code,
+            error_message,
+            expected_exception_type,
+            expected_message,
+        ) in cases:
+            with self.subTest(error_code=error_code, error_message=error_message):
+                response = BatchGenerateOutputsPB()
+                result = response.results.add()
+                result.error_info.error_code = error_code
+                result.error_info.error_message = error_message
+
+                client = self._make_batch_client()
+
+                stub = MagicMock()
+                stub.BatchGenerateCall = AsyncMock(return_value=response)
+                with (
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ),
+                    self.assertRaises(FtRuntimeException) as context,
+                ):
+                    asyncio.run(
+                        client.batch_enqueue(
+                            [self._make_generate_input(GenerateConfig())]
+                        )
+                    )
+
+                self.assertEqual(
+                    context.exception.exception_type, expected_exception_type
+                )
+                self.assertEqual(
+                    context.exception.message,
+                    f"batch item 0 failed: {expected_message}",
+                )
+
+    def test_batch_enqueue_stops_before_later_items_after_first_error(self):
+        response = BatchGenerateOutputsPB()
+        failed = response.results.add()
+        failed.error_info.error_code = ErrorCodePB.INVALID_PARAMS
+        failed.error_info.error_message = "first item failed"
+        response.results.add()
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output"
+            ) as trans_output_mock,
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(
+                client.batch_enqueue(
+                    [
+                        self._make_generate_input(GenerateConfig()),
+                        self._make_generate_input(GenerateConfig()),
+                    ]
+                )
+            )
+
+        self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        trans_output_mock.assert_not_called()
+
+    def test_batch_prefill_only_rejects_generated_tokens(self):
+        response = BatchGenerateOutputsPB()
+        output = response.results.add().final_output.flatten_output
+        output.finished.append(True)
+        output.aux_info.add().output_len = 1
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertLogs(
+                "rtp_llm.cpp.model_rpc.model_rpc_client", level="ERROR"
+            ) as logs,
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(
+                client.batch_enqueue(
+                    [self._make_generate_input(GenerateConfig(max_new_tokens=0))]
+                )
+            )
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+        )
+        self.assertIn("output_len=1", context.exception.message)
+        log_text = "\n".join(logs.output)
+        self.assertIn("request_id=1", log_text)
+        self.assertIn("aux_info[0]", log_text)
+
+    def test_batch_prefill_only_accepts_missing_aux_info_when_disabled(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.CopyFrom(_make_response())
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+        input_py = self._make_generate_input(
+            GenerateConfig(max_new_tokens=0, aux_info=False)
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            results = asyncio.run(client.batch_enqueue([input_py]))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0].generate_outputs), 1)
+        self.assertTrue(results[0].generate_outputs[0].finished)
+        self.assertIsNone(results[0].generate_outputs[0].aux_info)
+
+    def test_batch_prefill_only_rejects_missing_aux_info(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.CopyFrom(_make_response())
+        client = self._make_batch_client()
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertLogs(
+                "rtp_llm.cpp.model_rpc.model_rpc_client", level="ERROR"
+            ) as logs,
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(
+                client.batch_enqueue(
+                    [
+                        self._make_generate_input(
+                            GenerateConfig(max_new_tokens=0, aux_info=True)
+                        )
+                    ]
+                )
+            )
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+        )
+        self.assertIn("completed without aux_info", context.exception.message)
+        self.assertIn("request_id=1", "\n".join(logs.output))
+
+    def test_batch_enqueue_maps_unknown_numeric_error_code_without_message(self):
+        unknown_error_code = 2_000_000_000
+        response = BatchGenerateOutputsPB()
+        result = response.results.add()
+        result.error_info.error_code = unknown_error_code
+
+        client = self._make_batch_client()
+
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(
+                client.batch_enqueue([self._make_generate_input(GenerateConfig())])
+            )
+
+        self.assertEqual(context.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
+        self.assertIn(
+            f"UNRECOGNIZED_ERROR_CODE_{unknown_error_code}",
+            context.exception.message,
+        )
+
+    def test_trans_tensor_preserves_scalar_and_zero_numel_shapes(self):
+        cases = (
+            ("scalar", [], struct.pack("<i", 7), (), 7),
+            ("empty_vector", [0], b"", (0,), []),
+            ("empty_matrix", [0, 4], b"", (0, 4), []),
+            ("prefill_only_output", [1, 1, 0], b"", (1, 1, 0), [[[]]]),
+        )
+
+        for name, shape, payload, expected_shape, expected_value in cases:
+            with self.subTest(name=name):
+                tensor_pb = TensorPB(
+                    data_type=TensorPB.DataType.INT32, int32_data=payload
+                )
+                tensor_pb.shape.extend(shape)
+
+                tensor = trans_tensor(tensor_pb)
+
+                self.assertEqual(tensor.dtype, torch.int32)
+                self.assertEqual(tuple(tensor.shape), expected_shape)
+                self.assertEqual(tensor.tolist(), expected_value)
+
+    def test_trans_tensor_preserves_default_empty_sentinel(self):
+        tensor = trans_tensor(TensorPB())
+
+        self.assertEqual(tensor.dtype, torch.float32)
+        self.assertEqual(tuple(tensor.shape), (0,))
+
+    def test_trans_tensor_rejects_invalid_shape_and_payload(self):
+        cases = (
+            ("negative_dimension", [1, -1], b"", "non-negative"),
+            ("short_payload", [2], struct.pack("<i", 1), "expected 8 bytes, got 4"),
+            (
+                "long_scalar_payload",
+                [],
+                struct.pack("<ii", 1, 2),
+                "expected 4 bytes, got 8",
+            ),
+        )
+
+        for name, shape, payload, expected_message in cases:
+            with self.subTest(name=name):
+                tensor_pb = TensorPB(
+                    data_type=TensorPB.DataType.INT32, int32_data=payload
+                )
+                tensor_pb.shape.extend(shape)
+
+                with self.assertRaisesRegex(ValueError, expected_message):
+                    trans_tensor(tensor_pb)
+
+    def test_trans_output_accepts_prefill_only_empty_output_ids(self):
+        input_py = self._make_generate_input(GenerateConfig(max_new_tokens=0))
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(True)
+        output_pb.aux_info.add().output_len = 0
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 1, 0])
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 1)
+        output_ids = outputs.generate_outputs[0].output_ids
+        self.assertEqual(output_ids.dtype, torch.int32)
+        self.assertEqual(tuple(output_ids.shape), (1, 0))
+        self.assertEqual(output_ids.numel(), 0)
+
+    def test_trans_output_round_trips_prompt_logits_payload(self):
+        input_py = self._make_generate_input(
+            GenerateConfig(return_prompt_logits=True, prompt_logits_top_k=3)
+        )
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(True)
+        prompt_logits = output_pb.prompt_logits
+        prompt_logits.topk_logprobs.data_type = TensorPB.DataType.FP32
+        prompt_logits.topk_logprobs.shape.extend([2, 3])
+        prompt_logits.topk_logprobs.fp32_data = struct.pack(
+            "<6f", -0.1, -0.2, -0.3, -0.4, -0.5, -0.6
+        )
+        prompt_logits.topk_token_ids.data_type = TensorPB.DataType.INT32
+        prompt_logits.topk_token_ids.shape.extend([2, 3])
+        prompt_logits.topk_token_ids.int32_data = struct.pack("<6i", 1, 2, 3, 4, 5, 6)
+        prompt_logits.target_logprobs.data_type = TensorPB.DataType.FP32
+        prompt_logits.target_logprobs.shape.extend([2])
+        prompt_logits.target_logprobs.fp32_data = struct.pack("<2f", -1.5, -2.5)
+        prompt_logits.start_pos = 2
+        prompt_logits.end_pos = 4
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 1)
+        actual = outputs.generate_outputs[0].prompt_logits
+        self.assertIsNotNone(actual)
+        torch.testing.assert_close(
+            actual["topk_logprobs"],
+            torch.tensor([[-0.1, -0.2, -0.3], [-0.4, -0.5, -0.6]]),
+        )
+        torch.testing.assert_close(
+            actual["topk_token_ids"],
+            torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            actual["target_logprobs"], torch.tensor([-1.5, -2.5])
+        )
+        self.assertEqual(actual["start_pos"], 2)
+        self.assertEqual(actual["end_pos"], 4)
+
+    def test_trans_input_writes_typed_grammar_fields_consistently(self):
+        grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")
+        cases = [
+            (
+                "json_schema",
+                {"type": "object"},
+                '{"type":"object"}',
+                lambda pb: pb.json_schema,
+            ),
+            ("regex", r"[a-z]+", r"[a-z]+", lambda pb: pb.regex),
+            ("ebnf", 'root ::= "a"', 'root ::= "a"', lambda pb: pb.ebnf),
+            (
+                "structural_tag",
+                {
+                    "type": "structural_tag",
+                    "format": {"type": "regex", "pattern": "a"},
+                },
+                '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
+                lambda pb: pb.structural_tag,
+            ),
+        ]
+
+        for field, value, expected, field_value in cases:
+            with self.subTest(field=field):
+                config = GenerateConfig(**{field: value})
+                config_before_rpc = config.model_dump()
+                input_pb = trans_input(self._make_generate_input(config))
+
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertTrue(input_pb.generate_config.HasField(field))
+                self.assertEqual(field_value(input_pb.generate_config).value, expected)
+                for removed_field in (
+                    "response_format",
+                    "grammar_terminate_without_stop_token",
+                ):
+                    self.assertNotIn(
+                        removed_field,
+                        input_pb.generate_config.DESCRIPTOR.fields_by_name,
+                    )
+                for other_field in grammar_fields:
+                    if other_field != field:
+                        self.assertFalse(input_pb.generate_config.HasField(other_field))
+
+    def test_trans_input_does_not_reapply_reasoning_envelope(self):
+        config = GenerateConfig(
+            response_format={"type": "json_object"},
+            in_think_mode=True,
+            end_think_token_ids=[7],
+            max_thinking_tokens=16,
+        )
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+        config_before_rpc = config.model_dump()
+
+        input_pb = trans_input(self._make_generate_input(config))
+
+        self.assertEqual(config.model_dump(), config_before_rpc)
+        structural_tag = json.loads(input_pb.generate_config.structural_tag.value)
+        elements = structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["type"], "tag")
+        self.assertEqual(elements[1]["type"], "json_schema")
+
+    def test_trans_output_preserves_speculative_acceptance_counters(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(False)
+        aux_info = output_pb.aux_info.add()
+        aux_info.speculative_draft_rounds = 7
+        aux_info.speculative_accepted_tokens_per_pos.extend([6, 4, 2])
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 1)
+        actual = outputs.generate_outputs[0].aux_info
+        self.assertEqual(actual.speculative_draft_rounds, 7)
+        self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+
+    def test_trans_output_generation_prefill_cuda_graph_status_compatibility(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for wire_status, expected_status in (
+            ("replayed", "replayed"),
+            ("", "not_requested"),
+        ):
+            with self.subTest(wire_status=wire_status):
+                outputs_pb = GenerateOutputsPB()
+                output_pb = outputs_pb.flatten_output
+                output_pb.finished.append(False)
+                output_pb.aux_info.add().generation_prefill_cuda_graph_status = (
+                    wire_status
+                )
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                self.assertEqual(
+                    outputs.generate_outputs[
+                        0
+                    ].aux_info.generation_prefill_cuda_graph_status,
+                    expected_status,
+                )
 
     @unittest.skip("need fix")
     def test_generate_stream(self):
@@ -140,6 +1271,23 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].aux_info.output_len, 2)
 
         self.assertEqual(res[2].finished, True)
+
+    def test_enable_disk_cache_serialization(self):
+        self.assertTrue(GenerateConfig(using_hf_sampling=False).enable_disk_cache)
+
+        for enabled in (False, True):
+            generate_config = GenerateConfig(
+                using_hf_sampling=False, enable_disk_cache=enabled
+            )
+            input = GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=generate_config,
+                request_id=0,
+                mm_inputs=[],
+            )
+
+            generate_config_pb = trans_input(input).generate_config
+            self.assertEqual(generate_config_pb.enable_disk_cache, enabled)
 
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()
@@ -172,6 +1320,8 @@ class ModelRpcClientTest(TestCase):
         logits_1 = res[1].logits.tolist()
         self.assertAlmostEqual(logits_1[0][0], 0.1, places=6)
         self.assertAlmostEqual(logits_1[0][1], 0.2, places=6)
+        self.assertEqual(res[1].aux_info.speculative_draft_rounds, 4)
+        self.assertEqual(res[1].aux_info.speculative_accepted_tokens_per_pos, [3, 2, 1])
 
         # res[2] 是完成标记，包含指定位置token的logits
         self.assertTrue(res[2].finished)
@@ -180,6 +1330,1727 @@ class ModelRpcClientTest(TestCase):
         logits_2 = res[2].logits.tolist()
         self.assertAlmostEqual(logits_2[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_2[0][1], 0.0, places=6)
+
+    def test_trans_input_request_info(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(trace_id="trace-from-config"),
+                request_id=123,
+                mm_inputs=[],
+                headers={"x-request-id": "header-request-id"},
+                request_info=RequestInfo(
+                    frontend_ip="10.0.0.1",
+                    dash_ip="10.0.0.2",
+                    trace_id="trace-from-info",
+                    request_id="source-request-id",
+                    source_role="frontend",
+                ),
+            )
+        )
+
+        self.assertEqual(input_pb.request_info.frontend_ip, "10.0.0.1")
+        self.assertEqual(input_pb.request_info.dash_ip, "10.0.0.2")
+        self.assertEqual(input_pb.request_info.trace_id, "trace-from-info")
+        self.assertEqual(input_pb.request_info.request_id, "source-request-id")
+        self.assertEqual(input_pb.request_info.source_role, "frontend")
+
+    def test_trans_input_dual_writes_role_addrs(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    role_addrs=[
+                        _prefill_role_addr(),
+                        _decode_role_addr(),
+                    ]
+                ),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertEqual(len(input_pb.generate_config.role_addrs), 2)
+        self.assertEqual(
+            [role_addr.role for role_addr in input_pb.generate_config.role_addrs],
+            [RoleAddrPB.PREFILL, RoleAddrPB.DECODE],
+        )
+        self.assertEqual(
+            [role_addr.role_str for role_addr in input_pb.generate_config.role_addrs],
+            ["PREFILL", "DECODE"],
+        )
+
+    def test_trans_input_request_info_fallback(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(trace_id="trace-from-config"),
+                request_id=123,
+                mm_inputs=[],
+                headers={"x-request-id": "header-request-id"},
+            )
+        )
+
+        self.assertEqual(input_pb.request_info.trace_id, "trace-from-config")
+        self.assertEqual(input_pb.request_info.request_id, "header-request-id")
+
+    def test_trans_input_request_info_trace_header_fallback(self):
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[],
+                headers={"traceparent": traceparent},
+            )
+        )
+
+        self.assertEqual(
+            input_pb.request_info.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736"
+        )
+        self.assertEqual(
+            input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
+        )
+
+    def test_enqueue_fetches_response_when_master_already_enqueued(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=1000,
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+            ),
+            request_id=321,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(None, []),
+        ) as start_span:
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
+        self.assertEqual(len(stub.fetch_calls), 1)
+        self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
+        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
+        self.assertEqual(stub.generate_calls, [])
+        start_span.assert_called_once_with(
+            "rtp_llm.fetch_response", "prefill-worker:9000"
+        )
+
+    def test_enqueue_uses_generate_stream_without_master_enqueue(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=322,
+            mm_inputs=[],
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(None, []),
+        ) as start_span:
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertEqual(stub.generate_calls[0][0].request_id, 322)
+        self.assertEqual(stub.fetch_calls, [])
+        start_span.assert_called_once_with(
+            "rtp_llm.generate_stream_call", "worker:9000"
+        )
+
+    def test_prefill_only_fails_fast_when_backend_reports_generated_tokens(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(output_len=1)])
+        input_py = self._make_generate_input(GenerateConfig(max_new_tokens=0))
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertLogs(
+                "rtp_llm.cpp.model_rpc.model_rpc_client", level="ERROR"
+            ) as logs,
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+        )
+        self.assertIn("output_len=1", context.exception.message)
+        self.assertIn("may not support", context.exception.message)
+        self.assertIn(
+            "prefill-only response contract violation",
+            "\n".join(logs.output),
+        )
+        log_text = "\n".join(logs.output)
+        self.assertIn("output_len=1", log_text)
+        self.assertIn("request_id=1", log_text)
+        self.assertIn("aux_info[0]", log_text)
+        self.assertTrue(stub.generate_iterator.cancelled)
+
+    def test_prefill_only_does_not_reject_missing_first_packet_aux_info(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(
+            generate_responses=[
+                _make_response(finished=False),
+                _make_response(finished=True, output_len=0),
+            ]
+        )
+        input_py = self._make_generate_input(GenerateConfig(max_new_tokens=0))
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 2)
+        self.assertFalse(stub.generate_iterator.cancelled)
+
+    def test_prefill_only_accepts_missing_stream_aux_info_when_disabled(self):
+        client = self._make_batch_client()
+        stub = _RoutingStub(
+            generate_responses=[
+                _make_response(finished=False),
+                _make_response(finished=True),
+            ]
+        )
+        input_py = self._make_generate_input(
+            GenerateConfig(max_new_tokens=0, aux_info=False)
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual([response.finished for response in responses], [False, True])
+        self.assertTrue(all(response.aux_info is None for response in responses))
+        self.assertFalse(stub.generate_iterator.cancelled)
+
+    def test_prefill_only_fails_when_stream_never_exposes_aux_info(self):
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        input_py = self._make_generate_input(
+            GenerateConfig(max_new_tokens=0, aux_info=True)
+        )
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            self.assertLogs(
+                "rtp_llm.cpp.model_rpc.model_rpc_client", level="ERROR"
+            ) as logs,
+            self.assertRaises(FtRuntimeException) as context,
+        ):
+            asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+        )
+        self.assertIn("completed without aux_info", context.exception.message)
+        self.assertIn("capability cannot be verified", context.exception.message)
+        self.assertIn(
+            "prefill-only capability verification failed",
+            "\n".join(logs.output),
+        )
+        log_text = "\n".join(logs.output)
+        self.assertIn("completed without aux_info", log_text)
+        self.assertIn("request_id=1", log_text)
+        self.assertFalse(stub.generate_iterator.cancelled)
+
+    def test_enqueue_cancels_fetch_stream_on_early_close(self):
+        async def run_and_close():
+            gen = client.enqueue(input_py)
+            first = await gen.__anext__()
+            await gen.aclose()
+            return first
+
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(
+            fetch_responses=[
+                _make_response(finished=False),
+                _make_response(finished=True),
+            ]
+        )
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=1000,
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+            ),
+            request_id=323,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(run_and_close())
+
+        self.assertTrue(stub.fetch_iterator.cancelled)
+
+    def test_enqueue_fetch_uses_prefill_when_decode_entrance(self):
+        async def run_and_close():
+            gen = client.enqueue(input_py)
+            await gen.__anext__()
+            await gen.aclose()
+
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=True,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=False)])
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=1000,
+                role_addrs=[
+                    _prefill_role_addr("prefill-worker", 9000),
+                    _decode_role_addr("decode-worker", 9001),
+                ],
+            ),
+            request_id=325,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(run_and_close())
+
+        self.assertEqual(client._channel_pool.targets, ["prefill-worker:9000"])
+        self.assertEqual(len(stub.fetch_calls), 1)
+
+    def test_enqueue_does_not_cancel_after_finished_response_is_seen(self):
+        async def run_and_close_after_finished():
+            gen = client.enqueue(input_py)
+            first = await gen.__anext__()
+            self.assertTrue(first.generate_outputs[0].finished)
+            await gen.aclose()
+
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=1000,
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+            ),
+            request_id=324,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(run_and_close_after_finished())
+
+        self.assertFalse(stub.fetch_iterator.cancelled)
+
+
+class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
+    def __init__(self):
+        self.metadata = None
+        self.metadata_ready = asyncio.Event()
+
+    @staticmethod
+    def _response():
+        outputs = GenerateOutputsPB()
+        output = outputs.flatten_output
+        output.output_ids.data_type = TensorPB.DataType.INT32
+        output.output_ids.shape.extend([1, 1])
+        output.output_ids.int32_data = struct.pack("<i", 7)
+        output.finished.extend([True])
+        aux_info = output.aux_info.add()
+        aux_info.input_len = 3
+        aux_info.output_len = 1
+        return outputs
+
+    async def GenerateStreamCall(self, request, context):
+        self.method = "GenerateStreamCall"
+        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
+        self.metadata_ready.set()
+        yield self._response()
+
+    async def FetchResponse(self, request, context):
+        self.method = "FetchResponse"
+        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
+        self.metadata_ready.set()
+        yield self._response()
+
+
+class _DelayedTerminalServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
+    def __init__(self, terminal_delay):
+        self.terminal_delay = terminal_delay
+        self.terminal_released = asyncio.Event()
+
+    async def GenerateStreamCall(self, request, context):
+        outputs = GenerateOutputsPB()
+        output = outputs.flatten_output
+        output.output_ids.data_type = TensorPB.DataType.INT32
+        output.output_ids.shape.extend([1, 1])
+        output.output_ids.int32_data = struct.pack("<i", 7)
+        output.finished.extend([True])
+        aux_info = output.aux_info.add()
+        aux_info.input_len = 3
+        aux_info.output_len = 1
+        yield outputs
+        await asyncio.sleep(self.terminal_delay)
+        self.terminal_released.set()
+
+
+class _RealChannelPool:
+    def __init__(self, channel):
+        self.channel = channel
+
+    async def get(self, _target_address):
+        return self.channel
+
+
+class ModelRpcClientGrpcMetadataTest(TestCase):
+    def test_trans_input_carries_distinct_w3c_context_per_request(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        exporter = InMemorySpanExporter()
+        self.assertTrue(tracing.reset_telemetry_for_test())
+        self.assertTrue(
+            tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+        )
+
+        def serialize(request_id, trace_id, parent_id, tracestate):
+            root = tracing.start_server_span(
+                f"root-{request_id}",
+                {
+                    "traceparent": f"00-{trace_id}-{parent_id}-01",
+                    "tracestate": tracestate,
+                    "baggage": "llm.user.id=must-not-propagate",
+                },
+            )
+            self.assertIsNotNone(root)
+            expected_server_span_id = format(
+                root.server_span.get_span_context().span_id, "016x"
+            )
+            input_pb = trans_input(
+                GenerateInput(
+                    token_ids=torch.tensor([1, 2, 3]),
+                    generate_config=GenerateConfig(),
+                    request_id=request_id,
+                    mm_inputs=[],
+                )
+            )
+            root.finish()
+            return input_pb.request_info.trace_context, expected_server_span_id
+
+        first, first_server_span_id = serialize(
+            951,
+            "11111111111111111111111111111111",
+            "1111111111111111",
+            "vendor=one",
+        )
+        second, second_server_span_id = serialize(
+            952,
+            "22222222222222222222222222222222",
+            "2222222222222222",
+            "vendor=two",
+        )
+        self.assertIn("-11111111111111111111111111111111-", first.traceparent)
+        self.assertIn("-22222222222222222222222222222222-", second.traceparent)
+        self.assertEqual(first.traceparent.split("-")[2], first_server_span_id)
+        self.assertEqual(second.traceparent.split("-")[2], second_server_span_id)
+        self.assertNotEqual(first.traceparent, second.traceparent)
+        self.assertEqual(first.tracestate, "vendor=one")
+        self.assertEqual(second.tracestate, "vendor=two")
+
+        self.assertTrue(tracing.shutdown_telemetry())
+        CURRENT_TRACE_STATE.set(None)
+        disabled = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(),
+                request_id=953,
+                mm_inputs=[],
+            )
+        )
+        self.assertFalse(disabled.request_info.HasField("trace_context"))
+
+    def test_trace_disabled_full_consumer_waits_for_real_grpc_terminal(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+
+        async def run():
+            self.assertTrue(tracing.reset_telemetry_for_test())
+            server = grpc.aio.server()
+            servicer = _DelayedTerminalServicer(terminal_delay=0.05)
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=902,
+                mm_inputs=[],
+            )
+            try:
+                responses = []
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                    0.01,
+                ):
+                    async for response in client.enqueue(input_py):
+                        responses.extend(response.generate_outputs)
+                self.assertEqual(len(responses), 1)
+                self.assertTrue(responses[0].finished)
+                self.assertTrue(servicer.terminal_released.is_set())
+            finally:
+                await channel.close()
+                await server.stop(None)
+
+        asyncio.run(run())
+
+    def test_traceparent_crosses_real_grpc_boundary(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+
+        async def run():
+            server = grpc.aio.server()
+            servicer = _MetadataCaptureServicer()
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+
+            exporter = InMemorySpanExporter()
+            self.assertTrue(tracing.reset_telemetry_for_test())
+            self.assertTrue(
+                tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+            )
+            root = tracing.start_server_span("root", {})
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=901,
+                mm_inputs=[],
+            )
+            try:
+                responses = []
+                async for response in client.enqueue(input_py):
+                    responses.extend(response.generate_outputs)
+                await asyncio.wait_for(servicer.metadata_ready.wait(), timeout=5)
+                self.assertEqual(len(responses), 1)
+                self.assertIsNotNone(servicer.metadata)
+                self.assertIn("traceparent", servicer.metadata)
+                self.assertTrue(servicer.metadata["traceparent"].startswith("00-"))
+                root.finish()
+                self.assertTrue(tracing.shutdown_telemetry())
+                spans = {span.name: span for span in exporter.get_finished_spans()}
+                self.assertIn("rtp_llm.generate_stream_call", spans)
+                self.assertEqual(
+                    spans["rtp_llm.generate_stream_call"].parent.span_id,
+                    spans["root"].context.span_id,
+                )
+            finally:
+                await channel.close()
+                await server.stop(None)
+                self.assertTrue(tracing.reset_telemetry_for_test())
+
+        asyncio.run(run())
+
+    def test_fetch_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+
+        async def run():
+            server = grpc.aio.server()
+            servicer = _MetadataCaptureServicer()
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+
+            exporter = InMemorySpanExporter()
+            self.assertTrue(tracing.reset_telemetry_for_test())
+            self.assertTrue(
+                tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+            )
+            root = tracing.start_server_span("fetch-root", {})
+            client = ModelRpcClient([], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    timeout_ms=1000,
+                    role_addrs=[_prefill_role_addr("127.0.0.1", port)],
+                ),
+                request_id=954,
+                mm_inputs=[],
+                enqueued_by_master=True,
+            )
+            try:
+                responses = [response async for response in client.enqueue(input_py)]
+                await asyncio.wait_for(servicer.metadata_ready.wait(), timeout=5)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(servicer.method, "FetchResponse")
+                self.assertIn("traceparent", servicer.metadata)
+                root.finish()
+                self.assertTrue(tracing.shutdown_telemetry())
+                spans = {span.name: span for span in exporter.get_finished_spans()}
+                fetch_span = spans["rtp_llm.fetch_response"]
+                self.assertEqual(
+                    fetch_span.parent.span_id, spans["fetch-root"].context.span_id
+                )
+                self.assertEqual(
+                    fetch_span.attributes["rpc.response.status_code"], "OK"
+                )
+                self.assertEqual(fetch_span.attributes["gen_ai.usage.input_tokens"], 3)
+                self.assertEqual(fetch_span.attributes["gen_ai.usage.output_tokens"], 1)
+            finally:
+                await channel.close()
+                await server.stop(None)
+                self.assertTrue(tracing.reset_telemetry_for_test())
+
+        asyncio.run(run())
+
+    def test_trace_enabled_full_consumer_does_not_cancel_slow_terminal(self):
+        async def run():
+            server = grpc.aio.server()
+            servicer = _DelayedTerminalServicer(terminal_delay=0.05)
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+            span = _FakeClientSpan()
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=903,
+                mm_inputs=[],
+            )
+            try:
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                    return_value=(span, []),
+                ), patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                    0.01,
+                ):
+                    responses = [
+                        response async for response in client.enqueue(input_py)
+                    ]
+                self.assertEqual(len(responses), 1)
+                self.assertTrue(servicer.terminal_released.is_set())
+                await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                self.assertEqual(span.status, "OK")
+                self.assertEqual(span.attributes["rpc.response.status_code"], "OK")
+            finally:
+                await channel.close()
+                await server.stop(None)
+
+        asyncio.run(run())
+
+    def test_trace_enabled_aclose_preserves_real_late_terminal(self):
+        async def run():
+            server = grpc.aio.server()
+            servicer = _DelayedTerminalServicer(terminal_delay=0.05)
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+            span = _FakeClientSpan()
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=904,
+                mm_inputs=[],
+            )
+            try:
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                    return_value=(span, []),
+                ), patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                    0.2,
+                ):
+                    gen = client.enqueue(input_py)
+                    response = await gen.__anext__()
+                    self.assertTrue(response.generate_outputs[0].finished)
+                    await gen.aclose()
+                    self.assertFalse(servicer.terminal_released.is_set())
+                    await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                self.assertTrue(servicer.terminal_released.is_set())
+                self.assertEqual(span.status, "OK")
+                self.assertEqual(span.attributes["rpc.response.status_code"], "OK")
+            finally:
+                await channel.close()
+                await server.stop(None)
+
+        asyncio.run(run())
+
+
+class _FakeAux:
+    def __init__(
+        self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
+    ):
+        self.input_len = input_len
+        self.output_len = output_len
+        self.first_token_cost_time = first_token_cost_time
+        self.cost_time = cost_time
+
+
+class _FakeOut:
+    def __init__(
+        self,
+        finished,
+        input_len=8,
+        output_len=3,
+        first_token_cost_time=8.5,
+        cost_time=20.0,
+    ):
+        self.finished = finished
+        self.aux_info = _FakeAux(
+            input_len, output_len, first_token_cost_time, cost_time
+        )
+
+
+class _AsyncReturn:
+    def __init__(self, value):
+        self._value = value
+
+    async def __call__(self, *args, **kwargs):
+        return self._value
+
+
+class _FakeClientSpan:
+    """Mirrors tracing.ClientSpanHandle: idempotent finish, writes dropped after."""
+
+    def __init__(self):
+        self.attributes = {}
+        self.status = None
+        self.error_type = None
+        self.finished = False
+        self.finish_calls = 0
+        self.end_count = 0
+        self.finished_event = asyncio.Event()
+
+    def set_attribute(self, key, value):
+        if not self.finished:
+            self.attributes[key] = value
+
+    def finish(self, error=None, error_type=""):
+        self.finish_calls += 1
+        if self.finished:
+            return
+        self.end_count += 1
+        self.finished = True
+        if error is not None or error_type:
+            self.status = "ERROR"
+            self.error_type = error_type or type(error).__name__
+        else:
+            self.status = "OK"
+        self.finished_event.set()
+
+
+class _FakeTraceState:
+    """Mirrors the request completion contract used during stream teardown."""
+
+    def __init__(self, settled_ok=None, renderer_completed=False):
+        self.settled_ok = settled_ok
+        self.renderer_completed = renderer_completed
+        self.server_context = None
+
+    def set_attribute(self, key, value):
+        pass
+
+
+class _FakeRpcError(grpc.RpcError):
+    def __init__(self, status, trailing_metadata=None):
+        self._status = status
+        self._trailing_metadata = trailing_metadata or {}
+
+    def code(self):
+        return self._status
+
+    def details(self):
+        return "injected terminal RPC error"
+
+    def trailing_metadata(self):
+        return self._trailing_metadata
+
+
+class _SpanAwareStub:
+    """Yields `total` responses; the last one carries the engine finished flag."""
+
+    def __init__(
+        self,
+        total,
+        finish_last=True,
+        terminal_error=None,
+        terminal_delay=0.0,
+        terminal_never=False,
+    ):
+        self._total = total
+        self._finish_last = finish_last
+        self._terminal_error = terminal_error
+        self._terminal_delay = terminal_delay
+        self._terminal_never = terminal_never
+        self.iterator = None
+
+    def FetchResponse(self, request, timeout=None, metadata=None):
+        return self.GenerateStreamCall(request, timeout=timeout, metadata=metadata)
+
+    def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
+        total, finish_last, terminal_error, terminal_delay, terminal_never = (
+            self._total,
+            self._finish_last,
+            self._terminal_error,
+            self._terminal_delay,
+            self._terminal_never,
+        )
+
+        class _Iterator:
+            def __init__(self):
+                self.cancelled = False
+                self.code_waited = False
+                self.code_resolved = False
+                self.events = []
+                self.cancelled_event = asyncio.Event()
+                self.code_started = asyncio.Event()
+                self._terminal_status = None
+                self._terminal_ready = asyncio.Event()
+
+            def __aiter__(self):
+                return self._gen()
+
+            def cancel(self):
+                self.events.append("cancel")
+                if self._terminal_ready.is_set():
+                    return False
+                self.cancelled = True
+                self.cancelled_event.set()
+                self._terminal_status = StatusCode.CANCELLED
+                self._terminal_ready.set()
+                return True
+
+            async def code(self):
+                self.code_waited = True
+                self.events.append("code")
+                self.code_started.set()
+                await self._terminal_ready.wait()
+                self.code_resolved = True
+                return self._terminal_status
+
+            async def _gen(self):
+                for i in range(total):
+                    outputs_pb = GenerateOutputsPB()
+                    output_pb = outputs_pb.flatten_output
+                    output_pb.output_ids.data_type = TensorPB.DataType.INT32
+                    output_pb.output_ids.shape.extend([1, i + 1])
+                    output_pb.output_ids.int32_data = struct.pack(
+                        "<" + "i" * (i + 1), *range(i + 1)
+                    )
+                    aux_info = output_pb.aux_info.add()
+                    aux_info.iter_count = i + 1
+                    aux_info.input_len = 8
+                    aux_info.output_len = i + 1
+                    aux_info.first_token_cost_time_us = 8500
+                    aux_info.cost_time_us = 20000
+                    output_pb.finished.extend([finish_last and i == total - 1])
+                    if finish_last and i == total - 1:
+                        # The real server can settle independently while the
+                        # Python message iterator remains suspended at yield.
+                        if not terminal_never:
+                            self._terminal_status = (
+                                terminal_error.code()
+                                if terminal_error is not None
+                                else StatusCode.OK
+                            )
+                            if terminal_delay:
+                                asyncio.get_running_loop().call_later(
+                                    terminal_delay, self._terminal_ready.set
+                                )
+                            else:
+                                asyncio.get_running_loop().call_soon(
+                                    self._terminal_ready.set
+                                )
+                    yield outputs_pb
+                if terminal_error is not None:
+                    self._terminal_status = terminal_error.code()
+                    self._terminal_ready.set()
+                    raise terminal_error
+                if not terminal_never:
+                    self._terminal_status = StatusCode.OK
+                    self._terminal_ready.set()
+
+        self.iterator = _Iterator()
+        return self.iterator
+
+
+class ClientSpanSettlementTest(TestCase):
+    """Regression guard for the CLIENT span settlement timing and status.
+
+    render_response_stream breaks out of its `async for` as soon as every
+    sequence has a finish_reason, so enqueue() stays suspended on its last
+    yield until aclose()/GC injects GeneratorExit. Settling the span there
+    marked successful requests Cancelled, dropped the usage attributes and
+    pushed the span end past the root span.
+
+    The application frame must be published before waiting for grpc.aio's
+    terminal status; settlement runs in a bounded independent task so a slow or
+    absent RPC deadline cannot delay the data plane.
+    """
+
+    USAGE_KEYS = (
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.total_tokens",
+    )
+
+    def _build_client(
+        self,
+        span,
+        total,
+        finish_last=True,
+        trace_state=None,
+        terminal_error=None,
+        terminal_delay=0.0,
+        terminal_never=False,
+    ):
+        client = ModelRpcClient(["127.0.0.1:1234"], {}, 0, False)
+        stub = _SpanAwareStub(
+            total,
+            finish_last,
+            terminal_error,
+            terminal_delay,
+            terminal_never,
+        )
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = _AsyncReturn(MagicMock())
+        token = CURRENT_TRACE_STATE.set(trace_state)
+        self.addCleanup(CURRENT_TRACE_STATE.reset, token)
+        patcher_stub = patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        )
+        patcher_span = patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(span, []),
+        )
+        self.addCleanup(patcher_stub.stop)
+        self.addCleanup(patcher_span.stop)
+        patcher_stub.start()
+        patcher_span.start()
+        client._test_stub = stub
+        return client
+
+    @staticmethod
+    def _make_input():
+        return GenerateInput(
+            token_ids=torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]),
+            generate_config=GenerateConfig(is_streaming=True),
+            request_id=7,
+            mm_inputs=[],
+        )
+
+    def test_engine_reported_finished_predicate(self):
+        self.assertFalse(_engine_reported_finished(None))
+        self.assertFalse(_engine_reported_finished(GenerateOutputs()))
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [_FakeOut(True), _FakeOut(False)]
+        self.assertFalse(_engine_reported_finished(outputs))
+        outputs.generate_outputs = [_FakeOut(True), _FakeOut(True)]
+        self.assertTrue(_engine_reported_finished(outputs))
+
+    def test_usage_attributes_skip_non_positive(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [_FakeOut(True, input_len=0, output_len=5)]
+        _record_client_span_usage(span, outputs)
+        self.assertEqual(span.attributes, {})
+        outputs.generate_outputs = [_FakeOut(True, input_len=8, output_len=3)]
+        _record_client_span_usage(span, outputs)
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 11)
+
+    def test_usage_attributes_sum_all_choices(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, input_len=8, output_len=3),
+            _FakeOut(True, input_len=8, output_len=5),
+        ]
+
+        _record_client_span_usage(span, outputs)
+
+        self.assertEqual(span.attributes["gen_ai.usage.input_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.output_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.prompt_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.completion_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 16)
+
+    def test_beam_usage_attributes_count_primary_sequence_only(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, input_len=8, output_len=3),
+            _FakeOut(True, input_len=8, output_len=5),
+        ]
+
+        _record_client_span_usage(span, outputs, include_all_sequences=False)
+
+        self.assertEqual(span.attributes["gen_ai.usage.input_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.output_tokens"], 3)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 11)
+
+    def test_usage_attributes_skip_inconsistent_choices(self):
+        for choices in (
+            [
+                _FakeOut(True, input_len=8, output_len=3),
+                _FakeOut(True, input_len=9, output_len=5),
+            ],
+            [
+                _FakeOut(True, input_len=8, output_len=3),
+                _FakeOut(True, input_len=8, output_len=0),
+            ],
+        ):
+            with self.subTest(choices=choices):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs()
+                outputs.generate_outputs = choices
+                _record_client_span_usage(span, outputs)
+                self.assertEqual(span.attributes, {})
+
+    def test_engine_latency_attributes_from_single_sequence_stream(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(
+                True,
+                output_len=5,
+                first_token_cost_time=8.5,
+                cost_time=20.0,
+            )
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 2.875
+        )
+
+    def test_engine_latency_attributes_require_coherent_aux_info(self):
+        cases = (
+            _FakeOut(True, output_len=0),
+            _FakeOut(True, output_len=1),
+            _FakeOut(True, output_len=5, first_token_cost_time=0),
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=8.0),
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs(generate_outputs=[output])
+                _record_client_span_latency(span, outputs)
+                if output.aux_info.output_len == 1:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                elif output.aux_info.cost_time < output.aux_info.first_token_cost_time:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                else:
+                    self.assertEqual(span.attributes, {})
+                self.assertNotIn(
+                    "rtp_llm.engine.time_per_output_token_ms", span.attributes
+                )
+
+    def test_multi_return_shares_ttft_but_omits_ambiguous_tpot(self):
+        """n>1 rides one physical stream: TPOT per sequence is not a span value."""
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=7, first_token_cost_time=8.5, cost_time=26.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+    def test_multi_return_disagreeing_on_first_token_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=5, first_token_cost_time=9.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_multi_return_with_one_empty_sequence_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=0, first_token_cost_time=8.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_greennet_gate_failure_finishes_client_span(self):
+        for error in (
+            FtRuntimeException(ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"),
+            FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, "unavailable"),
+            asyncio.CancelledError(),
+        ):
+            with self.subTest(error=type(error).__name__):
+                span = _FakeClientSpan()
+                client = self._build_client(span, total=1)
+                input_pb = GenerateInputPB(request_id=7)
+                input_pb.multimodal_inputs.add(multimodal_url="image://test")
+                with patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+                    return_value=input_pb,
+                ), patch.object(
+                    client, "_wait_greennet_verdict", new=AsyncMock(side_effect=error)
+                ):
+
+                    async def run():
+                        with self.assertRaises(type(error)):
+                            await client.enqueue(self._make_input()).__anext__()
+
+                    asyncio.run(run())
+                self.assertTrue(span.finished)
+                self.assertEqual(span.status, "ERROR")
+                self.assertEqual(span.end_count, 1)
+
+    def test_greennet_transport_failure_is_not_content_rejection(self):
+        # String patch lookup can resolve through rtp_llm.__getattr__ to the
+        # mocked ops module before the real greennet_hook has been imported.
+        greennet_hook = importlib.import_module("rtp_llm.multimodal.greennet_hook")
+        structured = ErrorDetailsPB(
+            error_code=ExceptionType.UNSAFE_INPUT_CONTENT.value, error_message="blocked"
+        ).SerializeToString()
+        for error, expected in (
+            (_FakeRpcError(StatusCode.UNAVAILABLE), ExceptionType.MM_PROCESS_ERROR),
+            (
+                _FakeRpcError(StatusCode.DEADLINE_EXCEEDED),
+                ExceptionType.MM_PROCESS_ERROR,
+            ),
+            (
+                _FakeRpcError(
+                    StatusCode.PERMISSION_DENIED,
+                    {"grpc-status-details-bin": structured},
+                ),
+                ExceptionType.UNSAFE_INPUT_CONTENT,
+            ),
+        ):
+            with self.subTest(status=error.code()):
+                client = self._build_client(_FakeClientSpan(), total=1)
+                inp = self._make_input()
+                inp.generate_config.role_addrs = [
+                    RoleAddr(
+                        role=RoleType.VIT,
+                        ip="127.0.0.1",
+                        grpc_port=8001,
+                        http_port=8000,
+                    )
+                ]
+                stub = MagicMock()
+                stub.WaitGreenNetVerdict = AsyncMock(side_effect=error)
+                with patch.object(
+                    greennet_hook,
+                    "greennet_enabled",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                    return_value=stub,
+                ):
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        asyncio.run(
+                            client._wait_greennet_verdict(
+                                inp, GenerateInputPB(request_id=7)
+                            )
+                        )
+                    stub.WaitGreenNetVerdict.assert_awaited_once()
+                    self.assertEqual(raised.exception.exception_type, expected)
+
+    def test_finished_frame_is_not_blocked_by_rpc_termination(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, terminal_delay=0.05)
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            while True:
+                outputs = await gen.__anext__()
+                if outputs.generate_outputs and outputs.generate_outputs[0].finished:
+                    self.assertFalse(client._test_stub.iterator.code_waited)
+                    break
+            await gen.aclose()
+            await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+            self.assertTrue(span.finished, "settlement runs after the finished frame")
+            self.assertEqual(client._test_stub.iterator.events, ["code"])
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        self.assertIsNone(span.error_type)
+        self.assertEqual(span.attributes["rpc.response.status_code"], "OK")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_finished_frame_with_late_rpc_error_marks_span_error(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=1,
+            terminal_error=_FakeRpcError(StatusCode.UNAVAILABLE),
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            outputs = await gen.__anext__()
+            self.assertTrue(outputs.generate_outputs[0].finished)
+            await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+            self.assertEqual(span.status, "ERROR")
+            with self.assertRaises(Exception):
+                await gen.__anext__()
+
+        asyncio.run(run())
+        self.assertEqual(span.attributes["rpc.response.status_code"], "UNAVAILABLE")
+        self.assertEqual(span.error_type, "RpcError")
+
+    def test_finished_frame_eventually_cancels_unsettled_rpc_with_or_without_trace(
+        self,
+    ):
+        async def run(client, span):
+            gen = client.enqueue(self._make_input())
+            outputs = await gen.__anext__()
+            self.assertTrue(outputs.generate_outputs[0].finished)
+            await gen.aclose()
+            iterator = client._test_stub.iterator
+            await asyncio.wait_for(iterator.cancelled_event.wait(), timeout=5)
+            self.assertTrue(iterator.cancelled)
+            if span is not None:
+                await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                self.assertEqual(span.status, "ERROR")
+                self.assertEqual(
+                    span.attributes["rpc.response.status_code"], "CANCELLED"
+                )
+            else:
+                self.assertFalse(iterator.code_waited)
+                self.assertEqual(iterator.events, ["cancel"])
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            span = _FakeClientSpan()
+            client = self._build_client(span, total=1, terminal_never=True)
+            asyncio.run(run(client, span))
+            client = self._build_client(None, total=1, terminal_never=True)
+            asyncio.run(run(client, None))
+
+    def test_settlement_task_cancellation_respects_transport_ownership(self):
+        async def run(abandoned):
+            stub = _SpanAwareStub(total=0, terminal_never=True)
+            iterator = stub.GenerateStreamCall(None)
+            span = _FakeClientSpan()
+            abandoned_event = asyncio.Event()
+            if abandoned:
+                abandoned_event.set()
+            task = asyncio.create_task(
+                _settle_client_span_after_rpc(iterator, span, None, abandoned_event)
+            )
+            await asyncio.wait_for(iterator.code_started.wait(), timeout=5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "RpcSettlementCancelled")
+            self.assertEqual(span.finish_calls, 1)
+            self.assertEqual(iterator.cancelled, abandoned)
+
+        asyncio.run(run(False))
+        asyncio.run(run(True))
+
+    def test_active_observer_waits_for_grpc_terminal_without_local_cancel(self):
+        async def run(has_deadline):
+            stub = _SpanAwareStub(total=1, terminal_delay=0.05)
+            iterator = stub.GenerateStreamCall(None)
+            stream = iterator.__aiter__()
+            await stream.__anext__()
+            span = _FakeClientSpan()
+            abandoned_event = asyncio.Event()
+            active_deadline = (
+                asyncio.get_running_loop().time() + 0.01 if has_deadline else None
+            )
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                0.01,
+            ):
+                status = await _settle_client_span_after_rpc(
+                    iterator,
+                    span,
+                    None,
+                    abandoned_event,
+                    active_deadline=active_deadline,
+                )
+            self.assertEqual(status, StatusCode.OK)
+            self.assertFalse(iterator.cancelled)
+            self.assertEqual(span.status, "OK")
+            await stream.aclose()
+
+        asyncio.run(run(True))
+        asyncio.run(run(False))
+
+    def test_abandoned_cleanup_timeout_starts_at_ownership_transfer(self):
+        async def run():
+            stub = _SpanAwareStub(total=0, terminal_never=True)
+            iterator = stub.GenerateStreamCall(None)
+            span = _FakeClientSpan()
+            abandoned_event = asyncio.Event()
+            active_deadline = asyncio.get_running_loop().time() + 0.001
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                0.05,
+            ):
+                task = asyncio.create_task(
+                    _settle_client_span_after_rpc(
+                        iterator,
+                        span,
+                        None,
+                        abandoned_event,
+                        active_deadline=active_deadline,
+                    )
+                )
+                await asyncio.wait_for(iterator.code_started.wait(), timeout=5)
+                await asyncio.sleep(0.01)
+                abandoned_event.set()
+                await asyncio.sleep(0.01)
+                self.assertFalse(iterator.cancelled)
+                await asyncio.wait_for(iterator.cancelled_event.wait(), timeout=1)
+                await task
+
+            self.assertEqual(span.error_type, "RpcError")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+
+        asyncio.run(run())
+
+    def test_outer_cancellation_during_final_rpc_wait_propagates(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span, total=1, finish_last=False, terminal_never=True
+        )
+
+        async def run():
+            async def consume():
+                async for _ in client.enqueue(self._make_input()):
+                    pass
+
+            task = asyncio.create_task(consume())
+            while client._test_stub.iterator is None:
+                await asyncio.sleep(0)
+            iterator = client._test_stub.iterator
+            await asyncio.wait_for(iterator.code_started.wait(), timeout=5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(iterator.cancelled)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+
+        asyncio.run(run())
+
+    def test_trace_disabled_does_not_wait_for_rpc_termination(self):
+        client = self._build_client(None, total=1, terminal_delay=0.05)
+
+        async def run():
+            async for outputs in client.enqueue(self._make_input()):
+                self.assertTrue(outputs.generate_outputs[0].finished)
+            self.assertFalse(client._test_stub.iterator.code_waited)
+
+        asyncio.run(run())
+
+    def test_stream_iterated_to_completion_keeps_span_ok(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=2, finish_last=False)
+
+        async def run():
+            async for _ in client.enqueue(self._make_input()):
+                pass
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_break_before_finished_still_reports_cancelled(self):
+        """Genuine interruption (client disconnect) must stay Cancelled.
+
+        The root span is unsettled here: the cancellation is still propagating
+        outward, so the request has not succeeded.
+        """
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, finish_last=False)
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for _ in gen:
+                break
+            self.assertFalse(span.finished, "no finished flag seen yet")
+            await gen.aclose()
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertTrue(client._test_stub.iterator.code_waited)
+            self.assertEqual(client._test_stub.iterator.events[:2], ["cancel", "code"])
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "Cancelled")
+        self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_fetch_cancellation_records_observed_latency_before_single_end(self):
+        async def run(span, client, exception_type, output_len, sequences):
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            outputs = GenerateOutputs(
+                generate_outputs=[
+                    _FakeOut(False, output_len=output_len) for _ in range(sequences)
+                ]
+            )
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+                return_value=outputs,
+            ):
+                gen = client.enqueue(input_py)
+                await gen.__anext__()
+                with self.assertRaises(exception_type):
+                    await gen.athrow(exception_type())
+                await gen.aclose()
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(span.end_count, 1)
+            ttft = span.attributes.get("rtp_llm.engine.time_to_first_token_ms")
+            tpot = span.attributes.get("rtp_llm.engine.time_per_output_token_ms")
+            self.assertEqual(ttft, 8.5 if output_len > 0 else None)
+            self.assertEqual(tpot, 5.75 if output_len == 3 and sequences == 1 else None)
+
+        for exception_type in (GeneratorExit, asyncio.CancelledError):
+            for output_len, sequences in ((0, 1), (1, 1), (3, 1), (3, 2)):
+                with self.subTest(
+                    exception=exception_type, tokens=output_len, sequences=sequences
+                ):
+                    span = _FakeClientSpan()
+                    client = self._build_client(span, total=1, finish_last=False)
+                    asyncio.run(
+                        run(span, client, exception_type, output_len, sequences)
+                    )
+
+    def test_fetch_cleanup_recancellation_records_latency_before_single_end(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, finish_last=False)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            gen = client.enqueue(input_py)
+            for _ in range(3):
+                await gen.__anext__()
+            # Cancel during the first teardown wait, then again in finally.
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client._wait_for_rpc_termination",
+                side_effect=asyncio.CancelledError,
+            ) as wait:
+                with self.assertRaises(asyncio.CancelledError):
+                    await gen.aclose()
+                self.assertEqual(wait.await_count, 2)
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5
+            )
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_per_output_token_ms"], 5.75
+            )
+
+        asyncio.run(run())
+
+    def test_fetch_cancel_before_any_output_omits_latency(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=0, terminal_never=True)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+
+            async def consume():
+                async for _ in client.enqueue(input_py):
+                    self.fail("no output was expected")
+
+            task = asyncio.create_task(consume())
+            while client._test_stub.iterator is None:
+                await asyncio.sleep(0)
+            await asyncio.wait_for(
+                client._test_stub.iterator.code_started.wait(), timeout=5
+            )
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertNotIn("rtp_llm.engine.time_to_first_token_ms", span.attributes)
+            self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+        asyncio.run(run())
+
+    def test_stop_word_break_with_renderer_milestone_keeps_span_ok(self):
+        """Stop-word truncation is normal before the root span is settled.
+
+        Context-dependent tokenization can make a string stop word miss the
+        engine's token-level list, so the renderer can break while the engine is
+        still generating. Its explicit milestone keeps that cleanup path OK.
+        """
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=3,
+            finish_last=False,
+            trace_state=_FakeTraceState(renderer_completed=True),
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            seen = 0
+            async for _ in gen:
+                seen += 1
+                if seen == 3:
+                    break  # renderer hit a stop word
+            await gen.aclose()
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        self.assertIsNone(span.error_type)
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 5.75
+        )
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_break_with_failed_root_reports_cancelled(self):
+        """Root span settled with an error keeps the child Cancelled."""
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span, total=3, finish_last=False, trace_state=_FakeTraceState(False)
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for _ in gen:
+                break
+            await gen.aclose()
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "Cancelled")
+
+    def test_response_conversion_error_cancels_before_waiting_for_code(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=2, finish_last=False)
+        call_count = 0
+
+        def fail_second_response(*args):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("conversion failed")
+            return trans_output(*args)
+
+        async def run():
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+                side_effect=fail_second_response,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "conversion failed"):
+                    async for _ in client.enqueue(self._make_input()):
+                        pass
+
+        asyncio.run(run())
+        iterator = client._test_stub.iterator
+        self.assertEqual(iterator.events[:2], ["cancel", "code"])
+        self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+        self.assertEqual(span.status, "ERROR")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_rpc_error_after_output_keeps_last_confirmed_usage(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=1,
+            finish_last=False,
+            terminal_error=_FakeRpcError(StatusCode.UNAVAILABLE),
+        )
+
+        async def run():
+            with self.assertRaisesRegex(Exception, "injected terminal RPC error"):
+                async for _ in client.enqueue(self._make_input()):
+                    pass
+
+        asyncio.run(run())
+        self.assertEqual(span.attributes["rpc.response.status_code"], "UNAVAILABLE")
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "RpcError")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_request_completed_normally_predicate(self):
+        self.assertFalse(_request_completed_normally(None))
+        self.assertFalse(_request_completed_normally(_FakeTraceState(None)))
+        self.assertFalse(_request_completed_normally(_FakeTraceState(False)))
+        self.assertTrue(_request_completed_normally(_FakeTraceState(True)))
+        self.assertTrue(
+            _request_completed_normally(_FakeTraceState(None, renderer_completed=True))
+        )
+
+    def test_unknown_detailed_error_code_falls_back_without_value_error(self):
+        details = ErrorDetailsPB(error_code=999999, error_message="future error")
+        error = _FakeRpcError(
+            StatusCode.INTERNAL,
+            {"grpc-status-details-bin": details.SerializeToString()},
+        )
+        client = ModelRpcClient.__new__(ModelRpcClient)
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            client._handle_grpc_error(error, "request: [7]", "worker:9000")
+
+        self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
+        self.assertEqual(raised.exception.message, "future error")
 
 
 if __name__ == "__main__":

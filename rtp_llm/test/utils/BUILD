@@ -2,6 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
+    "filelock",
     "torch",
 ])
 
@@ -25,25 +26,29 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "jit_sys_path_setup",
+    srcs = ["jit_sys_path_setup.py"],
+    deps = [":filelock", "//rtp_llm:jit_cache_env"],
+)
+
 py_binary(
     name = "gpu_lock",
-    deps = [":torch"],
+    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
     main = "device_resource.py",
-    srcs = [
-        "device_resource.py",
-        "jit_sys_path_setup.py",
-    ],
+    srcs = ["device_resource.py"],
 )
 
 py_library(
     name = "device_resource",
-    deps = [],
+    deps = [":filelock"],
     srcs = ["device_resource.py"],
 )
 
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
+    deps = [":test_util", "//rtp_llm:jit_cache_env"],
     visibility = ["//visibility:public"],
 )
 
@@ -53,4 +58,30 @@ py_test(
     deps = [
         ":test_util",
     ],
+)
+
+py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    deps = [
+        ":maga_server_manager",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "numeric_util_test",
+    srcs = ["numeric_util_test.py"],
+    deps = [
+        ":test_util",
+        ":torch",
+    ],
+)
+
+
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":device_resource"],
 )

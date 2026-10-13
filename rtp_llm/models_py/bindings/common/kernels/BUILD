@@ -2,6 +2,17 @@ load("//:def.bzl", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
+cc_library(
+    name = "block_id_copy",
+    srcs = ["block_id_copy.cu"],
+    hdrs = ["block_id_copy.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+)
+
 any_cuda_deps = select({
     "@//:using_cuda": [
         "//rtp_llm/models_py/bindings/cuda/kernels:cuda_utils_common",
@@ -187,6 +198,7 @@ cc_library(
     srcs = glob(["moe/*.cu"]),
     hdrs = glob(["moe/*.h"]),
     deps = any_cuda_deps + [
+        "//3rdparty:cub_compat",
         "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
         "@cutlass_h_moe//:cutlass",
@@ -234,6 +246,18 @@ cc_library(
     ],
     deps = any_cuda_deps + [
         ":fuse_copy_util",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "vocab_prune_kernels",
+    srcs = ["vocab_prune/mapping.cu"],
+    hdrs = ["vocab_prune/mapping.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",

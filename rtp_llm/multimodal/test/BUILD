@@ -14,7 +14,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -29,9 +30,10 @@ py_test(
         ":testdata",
     ],
     env = {
-        "MM_CACHE_ITEM_NUM": "0"
+        "MM_CACHE_ITEM_NUM": "0",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -40,12 +42,13 @@ py_test(
         "multimodal_util_test.py",
     ],
     deps = [
-        "//rtp_llm:testlib",
+        "//rtp_llm:multimodal",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],
     data = [
         ":testdata",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -83,7 +86,121 @@ py_test(
     srcs = [
         "mm_scheduler_test.py",
     ],
+    env = {"GPU_COUNT": "0"},
     deps = [
         "//rtp_llm:testlib",
     ],
+)
+
+py_test(
+    name = "mm_output_transport_test",
+    srcs = [
+        "mm_output_transport_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+# This target covers the production shared-library and Python/C++ config boundary.
+# The real Barex multi-GPU export -> read -> release smoke lives in internal_source.
+py_test(
+    name = "mm_rdma_exporter_library_test",
+    srcs = [
+        "mm_rdma_exporter_library_test.py",
+    ],
+    data = [
+        "//rtp_llm/libs:libmm_rdma_exporter_so",
+        "//rtp_llm/libs:librtp_compute_ops_so",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_library(
+    name = "process_engine_test_helpers",
+    testonly = True,
+    srcs = ["multimodal_process_engine_test.py"],
+    data = [":testdata"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_remote_embedding_cache_test",
+    srcs = ["mm_remote_embedding_cache_test.py"],
+    deps = [":process_engine_test_helpers"],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_test",
+    srcs = ["mm_kvcm_emb_client_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_config_test",
+    srcs = ["mm_kvcm_emb_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_tensor_object_test",
+    srcs = ["mm_kvcm_tensor_object_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_cancellation_test",
+    srcs = ["mm_cancellation_test.py"],
+    deps = [":process_engine_test_helpers"],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
+    name = "cuda_graph_gate_test",
+    srcs = ["cuda_graph_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen3_vl_embedding_test",
+    srcs = ["qwen3_vl_embedding_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "deepseek_v41_processor_test",
+    srcs = ["deepseek_v41_processor_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_vision_test",
+    srcs = ["deepseek_v41_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_vision_test",
+    srcs = ["deepseek_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )

@@ -27,6 +27,33 @@ class GlobalCacheIndexTest {
     }
 
     @Test
+    void countsFollowSharedBlockOwnershipAndClear() {
+        globalCacheIndex.addCacheBlock(1L, "engine1");
+        globalCacheIndex.addCacheBlock(1L, "engine1");
+        globalCacheIndex.addCacheBlock(1L, "engine2");
+        globalCacheIndex.addCacheBlock(2L, "engine1");
+        assertEquals(2L, globalCacheIndex.totalBlocks());
+        assertEquals(3L, globalCacheIndex.totalMappings());
+
+        globalCacheIndex.removeCacheBlock("engine1", 1L);
+        assertEquals(2L, globalCacheIndex.totalBlocks());
+        assertEquals(2L, globalCacheIndex.totalMappings());
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2");
+        assertEquals(1L, globalCacheIndex.totalBlocks());
+        assertEquals(1L, globalCacheIndex.totalMappings());
+        globalCacheIndex.removeCacheBlock("missing", 2L);
+        globalCacheIndex.clear();
+        assertEquals(0L, globalCacheIndex.totalBlocks());
+        assertEquals(0L, globalCacheIndex.totalMappings());
+        assertTrue(globalCacheIndex.batchCalculatePrefixMatchLength(
+                List.of("engine1", "engine2"), List.of(1L, 2L)).isEmpty());
+
+        globalCacheIndex.addCacheBlock(3L, "engine1");
+        assertEquals(1L, globalCacheIndex.totalBlocks());
+        assertEquals(1L, globalCacheIndex.totalMappings());
+    }
+
+    @Test
     void testEmptyInput() {
         // Test empty input cases
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
@@ -76,8 +103,8 @@ class GlobalCacheIndexTest {
 
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals(0, result.get("engine1").intValue(), "Engine1 should have 0 prefix match");
-        assertEquals(0, result.get("engine2").intValue(), "Engine2 should have 0 prefix match");
+        assertTrue(result.isEmpty(),
+                "engines with zero prefix match are omitted from the sparse result");
     }
 
     @Test
@@ -158,6 +185,21 @@ class GlobalCacheIndexTest {
     }
 
     @Test
+    void reusedCompactionBufferNeverLeaksCandidatesFromALargerQuery() {
+        globalCacheIndex.addCacheBlock(1L, "engine1");
+        globalCacheIndex.addCacheBlock(1L, "engine2");
+
+        assertEquals(
+                Map.of("engine1", 1, "engine2", 1),
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        List.of("engine1", "engine2"), List.of(1L)));
+        assertEquals(
+                Map.of("engine1", 1),
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        List.of("engine1"), List.of(1L)));
+    }
+
+    @Test
     void testNonExistentBlocks() {
         // Test non-existent blocks
         globalCacheIndex.addCacheBlock(1L, "engine1");
@@ -168,7 +210,8 @@ class GlobalCacheIndexTest {
         Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         assertEquals(1, result.get("engine1").intValue(), "Engine1 should match first block only");
-        assertEquals(0, result.get("engine2").intValue(), "Engine2 should have no matches");
+        assertTrue(!result.containsKey("engine2"),
+                "zero-prefix engines are represented by absence");
     }
 
     @Test

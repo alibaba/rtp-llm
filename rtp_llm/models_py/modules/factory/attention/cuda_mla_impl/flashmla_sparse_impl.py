@@ -13,7 +13,7 @@ try:
     if torch.version.cuda:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) >= (12, 9):
-            from flash_mla import (
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
                 flash_mla_sparse_fwd,
                 flash_mla_with_kvcache,
                 get_mla_metadata,
@@ -117,7 +117,8 @@ class SparseMlaOp(object):
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
             token_indices=topk_indices_2d,
-            BLOCK_SIZE=self.token_per_block,
+            TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
+            ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
             BLOCK_N=min(128, topk),  # tile width, must divide topk
             HAS_PREFILL_WORKSPACE=False,

@@ -60,6 +60,7 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
+    moe_pure_tp_preshard: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod
@@ -132,7 +133,6 @@ class LoadConfig(BaseModel):
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
-        rank_per_node = ep_size // num_nodes
 
         check_with_info(
             redundant_expert <= expert_num,
@@ -158,7 +158,10 @@ class LoadConfig(BaseModel):
                     len(phy2log[0]) == phy_exp_num,
                     f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {phy_exp_num}",
                 )
+        elif redundant_expert == 0:
+            phy2log = [list(range(expert_num)) for _ in range(layer_num)]
         elif redundant_expert % ep_size == 0:
+            rank_per_node = ep_size // num_nodes
             redundant_expert_per_ep = redundant_expert // ep_size
             for _ in range(layer_num):
                 layer_phy2log: List[int] = []

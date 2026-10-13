@@ -15,7 +15,10 @@ try:
     if torch.version.cuda:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) >= (12, 9):
-            from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
+                flash_mla_with_kvcache,
+                get_mla_metadata,
+            )
 
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
@@ -185,9 +188,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert topk == self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
-        assert self.precomputed_req_ids is not None, (
-            "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
-        )
+        assert (
+            self.precomputed_req_ids is not None
+        ), "precomputed_req_ids must be set in plan() before _convert_topk_indices_to_global"
         req_id = self.precomputed_req_ids
         from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
@@ -197,7 +200,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             req_id=req_id,
             block_table=self.block_table,
             token_indices=topk_indices_2d,
-            BLOCK_SIZE=self.token_per_block,
+            TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
+            ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
@@ -381,17 +385,15 @@ class SparseMlaCpImpl(SparseMlaImpl):
         total_local_ids = self.fmha_impl.total_local_ids
         has_tokens = total_global_ids is not None and total_global_ids.size(0) > 0
 
-        precomputed_ks = (
-            self.fmha_params.ks[total_global_ids] if has_tokens else None
-        )
-        precomputed_ke = (
-            self.fmha_params.ke[total_global_ids] if has_tokens else None
-        )
+        precomputed_ks = self.fmha_params.ks[total_global_ids] if has_tokens else None
+        precomputed_ke = self.fmha_params.ke[total_global_ids] if has_tokens else None
         precomputed_lengths = (
             self.fmha_params.expanded_seq_lens[total_global_ids] if has_tokens else None
         )
         precomputed_topk_off = (
-            self.fmha_params.topk_indices_offset[total_global_ids] if has_tokens else None
+            self.fmha_params.topk_indices_offset[total_global_ids]
+            if has_tokens
+            else None
         )
 
         # Pack CP indices from fmha_impl for use by indexer and others

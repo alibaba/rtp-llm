@@ -10,6 +10,18 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
+    name = "batch_copy_test",
+    srcs = [
+        "ROCmBatchCopyTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+cc_test(
     name = "beam_search_op_test",
     srcs = [
         "RocmBeamSearchOpTest.cc",
@@ -19,4 +31,19 @@ cc_test(
     deps = test_deps,
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+cc_test(
+    name = "sampler_op_test",
+    srcs = [
+        "RocmSamplerOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+    ],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )

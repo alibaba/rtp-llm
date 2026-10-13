@@ -12,11 +12,15 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -330,14 +334,14 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block,
             attn_inputs,
         )
-        if kv_cache is not None:
-            compute_ops.write_cache_store(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
-                attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        cache_store_inputs = attn_inputs.cache_store_inputs
+        cache_store_writer = attn_inputs.cache_store_writer
+        if (
+            kv_cache is not None
+            and cache_store_inputs is not None
+            and cache_store_writer is not None
+        ):
+            cache_store_writer.write(cache_store_inputs, kv_cache)
         return attn_out
 
 
@@ -819,13 +823,41 @@ class KimiLinearModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self.kv_cache is None:
+            return None
+        full_attention_layers = (
+            layer_idx
+            for layer_idx, layer in enumerate(self.layers)
+            if layer.layer_type != HybridAttentionType.LINEAR
+        )
+        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
@@ -840,21 +872,28 @@ class KimiLinearModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, i
+            )
+            layer_fmha_impl = (
+                None
+                if decoder_layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            )
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            capture.capture_layer(i, hidden_states, residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return capture.finalize(hidden_states, residual)

@@ -44,8 +44,14 @@ std::string GptModelInputs::debugString(bool force) const {
                  << "trace_ids: " << combineStrings(trace_ids) << ", combo_tokens: " << tb(combo_tokens)
                  << ", input_lengths: " << tb(input_lengths) << ", sequence_lengths: " << tb(sequence_lengths)
                  << ", prefix_lengths: " << tb(prefix_lengths);
+    if (sequence_lengths_plus_1.defined()) {
+        debug_string << ", sequence_lengths_plus_1: " << tb(sequence_lengths_plus_1);
+    }
     if (combo_position_ids.defined()) {
         debug_string << ", combo_position_ids: " << tb(combo_position_ids);
+    }
+    if (last_hidden_states.defined()) {
+        debug_string << ", last_hidden_states: " << tb(last_hidden_states);
     }
     if (kv_cache_kernel_block_id.defined()) {
         debug_string << ", kv_cache_kernel_block_id: " << tb(kv_cache_kernel_block_id);
@@ -53,6 +59,7 @@ std::string GptModelInputs::debugString(bool force) const {
     if (kv_cache_block_id.defined()) {
         debug_string << ", kv_cache_block_id: " << tb(kv_cache_block_id);
     }
+    debug_string << ", kv_cache_group_tags: " << combineStrings(kv_cache_group_tags);
     if (attention_mask.defined()) {
         debug_string << ", attention_mask: " << tb(attention_mask);
     }
@@ -67,6 +74,8 @@ std::string GptModelInputs::debugString(bool force) const {
     }
     debug_string << ", kv_block_stride_bytes: " << kv_block_stride_bytes;
     debug_string << ", pd_separation: " << pd_separation;
+    debug_string << ", skip_lm_head: " << skip_lm_head;
+    debug_string << ", capture_hidden_states: " << capture_hidden_states;
     debug_string << "}";
     return debug_string.str();
 }

@@ -27,7 +27,13 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType, MlaOpsType
+from rtp_llm.ops import (
+    DataType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+    MlaOpsType,
+    OpaqueBlockEntryCountMode,
+)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -393,6 +399,11 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                     config=moe_config,
                 ),
             ]
+            if self.model_config.n_shared_experts == 0:
+                # Routed-only checkpoints do not contain shared_experts.* keys.
+                # Keep the routed descriptor while preventing the loader from
+                # attempting to resolve absent shared-expert tensors.
+                layer_weights.pop(0)
             if self.has_e_score_correction_bias:
                 layer_weights.append(
                     AtomicWeight(
@@ -540,6 +551,44 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
 class DeepSeekV2(BaseModel):
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if model_config.kv_cache_spec_descs:
+            return
+
+        super()._post_build_model_config(model_config)
+        if not (
+            model_config.attn_config.is_sparse and model_config.attn_config.use_mla
+        ):
+            return
+
+        indexer_head_dim = int(model_config.attn_config.indexer_head_dim)
+        if indexer_head_dim <= 0 or indexer_head_dim % 128 != 0:
+            raise ValueError(
+                "sparse MLA indexer_head_dim must be positive and divisible by 128, "
+                f"got {indexer_head_dim}"
+            )
+        physical_tokens_per_block = int(model_config.attn_config.tokens_per_block)
+        if physical_tokens_per_block <= 0:
+            raise ValueError(
+                "sparse MLA tokens_per_block must be positive, "
+                f"got {physical_tokens_per_block}"
+            )
+
+        indexer_desc = KVCacheSpecDesc()
+        indexer_desc.tag = "indexer_kv"
+        indexer_desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        indexer_desc.entry_dtype = DataType.TYPE_UINT8
+        indexer_desc.entry_elems = indexer_head_dim + indexer_head_dim // 128 * 4
+        indexer_desc.entry_count_mode = (
+            OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
+        )
+        indexer_desc.compression_ratio = 1
+        descs = model_config.kv_cache_spec_descs
+        for layer_descs in descs:
+            layer_descs.append(indexer_desc)
+        model_config.kv_cache_spec_descs = descs
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
         config.attn_config.head_num = 0
@@ -591,6 +640,7 @@ class DeepSeekV2(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
             config.inter_size = config_json["intermediate_size"]
+            config.dense_inter_size = config.inter_size
             config.attn_config.head_num = config_json["num_attention_heads"]
             config.attn_config.kv_head_num = config_json.get(
                 "num_key_value_heads", config.attn_config.head_num
@@ -687,15 +737,17 @@ class DeepSeekV2(BaseModel):
             config.moe_k = config_json["num_experts_per_tok"]
             config.expert_num = config_json["n_routed_experts"]
             moe_intermediate_size = config_json["moe_intermediate_size"]
+            config.moe_inter_size = moe_intermediate_size
             config.moe_n_group = config_json.get("n_group", 1)
             config.moe_topk_group = config_json.get("topk_group", 1)
 
             n_shared_experts = config_json["n_shared_experts"]
+            config.n_shared_experts = n_shared_experts
             config.inter_size = n_shared_experts * moe_intermediate_size
 
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
-            config.moe_style = 2  # shared + expert
+            config.moe_style = 2 if n_shared_experts > 0 else 1
 
             moe_step = config_json.get("moe_layer_freq", 1)
             first_k_dense_replace = config_json["first_k_dense_replace"]
@@ -804,18 +856,6 @@ class DeepSeekV3Mtp(DeepSeekV2):
         config.reverse_e_h_norm = True
         config.is_mtp = True
         return config
-
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        desc = KVCacheSpecDesc()
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
-            desc.cache_type = KVCacheSpecType.MLA
-        else:
-            desc.cache_type = KVCacheSpecType.MHA
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
 
     @staticmethod
     def get_weight_cls():

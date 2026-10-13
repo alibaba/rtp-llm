@@ -21,21 +21,8 @@ def git_deps():
             "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
             "@rtp_llm//patches/rules_python:0002-remove-import-from-rules_cc.patch",
             "@rtp_llm//patches/rules_python:0001-xx.patch",
+            "@rtp_llm//patches/rules_python:0003-package-wheel-patches.patch",
         ],
-    )
-
-    new_git_repository(
-        name = "cutlass_fa",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-    )
-
-    new_git_repository(
-        name = "cutlass",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
     new_git_repository(
@@ -46,46 +33,10 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "cutlass3.6",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "cc3c29a81a140f7b97045718fb88eb0664c37bd7",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-        patches = ["@rtp_llm//3rdparty/cutlass:0001-cuda12.4-compat.patch"],
-    )
-
-    new_git_repository(
         name = "cutlass4.0",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "dc4817921edda44a549197ff3a9dcf5df0636e7b",
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-    )
-
-    new_git_repository(
-        name = "flashinfer_cpp",
-        remote = "https://github.com/flashinfer-ai/flashinfer.git",
-        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
-        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
-            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
-            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
-            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
-            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
-            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
-            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
-            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
-            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
-        ],
-    )
-
-    new_git_repository(
-        name = "flashmla",
-        remote = "https://github.com/deepseek-ai/FlashMLA.git",
-        commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",
-        build_file = str(Label("@rtp_llm//3rdparty/flashmla:flashmla.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashmla:0001-add-interface.patch",
-        ],
     )
 
     git_repository(
@@ -195,14 +146,6 @@ def git_deps():
         commit = "109c570727c3089fef655edcdd0dd02cc5958010",
         patches = ["@rtp_llm//patches/grpc:0001-Rename-gettid-functions.patch"],
         shallow_since = "1518192000 +0800",
-    )
-
-    git_repository(
-        name = "KleidiAI",
-        remote = "https://git.gitlab.arm.com/kleidi/kleidiai.git",
-        commit = "2d160cf675d6df7068a17da07ec6218fd9478541",
-        patch_args = ["-p1"],
-        patches = ["@rtp_llm//patches/kai:0001-add-a8w4-fp16-support.patch"],
     )
 
     http_archive(

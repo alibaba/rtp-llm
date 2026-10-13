@@ -1,29 +1,43 @@
-import logging
-from typing import Any, List, Tuple, Union
+from __future__ import annotations
 
-import numpy as np
-import torch
+from typing import TYPE_CHECKING, Any, List, Tuple, Union
+
+if TYPE_CHECKING:
+    import numpy as np
+    import torch
+
+_np_module = None
+
+
+def _numpy():
+    global _np_module
+    if _np_module is None:
+        import numpy as np
+
+        _np_module = np
+    return _np_module
 
 
 def remove_padding_eos_with_numpy(
     token_ids: np.ndarray, eos_token_id: int
 ) -> np.ndarray:
+    np = _numpy()
     # token_ids shape: [max_length]
     return token_ids[token_ids != eos_token_id]
 
 
 def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
+    import torch
+
     return torch.IntTensor(
         remove_padding_eos_with_numpy(token_ids.cpu().numpy(), eos_token_id).tolist()
     )
 
 
-import numpy as np
-
-
 def batch_remove_padding_eos(
     batched_tokens: np.ndarray, eos_token_id: int
 ) -> List[np.ndarray]:
+    np = _numpy()
     eos_mask = batched_tokens == eos_token_id
     first_eos_indices = np.argmax(eos_mask, axis=1)
     seq_len = batched_tokens.shape[1]
@@ -62,6 +76,7 @@ output:
 
 
 def to_word_list_format(words_list: List[List[List[int]]]):
+    np = _numpy()
     flat_ids = []
     offsets = []
 
@@ -175,7 +190,7 @@ def truncate_token_with_stop_word_id(
         "Convert ndarray/tensor with .tolist() before calling."
     )
     for stop_word_id in stop_word_ids:
-        if stop_word_id and np.array_equal(tokens[-len(stop_word_id) :], stop_word_id):
+        if stop_word_id and tokens[-len(stop_word_id) :] == stop_word_id:
             tokens = tokens[: (-len(stop_word_id))]
             break
     return tokens

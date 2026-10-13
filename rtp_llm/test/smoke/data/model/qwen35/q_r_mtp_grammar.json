@@ -1,0 +1,469 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "grammar_constraint_only": true,
+    "_comment": "MTP + grammar (no reasoning). Concurrent smoke drives regex/json_schema under concurrency_limit; xgrammar must be active from the first output token because thinking is disabled (enable_thinking=false + server think_mode=0). Do not mix with q_r_mtp_grammar_reasoning.json — that case enables thinking and keeps grammar in passthrough until </think>. grammar_constraint_only=true: only verify each actual content satisfies the response_format constraint; the OpenaiComparer copies non-deterministic content/reasoning_content/timing fields from actual to expect when constraint passes.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319404,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "#3498db",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 19,
+                    "total_tokens": 26,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 24140.837,
+                    "iter_count": 7,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 7,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 23502.625,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a US zip code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "[0-9]{5}"
+                },
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319405,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "90210",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 19,
+                    "total_tokens": 25,
+                    "completion_tokens": 6,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 861.905,
+                    "iter_count": 6,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 6,
+                    "step_output_len": 6,
+                    "first_token_cost_time": 513.63,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1781319410,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"Elena Vance\",\n  \"age\": 32,\n  \"city\": \"Portland, Oregon, USA\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 19,
+                    "total_tokens": 54,
+                    "completion_tokens": 35,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 4874.269,
+                    "iter_count": 35,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 35,
+                    "step_output_len": 35,
+                    "first_token_cost_time": 2496.49,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I need to log a customer support incident. The customer is Maria Lopez, contact +1-415-555-0142, ticket from 2026-04-12. They reported that the mobile app crashes when uploading photos larger than 20MB on iOS. Severity is high — affects checkout. Tag this with the right product area and an action plan."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "support_incident",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "ticket_id": {
+                                    "type": "string",
+                                    "pattern": "^TKT-[0-9]{6}$"
+                                },
+                                "reported_on": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                                },
+                                "severity": {
+                                    "type": "string",
+                                    "enum": ["low", "medium", "high", "critical"]
+                                },
+                                "product_area": {
+                                    "type": "string",
+                                    "enum": ["checkout", "search", "auth", "media", "notifications"]
+                                },
+                                "customer": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                            "maxLength": 60
+                                        },
+                                        "phone": {
+                                            "type": "string",
+                                            "pattern": "^\\+[0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{4}$"
+                                        }
+                                    },
+                                    "required": ["name", "phone"],
+                                    "additionalProperties": false
+                                },
+                                "actions": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "owner": {
+                                                "type": "string",
+                                                "enum": ["mobile", "backend", "qa", "infra"]
+                                            },
+                                            "summary": {
+                                                "type": "string",
+                                                "maxLength": 80
+                                            }
+                                        },
+                                        "required": ["owner", "summary"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["ticket_id", "reported_on", "severity", "product_area", "customer", "actions"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{}",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only — content/usage/aux_info filled in from actual when schema validates"
+            },
+            "_comment": "complex_schema (no-thinking, MTP) — nested object + enum × 3 + pattern × 3 + bounded array. Prompt is a natural-language ticket description that does NOT mention 'JSON' or any schema field. Without xgrammar masking the model will: (1) prefix with explanation/markdown fence, (2) hallucinate ticket_id format, (3) emit free-text severity ('Severe', 'major'), (4) skip the nested phone pattern, (5) drop required actions[] or exceed maxItems=3. Each of those is rejected by jsonschema.validate. This case fails open under any grammar bug that lets a single token escape the mask."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你必须调用天气查询工具，只填写 location 字段，不要输出 unit、date、time 或其他字段。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "查询杭州天气"
+                    }
+                ],
+                "response_format": {
+                    "type": "structural_tag",
+                    "structural_tag": {
+                        "type": "structural_tag",
+                        "format": {
+                            "type": "triggered_tags",
+                            "triggers": ["<tool_call>"],
+                            "tags": [
+                                {
+                                    "type": "tag",
+                                    "begin": "<tool_call>get_current_weather",
+                                    "content": {
+                                        "type": "json_schema",
+                                        "json_schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "location": {
+                                                    "type": "string",
+                                                    "description": "城市 杭州市、余杭区"
+                                                }
+                                            },
+                                            "required": ["location"],
+                                            "additionalProperties": false
+                                        },
+                                        "style": "glm_xml"
+                                    },
+                                    "end": "</tool_call>"
+                                }
+                            ],
+                            "at_least_one": true,
+                            "stop_after_first": true,
+                            "excludes": ["<think>", "</think>"]
+                        }
+                    }
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only placeholder — actual is validated against the structural_tag constraint, not compared byte-for-byte."
+            },
+            "_comment": "triggered_tags ACTIVE-constraint test — at_least_one=true forces the grammar to emit at least one complete <tool_call>get_current_weather...{glm_xml location}...</tool_call> tag. Keep the prompt simple and aligned with the tool call; the purpose is to validate triggered_tags wiring under smoke, not to test adversarial model behavior. The validator asserts: (1) excludes <think>/</think> never appear; (2) every <tool_call> trigger completes into a well-formed tag whose inner glm_xml payload carries the required 'location' key; (3) no bare/uncompleted trigger leaks into the free text."
+        }
+    ]
+}

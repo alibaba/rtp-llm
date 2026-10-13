@@ -126,7 +126,11 @@ class DeepSeekVLV2ImageEmbedding(ImageEmbeddingInterface):
         assert (
             mm_input.mm_type == MMUrlType.IMAGE or mm_input.mm_type == MMUrlType.DEFAULT
         )
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        data = get_bytes_io_from_url(
+            mm_input.url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         image = Image.open(data).convert("RGB")
         best_width, best_height = select_best_resolution(
             image.size, candidate_resolutions

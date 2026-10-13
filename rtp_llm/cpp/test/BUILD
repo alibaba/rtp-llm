@@ -12,7 +12,6 @@ sampler_test_copts = [
     "-fno-access-control",
 ] + test_copts
 
-
 cc_library(
     name = "test_headers",
     hdrs = glob([
@@ -58,15 +57,22 @@ cc_test(
         "SamplerTest.cc",
     ],
     data = [
-        "//rtp_llm/test/model_test/fake_test/testdata:testdata"
+        "//rtp_llm/test/model_test/fake_test/testdata",
     ],
     copts = sampler_test_copts,
     deps = test_deps + [
         ":test_utils",
     ],
-    env = select({
-        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
+    env = device_test_envs(),
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "L20_CU13"},
     }),
-    exec_properties = {'gpu':'H20'},
+    # Keeps upstream's select shape and its ROCm branch; the CUDA branch pins
+    # L20_CU13 (sm89) rather than H20. sampler_test ran in the sm8x lane's
+    # 183-target double run without failures, and it stays green after the
+    # pool moved to L20_CU13 (4/4). Upstream was preserving the old H20 pin
+    # while refactoring env to device_test_envs(), not asserting this needs
+    # sm90.
+    tags = ["L20_CU13"],
 )

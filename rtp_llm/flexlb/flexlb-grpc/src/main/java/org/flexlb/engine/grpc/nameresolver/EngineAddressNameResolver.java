@@ -1,25 +1,24 @@
 package org.flexlb.engine.grpc.nameresolver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.lang3.StringUtils;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.flexlb.util.JsonUtils;
+import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * @author saichen.sm
@@ -33,45 +32,35 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
     private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
-    private final List<String> serviceAddressList;
+    private final Map<String/*address*/, String/*protocol*/> addressProtocols;
 
-    public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
+    public EngineAddressNameResolver(
+            ServiceDiscovery serviceDiscovery,
+            ModelMetaConfig modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
-        this.serviceAddressList = initServiceAddressList(modelConfig);
-        log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
+        this.addressProtocols = addressProtocols(modelConfig.getServiceRoute());
+        log.info("EngineAddressNameResolver start subscribe clusters:{} ", addressProtocols.keySet());
         fetchAllDomainsHosts();
-        setupListeners(serviceDiscovery, serviceAddressList);
+        setupListeners();
     }
 
     @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
     public void periodicHostUpdate() {
-        Logger.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
         fetchAllDomainsHosts();
     }
 
-    private void setupListeners(ServiceDiscovery serviceDiscovery, List<String> serviceAddressList) {
+    private void setupListeners() {
         // Create independent listener for each service address
-        for (String serviceAddress : serviceAddressList) {
-            if (serviceAddress == null) {
-                Logger.warn("Skipping null serviceAddress");
-                continue;
-            }
+        for (String serviceAddress : addressProtocols.keySet()) {
             ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
             serviceDiscovery.listen(serviceAddress, addressListener);
         }
     }
 
     private void fetchAllDomainsHosts() {
-        for (String serverAddress : serviceAddressList) {
-            if (serverAddress == null) {
-                Logger.warn("Skipping null serverAddress during fetch");
-                continue;
-            }
-
+        for (String serverAddress : addressProtocols.keySet()) {
             try {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
-                Logger.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
                 updateDomainHosts(serverAddress, hosts);
             } catch (Exception e) {
                 Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
@@ -79,15 +68,17 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
     }
 
-    private List<String> initServiceAddressList(String modelConfigJson) {
-        return Optional.ofNullable(modelConfigJson)
-                .filter(StringUtils::isNotBlank)
-                .map(json -> JsonUtils.toObject(modelConfigJson, ServiceRoute.class))
-                .map(serviceRoute -> serviceRoute.getAllEndpoints().stream()
-                        .map(Endpoint::getAddress)
-                        .collect(Collectors.toList()))
-                .filter(CollectionUtils::isNotEmpty)
-                .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable, modelConfigJson=" + modelConfigJson));
+    private static Map<String, String> addressProtocols(ServiceRoute serviceRoute) {
+        Map<String, String> protocols = new LinkedHashMap<>();
+        for (var endpoint : serviceRoute.getAllEndpoints()) {
+            if (endpoint.getAddress() != null) {
+                protocols.putIfAbsent(endpoint.getAddress(), null);
+                if (endpoint.getProtocol() != null) {
+                    protocols.put(endpoint.getAddress(), endpoint.getProtocol());
+                }
+            }
+        }
+        return Collections.unmodifiableMap(protocols);
     }
 
     @Override
@@ -102,13 +93,20 @@ public class EngineAddressNameResolver implements CustomNameResolver {
      * @param address  Service address
      * @param hostList Host list
      */
-    private void updateDomainHosts(String address, List<WorkerHost> hostList) {
+    private synchronized void updateDomainHosts(String address, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(address);
         } else {
+            // VipServer registers the gRPC port (not httpPort) for GRPC-protocol deployments.
+            // Downstream AbstractGrpcClient expects "ip:httpPort" and applies toGrpcPort(+1),
+            // so correct the port back to httpPort semantics here (aligned with the GRPC branch
+            // of WorkerAddressService.convertServiceDiscoveryHosts on the sync path).
+            String protocol = addressProtocols.get(address);
+            boolean isGrpcProtocol = BackendServiceProtocolEnum.GRPC.getName().equalsIgnoreCase(protocol);
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
-                ipPortList.add(host.getIp() + ":" + host.getPort());
+                int port = isGrpcProtocol ? host.getPort() - 1 : host.getPort();
+                ipPortList.add(host.getIp() + ":" + port);
             }
             domainHostsMap.put(address, ipPortList);
         }
@@ -117,7 +115,15 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
-        Logger.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
+
+        // Service discovery polls even when membership is unchanged. Keep the
+        // update path and its logs edge-triggered so a steady cluster is quiet.
+        if (new HashSet<>(allIpPortList).equals(new HashSet<>(aggregatedHosts))) {
+            return;
+        }
+
+        Logger.info("Engine hosts changed: domain={}, domainHosts={}, totalHosts={}",
+                address, hostList == null ? 0 : hostList.size(), aggregatedHosts.size());
         // Update global host list and notify listener
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {

@@ -1,22 +1,722 @@
+import contextlib
+import io
+import os
+import re
+import sys
 import unittest
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
+from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
 )
+from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.start_backend_server import start_backend_server
+
+# clear=True must preserve gpu_lock isolation across Torch lazy initialization.
+_PINNED_DEVICES = {
+    name: os.environ[name]
+    for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+    if name in os.environ
+}
+
+
+def _jit_env(**values):
+    return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class ServerConfigPortLayoutTest(TestCase):
+    def test_dash_sc_rejects_legacy_stride_eight(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 8
+
+        with self.assertRaisesRegex(ValueError, "must be at least 9"):
+            config.validate_port_layout(dash_sc_enabled=True)
+
+    def test_dash_sc_accepts_stride_nine_without_cross_rank_overlap(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 9
+        config.validate_port_layout(dash_sc_enabled=True)
+
+        config.rank_id = 0
+        rank_zero_dash_sc_port = config.dash_sc_grpc_server_port
+        config.rank_id = 1
+        rank_one_server_port = config.server_port
+
+        self.assertEqual(rank_zero_dash_sc_port, config.start_port + 8)
+        self.assertEqual(rank_one_server_port, config.start_port + 9)
+        self.assertNotEqual(rank_zero_dash_sc_port, rank_one_server_port)
+
+    def test_vit_without_dash_sc_allows_legacy_stride(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 8
+
+        config.validate_port_layout(dash_sc_enabled=False)
+
+
+class KVCacheEventHostIdentityTest(TestCase):
+    def _dp_publisher_configs(self) -> PyEnvConfigs:
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.kv_cache_config.kv_cache_event_publisher_type = "kvcm"
+        py_env_configs.parallelism_config.dp_size = 2
+        py_env_configs.parallelism_config.dp_rank = 1
+        py_env_configs.parallelism_config.tp_rank = 0
+        py_env_configs.server_config.ip = "10.0.0.8"
+        py_env_configs.server_config.start_port = 20000
+        py_env_configs.server_config.worker_info_port_num = 9
+        py_env_configs.server_config.set_local_rank(3)
+        return py_env_configs
+
+    def test_empty_host_identity_uses_rank_port_layout(self):
+        py_env_configs = self._dp_publisher_configs()
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "10.0.0.8:20027",
+        )
+        self.assertIn("auto-derived", "\n".join(logs.output))
+        self.assertIn("overwrite", "\n".join(logs.output))
+
+    def test_explicit_host_identity_is_preserved(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.kv_cache_config.kv_cache_event_host_ip_port = (
+            "cache-replica-1:19000"
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "cache-replica-1:19000",
+        )
+        self.assertIn("explicit", "\n".join(logs.output))
+
+    def test_non_publisher_tp_rank_is_unchanged(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.parallelism_config.tp_rank = 1
+
+        configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+
+class SingleGpuBackendRankTest(TestCase):
+    def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):
+        py_env_configs = PyEnvConfigs()
+        parallelism_config = py_env_configs.parallelism_config
+        parallelism_config.tp_size = tp_size
+        parallelism_config.dp_size = dp_size
+        parallelism_config.ep_size = tp_size * dp_size if dp_size > 1 else 1
+        parallelism_config.world_size = tp_size * dp_size
+        parallelism_config.world_rank = world_rank
+        parallelism_config.local_world_size = 1
+
+        py_env_configs.kv_cache_config.kv_cache_event_publisher_type = "kvcm"
+        py_env_configs.server_config.ip = "10.0.0.8"
+        py_env_configs.server_config.start_port = 20000
+
+        def initialize_rank(
+            global_controller, configs, selected_world_rank, pipe_writer
+        ):
+            set_parallelism_config(
+                configs.parallelism_config,
+                selected_world_rank,
+                configs.ffn_disaggregate_config,
+                configs.prefill_cp_config,
+            )
+            local_rank = configs.parallelism_config.local_rank
+            configs.server_config.set_local_rank(local_rank)
+            configs.distribute_config.set_local_rank(local_rank)
+            configure_kv_cache_event_host_ip_port(configs)
+            return selected_world_rank
+
+        with (
+            patch("rtp_llm.start_backend_server.signal.signal"),
+            patch("rtp_llm.start_backend_server.os.makedirs"),
+            patch("rtp_llm.start_backend_server.setproctitle"),
+            patch("rtp_llm.start_backend_server.load_gpu_nic_affinity"),
+            patch(
+                "rtp_llm.start_backend_server.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "rtp_llm.start_backend_server.torch.cuda.device_count",
+                return_value=1,
+            ),
+            patch(
+                "rtp_llm.utils.jit_cache_manager.start_from_config",
+                return_value=None,
+            ),
+            patch(
+                "rtp_llm.start_backend_server.local_rank_start",
+                side_effect=initialize_rank,
+            ),
+        ):
+            result = start_backend_server(object(), py_env_configs)
+
+        return result, py_env_configs
+
+    def test_single_gpu_nonzero_dp_rank_starts_publisher(self):
+        result, py_env_configs = self._start_rank(tp_size=1, dp_size=2, world_rank=1)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(py_env_configs.parallelism_config.tp_rank, 0)
+        self.assertEqual(py_env_configs.parallelism_config.dp_rank, 1)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "10.0.0.8:20000",
+        )
+
+    def test_single_gpu_nonzero_tp_rank_does_not_start_publisher(self):
+        result, py_env_configs = self._start_rank(tp_size=2, dp_size=1, world_rank=1)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(py_env_configs.parallelism_config.tp_rank, 1)
+        self.assertEqual(py_env_configs.parallelism_config.dp_rank, 0)
+        self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
 
 class GenerateConfigTest(TestCase):
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "TP_SIZE": "1",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_DISK_CACHE": "1",
+            "DISK_CACHE_PATHS": "/tmp/cache-a,/tmp/cache-b",
+            "DISK_CACHE_SIZE_MB": "4096",
+            "DISK_CACHE_BUFFERED_IO": "0",
+            "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
+            "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
+            "ENABLE_MEMORY_CACHE": "1",
+            "MEMORY_CACHE_SIZE_MB": "2048",
+            "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
+            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
+            "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
+            "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
+            "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
+            "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
+            "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
+            "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
+            "BLOCK_TREE_MEMORY_EVICT_HIGH_WATERMARK_RATIO": "0.82",
+            "BLOCK_TREE_DISK_EVICT_LOW_WATERMARK_RATIO": "0.73",
+            "BLOCK_TREE_DISK_EVICT_HIGH_WATERMARK_RATIO": "0.83",
+        },
+        clear=True,
+    )
+    def test_kv_cache_strategy_args_propagate_from_env(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        config = py_env_configs.kv_cache_config
+
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/cache-a,/tmp/cache-b")
+        self.assertEqual(config.disk_cache_size_mb, 4096)
+        self.assertFalse(config.disk_cache_buffered_io)
+        self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
+        self.assertEqual(config.disk_cache_staging_block_count, 8)
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 2048)
+        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
+        self.assertEqual(config.block_tree_transfer_worker_count, 7)
+        self.assertEqual(config.block_tree_business_queue_max_size, 211)
+        self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
+        self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
+        self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(config.block_tree_memory_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
+        self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
+
+    def test_kv_cache_strategy_defaults_are_rollback_safe(self):
+        config = PyEnvConfigs().kv_cache_config
+
+        self.assertFalse(config.enable_memory_cache)
+        self.assertEqual(config.disk_cache_staging_block_count, 128)
+        self.assertEqual(config.device_eviction_policy, "lru")
+        self.assertEqual(config.memory_eviction_policy, "lru")
+        self.assertEqual(config.disk_eviction_policy, "fifo")
+        self.assertEqual(config.reserve_block_ratio, 5)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    @patch.dict("os.environ", _jit_env(), clear=True)
+    def test_kv_cache_scheduler_reserve_defaults_and_override(self):
+        self.assertEqual(setup_args().kv_cache_config.reserve_block_ratio, 5)
+        config = setup_args(["--reserve_block_ratio", "7"]).kv_cache_config
+        self.assertEqual(config.reserve_block_ratio, 7)
+
+    @patch.dict(
+        "os.environ",
+        _jit_env(RESERVE_BLOCK_RATIO="7"),
+        clear=True,
+    )
+    def test_kv_cache_scheduler_reserve_from_env_and_cli_override(self):
+        for args, expected_ratio in (
+            (None, 7),
+            ([], 7),
+            (["--reserve_block_ratio", "9"], 9),
+        ):
+            with self.subTest(args=args):
+                config = setup_args(args).kv_cache_config
+                self.assertEqual(config.reserve_block_ratio, expected_ratio)
+
+    def test_canonical_kv_cache_cli_names(self):
+        config = setup_args(
+            [
+                "--enable_memory_cache",
+                "1",
+                "--memory_cache_size_mb",
+                "2048",
+                "--memory_cache_sync_timeout_ms",
+                "6789",
+                "--block_tree_memory_evict_low_watermark_ratio",
+                "0.72",
+                "--block_tree_memory_evict_high_watermark_ratio",
+                "0.82",
+                "--enable_disk_cache",
+                "1",
+                "--disk_cache_paths",
+                "/tmp/host-cache",
+                "--disk_cache_size_mb",
+                "4096",
+            ]
+        ).kv_cache_config
+
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 2048)
+        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(config.block_tree_memory_evict_high_watermark_ratio, 0.82)
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/host-cache")
+        self.assertEqual(config.disk_cache_size_mb, 4096)
+        self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_MEMORY_CACHE": "1",
+            "MEMORY_CACHE_SIZE_MB": "1024",
+            "ENABLE_DISK_CACHE": "1",
+            "DISK_CACHE_PATHS": "/tmp/disk-cache",
+            "DISK_CACHE_SIZE_MB": "2048",
+        },
+        clear=True,
+    )
+    def test_canonical_kv_cache_env_names(self):
+        config = setup_args().kv_cache_config
+
+        self.assertTrue(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 1024)
+        self.assertTrue(config.enable_disk_cache)
+        self.assertEqual(config.disk_cache_paths, "/tmp/disk-cache")
+        self.assertEqual(config.disk_cache_size_mb, 2048)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "MODEL_TYPE": "fake_model",
+            "ENABLE_MEMORY_CACHE": "0",
+            "MEMORY_CACHE_SIZE_MB": "0",
+            "DISK_CACHE_PATHS": "",
+        },
+        clear=True,
+    )
+    def test_canonical_kv_cache_env_preserves_false_zero_and_empty(self):
+        config = setup_args().kv_cache_config
+
+        self.assertFalse(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_size_mb, 0)
+        self.assertEqual(config.disk_cache_paths, "")
+
+    def test_kv_cache_config_pickle_round_trip_includes_eviction_fields(self):
+        import pickle
+
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.disk_cache_staging_block_count = 8
+        config.enable_disk_cache = False
+        config.device_eviction_policy = "fifo"
+        config.memory_eviction_policy = "lfu"
+        config.disk_eviction_policy = "lru"
+        config.reserve_block_ratio = 7
+        config.dsv4_fixed_pool_blocks = 512
+        config.dsv4_hca_state_pool_blocks = 256
+        config.dsv4_fixed_pool_use_memory = True
+        config.memory_cache_max_descriptors_per_transfer_batch = 17
+        config.block_tree_full_prefix_scan_interval_ms = 5000
+        config.block_tree_transfer_worker_count = 7
+        config.block_tree_business_queue_max_size = 211
+        config.block_tree_transfer_queue_max_size = 307
+        config.block_tree_device_evict_low_watermark_ratio = 0.71
+        config.block_tree_device_evict_high_watermark_ratio = 0.81
+        config.block_tree_memory_evict_low_watermark_ratio = 0.72
+        config.block_tree_memory_evict_high_watermark_ratio = 0.82
+        config.block_tree_disk_evict_low_watermark_ratio = 0.73
+        config.block_tree_disk_evict_high_watermark_ratio = 0.83
+
+        state = config.__getstate__()
+        self.assertEqual(len(state), 69)
+        self.assertEqual(state[:2], ("KVCacheConfig", 7))
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.disk_cache_staging_block_count, 8)
+        self.assertFalse(restored.enable_disk_cache)
+        self.assertEqual(restored.device_eviction_policy, "fifo")
+        self.assertEqual(restored.memory_eviction_policy, "lfu")
+        self.assertEqual(restored.disk_eviction_policy, "lru")
+        self.assertEqual(restored.reserve_block_ratio, 7)
+        self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
+        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
+        self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
+        self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
+        self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+        self.assertEqual(restored.block_tree_business_queue_max_size, 211)
+        self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(restored.block_tree_device_evict_low_watermark_ratio, 0.71)
+        self.assertEqual(restored.block_tree_device_evict_high_watermark_ratio, 0.81)
+        self.assertEqual(restored.block_tree_memory_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(restored.block_tree_memory_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(restored.block_tree_disk_evict_low_watermark_ratio, 0.73)
+        self.assertEqual(restored.block_tree_disk_evict_high_watermark_ratio, 0.83)
+        self.assertFalse(hasattr(restored, "write_cache_sync"))
+
+        config.enable_disk_cache = True
+        restored_enabled = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored_enabled.enable_disk_cache)
+
+        def restore(pickle_state):
+            value = KVCacheConfig.__new__(KVCacheConfig)
+            value.__setstate__(pickle_state)
+            return value
+
+        event_state = state
+        state = (state[0], 6, *state[2:-5])
+        version_five_state = (state[0], 5, *state[2:], True)
+        self.assertEqual(restore(version_five_state).__getstate__(), event_state)
+        version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
+        restored_version_four = restore(version_four_state)
+        self.assertEqual(restored_version_four.__getstate__(), event_state)
+
+        legacy_state = (
+            state[0],
+            3,
+            *version_four_state[2:20],
+            False,
+            *version_four_state[20:],
+        )
+        restored_legacy = restore(legacy_state)
+        self.assertEqual(restored_legacy.__getstate__(), event_state)
+
+        source_extended_state = (state[0], 1, *legacy_state[2:-1])
+        restored_source_extended = restore(source_extended_state)
+        self.assertEqual(restored_source_extended.block_tree_transfer_worker_count, 7)
+        self.assertEqual(
+            restored_source_extended.block_tree_business_queue_max_size, 211
+        )
+        self.assertFalse(hasattr(restored_source_extended, "write_cache_sync"))
+
+        source_state = (state[0], 1, *legacy_state[2:57])
+        restored_source = restore(source_state)
+        self.assertEqual(restored_source.dsv4_fixed_pool_blocks, 512)
+        self.assertEqual(restored_source.dsv4_hca_state_pool_blocks, 256)
+        self.assertEqual(
+            restored_source.memory_cache_max_descriptors_per_transfer_batch, 17
+        )
+        self.assertFalse(hasattr(restored_source, "write_cache_sync"))
+
+        write_sync_state = (state[0], 2, *legacy_state[2:57], True)
+        restored_write_sync = restore(write_sync_state)
+        default_config = KVCacheConfig()
+        self.assertEqual(
+            restored_write_sync.block_tree_transfer_worker_count,
+            default_config.block_tree_transfer_worker_count,
+        )
+        self.assertFalse(hasattr(restored_write_sync, "write_cache_sync"))
+
+    def test_kv_cache_config_pickle_rejects_incompatible_states(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        def restore(state):
+            value = KVCacheConfig.__new__(KVCacheConfig)
+            value.__setstate__(state)
+            return value
+
+        state = KVCacheConfig().__getstate__()
+        for invalid_state in (
+            state[2:],
+            ("OtherConfig", *state[1:]),
+            (state[0], 99, *state[2:]),
+            state[:-1],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid KVCacheConfig state"):
+                restore(invalid_state)
+
+    def test_kv_cache_config_queue_and_watermark_bindings_match_stub(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        expected_fields = {
+            "block_tree_transfer_worker_count": "int",
+            "block_tree_business_queue_max_size": "int",
+            "block_tree_transfer_queue_max_size": "int",
+            "block_tree_device_evict_low_watermark_ratio": "float",
+            "block_tree_device_evict_high_watermark_ratio": "float",
+            "block_tree_memory_evict_low_watermark_ratio": "float",
+            "block_tree_memory_evict_high_watermark_ratio": "float",
+            "block_tree_disk_evict_low_watermark_ratio": "float",
+            "block_tree_disk_evict_high_watermark_ratio": "float",
+        }
+        stub_path = (
+            Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"
+        )
+        stub_text = stub_path.read_text(encoding="utf-8")
+        stub_class = stub_text.split("class KVCacheConfig:\n", maxsplit=1)[1].split(
+            "\nclass ", maxsplit=1
+        )[0]
+        stub_fields = dict(
+            re.findall(r"^    ([A-Za-z_]\w*): ([^\n]+)$", stub_class, re.MULTILINE)
+        )
+
+        for field, expected_type in expected_fields.items():
+            with self.subTest(field=field):
+                self.assertTrue(hasattr(KVCacheConfig, field))
+                self.assertEqual(stub_fields.get(field), expected_type)
+
+    def test_jit_config(self):
+        valid = (
+            ([], {}, ("", 180)),
+            (
+                [],
+                {"REMOTE_JIT_DIR": "/remote/jit", "JIT_CACHE_SETUP_TIMEOUT_S": "60"},
+                ("/remote/jit", 60),
+            ),
+            (["--jit_cache_setup_timeout_s", "5"], {}, ("", 5)),
+            (["--jit_cache_setup_timeout_s", "-1"], {}, ("", -1)),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "-1"}, ("", -1)),
+            # CLI wins over env even for -1, which the provided_args scanner sees
+            # as an option rather than as a value.
+            (
+                ["--jit_cache_setup_timeout_s", "-1"],
+                {"JIT_CACHE_SETUP_TIMEOUT_S": "60"},
+                ("", -1),
+            ),
+        )
+        for args, env, expected in valid:
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args(args).jit_config
+                self.assertEqual(
+                    (config.remote_jit_dir, config.jit_cache_setup_timeout_s), expected
+                )
+
+        for args, env, expected in (
+            ([], {}, True),
+            (["--manage_jit_cache", "0"], {}, False),
+            ([], {"MANAGE_JIT_CACHE": "0"}, False),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                self.assertIs(setup_args(args).jit_config.manage_jit_cache, expected)
+
+        timeout_error, bool_error = "positive integer or -1", "Boolean value expected"
+        for args, env, message in (
+            (["--jit_cache_setup_timeout_s", "0"], {}, timeout_error),
+            (["--jit_cache_setup_timeout_s", "-2"], {}, timeout_error),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "0"}, timeout_error),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "invalid"}, timeout_error),
+            ([], {"MANAGE_JIT_CACHE": "maybe"}, bool_error),
+            # An empty value fails like every other int/str2bool arg does.
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": ""}, timeout_error),
+            ([], {"MANAGE_JIT_CACHE": ""}, bool_error),
+        ):
+            stderr = io.StringIO()
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ), contextlib.redirect_stderr(stderr), self.assertRaises(
+                SystemExit
+            ) as context:
+                setup_args(args)
+            self.assertEqual(context.exception.code, 2)
+            # Fail *because of this validator*, not from an unrelated parse error.
+            self.assertIn(message, stderr.getvalue())
+
+    def test_jit_config_pure_env_path_without_cli_args(self):
+        """setup_args() with no argv reaches the env-only branch of the scanner.
+
+        This is the deployment path: every value arrives as a raw env string.
+        """
+        for env, expected in (
+            ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, True)),
+            ({"MANAGE_JIT_CACHE": "0"}, (180, False)),
+        ):
+            with self.subTest(env=env), patch.object(sys, "argv", ["prog"]), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ):
+                config = setup_args().jit_config
+                self.assertEqual(
+                    (config.jit_cache_setup_timeout_s, config.manage_jit_cache),
+                    expected,
+                )
+
+    def test_engine_config_propagates_role_to_parallelism_config(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.role_config.role_type = RoleType.PREFILL
+
+        engine_config = EngineConfig.create(py_env_configs)
+
+        self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
+        self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
+
+    def test_engine_config_preserves_role_when_context_parallel_is_enabled(self):
+        for role_type in (
+            RoleType.PDFUSION,
+            RoleType.PREFILL,
+            RoleType.DECODE,
+        ):
+            with self.subTest(role_type=role_type):
+                py_env_configs = PyEnvConfigs()
+                py_env_configs.role_config.role_type = role_type
+                py_env_configs.parallelism_config.prefill_cp_config.method = (
+                    CPRotateMethod.ALL_GATHER
+                )
+
+                engine_config = EngineConfig.create(py_env_configs)
+                self.assertEqual(engine_config.pd_sep_config.role_type, role_type)
+                self.assertEqual(engine_config.parallelism_config.role_type, role_type)
+
+    def test_engine_config_minimal_dataclass_construction_from_py_env_configs(self):
+        py_env_configs = PyEnvConfigs()
+
+        engine_config = EngineConfig(
+            parallelism_config=py_env_configs.parallelism_config,
+            runtime_config=py_env_configs.runtime_config,
+            nccl_comm_config=NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            ),
+            server_config=py_env_configs.server_config,
+            pd_sep_config=py_env_configs.pd_separation_config,
+            concurrency_config=py_env_configs.concurrency_config,
+            fmha_config=py_env_configs.fmha_config,
+            kv_cache_config=py_env_configs.kv_cache_config,
+            profiling_debug_logging_config=(
+                py_env_configs.profiling_debug_logging_config
+            ),
+            hw_kernel_config=py_env_configs.py_hw_kernel_config,
+            device_resource_config=py_env_configs.device_resource_config,
+            moe_config=py_env_configs.moe_config,
+            model_specific_config=py_env_configs.model_specific_config,
+            sp_config=py_env_configs.sp_config,
+            cache_store_config=py_env_configs.cache_store_config,
+            misc_config=py_env_configs.misc_config.misc_config,
+            arpc_config=py_env_configs.arpc_config,
+            grpc_config=py_env_configs.grpc_config,
+            dash_sc_grpc_config=py_env_configs.dash_sc_grpc_config,
+            grammar_config=py_env_configs.grammar_config,
+            load_config=py_env_configs.load_config,
+        )
+
+        self.assertIs(engine_config.grammar_config, py_env_configs.grammar_config)
+
+    def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.prefill_cp_config.kv_cache_sharded = True
+        py_env_configs.prefill_cp_config.prefill_cp_size = 4
+
+        set_parallelism_config(
+            py_env_configs.parallelism_config,
+            py_prefill_cp_config=py_env_configs.prefill_cp_config,
+        )
+
+        self.assertTrue(
+            py_env_configs.parallelism_config.prefill_cp_config.kv_cache_sharded
+        )
+        self.assertEqual(
+            py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
+        )
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "START_PORT": "20000",
+            "REMOTE_SERVER_PORT": "30000",
+            "WORKER_INFO_PORT_NUM": "13",
+        },
+        clear=True,
+    )
+    def test_custom_stride_reaches_local_remote_and_pd_port_consumers(self):
+        py_env_configs = setup_args()
+        server_config = py_env_configs.server_config
+        distribute_config = py_env_configs.distribute_config
+        server_config.rank_id = 2
+        distribute_config.rank_id = 2
+        py_env_configs.pd_separation_config.role_type = RoleType.DECODE
+
+        setup_pd_sep_config(
+            py_env_configs.pd_separation_config,
+            py_env_configs.cache_store_config,
+            server_config,
+            distribute_config,
+        )
+
+        self.assertEqual(server_config.server_port, 20026)
+        self.assertEqual(distribute_config.remote_rpc_server_port, 30027)
+        self.assertEqual(py_env_configs.pd_separation_config.worker_port_offset, 13)
+        self.assertEqual(
+            py_env_configs.pd_separation_config.remote_rpc_server_port, 30027
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.cache_store_connect_port, 30028
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.cache_store_rdma_connect_port,
+            30030,
+        )
+
+    def setUp(self):
+        # clear=True below removes CUDA_VISIBLE_DEVICES after torch is imported;
+        # these config-only tests must not trigger real CUDA lazy initialization.
+        cuda_available = patch(
+            "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+            return_value=False,
+        )
+        cuda_available.start()
+        self.addCleanup(cuda_available.stop)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
@@ -26,6 +726,8 @@ class GenerateConfigTest(TestCase):
             "START_PORT": "20000",
             "MODEL_TYPE": "fake_model",
             "USE_ALL_GATHER": "0",
+            "PREFILL_CP_KV_CACHE_SHARDED": "1",
+            "PREFILL_CP_SIZE": "4",
         },
         clear=True,
     )
@@ -41,6 +743,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(pc.tp_size, 4)
         self.assertEqual(pc.world_size, 4)
         self.assertEqual(pc.local_world_size, 2)
+        self.assertTrue(pc.prefill_cp_config.kv_cache_sharded)
+        self.assertEqual(pc.prefill_cp_config.prefill_cp_size, 4)
         self.assertEqual(py_env_configs.server_config.server_port, 20000)
 
         self.assertEqual(py_env_configs.moe_config.use_deepep_moe, True)
@@ -51,6 +755,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",
@@ -79,6 +784,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
@@ -102,6 +808,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "DP_SIZE": "2",
             "PP_SIZE": "1",

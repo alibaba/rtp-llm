@@ -25,7 +25,12 @@ class AllFakeModelTest(TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             tokenizer_path = self._create_qwen35_tokenizer(Path(temp_dir))
 
-            for model_type in ["qwen35_dense", "qwen35_moe", "qwen35_moe_mtp"]:
+            for model_type in [
+                "qwen35_dense",
+                "qwen35_dense_mtp",
+                "qwen35_moe",
+                "qwen35_moe_mtp",
+            ]:
                 with self.subTest(model_type=model_type):
                     tokenizer = TokenizerFactory.create(
                         str(tokenizer_path), str(tokenizer_path), model_type

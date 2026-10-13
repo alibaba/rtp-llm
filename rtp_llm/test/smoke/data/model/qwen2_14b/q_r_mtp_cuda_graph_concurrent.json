@@ -165,6 +165,7 @@
                 "finished": true,
                 "aux_info": {
                     "iter_count": 44,
+                    "iter_count_tolerance": 2,
                     "output_len": 50,
                     "input_len": 58
                 }

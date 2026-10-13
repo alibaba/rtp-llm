@@ -14,6 +14,7 @@ class RouterType(Enum):
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
     MORI_EP_INTRANODE = 6  # MORI intra-node EP router
     MORI_EP_INTERNODE = 7  # MORI inter-node EP router
+    FUSED_EXECUTOR = 8  # Dispatch/combine are fused into the expert executor
 
 
 class ExecutorType(Enum):
@@ -36,3 +37,4 @@ class ExecutorType(Enum):
     )
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    FP8_FP4 = 9  # DeepGEMM FP8-activation x FP4-weight executor

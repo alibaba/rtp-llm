@@ -3,10 +3,11 @@ Unit tests for worker_status.py models, focusing on ScheduleMeta type conversion
 Tests the validate_role method that converts string to RoleType enum.
 """
 
+import json
 import unittest
 
 from rtp_llm.config.generate_config import RoleType
-from rtp_llm.server.worker_status import ScheduleMeta, ServerStatus
+from rtp_llm.server.worker_status import ScheduleMeta, ServerStatus, _coerce_role_type
 
 
 class TestScheduleMetaRoleConversion(unittest.TestCase):
@@ -69,6 +70,52 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
             expected_role = getattr(RoleType, role_type_str)
             self.assertEqual(schedule_meta.server_status[0].role, expected_role)
 
+    def test_coerce_role_type_accepts_instances_names_and_integers(self):
+        role_names = ["PDFUSION", "PREFILL", "DECODE", "VIT", "FRONTEND"]
+
+        for role_value, role_name in enumerate(role_names):
+            expected_role = getattr(RoleType, role_name)
+            for value in (
+                expected_role,
+                role_name,
+                role_name.lower(),
+                f"RoleType.{role_name}",
+                f"ROLE_TYPE_{role_name}",
+                role_value,
+            ):
+                with self.subTest(value=value):
+                    self.assertEqual(_coerce_role_type(value), expected_role)
+
+    def test_coerce_role_type_rejects_invalid_values(self):
+        invalid_values = (
+            "",
+            "UNKNOWN",
+            "RoleType.UNKNOWN",
+            -1,
+            5,
+            6,
+            RoleType(5),
+            True,
+            None,
+            1.5,
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _coerce_role_type(value)
+
+    def test_schedule_meta_accepts_legacy_and_typed_role_spellings(self):
+        for role_value in ("RoleType.PREFILL", "ROLE_TYPE_PREFILL", 1):
+            with self.subTest(role=role_value):
+                status = ServerStatus.model_validate(
+                    {
+                        "role": role_value,
+                        "server_ip": "127.0.0.1",
+                        "http_port": 8000,
+                        "grpc_port": 9000,
+                    }
+                )
+                self.assertEqual(status.role, RoleType.PREFILL)
+
     def test_server_status_with_debug_info(self):
         """Test ServerStatus with optional debug_info field."""
         test_data = {
@@ -111,6 +158,32 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
         # Verify role is preserved in serialization
         self.assertEqual(meta_dict["server_status"][0]["role"], RoleType.PREFILL)
 
+    def test_schedule_meta_does_not_mutate_raw_role_for_followup_json(self):
+        """Validation must not put a pybind enum into the raw response dict.
+
+        The frontend forwards one selected server-status object in a subsequent
+        schedule request. Keeping the wire response as JSON-native data makes
+        that follow-up payload serializable.
+        """
+        raw = {
+            "server_status": [
+                {
+                    "role": "VIT",
+                    "server_ip": "127.0.0.1",
+                    "http_port": 8000,
+                    "grpc_port": 9000,
+                    "group": "g0",
+                }
+            ],
+            "code": 200,
+        }
+
+        ScheduleMeta.model_validate(raw)
+
+        self.assertEqual(raw["server_status"][0]["role"], "VIT")
+        # This is the exact shape eventually nested under selected_vit.
+        json.dumps({"selected_vit": raw["server_status"][0]})
+
     def test_schedule_meta_with_empty_server_status(self):
         """Test ScheduleMeta with empty server_status list."""
         test_data = {
@@ -121,6 +194,16 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
 
         schedule_meta = ScheduleMeta.model_validate(test_data)
         self.assertEqual(len(schedule_meta.server_status), 0)
+
+    def test_schedule_meta_enqueued_by_master_defaults_false(self):
+        schedule_meta = ScheduleMeta.model_validate(self.valid_schedule_meta)
+        self.assertFalse(schedule_meta.enqueued_by_master)
+
+    def test_schedule_meta_accepts_enqueued_by_master(self):
+        test_data = dict(self.valid_schedule_meta)
+        test_data["enqueued_by_master"] = True
+        schedule_meta = ScheduleMeta.model_validate(test_data)
+        self.assertTrue(schedule_meta.enqueued_by_master)
 
 
 if __name__ == "__main__":

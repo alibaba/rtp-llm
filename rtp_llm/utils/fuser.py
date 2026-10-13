@@ -7,31 +7,86 @@ import threading
 import time
 from enum import Enum
 from subprocess import check_call
-from typing import Dict, Optional
-from urllib.parse import urlparse
+from typing import Dict, Optional, Tuple, Type
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
-import requests
+_PUBLIC_OSS_QUERY_KEYS = {"ENDPOINT", "HOST", "OSS_ENDPOINT"}
+_SENSITIVE_QUERY_KEYS = {
+    "ACCESS_KEY",
+    "ACCESS_KEY_ID",
+    "ACCESS_KEY_SECRET",
+    "AK",
+    "ID",
+    "KEY",
+    "OSS_ACCESS_ID",
+    "OSS_ACCESS_KEY",
+    "SECURITY_TOKEN",
+    "SK",
+    "TOKEN",
+}
 
-from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
+
+def _redact_uri(path: str) -> str:
+    """Remove credentials from a remote URI before it reaches logs."""
+    try:
+        parsed = urlsplit(path)
+    except ValueError:
+        return "<redacted-invalid-uri>"
+    if not parsed.scheme:
+        return path
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = "***@" + netloc.rsplit("@", 1)[1]
+
+    redacted_query = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.upper()
+        sensitive = normalized_key in _SENSITIVE_QUERY_KEYS
+        if parsed.scheme.lower() == "oss":
+            sensitive = normalized_key not in _PUBLIC_OSS_QUERY_KEYS
+        redacted_query.append((key, "***" if sensitive else value))
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            urlencode(redacted_query),
+            parsed.fragment,
+        )
+    )
 
 
 class RetryableError(Exception):
     pass
 
 
+def _requests_module():
+    import requests
+
+    return requests
+
+
 def retry_with_timeout(
     timeout_seconds: int = 300,
     retry_interval: float = 1.0,
-    exceptions: tuple = (requests.exceptions.RequestException, RetryableError),
+    exceptions: Optional[Tuple[Type[BaseException], ...]] = None,
 ):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            retry_exceptions = exceptions
+            if retry_exceptions is None:
+                requests = _requests_module()
+                retry_exceptions = (
+                    requests.exceptions.RequestException,
+                    RetryableError,
+                )
             start_time = time.time()
             while True:
                 try:
                     return func(*args, **kwargs)
-                except exceptions as e:
+                except retry_exceptions as e:
                     elapsed_time = time.time() - start_time
                     if elapsed_time >= timeout_seconds:
                         raise TimeoutError(
@@ -57,6 +112,10 @@ class MountRwMode(Enum):
 # see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
 class Fuser:
     def __init__(self) -> None:
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import (
+            HippoHelper,
+        )
+
         if HippoHelper.host_fuse_port():
             self._fuse_uri = (
                 f"http://{HippoHelper.host_ip}:{HippoHelper.host_fuse_port()}"
@@ -75,6 +134,7 @@ class Fuser:
         return self._available
 
     def _check_valid(self) -> bool:
+        requests = _requests_module()
         try:
             response = requests.post(
                 f"{self._fuse_uri}/FuseService/mount",
@@ -124,14 +184,23 @@ class Fuser:
                 {"cacheOptions": {"writeMode": "WRITE_THROGH", "enableRemove": True}}
             )
 
-        logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")
-        mount_result = requests.post(
-            f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600
-        ).json()
+        display_path = _redact_uri(path)
+        display_req_json = dict(req_json)
+        display_req_json["uri"] = display_path
+        logging.info(
+            f"mount request to {self._fuse_uri}/FuseService/mount: {display_req_json}"
+        )
+        mount_result = (
+            _requests_module()
+            .post(f"{self._fuse_uri}/FuseService/mount", json=req_json, timeout=600)
+            .json()
+        )
         error_code = mount_result["errorCode"]
         if error_code != 0:
-            raise RetryableError(f"mount {path} -> {mnt_path} failed: {mount_result}")
-        logging.info(f"mount dir success: {path} -> {mnt_path}")
+            raise RetryableError(
+                f"mount {display_path} -> {mnt_path} failed: errorCode={error_code}"
+            )
+        logging.info(f"mount dir success: {display_path} -> {mnt_path}")
 
         with self.lock:
             if mnt_path in self._mount_src_map:
@@ -146,9 +215,11 @@ class Fuser:
 
     def _perform_umount(self, mnt_path: str) -> None:
         req_json = {"mountDir": mnt_path}
-        umount_result = requests.post(
-            f"{self._fuse_uri}/FuseService/umount", json=req_json, timeout=600
-        ).json()
+        umount_result = (
+            _requests_module()
+            .post(f"{self._fuse_uri}/FuseService/umount", json=req_json, timeout=600)
+            .json()
+        )
         error_code = umount_result["errorCode"]
         if error_code != 0:
             raise Exception(f"umount {mnt_path} failed: {umount_result}")
@@ -189,7 +260,17 @@ class Fuser:
                 self.umount_fuse_dir(mnt_path, force=force)
 
 
-_fuser = Fuser()
+_fuser: Optional[Fuser] = None
+_fuser_lock = threading.Lock()
+
+
+def _get_fuser() -> Fuser:
+    global _fuser
+    if _fuser is None:
+        with _fuser_lock:
+            if _fuser is None:
+                _fuser = Fuser()
+    return _fuser
 
 
 class MountInfo:
@@ -267,7 +348,10 @@ class NfsManager:
         with self._lock:
             self._mounted_path_map = {}
             for mount_root in list(self._nfs_info_map.keys()):
-                self._do_unmount_nfs(mount_root)
+                try:
+                    self._do_unmount_nfs(mount_root)
+                except Exception:
+                    logging.exception(f"failed to unmount nfs {mount_root}")
 
 
 _nfs_manager = NfsManager()
@@ -286,15 +370,28 @@ def fetch_remote_file_to_local(
         logging.info(f"try mount nas path {path}")
         return _nfs_manager.mount_nfs_dir(path)
     else:
-        logging.info(f"try fuse path {path}")
-        return _fuser.mount_dir(path, mount_mode, enable_mnt_ref)
+        logging.info(f"try fuse path {_redact_uri(path)}")
+        return _get_fuser().mount_dir(path, mount_mode, enable_mnt_ref)
 
 
 def umount_file(path: str, force: bool = False):
     logging.info(f"umount file {path}")
-    _fuser.umount_fuse_dir(path, force=force)
-    _nfs_manager.unmount_nfs_path(path)
+    try:
+        _get_fuser().umount_fuse_dir(path, force=force)
+    finally:
+        _nfs_manager.unmount_nfs_path(path)
+
+
+def umount_all() -> None:
+    # Shutdown hook for os._exit() paths that bypass atexit. FUSE unmount may raise;
+    # finally keeps NFS unmount running so nas:// mounts don't leak across restarts.
+    # Skip constructing a Fuser on this path: no instance means nothing was mounted.
+    try:
+        if _fuser is not None:
+            _fuser.umount_all(force=True)
+    finally:
+        _nfs_manager.unmount_all()
 
 
 def fuse_available() -> bool:
-    return _fuser.available
+    return _get_fuser().available

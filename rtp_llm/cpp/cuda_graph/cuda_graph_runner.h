@@ -1,5 +1,11 @@
 #pragma once
 
+#include <array>
+#include <atomic>
+#include <exception>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -11,61 +17,139 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
 
+namespace kmonitor {
+class MetricsReporter;
+}
+
 namespace rtp_llm {
+
+struct CacheTopology;
+
+class DirtyCudaGraphCaptureError: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class GenerationPrefillCudaGraphUnsupportedBackendError: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
+    // Stateless capture-side width helpers. They borrow the current model
+    // topology but never store page geometry in GraphParams or the runner.
+    static int64_t
+    captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
+
+    CudaGraphRunner(const GraphParams&                         graph_params,
+                    py::object                                 py_instance,
+                    const char*                                forward_method_name = "forward",
+                    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        role_(graph_params.role),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
-        seq_size_per_block_(graph_params.tokens_per_block),
-        kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
-        sp_steps_(graph_params.sp_steps),
+        input_hidden_size_(graph_params.input_hidden_size),
+        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
+        position_encoding_(graph_params.position_encoding),
+        token_type_embedding_(graph_params.token_type_embedding),
+        input_embedding_scalar_(graph_params.input_embedding_scalar),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-        kv_cache_group_num_(graph_params.kv_cache_group_num),
-        position_id_len_factor_(graph_params.position_id_len_factor) {
+        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        position_id_len_factor_(graph_params.position_id_len_factor),
+        metrics_reporter_(std::move(metrics_reporter)),
+        generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
+        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
+        RTP_LLM_CHECK_WITH_INFO(graph_params.max_seq_len > 0, "CUDA graph max sequence length must be positive");
+        max_kernel_block_table_width_ = graph_params.kernel_block_table_width;
+        RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
+                                "CUDA graph requires a positive kernel block table width");
+        max_bs_ = graph_params.max_context_batch_size;
+        if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
+            engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
         }
-        max_bs_               = graph_params.max_context_batch_size;
+        if (role_ == CudaGraphRole::AUTO) {
+            role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
+                    is_prefill_cuda_graph_mode_ ?
+                                        (num_tokens_per_bs_ == max_seq_len_ ? CudaGraphRole::EMBEDDING_PREFILL :
+                                                                              CudaGraphRole::MTP_DRAFT_PREFILL) :
+                                        CudaGraphRole::DECODE;
+        }
+        is_prefill_cuda_graph_mode_ = role_ == CudaGraphRole::EMBEDDING_PREFILL
+                                      || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
+                                      || role_ == CudaGraphRole::GENERATION_PREFILL;
+        is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        if (role_ == CudaGraphRole::GENERATION_PREFILL) {
+            RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
+                                        && generation_prefill_cuda_graph_max_requests_
+                                               <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                    "generation prefill CUDA graph max_requests must be in [1, %d], got %d",
+                                    HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+                                    generation_prefill_cuda_graph_max_requests_);
+            RTP_LLM_CHECK_WITH_INFO(
+                max_bs_ == static_cast<size_t>(generation_prefill_cuda_graph_max_requests_ + 1),
+                "generation prefill CUDA graph backend batch must include exactly one sentinel row: "
+                "max_bs=%zu max_requests=%d",
+                max_bs_,
+                generation_prefill_cuda_graph_max_requests_);
+        }
+        for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
+            counter.store(0, std::memory_order_relaxed);
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
+        py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
+            hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, role_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
-                         kernel_seq_size_per_block_,
+                         static_cast<long long>(max_kernel_block_table_width_),
                          hidden_size_,
+                         input_hidden_size_,
                          num_tokens_per_bs_,
+                         static_cast<int>(role_),
                          is_prefill_cuda_graph_mode_,
                          is_target_verify_);
     }
 
     ~CudaGraphRunner() {
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
+        if (capture_session_may_be_dirty_.load(std::memory_order_acquire)) {
+            RTP_LLM_LOG_ERROR("Skip CUDA graph runner drain because capture/session cleanup did not complete; "
+                              "the caller must fail model initialization instead of continuing eager execution");
+        } else if (isGenerationPrefillCudaGraph()) {
+            try {
+                cuda_graph::GraphStreamGuard stream_guard(capture_stream_);
+                cuda_graph::graphDeviceSynchronize();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("CUDA graph runner drain failed during teardown: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("CUDA graph runner drain failed during teardown with unknown exception");
+            }
+        }
         py::gil_scoped_acquire gil;
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
@@ -75,17 +159,29 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool           canRun(const PyModelInputs& inputs,
+                          CudaGraphState&      state,
+                          CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphBs(const CudaGraphState& state) const;
+    int            getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
-    // Factory methods for test: take GraphParams so callers can reuse the same struct
-    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
-    static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
+    bool captureSessionMayBeDirty() const override {
+        return capture_session_may_be_dirty_.load(std::memory_order_acquire);
+    }
+
+    // Complete capture with one ownership/error path for every graph role. A
+    // failed dirty capture intentionally retains the runner until process exit;
+    // a clean failure destroys it before propagating the original exception.
+    static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
     // Common capture logic for both prefill and decode
@@ -94,16 +190,28 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
 
     bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+        return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
     bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        return role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
+    }
+    bool isGenerationPrefillCudaGraph() const {
+        return role_ == CudaGraphRole::GENERATION_PREFILL;
+    }
+    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+        // DSpARK propose/commit now run as construction-time-role decode graphs
+        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
+        // prefill keeps the fixed-capacity Python path: slicing its output buffer
+        // would mismatch the forward_decode [B * q_len, dim] result in
+        // captureOneGraphInstance.
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
+    py::object        prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph);
     void              logCudaGraphPoolMemory(const char* phase);
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
@@ -113,9 +221,15 @@ private:
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
-    bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
+    bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state, bool observe_fallback);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
-    bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    bool tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state, bool observe_fallback);
+    bool validateComboPositionIds(const PyModelInputs&  inputs,
+                                  const CudaGraphState& state,
+                                  const torch::Tensor&  captured_position_ids,
+                                  size_t&               copy_numel) const;
+    bool
+    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state, CudaGraphCheckMode mode) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
@@ -124,16 +238,17 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
     int                     max_num_token_{1};
+    int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};
-    int                     seq_size_per_block_{0};
-    int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
-    int                     sp_steps_{0};
+    size_t                  input_hidden_size_{0};
+    int                     hc_mult_{1};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
@@ -150,12 +265,27 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<int32_t> kv_cache_layer_to_group_;
-    int32_t              kv_cache_group_num_     = 0;
-    int                  position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string>                   kv_cache_group_tags_;
+    int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
+    int                                        engram_window_size_{0};
+    int                                        generation_prefill_cuda_graph_max_requests_{0};
+    int                                        generation_prefill_cuda_graph_pad_token_id_{0};
+    torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
+    mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
+    static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =
+        static_cast<size_t>(GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH) + 1;
+    mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
+                                  generation_prefill_cuda_graph_fallback_log_counts_;
+    mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    // Used only by generation-prefill to protect its asynchronous staging copies.
+    torch::Event generation_prefill_prepare_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_    = false;
+    std::atomic<bool> capture_session_may_be_dirty_ = false;
 };
 
 }  // namespace rtp_llm

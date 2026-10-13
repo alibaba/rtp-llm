@@ -41,6 +41,33 @@ public:
         return local_server_->BatchGenerateCall(context, request, response);
     }
 
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch not implemented on this role");
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueGroup not implemented on this role");
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        (void)context;
+        (void)request;
+        (void)writer;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
+    }
+
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         return local_server_->GetWorkerStatus(context, request, response);
@@ -76,6 +103,18 @@ public:
                                         const StartProfileInternalRequestPB* request,
                                         EmptyPB*                             response) override {
         return local_server_->StartProfileInternal(context, request, response);
+    }
+
+    ::grpc::Status DumpTorchAllocator(::grpc::ServerContext*             context,
+                                      const TorchAllocatorDumpRequestPB* request,
+                                      TorchAllocatorDumpResponsePB*      response) override {
+        return local_server_->DumpTorchAllocator(context, request, response);
+    }
+
+    ::grpc::Status DumpTorchAllocatorInternal(::grpc::ServerContext*             context,
+                                              const TorchAllocatorDumpRequestPB* request,
+                                              TorchAllocatorDumpResultPB*        response) override {
+        return local_server_->DumpTorchAllocatorInternal(context, request, response);
     }
 
     ::grpc::Status
@@ -120,6 +159,8 @@ public:
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }
+
+    virtual void beginShutdown() {}
 
     virtual void stop() {
         if (local_server_) {

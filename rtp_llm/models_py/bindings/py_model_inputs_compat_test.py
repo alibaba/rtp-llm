@@ -1,17 +1,160 @@
+import ast
+import pickle
 import unittest
+from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_layer_cache_for_group,
+    get_layer_caches_for_groups,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_group,
+)
+from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
+from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType, KVCacheConfig
 from rtp_llm.ops.compute_ops import (
-    CacheGroupType,
+    CacheStoreWriter,
     KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
+    PyModelOutputs,
 )
 
 
+class _RoutingCache:
+    def __init__(self, layer_tags: list[list[str]]) -> None:
+        self._layer_tags = layer_tags
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        return [
+            LayerKVCache(torch.ones(1), 1, layer_id, tag)
+            for tag in self._layer_tags[layer_id]
+        ]
+
+
+class _ConcreteRoutingCache:
+    def __init__(self, caches: list[LayerKVCache]) -> None:
+        self._caches = caches
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        if layer_id != 0:
+            raise RuntimeError(f"invalid layer {layer_id}")
+        return self._caches
+
+
 class PyModelInputsCompatTest(unittest.TestCase):
+    def test_runtime_tier_knobs_survive_configuration_pickle(self) -> None:
+        config = KVCacheConfig()
+        values = {
+            "disk_cache_paths": "/cache/a,/cache/b",
+            "disk_cache_size_mb": 4096,
+            "disk_cache_staging_block_count": 17,
+            "block_tree_transfer_worker_count": 3,
+            "block_tree_business_queue_max_size": 29,
+            "block_tree_transfer_queue_max_size": 31,
+            "block_tree_device_evict_low_watermark_ratio": 0.61,
+            "block_tree_device_evict_high_watermark_ratio": 0.71,
+            "kvcm_server_address": "cache.example:1234",
+            "kvcm_storage_queue_size": 113,
+            "kvcm_model_user_data": "descriptor-driven",
+        }
+        for name, value in values.items():
+            setattr(config, name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in values.items():
+            with self.subTest(field=name):
+                self.assertEqual(getattr(restored, name), value)
+
+    def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
+        default_config = HybridAttentionConfig()
+        self.assertFalse(default_config.enable_hybrid_attention)
+        self.assertEqual(default_config.hybrid_attention_types, [])
+
+        attention_types = [HybridAttentionType.NONE, HybridAttentionType.LINEAR]
+        config = HybridAttentionConfig(True, attention_types)
+        self.assertTrue(config.enable_hybrid_attention)
+        self.assertEqual(config.hybrid_attention_types, attention_types)
+
+        with self.assertRaises(TypeError):
+            HybridAttentionConfig(True, True, attention_types)
+
+    def test_sparse_group_routes_select_exact_tags_independent_of_topology_order(
+        self,
+    ) -> None:
+        default_cache = LayerKVCache(torch.ones(1), 64, layer_id=0, tag="default")
+        indexer_cache = LayerKVCache(
+            torch.ones(1) * 2, 64, layer_id=0, tag="indexer_kv"
+        )
+        cache = _ConcreteRoutingCache([indexer_cache, default_cache])
+
+        self.assertIs(get_layer_cache_for_group(cache, 0, "default"), default_cache)
+        self.assertIs(get_layer_cache_for_group(cache, 0, "indexer_kv"), indexer_cache)
+        self.assertEqual(
+            get_layer_caches_for_groups(cache, 0, ("default", "indexer_kv")),
+            {"default": default_cache, "indexer_kv": indexer_cache},
+        )
+        routes = {"indexer_kv": object(), "default": object()}
+        self.assertIs(select_fmha_impl_for_group(routes, "default"), routes["default"])
+        self.assertIs(
+            select_fmha_impl_for_group(routes, "indexer_kv"),
+            routes["indexer_kv"],
+        )
+
+    def test_sparse_group_routes_reject_absent_duplicate_and_wrong_tags(self) -> None:
+        absent = _ConcreteRoutingCache([LayerKVCache(torch.ones(1), 64, 0, "default")])
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            get_layer_cache_for_group(absent, 0, "indexer_kv")
+
+        duplicate = _ConcreteRoutingCache(
+            [
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicate KV cache group"):
+            get_layer_cache_for_group(duplicate, 0, "indexer_kv")
+
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            select_fmha_impl_for_group({"wrong": object()}, "indexer_kv")
+
+    def test_cache_binding_stubs_match_runtime_members(self) -> None:
+        stub_path = (
+            Path(__file__).resolve().parents[2]
+            / "ops"
+            / "librtp_compute_ops"
+            / "__init__.pyi"
+        )
+        module = ast.parse(stub_path.read_text())
+        stub_classes = {
+            node.name: node for node in module.body if isinstance(node, ast.ClassDef)
+        }
+
+        for class_name, runtime_class in (
+            ("CacheStoreWriter", CacheStoreWriter),
+            ("KVCache", KVCache),
+            ("LayerKVCache", LayerKVCache),
+            ("PyAttentionInputs", PyAttentionInputs),
+        ):
+            with self.subTest(class_name=class_name):
+                stub_members = set()
+                for node in stub_classes[class_name].body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        stub_members.add(node.name)
+                    elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name
+                    ):
+                        stub_members.add(node.target.id)
+
+                stub_members = {
+                    name for name in stub_members if not name.startswith("_")
+                }
+                runtime_members = {
+                    name for name in vars(runtime_class) if not name.startswith("_")
+                }
+                self.assertEqual(stub_members, runtime_members)
+
     def _attn_inputs(self, is_prefill: bool, input_length: int) -> PyAttentionInputs:
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = is_prefill
@@ -27,181 +170,126 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(3, inputs.attention_inputs.input_lengths.item())
 
+    def test_model_outputs_exposes_explicit_speculative_features(self) -> None:
+        hidden_states = torch.empty(0)
+        outputs = PyModelOutputs(hidden_states)
+
+        self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
+        self.assertIsNone(outputs.mtp_target_hidden_states)
+        self.assertFalse(hasattr(outputs, "params_ptr"))
+
+        target_features = torch.ones(2, 3)
+        outputs = PyModelOutputs(hidden_states, target_features)
+        self.assertEqual(
+            target_features.data_ptr(), outputs.mtp_target_hidden_states.data_ptr()
+        )
+        with self.assertRaises(TypeError):
+            PyModelOutputs(hidden_states, {"full": None})
+
     def test_attention_inputs_field_updates_directly(self) -> None:
         inputs = PyModelInputs()
         inputs.attention_inputs = self._attn_inputs(is_prefill=False, input_length=2)
 
         self.assertFalse(inputs.attention_inputs.is_prefill)
-
         inputs.attention_inputs.is_prefill = True
         inputs.attention_inputs.input_lengths = torch.tensor([5], dtype=torch.int32)
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(5, inputs.attention_inputs.input_lengths.item())
 
-    def test_select_block_map_for_layer_uses_layer_to_group_tensor(self) -> None:
-        attn_inputs = PyAttentionInputs()
-        attn_inputs.kv_cache_layer_to_group = torch.tensor([1], dtype=torch.int32)
-        attn_inputs.kv_cache_kernel_block_id_by_group = [
-            torch.tensor([[10]], dtype=torch.int32),
-            torch.tensor([[20]], dtype=torch.int32),
-        ]
-        attn_inputs.kv_cache_kernel_block_id_device_by_group = [
-            torch.tensor([[11]], dtype=torch.int32),
-            torch.tensor([[21]], dtype=torch.int32),
-        ]
+    def test_kv_cache_is_runtime_constructed_and_read_only(self) -> None:
+        with self.assertRaises(TypeError):
+            KVCache()
 
-        selected_gid = select_block_map_for_layer(attn_inputs, 0)
+        for old_name in (
+            "kv_cache_base_by_layer",
+            "kv_scale_base_by_layer",
+            "seq_size_per_block",
+            "kernel_seq_size_per_block",
+            "num_kv_heads",
+            "head_dim",
+            "use_mla",
+            "kv_lora_rank",
+            "rope_head_dim",
+            "layer_attn_types",
+            "group_types",
+            "group_seq_block_sizes",
+            "group_kernel_seq_block_sizes",
+            "layer_to_group_ids",
+            "layer_tag_to_group_id",
+            "get_layer_caches",
+        ):
+            self.assertFalse(hasattr(KVCache, old_name), old_name)
 
-        self.assertEqual(1, selected_gid)
-        self.assertEqual(20, attn_inputs.kv_cache_kernel_block_id.item())
-        self.assertEqual(21, attn_inputs.kv_cache_kernel_block_id_device.item())
+        for new_name in (
+            "group_tags",
+            "layer_count",
+            "get_layer_cache",
+            "get_layer_cache_groups",
+            "get_seq_size_per_block",
+            "get_kernel_seq_size_per_block",
+        ):
+            self.assertTrue(hasattr(KVCache, new_name), new_name)
 
-    def test_kv_cache_kernel_block_view_applies_only_to_full_layers(self) -> None:
-        kv_cache = KVCache()
-        kv_cache.seq_size_per_block = 8
-        kv_cache.kernel_seq_size_per_block = 2
-        kv_cache.num_kv_heads = 1
-        kv_cache.head_dim = 4
-        kv_cache.layer_attn_types = [CacheGroupType.FULL, CacheGroupType.LINEAR]
-        kv_cache.layer_to_group_ids = [[0], [1]]
-        kv_cache.group_types = [CacheGroupType.FULL, CacheGroupType.LINEAR]
-        kv_cache.group_tags = ["full", "linear"]
+    def test_layer_kv_cache_parameterized_constructor(self) -> None:
+        base = torch.arange(8, dtype=torch.float16).reshape(2, 4)
+        scale = torch.ones((2, 1), dtype=torch.float32)
 
-        full_base = torch.arange(3 * 2 * 1 * 8 * 4, dtype=torch.float16).reshape(3, 64)
-        linear_base = torch.arange(3 * 64, dtype=torch.float16).reshape(3, 64)
-        kv_cache.kv_cache_base_by_layer = [full_base, linear_base]
-        kv_cache.kv_cache_base_by_layer_group = [
-            [full_base],
-            [torch.empty(0, dtype=torch.float16), linear_base],
-        ]
-
-        full_layer = kv_cache.get_layer_cache(0)
-        linear_layer = kv_cache.get_layer_cache(1)
-        full_group = kv_cache.get_layer_cache_by_group(0, 0)
-        linear_group = kv_cache.get_layer_cache_by_group(1, 1)
-
-        self.assertEqual(2, full_layer.seq_size_per_block)
-        self.assertEqual((12, 2, 1, 2, 4), tuple(full_layer.kv_cache_base.shape))
-        self.assertEqual(tuple(full_layer.kv_cache_base.shape), tuple(full_group.kv_cache_base.shape))
-        self.assertEqual(8, linear_layer.seq_size_per_block)
-        self.assertEqual((3, 64), tuple(linear_layer.kv_cache_base.shape))
-        self.assertEqual(tuple(linear_layer.kv_cache_base.shape), tuple(linear_group.kv_cache_base.shape))
-
-    def _assert_mla_kernel_view(
-        self,
-        base: torch.Tensor,
-        scale: torch.Tensor,
-        kernel_page_size: int,
-    ) -> None:
-        physical_blocks, physical_page_size, stride = base.shape
-        scale_stride = scale.shape[2]
-        blocks_per_physical = physical_page_size // kernel_page_size
-
-        kv_cache = KVCache()
-        kv_cache.seq_size_per_block = physical_page_size
-        kv_cache.kernel_seq_size_per_block = kernel_page_size
-        kv_cache.use_mla = True
-        kv_cache.kv_lora_rank = 4
-        kv_cache.rope_head_dim = 2
-        kv_cache.layer_attn_types = [CacheGroupType.FULL]
-        kv_cache.layer_to_group_ids = [[0]]
-        kv_cache.group_types = [CacheGroupType.FULL]
-        kv_cache.group_tags = ["full"]
-        kv_cache.kv_cache_base_by_layer = [base]
-        kv_cache.kv_scale_base_by_layer = [scale]
-        kv_cache.kv_cache_base_by_layer_group = [[base]]
-        kv_cache.kv_scale_base_by_layer_group = [[scale]]
-
-        legacy = kv_cache.get_layer_cache(0)
-        by_group = kv_cache.get_layer_cache_by_group(0, 0)
-        expected_shape = (
-            physical_blocks * blocks_per_physical,
-            kernel_page_size,
-            stride,
-        )
-        expected_scale_shape = (
-            physical_blocks * blocks_per_physical,
-            kernel_page_size,
-            scale_stride,
+        layer = LayerKVCache(
+            base,
+            16,
+            layer_id=3,
+            tag="full",
+            kv_scale_base=scale,
         )
 
-        for view in (legacy, by_group):
-            self.assertEqual(kernel_page_size, view.seq_size_per_block)
-            self.assertEqual(expected_shape, tuple(view.kv_cache_base.shape))
-            self.assertEqual(expected_scale_shape, tuple(view.kv_scale_base.shape))
-            self.assertEqual(base.data_ptr(), view.kv_cache_base.data_ptr())
-            self.assertEqual(base.numel(), view.kv_cache_base.numel())
-            self.assertEqual(scale.data_ptr(), view.kv_scale_base.data_ptr())
-            self.assertEqual(scale.numel(), view.kv_scale_base.numel())
+        self.assertEqual(base.data_ptr(), layer.kv_cache_base.data_ptr())
+        self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
+        self.assertEqual(16, layer.seq_size_per_block)
+        self.assertEqual(3, layer.layer_id)
+        self.assertFalse(hasattr(layer, "group_id"))
+        self.assertEqual("full", layer.tag)
 
-            for physical_block in range(physical_blocks):
-                for token in range(physical_page_size):
-                    kernel_block = (
-                        physical_block * blocks_per_physical
-                        + token // kernel_page_size
-                    )
-                    kernel_token = token % kernel_page_size
-                    self.assertTrue(
-                        torch.equal(
-                            base[physical_block, token],
-                            view.kv_cache_base[kernel_block, kernel_token],
-                        )
-                    )
-                    self.assertTrue(
-                        torch.equal(
-                            scale[physical_block, token],
-                            view.kv_scale_base[kernel_block, kernel_token],
-                        )
-                    )
+        positional = LayerKVCache(base, 16, 3, "full", scale)
+        self.assertEqual("full", positional.tag)
+        self.assertEqual(3, positional.layer_id)
+        self.assertEqual(scale.data_ptr(), positional.kv_scale_base.data_ptr())
+        self.assertFalse(hasattr(LayerKVCache(), "group_id"))
 
-    def test_mla_bf16_kernel_block_view_preserves_physical_page_mapping(self) -> None:
-        base = (
-            torch.arange(8 * 8 * 6, dtype=torch.float32)
-            .to(torch.bfloat16)
-            .reshape(8, 8, 6)
-        )
-        scale = (
-            torch.arange(8 * 8 * 3, dtype=torch.int32)
-            .to(torch.uint8)
-            .reshape(8, 8, 3)
+        with self.assertRaises(TypeError):
+            LayerKVCache(base, 16, layer_id=3, group_id=2, tag="full")
+        with self.assertRaises(TypeError):
+            LayerKVCache(base, 16, 3, 2, "full", scale)
+
+    def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
+        full = self._attn_inputs(is_prefill=False, input_length=1)
+        linear = self._attn_inputs(is_prefill=False, input_length=1)
+        full.kv_cache_kernel_block_id = torch.tensor([[10]], dtype=torch.int32)
+        linear.kv_cache_kernel_block_id = torch.tensor([[20]], dtype=torch.int32)
+
+        inputs = PyModelInputs()
+        inputs.attention_inputs = {"full": full, "linear": linear}
+        selected = select_attention_inputs_for_layer(
+            inputs, _RoutingCache([["linear"]]), 0
         )
 
-        self._assert_mla_kernel_view(base, scale, kernel_page_size=2)
+        self.assertEqual(20, selected.kv_cache_kernel_block_id.item())
+        self.assertFalse(hasattr(selected, "kv_cache_kernel_block_id_by_group"))
+        self.assertFalse(hasattr(selected, "kv_cache_layer_to_group"))
 
-    def test_mla_packed_fp8_kernel_block_view_preserves_physical_page_mapping(
-        self,
-    ) -> None:
-        packed_stride = 256 + 256 // 128 * 4 + 64 * 2
-        base = (
-            torch.arange(8 * 8 * packed_stride, dtype=torch.int32)
-            .remainder(251)
-            .to(torch.uint8)
-            .reshape(8, 8, packed_stride)
-        )
-        scale = (
-            torch.arange(8 * 8 * 5, dtype=torch.int32)
-            .remainder(251)
-            .to(torch.uint8)
-            .reshape(8, 8, 5)
-        )
+    def test_single_group_adapter_returns_native_layer_cache(self) -> None:
+        tensors = [torch.zeros((2, 2, 1, 8, 4), dtype=torch.float16)]
+        cache = SingleGroupKVCacheAdapter(tensors, 8)
 
-        self._assert_mla_kernel_view(base, scale, kernel_page_size=2)
-
-    def test_mla_kernel_block_view_with_one_kernel_block_per_physical_block(
-        self,
-    ) -> None:
-        base = (
-            torch.arange(8 * 8 * 6, dtype=torch.float32)
-            .to(torch.bfloat16)
-            .reshape(8, 8, 6)
+        layer = cache.get_layer_cache(0)
+        self.assertIsInstance(layer, LayerKVCache)
+        self.assertEqual(tensors[0].data_ptr(), layer.kv_cache_base.data_ptr())
+        self.assertEqual(["default"], cache.group_tags)
+        self.assertEqual(1, cache.layer_count)
+        self.assertEqual(8, cache.get_seq_size_per_block("default"))
+        self.assertEqual(
+            ["default"], [item.tag for item in cache.get_layer_cache_groups(0)]
         )
-        scale = (
-            torch.arange(8 * 8 * 3, dtype=torch.int32)
-            .to(torch.uint8)
-            .reshape(8, 8, 3)
-        )
-
-        self._assert_mla_kernel_view(base, scale, kernel_page_size=8)
+        self.assertFalse(hasattr(cache, "get_layer_caches"))
 
 
 if __name__ == "__main__":

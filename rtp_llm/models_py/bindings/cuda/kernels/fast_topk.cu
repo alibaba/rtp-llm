@@ -46,10 +46,11 @@ struct FastTopKParams {
     int64_t input_stride;
 };
 
-// when length <= TopK, we can directly write the indices
+// when length <= top-k, we can directly write the indices
+template<int kTopK>
 __device__ void naive_topk_cuda(const float* __restrict__ score, int32_t* __restrict__ indice, int32_t length) {
     const auto tid = threadIdx.x;
-    for (int i = tid; i < TopK; i += kThreadsPerBlock) {
+    for (int i = tid; i < kTopK; i += kThreadsPerBlock) {
         indice[i] = (i < length) ? i : -1;
     }
 }
@@ -97,10 +98,11 @@ __device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
+template<int kTopK>
 __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restrict__ index, int row_start, int length) {
     // An optimized topk kernel copied from tilelang kernel
-    // We assume length > TopK here, or it will crash
-    int            topk            = TopK;
+    // We assume length > kTopK here, or it will crash
+    int            topk            = kTopK;
     constexpr auto BLOCK_SIZE      = 1024;
     constexpr auto RADIX           = 256;
     constexpr auto SMEM_INPUT_SIZE = kSmem / (2 * sizeof(int));
@@ -243,7 +245,7 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
                     if (round == 3) {
                         const auto pos = ::atomicAdd(&s_last_remain, -1);
                         if (pos > 0) {
-                            index[TopK - pos] = idx;
+                            index[kTopK - pos] = idx;
                         }
                     } else {
                         const auto pos = ::atomicAdd(&s_num_input[r_idx ^ 1], 1);
@@ -271,9 +273,24 @@ __global__ __launch_bounds__(kThreadsPerBlock)  // topk
     const auto indice                                               = indices + bid * TopK;
     const auto score                                                = input + bid * input_stride;
     if (length <= TopK) {
-        return naive_topk_cuda(score, indice, length);
+        return naive_topk_cuda<TopK>(score, indice, length);
     } else {
-        return fast_topk_cuda_tl(score, indice, row_start, length);
+        return fast_topk_cuda_tl<TopK>(score, indice, row_start, length);
+    }
+}
+
+template<int kTopK>
+__global__ __launch_bounds__(kThreadsPerBlock) void topk_variable_kernel(const FastTopKParams params) {
+    const auto& [input, row_starts, indices, lengths, input_stride] = params;
+    const auto bid                                                  = static_cast<uint64_t>(blockIdx.x);
+    const auto row_start                                            = row_starts == nullptr ? 0 : row_starts[bid];
+    const auto length                                               = lengths[bid];
+    const auto indice                                               = indices + bid * kTopK;
+    const auto score                                                = input + bid * input_stride;
+    if (length <= kTopK) {
+        return naive_topk_cuda<kTopK>(score, indice, length);
+    } else {
+        return fast_topk_cuda_tl<kTopK>(score, indice, row_start, length);
     }
 }
 
@@ -290,7 +307,7 @@ __global__ __launch_bounds__(kThreadsPerBlock)  // decode
         return naive_topk_transform_decode(score, length, dst_page_entry);
     } else {
         __shared__ int s_indices[TopK];
-        fast_topk_cuda_tl(score, s_indices, row_start, length);
+        fast_topk_cuda_tl<TopK>(score, s_indices, row_start, length);
         // copy src[s_indices] to dst, we manually unroll here
         static_assert(TopK % kThreadsPerBlock == 0);
         static_assert(TopK / kThreadsPerBlock == 2);
@@ -341,7 +358,7 @@ __global__ __launch_bounds__(kThreadsPerBlock)  // prefill
         return naive_topk_transform(score, length, dst_page_entry, src_page_entry);
     } else {
         __shared__ int s_indices[TopK];
-        fast_topk_cuda_tl(score, s_indices, row_start, length);
+        fast_topk_cuda_tl<TopK>(score, s_indices, row_start, length);
         // copy src[s_indices] to dst, we manually unroll here
         static_assert(TopK % kThreadsPerBlock == 0);
         static_assert(TopK / kThreadsPerBlock == 2);
@@ -371,7 +388,7 @@ __global__ __launch_bounds__(kThreadsPerBlock)  // prefill, ragged kv
         return naive_topk_transform_ragged(score, length, dst_indices_entry, offset);
     } else {
         __shared__ int s_indices[TopK];
-        fast_topk_cuda_tl(score, s_indices, row_start, length);
+        fast_topk_cuda_tl<TopK>(score, s_indices, row_start, length);
         // copy src[s_indices] to dst, we manually unroll here
         static_assert(TopK % kThreadsPerBlock == 0);
         static_assert(TopK / kThreadsPerBlock == 2);
@@ -410,6 +427,33 @@ auto get_params(const at::Tensor&         score,
         .input        = score.data_ptr<float>(),
         .row_starts   = row_starts_opt.has_value() ? row_starts_opt->data_ptr<int32_t>() : nullptr,
         .indices      = indices_data_ptr,
+        .lengths      = lengths.data_ptr<int32_t>(),
+        .input_stride = score.stride(0),
+    };
+}
+
+auto get_params_for_topk(const at::Tensor&         score,
+                         const at::Tensor&         lengths,
+                         std::optional<at::Tensor> row_starts_opt,
+                         const at::Tensor&         indices,
+                         int64_t                   top_k) -> FastTopKParams {
+    const auto B = score.size(0);
+    TORCH_CHECK(score.dim() == 2 && score.stride(1) == 1);
+    if (row_starts_opt.has_value()) {
+        const auto& row_starts = row_starts_opt.value();
+        TORCH_CHECK(row_starts.dim() == 1);
+        TORCH_CHECK(row_starts.size(0) == B);
+    }
+    TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous());
+    TORCH_CHECK(lengths.size(0) == B);
+    TORCH_CHECK(indices.dim() == 2 && indices.is_contiguous());
+    TORCH_CHECK(indices.size(0) == B);
+    TORCH_CHECK(indices.size(1) == top_k);
+
+    return FastTopKParams{
+        .input        = score.data_ptr<float>(),
+        .row_starts   = row_starts_opt.has_value() ? row_starts_opt->data_ptr<int32_t>() : nullptr,
+        .indices      = indices.data_ptr<int32_t>(),
         .lengths      = lengths.data_ptr<int32_t>(),
         .input_stride = score.stride(0),
     };
@@ -454,6 +498,44 @@ void fast_topk_v2(const at::Tensor&         score,
     topk_kernel<<<grid, block, kSmem, stream>>>(params);
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "topk kernel failed:", ::cudaGetErrorString(result));
+}
+
+void fast_topk_v2_variable(const at::Tensor&         score,
+                           at::Tensor&               indices,
+                           const at::Tensor&         lengths,
+                           std::optional<at::Tensor> row_starts_opt,
+                           int64_t                   top_k) {
+    CHECK_CUDA(score);
+    CHECK_CUDA(indices);
+    CHECK_CUDA(lengths);
+    if (row_starts_opt.has_value()) {
+        CHECK_CUDA(row_starts_opt.value());
+    }
+    const auto params = get_params_for_topk(score, lengths, row_starts_opt, indices, top_k);
+    const auto B      = score.size(0);
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    const auto grid   = dim3{static_cast<uint32_t>(B)};
+    const auto block  = dim3{kThreadsPerBlock};
+
+    switch (top_k) {
+        case 512:
+            setup_kernel_smem_once<topk_variable_kernel<512>, kSmem>();
+            topk_variable_kernel<512><<<grid, block, kSmem, stream>>>(params);
+            break;
+        case 1024:
+            setup_kernel_smem_once<topk_variable_kernel<1024>, kSmem>();
+            topk_variable_kernel<1024><<<grid, block, kSmem, stream>>>(params);
+            break;
+        case 2048:
+            setup_kernel_smem_once<topk_kernel, kSmem>();
+            topk_kernel<<<grid, block, kSmem, stream>>>(params);
+            break;
+        default:
+            TORCH_CHECK(false, "fast_topk_v2_variable only supports top_k in {512, 1024, 2048}");
+    }
+
+    const auto result = cudaGetLastError();
+    TORCH_CHECK(result == cudaSuccess, "topk variable kernel failed:", ::cudaGetErrorString(result));
 }
 
 void fast_topk_transform_fused(const at::Tensor&         score,

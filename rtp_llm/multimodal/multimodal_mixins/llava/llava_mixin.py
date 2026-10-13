@@ -296,7 +296,16 @@ class LlavaImageEmbedding(MultiModalEmbeddingInterface):
         image_grid_pinpoints: List[Any],
     ):
         assert len(mm_inputs) == 1
-        data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
+        max_file_size_kb = (
+            vit_config.mm_video_max_file_size_kb
+            if mm_inputs[0].mm_type == MMUrlType.VIDEO
+            else vit_config.mm_image_max_file_size_kb
+        )
+        data = get_bytes_io_from_url(
+            mm_inputs[0].url,
+            vit_config.download_headers,
+            max_file_size_kb=max_file_size_kb,
+        )
         load_data = LlavaImageEmbedding.load_from_bytes(
             data, mm_inputs[0].mm_type, mm_inputs[0].mm_preprocess_config
         )

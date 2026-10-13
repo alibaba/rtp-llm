@@ -16,6 +16,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import RoleType
 from rtp_llm.server.host_service import HostService, HostServiceArgs
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
@@ -68,6 +69,35 @@ class EmbeddingEndpoint(object):
         host_args = HostServiceArgs.create_from_env()
         self.host_service = HostService(host_args)
         logging.info(f"embedding endpoint grpc options: {self.options}")
+        # Reuse channels across requests: creating a new aio channel per request
+        # leaks C-core resources over time and causes RSS growth.
+        self._channel_pool = GrpcHostChannelPool(
+            options=self.options, cleanup_interval=60
+        )
+
+    async def start_profile(self, req: Any) -> Dict[str, Any]:
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            req = req or {}
+            request = pb2.StartProfileRequestPB(
+                trace_name=str(req.get("trace_name", "")),
+                start_step=int(req.get("start_step", 0)),
+                num_steps=int(req.get("num_steps", 0)),
+                enable_all_rank=self._as_bool(
+                    req.get("enable_all_rank", req.get("all_tp", False))
+                ),
+            )
+            channel = await self._channel_pool.get(self.address)
+            stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
+            await stub.StartProfile(request, timeout=3)
+            return {"status": "ok"}
+        except Exception as e:
+            logging.error("Start embedding profile failed: %s", e)
+            return {"error": f"Failed to start profile: {e}"}
+
+    async def close(self) -> None:
+        await self._channel_pool.close()
 
     async def embedding(
         self, request: Dict[str, Any]
@@ -91,16 +121,17 @@ class EmbeddingEndpoint(object):
         return response, logable_response
 
     @staticmethod
+    def _as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value) if value is not None else default
+
+    @staticmethod
     def _extract_profile_config(request: Dict[str, Any]) -> Dict[str, Any]:
         def as_dict(value):
             return value if isinstance(value, dict) else {}
-
-        def as_bool(value, default=False):
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.lower() in ("true", "1", "yes")
-            return bool(value) if value is not None else default
 
         def as_int(value, default=1):
             try:
@@ -112,7 +143,9 @@ class EmbeddingEndpoint(object):
         generate_config = as_dict(request.get("generate_config"))
         config = {**extra_configs, **generate_config}
         return {
-            "gen_timeline": as_bool(config.get("gen_timeline", False)),
+            "gen_timeline": EmbeddingEndpoint._as_bool(
+                config.get("gen_timeline", False)
+            ),
             "profile_step": as_int(config.get("profile_step", 1)),
             "profile_trace_name": re.sub(
                 r"[^A-Za-z0-9_-]", "", str(config.get("profile_trace_name", ""))
@@ -133,7 +166,7 @@ class EmbeddingEndpoint(object):
         profile_config: Optional[Dict[str, Any]] = None,
     ):
         profile_config = profile_config or {}
-        channel = grpc.aio.insecure_channel(self.address, options=self.options)
+        channel = await self._channel_pool.get(self.address)
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
 
@@ -154,6 +187,7 @@ class EmbeddingEndpoint(object):
                 max_frames=feature.mm_preprocess_config.max_frames,
                 crop_positions=feature.mm_preprocess_config.crop_positions,
                 mm_timeout_ms=feature.mm_preprocess_config.mm_timeout_ms,
+                max_long_side_pixel=(feature.mm_preprocess_config.max_long_side_pixel),
             )
             multimodal_features.append(
                 pb2.MultimodalInputPB(
@@ -193,5 +227,3 @@ class EmbeddingEndpoint(object):
         except grpc.RpcError as e:
             logging.warning(f"RPC failed: {e.code()}: {e.details()}")
             raise
-        finally:
-            await channel.close()

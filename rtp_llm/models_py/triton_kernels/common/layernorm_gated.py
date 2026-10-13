@@ -32,6 +32,7 @@ def _layer_norm_fwd_1pass_kernel(
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_Z: tl.constexpr,
+    SHARED_WEIGHT: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -46,9 +47,10 @@ def _layer_norm_fwd_1pass_kernel(
     if not IS_RMS_NORM:
         Mean += group * M
     Rstd += group * M
-    W += group * N
-    if HAS_BIAS:
-        B += group * N
+    if not SHARED_WEIGHT:
+        W += group * N
+        if HAS_BIAS:
+            B += group * N
     # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
@@ -106,11 +108,12 @@ def layer_norm_fwd(
     if z is not None:
         assert z.stride(-1) == 1
         assert z.shape == (M, N)
-    assert weight.shape == (N,)
+    shared_weight = weight.shape == (group_size,)
+    assert shared_weight or weight.shape == (N,)
     assert weight.stride(-1) == 1
     if bias is not None:
         assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
+        assert bias.shape == weight.shape
     # allocate output
     if out is not None:
         assert out.shape == x.shape
@@ -147,6 +150,7 @@ def layer_norm_fwd(
             group_size,
             eps,
             BLOCK_N=BLOCK_N,
+            SHARED_WEIGHT=shared_weight,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
             ACTIVATION=activation,
@@ -187,8 +191,9 @@ class RmsNormGated(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         assert (
-            x.shape[-1] == self.weight.shape[-1]
-        ), "Input dimension must be equal to weight dimension, input_shape: {}, weight_shape: {}".format(
+            self.weight.shape[-1] == self.group_size
+            or x.shape[-1] == self.weight.shape[-1]
+        ), "Weight must match input or group size, input_shape: {}, weight_shape: {}".format(
             x.shape, self.weight.shape
         )
 

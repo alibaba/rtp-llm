@@ -97,26 +97,22 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);
+        json.Jsonize("prefill_disk_reuse_len", prefill_disk_reuse_len, prefill_disk_reuse_len);
+        json.Jsonize("decode_disk_reuse_len", decode_disk_reuse_len, decode_disk_reuse_len);
+        json.Jsonize("speculative_draft_rounds", speculative_draft_rounds, speculative_draft_rounds);
+        json.Jsonize("speculative_accepted_tokens_per_pos",
+                     speculative_accepted_tokens_per_pos,
+                     speculative_accepted_tokens_per_pos);
+        json.Jsonize("generation_prefill_cuda_graph_status",
+                     generation_prefill_cuda_graph_status,
+                     generation_prefill_cuda_graph_status);
     }
-    AuxInfoAdapter() {
-        AuxInfo();
-    }
-    AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us     = base.cost_time_us;
-        iter_count       = base.iter_count;
-        input_len        = base.input_len;
-        prefix_len       = base.prefix_len;
-        reuse_len        = base.reuse_len;
-        output_len       = base.output_len;
-        step_output_len  = base.step_output_len;
-        pd_sep           = base.pd_sep;
-        cum_log_probs    = base.cum_log_probs;
-        local_reuse_len  = base.local_reuse_len;
-        remote_reuse_len = base.remote_reuse_len;
-
+    AuxInfoAdapter() = default;
+    AuxInfoAdapter(const AuxInfo& base): AuxInfo(base) {
         cost_time_ms = cost_time_us / 1000.0;
     }
-    float                    cost_time_ms;
+    float                    cost_time_ms{0.0f};
     std::vector<std::string> beam_responses;
 };
 
@@ -140,6 +136,8 @@ public:
             json.Jsonize("output_ids", output_ids.value(), output_ids.value());
         if (input_ids.has_value())
             json.Jsonize("input_ids", input_ids.value(), input_ids.value());
+        if (custom_output.has_value())
+            json.Jsonize("custom_output", custom_output.value(), custom_output.value());
     }
     bool                                           finished;
     std::vector<std::string>                       response;
@@ -149,6 +147,7 @@ public:
     std::optional<std::vector<std::vector<float>>> hidden_states;
     std::optional<std::vector<std::vector<int>>>   output_ids;
     std::optional<std::vector<std::vector<int>>>   input_ids;
+    std::optional<Any>                             custom_output;
 };
 
 class BatchResponse: public Jsonizable {

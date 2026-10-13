@@ -1,8 +1,6 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/solve_tril.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -49,11 +47,17 @@ def solve_tril_16x16_kernel(
     Ad = Ad + (bos * H + i_h) * 16
 
     offset = (i_t * 16) % BT
-    p_A = tl.make_block_ptr(
-        A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0)
-    )
-    p_Ai = tl.make_block_ptr(Ad, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0))
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    p_A_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 16)
+    p_A_m0 = (p_A_i0 >= 0) & (p_A_i0 < (T))
+    p_A_i1 = tl.arange(0, 16).to(tl.int64) + (offset)
+    p_A_m1 = (p_A_i1 >= 0) & (p_A_i1 < (BT))
+    p_A = (A) + p_A_i0[:, None] * (H * BT) + p_A_i1[None, :] * (1)
+    p_Ai_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 16)
+    p_Ai_m0 = (p_Ai_i0 >= 0) & (p_Ai_i0 < (T))
+    p_Ai_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_m1 = (p_Ai_i1 >= 0) & (p_Ai_i1 < (16))
+    p_Ai = (Ad) + p_Ai_i0[:, None] * (H * 16) + p_Ai_i1[None, :] * (1)
+    b_A = tl.load(p_A, mask=p_A_m0[:, None] & p_A_m1[None, :], other=0).to(tl.float32)
     b_A = -tl.where(tl.arange(0, 16)[:, None] > tl.arange(0, 16)[None, :], b_A, 0)
 
     o_i = tl.arange(0, 16)
@@ -66,7 +70,7 @@ def solve_tril_16x16_kernel(
     tl.store(
         p_Ai,
         b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_m0[:, None] & p_Ai_m1[None, :],
     )
 
 
@@ -108,45 +112,63 @@ def merge_16x16_to_32x32_inverse_kernel(
     Ad += (bos * H + i_h) * 16
     Ai += (bos * H + i_h) * 32
 
-    p_A_21 = tl.make_block_ptr(
-        A, (T, 32), (H * 32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0)
-    )
-    p_Ad_11 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 32, 0), (16, 16), (1, 0)
-    )
-    p_Ad_22 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0)
-    )
-    p_Ai_11 = tl.make_block_ptr(
-        Ai, (T, 32), (H * 32, 1), (i_t * 32, 0), (16, 16), (1, 0)
-    )
-    p_Ai_22 = tl.make_block_ptr(
-        Ai, (T, 32), (H * 32, 1), (i_t * 32 + 16, 16), (16, 16), (1, 0)
-    )
-    p_Ai_21 = tl.make_block_ptr(
-        Ai, (T, 32), (H * 32, 1), (i_t * 32 + 16, 0), (16, 16), (1, 0)
-    )
+    p_A_21_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32 + 16)
+    p_A_21_m0 = (p_A_21_i0 >= 0) & (p_A_21_i0 < (T))
+    p_A_21_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_A_21_m1 = (p_A_21_i1 >= 0) & (p_A_21_i1 < (32))
+    p_A_21 = (A) + p_A_21_i0[:, None] * (H * 32) + p_A_21_i1[None, :] * (1)
+    p_Ad_11_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32)
+    p_Ad_11_m0 = (p_Ad_11_i0 >= 0) & (p_Ad_11_i0 < (T))
+    p_Ad_11_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_11_m1 = (p_Ad_11_i1 >= 0) & (p_Ad_11_i1 < (16))
+    p_Ad_11 = (Ad) + p_Ad_11_i0[:, None] * (H * 16) + p_Ad_11_i1[None, :] * (1)
+    p_Ad_22_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32 + 16)
+    p_Ad_22_m0 = (p_Ad_22_i0 >= 0) & (p_Ad_22_i0 < (T))
+    p_Ad_22_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_22_m1 = (p_Ad_22_i1 >= 0) & (p_Ad_22_i1 < (16))
+    p_Ad_22 = (Ad) + p_Ad_22_i0[:, None] * (H * 16) + p_Ad_22_i1[None, :] * (1)
+    p_Ai_11_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32)
+    p_Ai_11_m0 = (p_Ai_11_i0 >= 0) & (p_Ai_11_i0 < (T))
+    p_Ai_11_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_11_m1 = (p_Ai_11_i1 >= 0) & (p_Ai_11_i1 < (32))
+    p_Ai_11 = (Ai) + p_Ai_11_i0[:, None] * (H * 32) + p_Ai_11_i1[None, :] * (1)
+    p_Ai_22_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32 + 16)
+    p_Ai_22_m0 = (p_Ai_22_i0 >= 0) & (p_Ai_22_i0 < (T))
+    p_Ai_22_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_Ai_22_m1 = (p_Ai_22_i1 >= 0) & (p_Ai_22_i1 < (32))
+    p_Ai_22 = (Ai) + p_Ai_22_i0[:, None] * (H * 32) + p_Ai_22_i1[None, :] * (1)
+    p_Ai_21_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 32 + 16)
+    p_Ai_21_m0 = (p_Ai_21_i0 >= 0) & (p_Ai_21_i0 < (T))
+    p_Ai_21_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_21_m1 = (p_Ai_21_i1 >= 0) & (p_Ai_21_i1 < (32))
+    p_Ai_21 = (Ai) + p_Ai_21_i0[:, None] * (H * 32) + p_Ai_21_i1[None, :] * (1)
 
-    A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
-    Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
+    A_21 = tl.load(p_A_21, mask=p_A_21_m0[:, None] & p_A_21_m1[None, :], other=0).to(
+        tl.float32
+    )
+    Ai_11 = tl.load(
+        p_Ad_11, mask=p_Ad_11_m0[:, None] & p_Ad_11_m1[None, :], other=0
+    ).to(tl.float32)
+    Ai_22 = tl.load(
+        p_Ad_22, mask=p_Ad_22_m0[:, None] & p_Ad_22_m1[None, :], other=0
+    ).to(tl.float32)
     Ai_21 = -tl.dot(
         tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
     )
     tl.store(
         p_Ai_11,
         Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_11_m0[:, None] & p_Ai_11_m1[None, :],
     )
     tl.store(
         p_Ai_22,
         Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_22_m0[:, None] & p_Ai_22_m1[None, :],
     )
     tl.store(
         p_Ai_21,
         Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_21_m0[:, None] & p_Ai_21_m1[None, :],
     )
 
 
@@ -188,48 +210,88 @@ def merge_16x16_to_64x64_inverse_kernel(
     Ad += (bos * H + i_h) * 16
     Ai += (bos * H + i_h) * 64
 
-    p_A_21 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 16, 0), (16, 16), (1, 0)
+    p_A_21_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_A_21_m0 = (p_A_21_i0 >= 0) & (p_A_21_i0 < (T))
+    p_A_21_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_A_21_m1 = (p_A_21_i1 >= 0) & (p_A_21_i1 < (64))
+    p_A_21 = (A) + p_A_21_i0[:, None] * (H * 64) + p_A_21_i1[None, :] * (1)
+    p_A_32_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_A_32_m0 = (p_A_32_i0 >= 0) & (p_A_32_i0 < (T))
+    p_A_32_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_A_32_m1 = (p_A_32_i1 >= 0) & (p_A_32_i1 < (64))
+    p_A_32 = (A) + p_A_32_i0[:, None] * (H * 64) + p_A_32_i1[None, :] * (1)
+    p_A_31_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_A_31_m0 = (p_A_31_i0 >= 0) & (p_A_31_i0 < (T))
+    p_A_31_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_A_31_m1 = (p_A_31_i1 >= 0) & (p_A_31_i1 < (64))
+    p_A_31 = (A) + p_A_31_i0[:, None] * (H * 64) + p_A_31_i1[None, :] * (1)
+    p_A_43_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_A_43_m0 = (p_A_43_i0 >= 0) & (p_A_43_i0 < (T))
+    p_A_43_i1 = tl.arange(0, 16).to(tl.int64) + (32)
+    p_A_43_m1 = (p_A_43_i1 >= 0) & (p_A_43_i1 < (64))
+    p_A_43 = (A) + p_A_43_i0[:, None] * (H * 64) + p_A_43_i1[None, :] * (1)
+    p_A_42_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_A_42_m0 = (p_A_42_i0 >= 0) & (p_A_42_i0 < (T))
+    p_A_42_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_A_42_m1 = (p_A_42_i1 >= 0) & (p_A_42_i1 < (64))
+    p_A_42 = (A) + p_A_42_i0[:, None] * (H * 64) + p_A_42_i1[None, :] * (1)
+    p_A_41_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_A_41_m0 = (p_A_41_i0 >= 0) & (p_A_41_i0 < (T))
+    p_A_41_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_A_41_m1 = (p_A_41_i1 >= 0) & (p_A_41_i1 < (64))
+    p_A_41 = (A) + p_A_41_i0[:, None] * (H * 64) + p_A_41_i1[None, :] * (1)
+    p_Ad_11_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64)
+    p_Ad_11_m0 = (p_Ad_11_i0 >= 0) & (p_Ad_11_i0 < (T))
+    p_Ad_11_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_11_m1 = (p_Ad_11_i1 >= 0) & (p_Ad_11_i1 < (16))
+    p_Ad_11 = (Ad) + p_Ad_11_i0[:, None] * (H * 16) + p_Ad_11_i1[None, :] * (1)
+    p_Ad_22_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_Ad_22_m0 = (p_Ad_22_i0 >= 0) & (p_Ad_22_i0 < (T))
+    p_Ad_22_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_22_m1 = (p_Ad_22_i1 >= 0) & (p_Ad_22_i1 < (16))
+    p_Ad_22 = (Ad) + p_Ad_22_i0[:, None] * (H * 16) + p_Ad_22_i1[None, :] * (1)
+    p_Ad_33_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_Ad_33_m0 = (p_Ad_33_i0 >= 0) & (p_Ad_33_i0 < (T))
+    p_Ad_33_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_33_m1 = (p_Ad_33_i1 >= 0) & (p_Ad_33_i1 < (16))
+    p_Ad_33 = (Ad) + p_Ad_33_i0[:, None] * (H * 16) + p_Ad_33_i1[None, :] * (1)
+    p_Ad_44_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_Ad_44_m0 = (p_Ad_44_i0 >= 0) & (p_Ad_44_i0 < (T))
+    p_Ad_44_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ad_44_m1 = (p_Ad_44_i1 >= 0) & (p_Ad_44_i1 < (16))
+    p_Ad_44 = (Ad) + p_Ad_44_i0[:, None] * (H * 16) + p_Ad_44_i1[None, :] * (1)
+
+    A_21 = tl.load(p_A_21, mask=p_A_21_m0[:, None] & p_A_21_m1[None, :], other=0).to(
+        tl.float32
     )
-    p_A_32 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 32, 16), (16, 16), (1, 0)
+    A_32 = tl.load(p_A_32, mask=p_A_32_m0[:, None] & p_A_32_m1[None, :], other=0).to(
+        tl.float32
     )
-    p_A_31 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0)
+    A_31 = tl.load(p_A_31, mask=p_A_31_m0[:, None] & p_A_31_m1[None, :], other=0).to(
+        tl.float32
     )
-    p_A_43 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 48, 32), (16, 16), (1, 0)
+    A_43 = tl.load(p_A_43, mask=p_A_43_m0[:, None] & p_A_43_m1[None, :], other=0).to(
+        tl.float32
     )
-    p_A_42 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 48, 16), (16, 16), (1, 0)
+    A_42 = tl.load(p_A_42, mask=p_A_42_m0[:, None] & p_A_42_m1[None, :], other=0).to(
+        tl.float32
     )
-    p_A_41 = tl.make_block_ptr(
-        A, (T, 64), (H * 64, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0)
-    )
-    p_Ad_11 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 64, 0), (16, 16), (1, 0)
-    )
-    p_Ad_22 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 64 + 16, 0), (16, 16), (1, 0)
-    )
-    p_Ad_33 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0)
-    )
-    p_Ad_44 = tl.make_block_ptr(
-        Ad, (T, 16), (H * 16, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0)
+    A_41 = tl.load(p_A_41, mask=p_A_41_m0[:, None] & p_A_41_m1[None, :], other=0).to(
+        tl.float32
     )
 
-    A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
-    A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
-    A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
-    A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
-    A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
-
-    Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1)).to(tl.float32)
-    Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1)).to(tl.float32)
-    Ai_33 = tl.load(p_Ad_33, boundary_check=(0, 1)).to(tl.float32)
-    Ai_44 = tl.load(p_Ad_44, boundary_check=(0, 1)).to(tl.float32)
+    Ai_11 = tl.load(
+        p_Ad_11, mask=p_Ad_11_m0[:, None] & p_Ad_11_m1[None, :], other=0
+    ).to(tl.float32)
+    Ai_22 = tl.load(
+        p_Ad_22, mask=p_Ad_22_m0[:, None] & p_Ad_22_m1[None, :], other=0
+    ).to(tl.float32)
+    Ai_33 = tl.load(
+        p_Ad_33, mask=p_Ad_33_m0[:, None] & p_Ad_33_m1[None, :], other=0
+    ).to(tl.float32)
+    Ai_44 = tl.load(
+        p_Ad_44, mask=p_Ad_44_m0[:, None] & p_Ad_44_m1[None, :], other=0
+    ).to(tl.float32)
 
     Ai_21 = -tl.dot(
         tl.dot(Ai_22, A_21, input_precision="ieee"), Ai_11, input_precision="ieee"
@@ -261,142 +323,174 @@ def merge_16x16_to_64x64_inverse_kernel(
         input_precision="ieee",
     )
 
-    p_Ai_11 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64, 0), (16, 16), (1, 0)
-    )
-    p_Ai_22 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 16, 16), (16, 16), (1, 0)
-    )
-    p_Ai_33 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 32, 32), (16, 16), (1, 0)
-    )
-    p_Ai_44 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 48, 48), (16, 16), (1, 0)
-    )
-    p_Ai_21 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 16, 0), (16, 16), (1, 0)
-    )
-    p_Ai_31 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0)
-    )
-    p_Ai_32 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 32, 16), (16, 16), (1, 0)
-    )
-    p_Ai_41 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0)
-    )
-    p_Ai_42 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 48, 16), (16, 16), (1, 0)
-    )
-    p_Ai_43 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 48, 32), (16, 16), (1, 0)
-    )
+    p_Ai_11_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64)
+    p_Ai_11_m0 = (p_Ai_11_i0 >= 0) & (p_Ai_11_i0 < (T))
+    p_Ai_11_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_11_m1 = (p_Ai_11_i1 >= 0) & (p_Ai_11_i1 < (64))
+    p_Ai_11 = (Ai) + p_Ai_11_i0[:, None] * (H * 64) + p_Ai_11_i1[None, :] * (1)
+    p_Ai_22_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_Ai_22_m0 = (p_Ai_22_i0 >= 0) & (p_Ai_22_i0 < (T))
+    p_Ai_22_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_Ai_22_m1 = (p_Ai_22_i1 >= 0) & (p_Ai_22_i1 < (64))
+    p_Ai_22 = (Ai) + p_Ai_22_i0[:, None] * (H * 64) + p_Ai_22_i1[None, :] * (1)
+    p_Ai_33_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_Ai_33_m0 = (p_Ai_33_i0 >= 0) & (p_Ai_33_i0 < (T))
+    p_Ai_33_i1 = tl.arange(0, 16).to(tl.int64) + (32)
+    p_Ai_33_m1 = (p_Ai_33_i1 >= 0) & (p_Ai_33_i1 < (64))
+    p_Ai_33 = (Ai) + p_Ai_33_i0[:, None] * (H * 64) + p_Ai_33_i1[None, :] * (1)
+    p_Ai_44_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_Ai_44_m0 = (p_Ai_44_i0 >= 0) & (p_Ai_44_i0 < (T))
+    p_Ai_44_i1 = tl.arange(0, 16).to(tl.int64) + (48)
+    p_Ai_44_m1 = (p_Ai_44_i1 >= 0) & (p_Ai_44_i1 < (64))
+    p_Ai_44 = (Ai) + p_Ai_44_i0[:, None] * (H * 64) + p_Ai_44_i1[None, :] * (1)
+    p_Ai_21_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_Ai_21_m0 = (p_Ai_21_i0 >= 0) & (p_Ai_21_i0 < (T))
+    p_Ai_21_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_21_m1 = (p_Ai_21_i1 >= 0) & (p_Ai_21_i1 < (64))
+    p_Ai_21 = (Ai) + p_Ai_21_i0[:, None] * (H * 64) + p_Ai_21_i1[None, :] * (1)
+    p_Ai_31_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_Ai_31_m0 = (p_Ai_31_i0 >= 0) & (p_Ai_31_i0 < (T))
+    p_Ai_31_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_31_m1 = (p_Ai_31_i1 >= 0) & (p_Ai_31_i1 < (64))
+    p_Ai_31 = (Ai) + p_Ai_31_i0[:, None] * (H * 64) + p_Ai_31_i1[None, :] * (1)
+    p_Ai_32_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_Ai_32_m0 = (p_Ai_32_i0 >= 0) & (p_Ai_32_i0 < (T))
+    p_Ai_32_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_Ai_32_m1 = (p_Ai_32_i1 >= 0) & (p_Ai_32_i1 < (64))
+    p_Ai_32 = (Ai) + p_Ai_32_i0[:, None] * (H * 64) + p_Ai_32_i1[None, :] * (1)
+    p_Ai_41_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_Ai_41_m0 = (p_Ai_41_i0 >= 0) & (p_Ai_41_i0 < (T))
+    p_Ai_41_i1 = tl.arange(0, 16).to(tl.int64) + (0)
+    p_Ai_41_m1 = (p_Ai_41_i1 >= 0) & (p_Ai_41_i1 < (64))
+    p_Ai_41 = (Ai) + p_Ai_41_i0[:, None] * (H * 64) + p_Ai_41_i1[None, :] * (1)
+    p_Ai_42_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_Ai_42_m0 = (p_Ai_42_i0 >= 0) & (p_Ai_42_i0 < (T))
+    p_Ai_42_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_Ai_42_m1 = (p_Ai_42_i1 >= 0) & (p_Ai_42_i1 < (64))
+    p_Ai_42 = (Ai) + p_Ai_42_i0[:, None] * (H * 64) + p_Ai_42_i1[None, :] * (1)
+    p_Ai_43_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 48)
+    p_Ai_43_m0 = (p_Ai_43_i0 >= 0) & (p_Ai_43_i0 < (T))
+    p_Ai_43_i1 = tl.arange(0, 16).to(tl.int64) + (32)
+    p_Ai_43_m1 = (p_Ai_43_i1 >= 0) & (p_Ai_43_i1 < (64))
+    p_Ai_43 = (Ai) + p_Ai_43_i0[:, None] * (H * 64) + p_Ai_43_i1[None, :] * (1)
     tl.store(
         p_Ai_11,
         Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_11_m0[:, None] & p_Ai_11_m1[None, :],
     )
     tl.store(
         p_Ai_22,
         Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_22_m0[:, None] & p_Ai_22_m1[None, :],
     )
     tl.store(
         p_Ai_33,
         Ai_33.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_33_m0[:, None] & p_Ai_33_m1[None, :],
     )
     tl.store(
         p_Ai_44,
         Ai_44.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_44_m0[:, None] & p_Ai_44_m1[None, :],
     )
     tl.store(
         p_Ai_21,
         Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_21_m0[:, None] & p_Ai_21_m1[None, :],
     )
     tl.store(
         p_Ai_31,
         Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_31_m0[:, None] & p_Ai_31_m1[None, :],
     )
     tl.store(
         p_Ai_32,
         Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_32_m0[:, None] & p_Ai_32_m1[None, :],
     )
     tl.store(
         p_Ai_41,
         Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_41_m0[:, None] & p_Ai_41_m1[None, :],
     )
     tl.store(
         p_Ai_42,
         Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_42_m0[:, None] & p_Ai_42_m1[None, :],
     )
     tl.store(
         p_Ai_43,
         Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_43_m0[:, None] & p_Ai_43_m1[None, :],
     )
 
     fill_zeros = tl.zeros((16, 16), dtype=tl.float32)
-    p_Ai_12 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64, 16), (16, 16), (1, 0)
-    )
-    p_Ai_13 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64, 32), (16, 16), (1, 0)
-    )
-    p_Ai_14 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64, 48), (16, 16), (1, 0)
-    )
-    p_Ai_23 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 16, 32), (16, 16), (1, 0)
-    )
-    p_Ai_24 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 16, 48), (16, 16), (1, 0)
-    )
-    p_Ai_34 = tl.make_block_ptr(
-        Ai, (T, 64), (H * 64, 1), (i_t * 64 + 32, 48), (16, 16), (1, 0)
-    )
+    p_Ai_12_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64)
+    p_Ai_12_m0 = (p_Ai_12_i0 >= 0) & (p_Ai_12_i0 < (T))
+    p_Ai_12_i1 = tl.arange(0, 16).to(tl.int64) + (16)
+    p_Ai_12_m1 = (p_Ai_12_i1 >= 0) & (p_Ai_12_i1 < (64))
+    p_Ai_12 = (Ai) + p_Ai_12_i0[:, None] * (H * 64) + p_Ai_12_i1[None, :] * (1)
+    p_Ai_13_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64)
+    p_Ai_13_m0 = (p_Ai_13_i0 >= 0) & (p_Ai_13_i0 < (T))
+    p_Ai_13_i1 = tl.arange(0, 16).to(tl.int64) + (32)
+    p_Ai_13_m1 = (p_Ai_13_i1 >= 0) & (p_Ai_13_i1 < (64))
+    p_Ai_13 = (Ai) + p_Ai_13_i0[:, None] * (H * 64) + p_Ai_13_i1[None, :] * (1)
+    p_Ai_14_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64)
+    p_Ai_14_m0 = (p_Ai_14_i0 >= 0) & (p_Ai_14_i0 < (T))
+    p_Ai_14_i1 = tl.arange(0, 16).to(tl.int64) + (48)
+    p_Ai_14_m1 = (p_Ai_14_i1 >= 0) & (p_Ai_14_i1 < (64))
+    p_Ai_14 = (Ai) + p_Ai_14_i0[:, None] * (H * 64) + p_Ai_14_i1[None, :] * (1)
+    p_Ai_23_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_Ai_23_m0 = (p_Ai_23_i0 >= 0) & (p_Ai_23_i0 < (T))
+    p_Ai_23_i1 = tl.arange(0, 16).to(tl.int64) + (32)
+    p_Ai_23_m1 = (p_Ai_23_i1 >= 0) & (p_Ai_23_i1 < (64))
+    p_Ai_23 = (Ai) + p_Ai_23_i0[:, None] * (H * 64) + p_Ai_23_i1[None, :] * (1)
+    p_Ai_24_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 16)
+    p_Ai_24_m0 = (p_Ai_24_i0 >= 0) & (p_Ai_24_i0 < (T))
+    p_Ai_24_i1 = tl.arange(0, 16).to(tl.int64) + (48)
+    p_Ai_24_m1 = (p_Ai_24_i1 >= 0) & (p_Ai_24_i1 < (64))
+    p_Ai_24 = (Ai) + p_Ai_24_i0[:, None] * (H * 64) + p_Ai_24_i1[None, :] * (1)
+    p_Ai_34_i0 = tl.arange(0, 16).to(tl.int64) + (i_t * 64 + 32)
+    p_Ai_34_m0 = (p_Ai_34_i0 >= 0) & (p_Ai_34_i0 < (T))
+    p_Ai_34_i1 = tl.arange(0, 16).to(tl.int64) + (48)
+    p_Ai_34_m1 = (p_Ai_34_i1 >= 0) & (p_Ai_34_i1 < (64))
+    p_Ai_34 = (Ai) + p_Ai_34_i0[:, None] * (H * 64) + p_Ai_34_i1[None, :] * (1)
     tl.store(
         p_Ai_12,
         fill_zeros.to(p_Ai_12.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_12_m0[:, None] & p_Ai_12_m1[None, :],
     )
     tl.store(
         p_Ai_13,
         fill_zeros.to(p_Ai_13.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_13_m0[:, None] & p_Ai_13_m1[None, :],
     )
     tl.store(
         p_Ai_14,
         fill_zeros.to(p_Ai_14.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_14_m0[:, None] & p_Ai_14_m1[None, :],
     )
     tl.store(
         p_Ai_23,
         fill_zeros.to(p_Ai_23.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_23_m0[:, None] & p_Ai_23_m1[None, :],
     )
     tl.store(
         p_Ai_24,
         fill_zeros.to(p_Ai_24.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_24_m0[:, None] & p_Ai_24_m1[None, :],
     )
     tl.store(
         p_Ai_34,
         fill_zeros.to(p_Ai_34.dtype.element_ty, fp_downcast_rounding="rtne"),
-        boundary_check=(0, 1),
+        mask=p_Ai_34_m0[:, None] & p_Ai_34_m1[None, :],
     )
 
 
 @input_guard
 def solve_tril(
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
     """

@@ -1,30 +1,26 @@
 package org.flexlb.config;
 
-import lombok.extern.slf4j.Slf4j;
-import org.flexlb.discovery.NoOpServiceDiscovery;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.discovery.LocalServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/**
- * ServiceDiscoveryConfiguration - Service discovery default configuration
- *
- * @author saichen.sm
- */
-@Slf4j
 @Configuration
 public class ServiceDiscoveryConfiguration {
-    /**
-     * Create default ServiceDiscovery Bean
-     * Used when no other ServiceDiscovery implementation is available
-     *
-     * @return NoOpServiceDiscovery instance
-     */
+
     @Bean
     @ConditionalOnMissingBean(ServiceDiscovery.class)
-    public ServiceDiscovery serviceDiscovery() {
-        log.info("Creating default NoOpServiceDiscovery (env-based discovery)");
-        return NoOpServiceDiscovery.getInstance();
+    public static ServiceDiscovery serviceDiscovery(ModelMetaConfig modelConfig) {
+        ServiceRoute route = modelConfig.getServiceRoute();
+        String file = route.getDiscoveryFile();
+        if (file == null || file.isBlank()) {
+            return new LocalServiceDiscovery(route.getHosts());
+        }
+        if (!route.getHosts().isEmpty()) {
+            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
+        }
+        return new LocalServiceDiscovery(file);
     }
 }

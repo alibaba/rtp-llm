@@ -1,126 +1,120 @@
 package org.flexlb.config;
 
-import lombok.Getter;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MapperFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
-import java.lang.reflect.Field;
+import java.util.Iterator;
+import java.util.Map;
 
-@Getter
+/** Loads the single, strict FLEXLB_CONFIG JSON document. */
 @Slf4j
 @Component
 public class ConfigService {
 
+    static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+
+    private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+            .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+            .build();
+
     private final FlexlbConfig flexlbConfig;
 
     public ConfigService() {
-        String lbConfigStr = System.getenv("FLEXLB_CONFIG");
-        log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
-        FlexlbConfig config;
-        if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
-        } else {
-            config = new FlexlbConfig();
+        this(System.getenv());
+    }
+
+    ConfigService(Map<String, String> environment) {
+        this(configDocument(environment));
+    }
+
+    ConfigService(String document) {
+        if (document == null || document.isBlank()) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "is required; configure requestLifecycle.request.timeoutMs");
         }
+        this.flexlbConfig = parse(document);
+        FlexlbConfigValidator.validate(flexlbConfig);
+        logEffectiveConfig(flexlbConfig);
+    }
 
-        // If corresponding advanced environment variables exist, override and update
-        applyEnvironmentOverrides(config);
+    private static String configDocument(Map<String, String> environment) {
+        return environment.get(FLEXLB_CONFIG_ENV);
+    }
 
-        this.flexlbConfig = config;
+    public static FlexlbConfig parse(String document) {
+        try {
+            JsonNode tree = STRICT_MAPPER.readTree(document);
+            rejectJsonNull(tree, "$");
+            FlexlbConfigValidator.validateDocumentShape(tree);
+            FlexlbConfig config = STRICT_MAPPER.treeToValue(
+                    tree, FlexlbConfig.class);
+            FlexlbConfigValidator.validate(config);
+            return config;
+        } catch (ConfigValidationException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
+        }
     }
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
     }
 
-    /**
-     * Apply environment variable overrides to configuration
-     * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
-     * Example: enableQueueing -> ENABLE_QUEUEING
-     */
-    private void applyEnvironmentOverrides(FlexlbConfig config) {
-        Field[] fields = FlexlbConfig.class.getDeclaredFields();
-        for (Field field : fields) {
-            // Only process primitive types and wrapper types
-            Class<?> fieldType = field.getType();
-            if (!isSupportedType(fieldType)) {
-                continue;
+    public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
+        if (groupSelector == null) {
+            throw new IllegalArgumentException("groupSelector cannot be null");
+        }
+        TrafficPolicyConfig.validate(groupSelector);
+        flexlbConfig.getRouter().setGroupSelector(groupSelector);
+        log.info("Group selector updated: rules={}", groupSelector.getRules().size());
+    }
+
+    private static void rejectJsonNull(JsonNode node, String path) {
+        if (node == null || node.isNull()) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "JSON null is not allowed at " + path);
+        }
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                rejectJsonNull(field.getValue(), path + "." + field.getKey());
             }
-
-            String envVarName = camelToUpperSnakeCase(field.getName());
-            String envValue = System.getenv(envVarName);
-
-            if (envValue != null && !envValue.trim().isEmpty()) {
-                try {
-                    field.setAccessible(true);
-                    Object parsedValue = parseValue(envValue.trim(), fieldType);
-                    Object oldValue = field.get(config);
-                    field.set(config, parsedValue);
-                    log.info(
-                            "Environment variable override: {} = {} (field: {}, old value: {})",
-                            envVarName,
-                            parsedValue,
-                            field.getName(),
-                            oldValue);
-                } catch (Exception e) {
-                    log.error(
-                            "Failed to apply environment variable {}: {}",
-                            envVarName,
-                            e.getMessage(),
-                            e);
-                }
+        } else if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                rejectJsonNull(node.get(index), path + "[" + index + "]");
             }
         }
     }
 
-    /**
-     * Check if the type is supported
-     */
-    private boolean isSupportedType(Class<?> type) {
-        return type == int.class
-                || type == Integer.class
-                || type == long.class
-                || type == Long.class
-                || type == double.class
-                || type == Double.class
-                || type == boolean.class
-                || type == Boolean.class
-                || type.isEnum();
-    }
-
-    /**
-     * Convert camel case to upper snake case
-     * Example: enableQueueing -> ENABLE_QUEUEING
-     */
-    private String camelToUpperSnakeCase(String camelCase) {
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < camelCase.length(); i++) {
-            char c = camelCase.charAt(i);
-            if (Character.isUpperCase(c) && i > 0) {
-                result.append('_');
-            }
-            result.append(Character.toUpperCase(c));
-        }
-        return result.toString();
-    }
-
-    /**
-     * Parse string value based on target type
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object parseValue(String value, Class<?> targetType) {
-        if (targetType == int.class || targetType == Integer.class) {
-            return Integer.parseInt(value);
-        } else if (targetType == long.class || targetType == Long.class) {
-            return Long.parseLong(value);
-        } else if (targetType == double.class || targetType == Double.class) {
-            return Double.parseDouble(value);
-        } else if (targetType == boolean.class || targetType == Boolean.class) {
-            return Boolean.parseBoolean(value);
-        } else if (targetType.isEnum()) {
-            return Enum.valueOf((Class<Enum>) targetType, value);
-        }
-        throw new IllegalArgumentException("Unsupported type: " + targetType);
+    private static void logEffectiveConfig(FlexlbConfig config) {
+        String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
+        String ordering = config.isDirect() ? "N/A"
+                : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
+        String decision = config.isDirect() ? "N/A"
+                : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
+        String dispatcher = config.getDispatcher().typeName();
+        log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
+                        + "dispatcher={}, prefillSelection=BEST_ONLY, "
+                        + "decodeCostExpression={}, groupRules={}",
+                config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
+                config.getRouter().getRoles().getDecode().getCostEstimator().getExpression(),
+                config.getRouter().getGroupSelector() == null ? 0
+                        : config.getRouter().getGroupSelector().getRules().size());
     }
 }

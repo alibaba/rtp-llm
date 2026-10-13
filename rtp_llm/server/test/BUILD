@@ -1,6 +1,42 @@
 load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_test(
+    name = "backend_rpc_server_visitor_test",
+    srcs = ["backend_rpc_server_visitor_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "backend_rpc_server_visitor_validate_input_test",
+    size = "small",
+    srcs = ["backend_rpc_server_visitor_validate_input_test.py"],
+    deps = [
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "backend_manager_test",
+    srcs = ["backend_manager_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
     name = "schedule_meta_test",
     srcs = ["schedule_meta_test.py"],
     deps = [
@@ -31,4 +67,43 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/server:server",
     ],
+)
+
+py_test(
+    name = "recent_cache_key_window_test",
+    srcs = ["recent_cache_key_window_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+    ],
+    tags = ["manual"],
+)
+py_test(
+    name = "master_client_trace_test",
+    srcs = ["master_client_trace_test.py"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:telemetry",
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "mm_cache_routing_test",
+    srcs = ["mm_cache_routing_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_hash_rpc_test",
+    srcs = ["mm_hash_rpc_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "real_vit_routing_integration_test",
+    srcs = ["real_vit_routing_integration_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
 )

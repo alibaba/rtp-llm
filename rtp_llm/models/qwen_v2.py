@@ -17,7 +17,6 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen import QWen
-from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -338,6 +337,15 @@ class QWenV2Weight(ModelDeployWeightInfo):
 class QWenV2(QWen):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config_path = os.path.join(ckpt_path, "config.json")
+        with open(config_path) as reader:
+            config_json = json.load(reader)
+        return cls._create_config_from_json(ckpt_path, config_json)
+
+    @classmethod
+    def _create_config_from_json(
+        cls, ckpt_path: str, config_json: Dict[str, Any]
+    ) -> ModelConfig:
         config = ModelConfig()
         config.ckpt_path = ckpt_path
         config.vocab_size = 152064
@@ -350,7 +358,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        QWenV2._from_hf(config, ckpt_path)
+        cls._from_config_json(config, config_json)
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0
@@ -388,14 +396,19 @@ class QWenV2(QWen):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(
-            config_json.get("rope_theta", config.attn_config.rope_config.base)
-        )
+        # Transformers 5.2 moved rope_theta under rope_parameters. Preserve
+        # the legacy top-level field's precedence when both are present.
+        rope_parameters = config_json.get("rope_parameters") or {}
+        rope_theta = config_json.get("rope_theta")
+        if rope_theta is None and isinstance(rope_parameters, dict):
+            rope_theta = rope_parameters.get("rope_theta")
+        if rope_theta is not None:
+            config.attn_config.rope_config.base = int(rope_theta)
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.config_dtype = config_json.get("torch_dtype") or config_json.get("dtype")
         config.headwise_config = config_json.get("headwise_config", None)
 
     @staticmethod
@@ -412,8 +425,15 @@ class QWenV2Embedding(QWenV2):
 
 
 class QwenV2MTPWeight(QWenV2Weight):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.vocab_prune = False
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        super()._process_meta(meta_dicts, weight_keys)
+        if "model.d2t" in weight_keys:
+            self.vocab_prune = True
 
     def _get_weight_info(self):
         weights = [
@@ -428,6 +448,25 @@ class QwenV2MTPWeight(QWenV2Weight):
                 identity,
             ),
         ]
+
+        if self.vocab_prune:
+            weights.extend(
+                [
+                    AtomicWeight(
+                        W.multi_tokens_predict_d2t_map,
+                        [CkptWeightInfo(self.prefix + "model.d2t", identity)],
+                        identity,
+                        data_type=torch.int64,
+                    ),
+                    AtomicWeight(
+                        W.multi_tokens_predict_t2d_map,
+                        [CkptWeightInfo(self.prefix + "model.t2d", identity)],
+                        identity,
+                        data_type=torch.int64,
+                    ),
+                ]
+            )
+
         layer_weights: List[List[AtomicWeight]] = []
         for layer in range(self._num_layers):
             w = self._get_hf_layer_weight_info(layer)
@@ -489,15 +528,6 @@ class QwenV2MTP(QWenV2):
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
         return config
-
-    @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        desc = KVCacheSpecDesc()
-        desc.cache_type = KVCacheSpecType.MHA
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
 
     def _create_python_model(self):
         model_config = self.model_config

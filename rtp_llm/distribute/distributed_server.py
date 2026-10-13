@@ -21,7 +21,6 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
-
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -84,6 +83,44 @@ def get_world_info(
         distribute_config,
         parallelism_config,
     )
+
+
+def get_dp_addrs_from_world_info(
+    world_info: WorldInfo, parallelism_config: ParallelismConfig
+) -> list[str]:
+    """RPC addresses for DP fan-out: one per DP group (tp_rank==0 per group), or a
+    single serving rank when FFN disaggregate is enabled.
+
+    Pure function over WorldInfo / ParallelismConfig — shared by FrontendWorker and
+    any other caller that needs to address the backend model_rpc servers (e.g.
+    DashScApp building its own BackendRPCServerVisitor).
+    """
+    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+    logging.info(
+        f"frontend worker ffn_disaggregate_config: {ffn_disaggregate_config.to_string()}"
+    )
+    if ffn_disaggregate_config.enable_ffn_disaggregate:
+        serving_ranks = (
+            ffn_disaggregate_config.attention_tp_size
+            * ffn_disaggregate_config.attention_dp_size
+        )
+        members = world_info.members[:serving_ranks]
+        logging.info(
+            f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
+        )
+    else:
+        members = [
+            member
+            for member in world_info.members
+            if (member.world_rank % parallelism_config.tp_size) == 0
+        ]
+
+    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    logging.info(
+        f"[world_rank: {parallelism_config.world_rank}] "
+        f"using addresses from world_info: {addresses}"
+    )
+    return addresses
 
 
 def get_local_world_info(
@@ -336,7 +373,7 @@ class DistributedServer(object):
                     if rank == 0:
                         self._world_info.master = new_member
                 self._world_info.initialized = True
-                setattr(self._world_info, "bootstrap", True)
+                self._world_info.bootstrap = True
                 return
 
             cur_time = datetime.datetime.now()

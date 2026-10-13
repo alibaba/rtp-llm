@@ -8,49 +8,96 @@ namespace rtp_llm {
 
 using namespace torch_ext;
 
+enum class CudaGraphRole : uint8_t {
+    AUTO = 0,
+    DECODE,
+    TARGET_VERIFY,
+    EMBEDDING_PREFILL,
+    MTP_DRAFT_PREFILL,
+    GENERATION_PREFILL,
+};
+
+enum class CudaGraphCheckMode : uint8_t {
+    FORWARD = 0,
+    PREPARE,
+};
+
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
-    int current_batch_size{1};
-    int current_seq_len{1};
-    int current_real_graph_bs{1};       // for decode
-    int current_real_graph_seq_len{1};  // for prefill
-    int seq_len_sum{0};
+    int                              current_batch_size{1};
+    int                              current_seq_len{1};
+    int                              current_real_graph_bs{1};       // for decode
+    int                              current_real_graph_seq_len{1};  // for prefill
+    int                              seq_len_sum{0};
+    int                              real_request_count{0};
+    int                              real_token_count{0};
+    int                              graph_token_capacity{0};
+    int                              graph_request_capacity{0};
+    int                              captured_backend_batch_size{0};
+    GenerationPrefillCudaGraphStatus generation_prefill_status{GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct GraphParams {
-    bool                 enable_cuda_graph            = false;
-    bool                 enable_cuda_graph_debug_mode = false;
-    bool                 is_prefill_cuda_graph_mode   = false;
-    bool                 is_target_verify             = false;
-    int                  max_seq_len                  = 0;
-    int                  tokens_per_block             = 0;  // physical kv block size
-    int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
-    int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    int                  sp_steps          = 0;
-    size_t               max_context_batch_size = 128;
-    std::size_t          hidden_size            = 0;
-    c10::ScalarType      model_data_type        = c10::ScalarType::Float;
-    std::vector<int>     prefill_capture_seq_lens;
-    std::vector<int>     decode_capture_batch_sizes;
-    std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
-    int32_t              kv_cache_group_num = 0;   // number of kv cache groups
+    bool             enable_cuda_graph                  = false;
+    bool             enable_cuda_graph_debug_mode       = false;
+    bool             is_prefill_cuda_graph_mode         = false;
+    bool             is_target_verify                   = false;
+    CudaGraphRole    role                               = CudaGraphRole::AUTO;
+    int              max_seq_len                        = 0;
+    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    size_t           max_context_batch_size = 128;
+    std::size_t      hidden_size            = 0;
+    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
+    std::vector<int> prefill_capture_seq_lens;
+    std::vector<int> decode_capture_batch_sizes;
+    int64_t          hc_mult                                    = 1;
+    int              generation_prefill_cuda_graph_max_requests = 0;
+    int              generation_prefill_cuda_graph_pad_token_id = 0;
+    // Golden cache-group identity for CUDA graph capture/replay. A one-group
+    // topology keeps the direct AttentionInputs fast path; multiple groups
+    // require an exact tag -> AttentionInputs mapping at replay time.
+    std::vector<std::string> kv_cache_group_tags;
+    // Final kernel block-table width, in kernel block IDs per row. Callers
+    // compute it from model topology and actual reserve/fake bounds before
+    // constructing the graph; this struct never re-derives page geometry.
+    int64_t kernel_block_table_width = 0;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
     //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
-    int                  position_id_len_factor = 0;
+    int position_id_len_factor = 0;
+    // Width of one input_hiddens row. This is deliberately independent from
+    // the model output hidden_size because auxiliary feature rows may be wider.
+    std::size_t input_hidden_size      = 0;
+    float       input_embedding_scalar = 1.0f;
+    // Model-owned embedding weights must be installed before initCapture();
+    // setting them after capture leaves the graph bound to undefined tensors.
+    torch::Tensor position_encoding;
+    torch::Tensor token_type_embedding;
+
 };
 
 class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                               = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)        = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)   = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)       = 0;
-    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
-    py::object             py_instance_;
+    virtual void           initCapture()                                                 = 0;
+    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual void           setPositionEncoding(torch::Tensor position_encoding)          = 0;
+    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;
+    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)         = 0;
+    virtual bool           canRun(const PyModelInputs& inputs,
+                                  CudaGraphState&      state,
+                                  CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
+    virtual bool           captureSessionMayBeDirty() const                              = 0;
+    virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                                  CudaGraphState&      state,
+                                                  bool                 skip_forward_event_sync = false)  = 0;
+
+    // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
+    // buffers after page-table changes. Other captured fields stay untouched.
+    virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    py::object py_instance_;
 };
 }  // namespace rtp_llm

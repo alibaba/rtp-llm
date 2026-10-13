@@ -59,6 +59,27 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.11_py310_cuda",
+        sha256 = "4c5be01584b7fee22d3c0d04062fd28026044acd07ffd0ee64cbd54b60e62d39",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.11_py310_cuda-aarch64",
+        sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
+        urls = [
+            "https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
         urls = [
@@ -70,9 +91,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
+        sha256 = "47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
@@ -117,12 +138,39 @@ def http_deps():
         sha256 = "8a50e27c6c009bb2e9d55c7ff44ccef53268cc0b67559b95fd7e22221f1e9600",
     )
 
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_40-cuda130.x86_64.rpm",
+        ],
+        sha256 = "392ac1aadf4ea9e3bad177a69ae8f35c5c1c59888c8505e8bee01cb8fe88d9e0",
+    )
+
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_39-cuda130.aarch64.rpm",
+        ],
+        sha256 = "84e482dfd219df4a7a240061f43627eafb0e79d582bd67228e2d5cac7ba8ffe4",
+    )
+
     http_archive(
         name = "remote_kv_cache_manager_server",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv_cache_manager_server_2026_04_29_14_32.tar.gz",
         ],
         sha256 = "6808080358f137c78205495b70b560261d59abff6eeddafc861e7511104c5b1a",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server_cuda130",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
+        ],
+        sha256 = "facbcee3395e3fa129cf45c7034d82e576fefc5af7017fead26ed795bb6f7bf6",
         build_file_content = """
 exports_files(["bin/kv_cache_manager_bin"])
         """,

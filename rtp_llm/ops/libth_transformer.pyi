@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import libth_transformer_config
 import torch
 import typing
@@ -23,7 +24,7 @@ class RtpEmbeddingOp:
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
-    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any) -> None:
+    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any, trace_config: typing.Any = None) -> None:
         ...
     def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
@@ -45,3 +46,6 @@ class TypedOutput:
     @t.setter
     def t(self, arg1: torch.Tensor) -> None:
         ...
+
+def get_multimodal_feature_hash(arg0: torch.Tensor) -> torch.Tensor:
+    ...

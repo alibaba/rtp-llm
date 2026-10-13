@@ -19,3 +19,11 @@ py_test(
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
 
+py_test(
+    name = "fp8_ptpc_solution_cache_test",
+    srcs = ["fp8_ptpc_solution_cache_test.py"],
+    deps = py_test_deps,
+    timeout = "eternal",
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)

@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef USING_CUDA12
+#if defined(USING_CUDA12) || defined(USING_CUDA13)
 
 #include <torch/extension.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -16,6 +16,9 @@ public:
     bool support(torch_ext::PyAttentionInputs attn_inputs);
 
     ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
+
+    void update(const XQAParamsPtr& params, torch_ext::PyAttentionInputs attn_inputs);
+    void updateKvCacheOffset(const torch::Tensor& kv_cache_offset, const torch::Tensor& kv_cache_block_id_device);
 
     torch::Tensor
     forward(const torch::Tensor& input, std::optional<torch_ext::LayerKVCache> kv_cache, const XQAParamsPtr& params);

@@ -232,6 +232,7 @@ register_tokenizer(
         "qwen_3",
         "qwen_3_tool",
         "qwen35_dense",
+        "qwen35_dense_mtp",
         "qwen35_moe",
         "qwen35_moe_mtp",
     ],

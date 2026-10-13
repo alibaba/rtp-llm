@@ -1,8 +1,10 @@
 #pragma once
+#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -12,6 +14,22 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 
 namespace rtp_llm {
+
+struct RequestInfo {
+    std::string frontend_ip;
+    std::string dash_ip;
+    std::string trace_id;
+    std::string request_id;
+    std::string source_role;
+
+    bool empty() const {
+        return frontend_ip.empty() && dash_ip.empty() && trace_id.empty() && request_id.empty() && source_role.empty();
+    }
+};
+
+struct MultimodalTokenLayout {
+    std::vector<std::pair<int32_t, int32_t>> spans;
+};
 
 class GenerateInput {
 public:
@@ -26,6 +44,12 @@ public:
 
     std::map<int, int> multimodalLengths() const {
         std::map<int, int> lengths;
+        if (v41_inputs && multimodal_features) {
+            for (const auto& feature : *multimodal_features) {
+                lengths[1] += feature.size(0);  // MMUrlType::IMAGE
+            }
+            return lengths;
+        }
         if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
             return {};
         } else {
@@ -43,7 +67,13 @@ public:
         debug_string << "GenerateInput {"
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
                      << ", input_ids: tensor[" << input_ids.numel() << "]"
-                     << ", prefix_length:" << prefix_length << "}";
+                     << ", prefix_length:" << prefix_length;
+        if (!request_info.empty()) {
+            debug_string << ", source_role:" << request_info.source_role << ", frontend_ip:" << request_info.frontend_ip
+                         << ", dash_ip:" << request_info.dash_ip << ", trace_id:" << request_info.trace_id
+                         << ", source_request_id:" << request_info.request_id;
+        }
+        debug_string << "}";
         return debug_string.str();
     }
 
@@ -52,28 +82,46 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (custom_output_token_position >= 0) {
+            custom_output_token_position += prefix_length;
+        }
     }
 
 public:
     int64_t                         request_id = 0;
+    RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+    std::optional<MultimodalTokenLayout>        multimodal_token_layout;
 
-    int     prefix_length = 0;
-    int64_t begin_time_us = 0;
+    int     prefix_length        = 0;
+    int64_t begin_time_us        = 0;
+    int64_t global_start_time_us = 0;
+
+    // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
+    // tagging only — never used for engine-side scheduling decisions.
+    int32_t priority = 0;
+
+    // Selected position in input_ids; -1 means no custom output.
+    int custom_output_token_position = -1;
 
     // Batch grouping params
-    int     batch_group_size = 1;
-    int64_t batch_group_id   = -1;  // Batch group ID for force batch grouping, -1 means not set
+    int     group_size = 1;
+    int64_t group_id   = -1;
+
+    bool isGroup() const {
+        return group_id != -1;
+    }
 };
 
 struct AuxInfo {
@@ -91,14 +139,20 @@ struct AuxInfo {
     int32_t                      local_reuse_len          = 0;
     int32_t                      remote_reuse_len         = 0;
     int32_t                      memory_reuse_len         = 0;
+    int32_t                      disk_reuse_len           = 0;
     int32_t                      prefill_total_reuse_len  = 0;
     int32_t                      prefill_local_reuse_len  = 0;
     int32_t                      prefill_remote_reuse_len = 0;
     int32_t                      prefill_memory_reuse_len = 0;
+    int32_t                      prefill_disk_reuse_len   = 0;
     int32_t                      decode_total_reuse_len   = 0;
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    int32_t                      decode_disk_reuse_len    = 0;
+    int32_t                      speculative_draft_rounds = 0;
+    std::vector<int32_t>         speculative_accepted_tokens_per_pos;
+    std::string                  generation_prefill_cuda_graph_status = "not_requested";
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
@@ -125,6 +179,8 @@ public:
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;
+    // Output of the deployment-registered post-layers CustomHandler.
+    std::optional<torch::Tensor> custom_output;
 };
 
 class GenerateOutputs {
@@ -155,9 +211,9 @@ inline std::string StreamStateToString(StreamState state) {
     }
 }
 
-// 事件集合：外部通过 reportEvent() 投递事件，状态机在 moveToNext() 中统一消费。
+// 事件集合：外部通过 reportEvent() 投递事件，生命周期方法中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
-// 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
+// 生命周期和终止事件一旦设置即保留；CanRun 是一次性调度准入，由调度器在需要重新准入时显式清除。
 class StreamEvents {
 public:
     enum EventType : uint32_t {
@@ -167,6 +223,7 @@ public:
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
         NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+        CachePrepared      = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {
@@ -175,6 +232,15 @@ public:
 
     bool has(EventType event) const {
         return (flags_ & event) != 0;
+    }
+
+    void clearCanRun() {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::CanRun));
+    }
+
+    void clearLoadInitiated() {
+        flags_ =
+            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
     }
 
 private:

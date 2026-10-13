@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import socket
+import subprocess
 from typing import Optional
 
 import torch
@@ -16,6 +17,8 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+
+RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
 def auto_configure_deepep(
@@ -78,10 +81,7 @@ def auto_configure_deepep(
     prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
     is_single_gpu = ep_size == 1
     is_pure_tp = (
-        tp_size > 1
-        and dp_size == 1
-        and ep_size == tp_size
-        and not prefill_cp_enabled
+        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
     )
     # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
     # the matching strategy's check_conditions (which requires use_all_gather)
@@ -344,6 +344,21 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
+        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+            py_prefill_cp_config.kv_cache_sharded
+        )
+        if hasattr(py_prefill_cp_config, "prefill_cp_size") and hasattr(
+            parallelism_config.prefill_cp_config, "prefill_cp_size"
+        ):
+            parallelism_config.prefill_cp_config.prefill_cp_size = (
+                py_prefill_cp_config.prefill_cp_size
+            )
+        elif py_prefill_cp_config.kv_cache_sharded:
+            logging.warning(
+                "PREFILL_CP_SIZE is not available in this rtp_llm.ops build; "
+                "prefill_cp_kv_cache_sharded was enabled but explicit CP size "
+                "cannot be propagated."
+            )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
@@ -352,8 +367,8 @@ def set_parallelism_config(
 def _infer_model_type(ckpt_path: str) -> Optional[str]:
     """Infer ``model_type`` by reading config.json from a local checkpoint directory.
 
-    Importing ``rtp_llm.models`` triggers all ``register_model`` calls so that
-    the architecture / repo lookup tables are populated before we query them.
+    ModelDict owns lightweight architecture / repo mappings, so this does not
+    import every model implementation during startup.
     """
     if not ckpt_path or not os.path.isdir(ckpt_path):
         return None
@@ -361,8 +376,6 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
     if not os.path.isfile(config_path):
         return None
     try:
-        import rtp_llm.models  # noqa: F401  — trigger model registrations
-
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         return ModelDict.get_ft_model_type_by_config(config)
@@ -511,6 +524,68 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     )
 
 
+def load_gpu_nic_affinity() -> bool:
+    if os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None:
+        return True
+
+    run_affinity_path = "/usr/local/bin/run_affinity"
+    if not os.path.exists(run_affinity_path):
+        logging.info("get gpu nic affinity failed, %s not exist", run_affinity_path)
+        return False
+
+    try:
+        subprocess.run(
+            [run_affinity_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RUN_AFFINITY_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "get gpu nic affinity timed out after %ss while running %s; continue without affinity",
+            RUN_AFFINITY_TIMEOUT_SEC,
+            run_affinity_path,
+        )
+        return False
+    except (subprocess.CalledProcessError, OSError) as e:
+        logging.warning(
+            "get gpu nic affinity failed, run %s failed, exception is %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+    except Exception as e:
+        logging.warning(
+            "get gpu nic affinity failed unexpectedly while running %s: %s",
+            run_affinity_path,
+            e,
+        )
+        return False
+
+    json_path = "npu_nic_affinity.json"
+    if not os.path.exists(json_path):
+        logging.info("get gpu nic affinity failed, %s does not exist", json_path)
+        return False
+
+    try:
+        with open(json_path) as affinity_file:
+            content = affinity_file.read().strip()
+        os.environ["ACCL_NIC_GPU_AFFINITY"] = content
+        logging.info(
+            "get gpu nic affinity success, set env ACCL_NIC_GPU_AFFINITY to %s",
+            content,
+        )
+        return True
+    except Exception as e:
+        logging.info(
+            "get gpu nic affinity failed, load %s failed, exception is %s",
+            json_path,
+            e,
+        )
+        return False
+
+
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
     """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
     if torch.cuda.is_available():
@@ -542,6 +617,44 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
             logging.info(
                 f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}"
             )
+
+
+def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
+    """Resolve the KVCM host identity after this backend rank is known."""
+    kv_cache_config = py_env_configs.kv_cache_config
+    parallelism_config = py_env_configs.parallelism_config
+    if (
+        kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+        or parallelism_config.tp_rank != 0
+    ):
+        return
+
+    server_config = py_env_configs.server_config
+    derived = not kv_cache_config.kv_cache_event_host_ip_port
+    if derived:
+        server_ip = server_config.ip or socket.gethostbyname(socket.gethostname())
+        kv_cache_config.kv_cache_event_host_ip_port = (
+            f"{server_ip}:{server_config.server_port}"
+        )
+        logging.info(
+            "KV_CACHE_EVENT_HOST_IP_PORT was empty; derived per-rank endpoint "
+            "%s from start_port=%s rank_id=%s worker_info_port_num=%s",
+            kv_cache_config.kv_cache_event_host_ip_port,
+            server_config.start_port,
+            server_config.rank_id,
+            server_config.worker_info_port_num,
+        )
+
+    if parallelism_config.dp_size > 1:
+        logging.warning(
+            "dp_size=%s requires a distinct KV_CACHE_EVENT_HOST_IP_PORT for every DP replica; "
+            "using %s value %s for dp_rank=%s. Sharing this value lets KVCM snapshots "
+            "overwrite another replica's host state.",
+            parallelism_config.dp_size,
+            "auto-derived" if derived else "explicit",
+            kv_cache_config.kv_cache_event_host_ip_port,
+            parallelism_config.dp_rank,
+        )
 
 
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):

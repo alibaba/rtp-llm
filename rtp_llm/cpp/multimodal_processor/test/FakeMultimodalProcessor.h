@@ -18,13 +18,17 @@ public:
         return FakeMultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len);
     }
 
+    float feature_value = 0.0f;
+
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string ip_port = "") override {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* = nullptr) override {
         MultimodalOutput output;
         for (const auto& input : mm_inputs) {
             int embed_len = std::stoi(input.url);
-            output.mm_features.push_back(torch::zeros({embed_len, 1}));
+            output.mm_features.push_back(torch::full({embed_len, 1}, feature_value));
         }
         return output;
     }

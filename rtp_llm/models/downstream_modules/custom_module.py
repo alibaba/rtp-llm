@@ -1,4 +1,6 @@
-from typing import Any, Dict, List, Union
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
@@ -8,7 +10,9 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.ops import EmbeddingCppOutput
+
+if TYPE_CHECKING:
+    from rtp_llm.ops import EmbeddingCppOutput
 
 """
 用于多种多样的下游任务
@@ -79,6 +83,12 @@ class CustomHandler(object):
     # specify required args for extended_forward
     def extend_forward_args(self) -> List[str]:
         return ["input_lengths", "input_ids", "hidden_states"]
+
+    def select_token_position(
+        self, input_ids: torch.Tensor, text_tokens_mask: Optional[torch.Tensor] = None
+    ) -> int:
+        """Select on expanded CPU prompt tokens; -1 opts out. Called once per request."""
+        raise NotImplementedError
 
     # extended_forward
     # input_lengths: [batch_size]

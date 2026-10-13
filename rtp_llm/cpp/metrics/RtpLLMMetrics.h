@@ -2,8 +2,12 @@
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <map>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -17,11 +21,12 @@ namespace rtp_llm {
 class RpcMetricsCollector final {
 public:
     // rpc server metrics
-    bool    qps              = false;
-    bool    cancel_qps       = false;
-    bool    error_qps        = false;
-    int64_t onflight_request = 0;
-    int64_t total_rt_us      = 0;
+    bool      qps              = false;
+    bool      cancel_qps       = false;
+    bool      error_qps        = false;
+    ErrorCode error_code       = ErrorCode::NONE_ERROR;
+    int64_t   onflight_request = 0;
+    int64_t   total_rt_us      = 0;
 
     // pd-sep prefill and decode metrics
     int     retry_times           = 0;
@@ -29,15 +34,17 @@ public:
     int     loading_cache_request = 0;
 
     // pd-sep prefill metrics
-    int64_t get_rpc_connection_rt_us       = 0;
-    int64_t multimodal_process_rt_us       = 0;
-    int64_t remote_allocate_resource_rt_us = 0;
-    int64_t enqueue_request_rt_us          = 0;
-    int64_t remote_load_cache_start_rt_us  = 0;
-    int64_t poll_local_output_rt_us        = 0;
-    int64_t remote_load_cache_end_rt_us    = 0;
-    int64_t remote_generate_rt_us          = 0;
-    int64_t poll_remote_output_rt_us       = 0;
+    int64_t get_rpc_connection_rt_us              = 0;
+    int64_t multimodal_process_rt_us              = 0;
+    int64_t remote_allocate_resource_rt_us        = 0;
+    int64_t enqueue_request_rt_us                 = 0;
+    int64_t remote_load_cache_start_rt_us         = 0;
+    int64_t remote_load_cache_wait_stream_rt_us   = 0;
+    int64_t remote_load_cache_write_request_rt_us = 0;
+    int64_t poll_local_output_rt_us               = 0;
+    int64_t remote_load_cache_end_rt_us           = 0;
+    int64_t remote_generate_rt_us                 = 0;
+    int64_t poll_remote_output_rt_us              = 0;
 
     // pd-sep decode stage metrics
     int64_t prepare_generate_context_rt_us = 0;
@@ -74,15 +81,17 @@ public:
     kmonitor::MutableMetric* retry_cost_time_ms_metric    = nullptr;
     kmonitor::MutableMetric* loading_cache_request_metric = nullptr;
 
-    kmonitor::MutableMetric* get_rpc_connection_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* multimodal_process_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric = nullptr;
-    kmonitor::MutableMetric* enqueue_request_rt_us_metric          = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric  = nullptr;
-    kmonitor::MutableMetric* poll_local_output_rt_us_metric        = nullptr;
-    kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric    = nullptr;
-    kmonitor::MutableMetric* remote_generate_rt_us_metric          = nullptr;
-    kmonitor::MutableMetric* poll_remote_output_rt_us_metric       = nullptr;
+    kmonitor::MutableMetric* get_rpc_connection_rt_us_metric              = nullptr;
+    kmonitor::MutableMetric* multimodal_process_rt_us_metric              = nullptr;
+    kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric        = nullptr;
+    kmonitor::MutableMetric* enqueue_request_rt_us_metric                 = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric         = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_wait_stream_rt_us_metric   = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_write_request_rt_us_metric = nullptr;
+    kmonitor::MutableMetric* poll_local_output_rt_us_metric               = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric           = nullptr;
+    kmonitor::MutableMetric* remote_generate_rt_us_metric                 = nullptr;
+    kmonitor::MutableMetric* poll_remote_output_rt_us_metric              = nullptr;
 
     kmonitor::MutableMetric* prepare_generate_context_rt_us_metric = nullptr;
     kmonitor::MutableMetric* allocate_resource_rt_us_metric        = nullptr;
@@ -128,6 +137,47 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class PrefillRecentCacheKeyMetricsCollector final {
+public:
+    bool    has_value                  = false;
+    bool    theory_has_value           = false;
+    bool    request_count              = false;
+    bool    empty_request_count        = false;
+    int64_t hit_count                  = 0;
+    int64_t total_count                = 0;
+    double  hit_ratio                  = 0.0;
+    int64_t retained_occurrences       = 0;
+    int64_t retained_unique_cache_keys = 0;
+    int64_t time_window_ms             = 0;
+
+    int64_t theory_all_hit_count   = 0;
+    int64_t theory_all_total_count = 0;
+    double  theory_all_hit_ratio   = 0.0;
+};
+
+class PrefillRecentCacheKeyMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, PrefillRecentCacheKeyMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* request_count_metric              = nullptr;
+    kmonitor::MutableMetric* empty_request_count_metric        = nullptr;
+    kmonitor::MutableMetric* hit_count_metric                  = nullptr;
+    kmonitor::MutableMetric* total_count_metric                = nullptr;
+    kmonitor::MutableMetric* hit_ratio_metric                  = nullptr;
+    kmonitor::MutableMetric* retained_occurrences_metric       = nullptr;
+    kmonitor::MutableMetric* retained_unique_cache_keys_metric = nullptr;
+    kmonitor::MutableMetric* time_window_ms_metric             = nullptr;
+
+    kmonitor::MutableMetric* theory_all_hit_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_all_total_count_metric = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_ratio_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RpcCacheStatusMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
@@ -143,20 +193,26 @@ private:
 
 class RtpLLMStreamMetricsCollector final {
 public:
-    bool qps               = false;
-    bool cancel_qps        = false;
-    bool error_qps         = false;
-    bool is_streaming_qps  = false;
-    bool not_streaming_qps = true;
+    bool qps                        = false;
+    bool cancel_qps                 = false;
+    bool error_qps                  = false;
+    bool is_streaming_qps           = false;
+    bool not_streaming_qps          = true;
+    bool kv_cache_malloc_failed_qps = false;
 
-    int64_t total_latency_us       = 0;
-    int64_t first_token_latency_us = 0;
-    int64_t wait_latency_us        = 0;
-    int64_t pause_latency_us       = 0;
-    int64_t iterate_count          = 0;
-    int64_t reuse_length           = 0;
-    int64_t input_token_length     = 0;
-    int64_t output_token_length    = 0;
+    int64_t total_latency_us         = 0;
+    int64_t first_token_latency_us   = 0;
+    int64_t wait_latency_us          = 0;
+    int64_t enqueue_to_canrun_us     = 0;
+    int64_t canrun_to_running_us     = 0;
+    int64_t loading_cache_latency_us = 0;
+    int64_t load_done_to_running_us  = 0;
+    int64_t pause_latency_us         = 0;
+    int64_t iterate_count            = 0;
+    int64_t reuse_length             = 0;
+    int64_t effective_context_length = 0;
+    int64_t input_token_length       = 0;
+    int64_t output_token_length      = 0;
     // for timeout
     int64_t timeout_latency_us = 0;
 
@@ -173,21 +229,27 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMStreamMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* qps_metric               = nullptr;
-    kmonitor::MutableMetric* cancel_qps_metric        = nullptr;
-    kmonitor::MutableMetric* error_qps_metric         = nullptr;
-    kmonitor::MutableMetric* is_streaming_qps_metric  = nullptr;
-    kmonitor::MutableMetric* not_streaming_qps_metric = nullptr;
+    kmonitor::MutableMetric* qps_metric                        = nullptr;
+    kmonitor::MutableMetric* cancel_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* error_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* is_streaming_qps_metric           = nullptr;
+    kmonitor::MutableMetric* not_streaming_qps_metric          = nullptr;
+    kmonitor::MutableMetric* kv_cache_malloc_failed_qps_metric = nullptr;
 
-    kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
-    kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* pause_latency_us_metric       = nullptr;
-    kmonitor::MutableMetric* iterate_count_metric          = nullptr;
-    kmonitor::MutableMetric* reuse_length_metric           = nullptr;
-    kmonitor::MutableMetric* input_token_length_metric     = nullptr;
-    kmonitor::MutableMetric* output_token_length_metric    = nullptr;
-    kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
+    kmonitor::MutableMetric* total_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* first_token_latency_us_metric   = nullptr;
+    kmonitor::MutableMetric* wait_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* enqueue_to_canrun_us_metric     = nullptr;
+    kmonitor::MutableMetric* canrun_to_running_us_metric     = nullptr;
+    kmonitor::MutableMetric* loading_cache_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_done_to_running_us_metric  = nullptr;
+    kmonitor::MutableMetric* pause_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* iterate_count_metric            = nullptr;
+    kmonitor::MutableMetric* reuse_length_metric             = nullptr;
+    kmonitor::MutableMetric* effective_context_length_metric = nullptr;
+    kmonitor::MutableMetric* input_token_length_metric       = nullptr;
+    kmonitor::MutableMetric* output_token_length_metric      = nullptr;
+    kmonitor::MutableMetric* query_batch_size_metric         = nullptr;
 
     kmonitor::MutableMetric* batch_with_prefill_times_metric = nullptr;
     kmonitor::MutableMetric* batch_with_prefill_len_metric   = nullptr;
@@ -244,12 +306,16 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
-    int64_t pending_decode_stream_size = 0;
-    int64_t decode_since_prefill       = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t loading_cache_stream_size   = 0;
+    int64_t pending_decode_stream_size  = 0;
+    int64_t decode_since_prefill        = 0;
+    int64_t admitted_context_batch_size = 0;
+    int64_t admitted_context_token_size = 0;
+    int64_t waiting_oldest_age_us       = 0;
+    int64_t group_fallback_count        = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -258,12 +324,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
+    kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
+    kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
+    kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
+    kmonitor::MutableMetric* group_fallback_acc_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -286,20 +356,294 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMGrammarMetricsCollector final {
+public:
+    bool compile_qps         = false;
+    bool compile_invalid_qps = false;
+    bool cache_hit_qps       = false;
+    bool overload_qps        = false;
+
+    int64_t compile_latency_us          = 0;
+    int64_t compile_inflight            = 0;
+    int64_t verdict_cache_bytes         = 0;
+    int64_t total_cache_budget_bytes    = 0;
+    int64_t compiler_cache_budget_bytes = 0;
+    int64_t verdict_cache_budget_bytes  = 0;
+};
+
+class RtpLLMGrammarMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMHiddenStateCaptureMetricsCollector final {
+public:
+    bool batch_qps                  = false;
+    bool publish_success_qps        = false;
+    bool failure_qps                = false;
+    bool initialization_failure_qps = false;
+    bool layout_failure_qps         = false;
+    bool prepare_failure_qps        = false;
+    bool quantize_failure_qps       = false;
+    bool store_failure_qps          = false;
+    bool shutdown_failure_qps       = false;
+    bool hard_contract_failure_qps  = false;
+    bool request_error_failure_qps  = false;
+    bool operational_failure_qps    = false;
+    bool duplicate_request_id_qps   = false;
+    bool broken_rejection_qps       = false;
+    bool bf16_publish_qps           = false;
+    bool fp8_publish_qps            = false;
+
+    bool    has_publish_latency       = false;
+    bool    has_quantize_latency      = false;
+    bool    has_store_put_latency     = false;
+    bool    has_publish_payload       = false;
+    bool    has_capture_status        = false;
+    int64_t publish_latency_us        = 0;
+    int64_t quantize_latency_us       = 0;
+    int64_t store_put_latency_us      = 0;
+    int64_t publish_request_count     = 0;
+    int64_t publish_token_count       = 0;
+    int64_t publish_payload_bytes     = 0;
+    int64_t publish_input_ids_bytes   = 0;
+    int64_t publish_aux_hidden_bytes  = 0;
+    int64_t publish_last_hidden_bytes = 0;
+    int64_t publish_scale_bytes       = 0;
+    int64_t capture_enabled           = 0;
+    int64_t capture_broken            = 0;
+};
+
+class RtpLLMHiddenStateCaptureMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMHiddenStateCaptureMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* batch_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* publish_success_qps_metric        = nullptr;
+    kmonitor::MutableMetric* failure_qps_metric                = nullptr;
+    kmonitor::MutableMetric* initialization_failure_qps_metric = nullptr;
+    kmonitor::MutableMetric* layout_failure_qps_metric         = nullptr;
+    kmonitor::MutableMetric* prepare_failure_qps_metric        = nullptr;
+    kmonitor::MutableMetric* quantize_failure_qps_metric       = nullptr;
+    kmonitor::MutableMetric* store_failure_qps_metric          = nullptr;
+    kmonitor::MutableMetric* shutdown_failure_qps_metric       = nullptr;
+    kmonitor::MutableMetric* hard_contract_failure_qps_metric  = nullptr;
+    kmonitor::MutableMetric* request_error_failure_qps_metric  = nullptr;
+    kmonitor::MutableMetric* operational_failure_qps_metric    = nullptr;
+    kmonitor::MutableMetric* duplicate_request_id_qps_metric   = nullptr;
+    kmonitor::MutableMetric* broken_rejection_qps_metric       = nullptr;
+    kmonitor::MutableMetric* bf16_publish_qps_metric           = nullptr;
+    kmonitor::MutableMetric* fp8_publish_qps_metric            = nullptr;
+
+    kmonitor::MutableMetric* publish_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* quantize_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* store_put_latency_us_metric      = nullptr;
+    kmonitor::MutableMetric* publish_request_count_metric     = nullptr;
+    kmonitor::MutableMetric* publish_token_count_metric       = nullptr;
+    kmonitor::MutableMetric* publish_payload_bytes_metric     = nullptr;
+    kmonitor::MutableMetric* publish_input_ids_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* publish_aux_hidden_bytes_metric  = nullptr;
+    kmonitor::MutableMetric* publish_last_hidden_bytes_metric = nullptr;
+    kmonitor::MutableMetric* publish_scale_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* capture_enabled_metric           = nullptr;
+    kmonitor::MutableMetric* capture_broken_metric            = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMTokenPSMetricsCollector final {
 public:
-    void merge(const RtpLLMTokenPSMetricsCollector* collector) {
-        if (collector) {
-            context_tps += collector->context_tps;
-            generate_tps += collector->generate_tps;
-            total_tps += collector->total_tps;
+    void addTokenSize(int64_t context_token_num,
+                      int64_t context_token_num_with_cache,
+                      int64_t generate_token_num,
+                      int64_t total_token_num,
+                      int64_t execute_time_us) {
+        if (context_token_num > 0 && execute_time_us > 0) {
+            context_token_num_ += context_token_num;
+            context_time_us_ += execute_time_us;
+        }
+        if (context_token_num_with_cache > 0 && execute_time_us > 0) {
+            context_token_num_with_cache_ += context_token_num_with_cache;
+            context_time_us_with_cache_ += execute_time_us;
+        }
+        if (generate_token_num > 0) {
+            generate_token_num_ += generate_token_num;
+        }
+        if (total_token_num > 0) {
+            total_token_num_ += total_token_num;
         }
     }
 
-public:
-    int64_t context_tps  = 0;
-    int64_t generate_tps = 0;
-    int64_t total_tps    = 0;
+    void addPriorityTokenSize(int32_t priority,
+                              int64_t context_token_num,
+                              int64_t context_token_num_with_cache,
+                              int64_t generate_token_num,
+                              int64_t total_token_num,
+                              int64_t execute_time_us) {
+        auto& collector = priority_collectors_[priority];
+        if (context_token_num > 0 && execute_time_us > 0) {
+            collector.context_token_num_ += context_token_num;
+        }
+        if (context_token_num_with_cache > 0 && execute_time_us > 0) {
+            collector.context_token_num_with_cache_ += context_token_num_with_cache;
+        }
+        if (generate_token_num > 0) {
+            collector.generate_token_num_ += generate_token_num;
+        }
+        if (total_token_num > 0) {
+            collector.total_token_num_ += total_token_num;
+        }
+    }
+
+    template<typename CountsByPriority>
+    void addTokenSizeByPriority(const CountsByPriority& counts_by_priority, int64_t execute_time_us) {
+        for (const auto& [priority, counts] : counts_by_priority) {
+            addPriorityTokenSize(
+                priority, counts.context, counts.context_with_cache, counts.generate, counts.total, execute_time_us);
+        }
+    }
+
+    void merge(const RtpLLMTokenPSMetricsCollector* collector) {
+        if (collector) {
+            context_token_num_ += collector->context_token_num_;
+            context_time_us_ += collector->context_time_us_;
+            context_token_num_with_cache_ += collector->context_token_num_with_cache_;
+            context_time_us_with_cache_ += collector->context_time_us_with_cache_;
+            generate_token_num_ += collector->generate_token_num_;
+            total_token_num_ += collector->total_token_num_;
+            for (const auto& [priority, priority_collector] : collector->priority_collectors_) {
+                priority_collectors_[priority].merge(&priority_collector);
+            }
+            if (hasMetrics()) {
+                report_zero_tps_ = false;
+            } else if (collector->report_zero_tps_) {
+                report_zero_tps_ = true;
+            }
+        }
+    }
+
+    // Raw TPS numerators, using the same timing validation and reporting-window reset.
+    int64_t contextTokens() const {
+        return context_token_num_;
+    }
+
+    int64_t contextTokensWithCache() const {
+        return context_token_num_with_cache_;
+    }
+
+    double contextTPS() const {
+        return calcTps(context_token_num_, context_time_us_);
+    }
+
+    double contextTPSWithCache() const {
+        return calcTps(context_token_num_with_cache_, context_time_us_with_cache_);
+    }
+
+    double contextWallTPS() const {
+        return calcTps(context_token_num_, report_window_us_);
+    }
+
+    double contextWallTPSWithCache() const {
+        return calcTps(context_token_num_with_cache_, report_window_us_);
+    }
+
+    void setReportWindowUs(int64_t report_window_us) {
+        report_window_us_ = report_window_us;
+    }
+
+    int64_t reportWindowUs() const {
+        return report_window_us_;
+    }
+
+    double generateTPS() const {
+        return generate_token_num_;
+    }
+
+    double totalTPS() const {
+        return total_token_num_;
+    }
+
+    bool hasContextTPS() const {
+        return context_time_us_ > 0;
+    }
+
+    bool hasContextTPSWithCache() const {
+        return context_time_us_with_cache_ > 0;
+    }
+
+    bool hasGenerateTPS() const {
+        return generate_token_num_ > 0;
+    }
+
+    bool hasTotalTPS() const {
+        return total_token_num_ > 0;
+    }
+
+    bool hasMetrics() const {
+        return hasContextTPS() || hasContextTPSWithCache() || hasGenerateTPS() || hasTotalTPS();
+    }
+
+    void markIdleWindow() {
+        if (!hasMetrics()) {
+            report_zero_tps_ = true;
+        }
+    }
+
+    bool reportZeroTPS() const {
+        return report_zero_tps_;
+    }
+
+    std::map<int32_t, RtpLLMTokenPSMetricsCollector> priorityCollectorsForReport() const {
+        // Priority buckets are additive contributions: they share the global execution/report window so their
+        // TPS values sum to the untagged series, even when a batch contains more than one priority.
+        auto collectors = priority_collectors_;
+        for (auto& entry : collectors) {
+            auto& collector                       = entry.second;
+            collector.context_time_us_            = context_time_us_;
+            collector.context_time_us_with_cache_ = context_time_us_with_cache_;
+            collector.report_window_us_           = report_window_us_;
+            collector.priority_collectors_.clear();
+        }
+        return collectors;
+    }
+
+private:
+    static double calcTps(int64_t token_num, int64_t time_us) {
+        if (time_us > 0) {
+            return static_cast<double>(token_num) * 1000000.0 / static_cast<double>(time_us);
+        }
+        return 0.0;
+    }
+
+private:
+    int64_t                                       context_token_num_            = 0;
+    int64_t                                       context_time_us_              = 0;
+    int64_t                                       context_token_num_with_cache_ = 0;
+    int64_t                                       context_time_us_with_cache_   = 0;
+    int64_t                                       generate_token_num_           = 0;
+    int64_t                                       total_token_num_              = 0;
+    int64_t                                       report_window_us_             = 0;
+    bool                                          report_zero_tps_              = false;
+    std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
 class RtpLLMTokenPSMetrics: public kmonitor::MetricsGroup {
@@ -308,9 +652,26 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* context_tps_metric  = nullptr;
-    kmonitor::MutableMetric* generate_tps_metric = nullptr;
-    kmonitor::MutableMetric* total_tps_metric    = nullptr;
+    kmonitor::MutableMetric* context_tokens_metric            = nullptr;
+    kmonitor::MutableMetric* context_tokens_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* context_tps_metric               = nullptr;
+    kmonitor::MutableMetric* context_tps_with_cache_metric    = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric              = nullptr;
+    kmonitor::MutableMetric* total_tps_metric                 = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMWallClockTokenPSMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* context_wall_tps_metric            = nullptr;
+    kmonitor::MutableMetric* context_wall_tps_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* wall_tps_report_interval_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -333,18 +694,90 @@ public:
         }
     }
 
+    class ActiveGuard {
+    public:
+        ActiveGuard() = default;
+        explicit ActiveGuard(MetricsLoopReporter* reporter): reporter_(reporter) {
+            if (reporter_) {
+                reporter_->beginActive();
+            }
+        }
+        ActiveGuard(const ActiveGuard&)            = delete;
+        ActiveGuard& operator=(const ActiveGuard&) = delete;
+        ActiveGuard(ActiveGuard&& other): reporter_(other.reporter_) {
+            other.reporter_ = nullptr;
+        }
+        ActiveGuard& operator=(ActiveGuard&& other) {
+            if (this != &other) {
+                release();
+                reporter_       = other.reporter_;
+                other.reporter_ = nullptr;
+            }
+            return *this;
+        }
+        ~ActiveGuard() {
+            release();
+        }
+
+    private:
+        void release() {
+            if (reporter_) {
+                reporter_->endActive();
+                reporter_ = nullptr;
+            }
+        }
+
+    private:
+        MetricsLoopReporter* reporter_ = nullptr;
+    };
+
+    ActiveGuard makeActiveGuard(bool active = true) {
+        return ActiveGuard(active ? this : nullptr);
+    }
+
     void report(const CollectType* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
         collector_.merge(collector);
     }
 
 private:
+    void beginActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++active_count_;
+    }
+
+    void endActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_count_ > 0) {
+            --active_count_;
+        }
+    }
+
     void reportLoop() {
         while (metrics_reporter_ && !stop_) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
-                collector_ = CollectType();
+                if (collector_.hasMetrics()) {
+                    auto priority_collectors = collector_.priorityCollectorsForReport();
+                    if (priority_collectors.empty()) {
+                        kmonitor::MetricsTags tags("priority", "0");
+                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector_);
+                    } else {
+                        for (auto& [priority, collector] : priority_collectors) {
+                            kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                            metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
+                        }
+                    }
+                    collector_ = CollectType();
+                } else if (active_count_ == 0) {
+                    // Idle service should emit 0 TPS with priority="0". An in-flight long step
+                    // with no completed sample stays silent until its step-interval-normalized
+                    // TPS is known.
+                    collector_.markIdleWindow();
+                    kmonitor::MetricsTags tags("priority", "0");
+                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector_);
+                    collector_ = CollectType();
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
@@ -354,9 +787,143 @@ private:
     std::mutex                   mutex_;
     bool                         stop_ = false;
     CollectType                  collector_;
-    int                          interval_ms_ = 1000;
+    int                          active_count_ = 0;
+    int                          interval_ms_  = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+};
+
+template<typename MetricsType, typename CollectType>
+class WallClockMetricsLoopReporter {
+public:
+    explicit WallClockMetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000):
+        collector_(CollectType()),
+        interval_ms_(interval_ms),
+        last_report_time_(std::chrono::steady_clock::now()),
+        metrics_reporter_(metrics_reporter) {
+        if (metrics_reporter_) {
+            metrics_reporter_thread_ =
+                std::thread(&WallClockMetricsLoopReporter<MetricsType, CollectType>::reportLoop, this);
+        }
+    }
+
+    ~WallClockMetricsLoopReporter() {
+        stop_.store(true, std::memory_order_release);
+        if (metrics_reporter_thread_.joinable()) {
+            metrics_reporter_thread_.join();
+        }
+    }
+
+    class ActiveGuard {
+    public:
+        ActiveGuard() = default;
+        explicit ActiveGuard(WallClockMetricsLoopReporter* reporter): reporter_(reporter) {
+            if (reporter_) {
+                reporter_->beginActive();
+            }
+        }
+        ActiveGuard(const ActiveGuard&)            = delete;
+        ActiveGuard& operator=(const ActiveGuard&) = delete;
+        ActiveGuard(ActiveGuard&& other): reporter_(other.reporter_) {
+            other.reporter_ = nullptr;
+        }
+        ActiveGuard& operator=(ActiveGuard&& other) {
+            if (this != &other) {
+                release();
+                reporter_       = other.reporter_;
+                other.reporter_ = nullptr;
+            }
+            return *this;
+        }
+        ~ActiveGuard() {
+            release();
+        }
+
+    private:
+        void release() {
+            if (reporter_) {
+                reporter_->endActive();
+                reporter_ = nullptr;
+            }
+        }
+
+    private:
+        WallClockMetricsLoopReporter* reporter_ = nullptr;
+    };
+
+    ActiveGuard makeActiveGuard(bool active = true) {
+        return ActiveGuard(active ? this : nullptr);
+    }
+
+    void report(const CollectType* collector) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        collector_.merge(collector);
+    }
+
+private:
+    void beginActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++active_count_;
+    }
+
+    void endActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_count_ > 0) {
+            --active_count_;
+        }
+    }
+
+    bool takeReportCollector(const std::chrono::steady_clock::time_point& now, CollectType& report_collector) {
+        auto window_us   = std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count();
+        report_collector = collector_;
+        report_collector.setReportWindowUs(window_us);
+        collector_        = CollectType();
+        last_report_time_ = now;
+        return true;
+    }
+
+    void reportLoop() {
+        while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
+            bool        should_report = false;
+            CollectType report_collector;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto                        now = std::chrono::steady_clock::now();
+                if (collector_.hasMetrics()) {
+                    should_report = takeReportCollector(now, report_collector);
+                } else if (active_count_ == 0) {
+                    // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
+                    // silent so their eventual wall window includes the full in-flight time since
+                    // the last wall report.
+                    collector_.markIdleWindow();
+                    should_report = takeReportCollector(now, report_collector);
+                }
+            }
+            if (should_report) {
+                auto priority_collectors = report_collector.priorityCollectorsForReport();
+                if (priority_collectors.empty()) {
+                    kmonitor::MetricsTags tags("priority", "0");
+                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &report_collector);
+                } else {
+                    for (auto& [priority, collector] : priority_collectors) {
+                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+        }
+    }
+
+private:
+    std::mutex                            mutex_;
+    std::atomic_bool                      stop_{false};
+    CollectType                           collector_;
+    int                                   active_count_ = 0;
+    int                                   interval_ms_  = 1000;
+    std::chrono::steady_clock::time_point last_report_time_;
+    std::thread                           metrics_reporter_thread_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 
 class RtpLLMExecutorMetricsCollector final {
@@ -409,14 +976,9 @@ private:
 
 class RtpLLMCacheMetricsCollector final {
 public:
-    int64_t kv_cache_item_num             = 0;
-    int64_t kv_cache_free_blocks          = 0;
-    int64_t kv_cache_available_blocks     = 0;
-    int64_t kv_cache_request_ref_blocks   = 0;
-    int64_t kv_cache_connector_ref_blocks = 0;
-    int64_t kv_cache_left_seq             = 0;
-    float   kv_cache_used_ratio           = 0;
-    int64_t mr_cost_time_ms               = 0;
+    int64_t kv_cache_item_num = 0;
+    int64_t kv_cache_left_seq = 0;
+    int64_t mr_cost_time_ms   = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {
@@ -425,14 +987,198 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_item_num_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_free_blocks_metric          = nullptr;
-    kmonitor::MutableMetric* kv_cache_available_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_request_ref_blocks_metric   = nullptr;
-    kmonitor::MutableMetric* kv_cache_connector_ref_blocks_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_left_seq_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_used_ratio_metric           = nullptr;
-    kmonitor::MutableMetric* mr_cost_time_ms_metric               = nullptr;
+    kmonitor::MutableMetric* kv_cache_item_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_left_seq_metric = nullptr;
+    kmonitor::MutableMetric* mr_cost_time_ms_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheOperationMetricsCollector final {
+public:
+    enum class OpType : int8_t {
+        MALLOC,
+        MALLOC_RETRY,  // A retry decision, not an executed allocation.
+        INSERT,
+        FREE,
+    };
+
+    OpType  operation_type = OpType::MALLOC;
+    int64_t latency_us     = 0;
+};
+
+class RtpLLMCacheOperationMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheOperationMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* malloc_retry_qps_metric  = nullptr;
+    kmonitor::MutableMetric* malloc_qps_metric        = nullptr;
+    kmonitor::MutableMetric* insert_qps_metric        = nullptr;
+    kmonitor::MutableMetric* free_qps_metric          = nullptr;
+    kmonitor::MutableMetric* malloc_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* insert_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* free_latency_us_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+// Reported once per BlockPool so each pool's capacity and utilization are visible.
+class RtpLLMCachePoolMetricsCollector final {
+public:
+    int64_t block_size_bytes                  = 0;
+    int64_t free_blocks                       = 0;
+    int64_t used_blocks                       = 0;
+    int64_t available_blocks                  = 0;
+    int64_t active_blocks                     = 0;
+    int64_t total_blocks                      = 0;
+    int64_t reserve_blocks                    = 0;
+    int64_t request_ref_blocks                = 0;
+    int64_t block_cache_ref_blocks            = 0;
+    int64_t load_ref_blocks                   = 0;
+    int64_t eviction_target_ref_blocks        = 0;
+    int64_t store_ref_blocks                  = 0;
+    float   used_ratio                        = 0;
+    bool    report_eviction_target_ref_blocks = false;
+};
+
+class RtpLLMCachePoolMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* block_size_bytes_metric           = nullptr;
+    kmonitor::MutableMetric* free_blocks_metric                = nullptr;
+    kmonitor::MutableMetric* used_blocks_metric                = nullptr;
+    kmonitor::MutableMetric* available_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* active_blocks_metric              = nullptr;
+    kmonitor::MutableMetric* total_blocks_metric               = nullptr;
+    kmonitor::MutableMetric* reserve_blocks_metric             = nullptr;
+    kmonitor::MutableMetric* request_ref_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* block_cache_ref_blocks_metric     = nullptr;
+    kmonitor::MutableMetric* load_ref_blocks_metric            = nullptr;
+    kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;
+    // Compatibility alias retained while dashboards migrate to the clarified name.
+    kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
+    kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheTransferMetricsCollector final {
+public:
+    std::string operation;
+
+    struct TransferBytesEntry {
+        std::string pool_name;
+        std::string group_type;
+        int64_t     transfer_bytes = 0;
+    };
+
+    std::string                     source_tier;
+    std::string                     target_tier;
+    std::vector<TransferBytesEntry> transfer_bytes;
+    int64_t                         descriptors_per_transfer  = 0;
+    int64_t                         latency_us                = 0;
+    int64_t                         queue_wait_latency_us     = 0;
+    int64_t                         in_flight                 = 0;
+    int64_t                         queue_waiting_tasks       = 0;
+    int64_t                         load_queue_backlog        = 0;
+    int64_t                         background_queue_backlog  = 0;
+    int64_t                         completion_queue_backlog  = 0;
+    bool                            success                   = true;
+    bool                            transfer_completed        = true;
+    bool                            report_transfer           = true;
+    bool                            report_task_queue         = false;
+    bool                            report_callback_queue     = false;
+    bool                            report_queue_wait_latency = false;
+    bool                            report_queue_backlog      = false;
+    std::string                     pool_type;
+};
+
+class RtpLLMCacheTransferMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
+    // Compatibility alias retained while dashboards migrate to the clarified name.
+    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
+    kmonitor::MutableMetric* transfer_task_queue_wait_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* task_queue_waiting_tasks_metric            = nullptr;
+    kmonitor::MutableMetric* callback_queue_waiting_tasks_metric        = nullptr;
+    kmonitor::MutableMetric* callback_queue_wait_latency_us_metric      = nullptr;
+    kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheEvictionMetricsCollector final {
+public:
+    std::string source_tier;
+    std::string target_tier;
+    std::string group_type;
+    std::string trigger_type;
+    int64_t     evictable_candidate_count  = 0;
+    int64_t     eviction_trigger_count     = 0;
+    int64_t     eviction_required_blocks   = 0;
+    int64_t     eviction_scheduled_blocks  = 0;
+    int64_t     tier_residence_time_ms     = 0;
+    int64_t     candidate_idle_time_ms     = 0;
+    int64_t     candidate_age_ms           = 0;
+    bool        report_evictable           = false;
+    bool        report_eviction_trigger    = false;
+    bool        report_eviction_blocks     = false;
+    bool        report_eviction            = false;
+    bool        report_tier_residence_time = false;
+    bool        report_candidate_idle_time = false;
+    bool        report_candidate_age       = false;
+};
+
+class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
+    kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* eviction_blocks_count_metric                = nullptr;
+    kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
+    kmonitor::MutableMetric* evicted_candidate_idle_time_ms_metric       = nullptr;
+    kmonitor::MutableMetric* evicted_candidate_age_ms_metric             = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMTierStoreMetricsCollector final {
+public:
+    std::string target_tier;
+    std::string outcome;
+    int64_t     block_count = 0;
+};
+
+class RtpLLMTierStoreMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTierStoreMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* store_publish_block_qps_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -440,16 +1186,39 @@ private:
 
 class RtpLLMCacheReuseMetricsCollector final {
 public:
-    int64_t kv_cache_reuse_length = 0;
-    float   kv_cache_hit_rate     = 0;
-};
+    int64_t block_aligned_input_length = 0;
+    int64_t kv_cache_reuse_length      = 0;
+    int64_t device_reuse_length        = 0;
+    int64_t host_reuse_length          = 0;
+    int64_t disk_reuse_length          = 0;
+    int64_t remote_reuse_length        = 0;
+    float   kv_cache_hit_rate          = 0;
+    float   device_hit_rate            = 0;
+    float   host_hit_rate              = 0;
+    float   disk_hit_rate              = 0;
 
-class RtpLLMDeviceCacheReuseMetricsCollector final {
-public:
-    int64_t match_cost_time_us    = 0;
-    int64_t device_input_length   = 0;
-    int64_t device_reuse_length   = 0;
-    float   device_cache_hit_rate = 0;
+    int64_t reuse_interval_avg_ms = 0;
+    int64_t reuse_interval_max_ms = 0;
+    int64_t hit_entry_age_avg_ms  = 0;
+    int64_t hit_entry_age_max_ms  = 0;
+
+    int64_t match_latency_us              = 0;
+    int64_t load_prepare_latency_us       = 0;
+    int64_t load_wait_latency_us          = 0;
+    int64_t match_to_ready_latency_us     = 0;
+    int64_t join_dependency_count         = 0;
+    int64_t join_wait_latency_us          = 0;
+    bool    load_attempted                = false;
+    bool    load_success                  = false;
+    bool    report_reuse_metrics          = false;
+    bool    report_hit_rates              = false;
+    bool    report_reuse_time_metrics     = false;
+    bool    report_match_latency          = false;
+    bool    report_match_to_ready_latency = false;
+    bool    report_load_metrics           = false;
+    bool    report_load_wait_latency      = false;
+    bool    report_load_join              = false;
+    bool    report_load_join_wait         = false;
 };
 
 class RtpLLMRemoteCacheMatchMetricsCollector final {
@@ -556,59 +1325,29 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
-    kmonitor::MutableMetric* kv_cache_hit_rate     = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMDeviceCacheReuseMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMDeviceCacheReuseMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* match_cost_time_us    = nullptr;
-    kmonitor::MutableMetric* device_input_length   = nullptr;
-    kmonitor::MutableMetric* device_reuse_length   = nullptr;
-    kmonitor::MutableMetric* device_cache_hit_rate = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMKernelMetricsCollector final {
-public:
-    float kernel_exec_time = 0;
-};
-
-class RtpLLMKernelMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMKernelMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* kernel_exec_time_metric = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMKVCacheInfoMetricsCollector final {
-public:
-    bool    qps              = false;
-    int64_t total_latency_us = 0;
-};
-
-class RtpLLMKVCacheInfoMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMKVCacheInfoMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* qps_metric              = nullptr;
-    kmonitor::MutableMetric* total_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* block_aligned_input_length_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_reuse_length_metric      = nullptr;
+    kmonitor::MutableMetric* device_reuse_length_metric        = nullptr;
+    kmonitor::MutableMetric* host_reuse_length_metric          = nullptr;
+    kmonitor::MutableMetric* disk_reuse_length_metric          = nullptr;
+    kmonitor::MutableMetric* remote_reuse_length_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_hit_rate_metric          = nullptr;
+    kmonitor::MutableMetric* device_hit_rate_metric            = nullptr;
+    kmonitor::MutableMetric* host_hit_rate_metric              = nullptr;
+    kmonitor::MutableMetric* disk_hit_rate_metric              = nullptr;
+    kmonitor::MutableMetric* reuse_interval_avg_ms_metric      = nullptr;
+    kmonitor::MutableMetric* reuse_interval_max_ms_metric      = nullptr;
+    kmonitor::MutableMetric* hit_entry_age_avg_ms_metric       = nullptr;
+    kmonitor::MutableMetric* hit_entry_age_max_ms_metric       = nullptr;
+    kmonitor::MutableMetric* match_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* load_qps_metric                   = nullptr;
+    kmonitor::MutableMetric* load_fail_qps_metric              = nullptr;
+    kmonitor::MutableMetric* load_prepare_latency_us_metric    = nullptr;
+    kmonitor::MutableMetric* load_wait_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* match_to_ready_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* load_joined_request_qps_metric    = nullptr;
+    kmonitor::MutableMetric* load_join_dependency_count_metric = nullptr;
+    kmonitor::MutableMetric* load_join_wait_latency_us_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -623,6 +1362,7 @@ public:
     int64_t total_propose_token_num        = 0;
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
+    int64_t spec_steps                     = 0;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -638,6 +1378,9 @@ public:
     kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
     kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
+    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
+    kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -780,88 +1523,6 @@ public:
     kmonitor::MutableMetric* transfer_block_count_metric      = nullptr;
     kmonitor::MutableMetric* transfer_total_block_size_metric = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric       = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMMemoryCacheMatchMetricsCollector final {
-public:
-    bool    failed        = false;
-    int64_t latency_us    = 0;
-    int64_t input_token   = 0;
-    int64_t matched_token = 0;
-};
-
-class RtpLLMMemoryCacheReadMetricsCollector final {
-public:
-    bool    failed        = false;
-    int64_t latency_us    = 0;
-    int64_t input_token   = 0;
-    int64_t matched_token = 0;
-    int64_t read_token    = 0;
-};
-
-class RtpLLMMemoryCacheWriteMetricsCollector final {
-public:
-    bool    failed      = false;
-    int64_t latency_us  = 0;
-    int64_t input_token = 0;
-    int64_t write_token = 0;
-};
-
-class RtpLLMMemoryCacheCopyMetricsCollector final {
-public:
-    bool    failed     = false;
-    int64_t latency_us = 0;
-    bool    from_gpu   = false;
-};
-
-class RtpLLMMemoryCacheStatusMetricsCollector final {
-public:
-    int64_t total_block_num     = 0;
-    int64_t allocated_block_num = 0;  // 在cache中的block数量
-    int64_t available_block_num = 0;  // 可用的block数量
-};
-
-class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheMatchMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
-    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_qps_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_failed_qps_metric  = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_none_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_latency_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_match_input_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_matched_token_metric     = nullptr;
-
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_qps_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_none_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_failed_qps_metric  = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_latency_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_input_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_read_token_metric       = nullptr;
-
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_qps_metric         = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_none_qps_metric    = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_failed_qps_metric  = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_latency_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_input_token_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_write_token_metric       = nullptr;
-
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
-
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

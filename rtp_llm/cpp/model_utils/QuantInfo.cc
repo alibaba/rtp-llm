@@ -46,6 +46,10 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
         quant_method_ = W4A8INT4PTPC;
         weight_bits_  = 4;
         group_size_   = group_size;
+    } else if (quant_method == "w8a8_int8_per_channel") {
+        quant_method_ = W8A8INT8PTPC;
+        weight_bits_  = 8;
+        group_size_   = 0;
     } else if (quant_method == "mxfp4-quark") {
         quant_method_ = QuarkMXFP4;
         weight_bits_  = 4;

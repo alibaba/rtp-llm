@@ -115,7 +115,7 @@
                         }
                     },
                     {
-                        "response": "，并提供答案。\n1. What is your favorite",
+                        "response": "，并提供答案。 1. What is the",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -141,14 +141,14 @@
                             "step_output_len": 10,
                             "iter_count": 10,
                             "cum_log_probs": [
-                                -10.616922378540039
+                                -9.246627807617188
                             ],
                             "beam_responses": [
-                                "，并提供答案。\n1. What is your favorite",
-                                "，以帮助学生提高听力理解能力。 ",
-                                "，以帮助学生提高听力理解能力。\n\n1",
-                                "，并提供答案。\n1. What is the most",
-                                "，并提供答案。\n1. What is the main"
+                                "，并提供答案。 1. What is the",
+                                "，并提供答案。 1. What is your",
+                                "，并提供答案。 1. What are the",
+                                "，并提供答案。 1. 提问：",
+                                "，并提供答案。\n1. What is the most"
                             ],
                             "pd_sep": false,
                             "softmax_probs": []

@@ -18,6 +18,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Lean multimodal protobuf converter shared with multimodal_processor without a dependency cycle.
+cc_library(
+    name = "multimodal_pb_converter",
+    srcs = ["MultimodalPbConverter.cc"],
+    hdrs = ["MultimodalPbConverter.h"],
+    copts = copts(),
+    deps = [
+        ":tensor_pb_convert",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "rpc_error_code",
     hdrs = [
@@ -37,36 +52,58 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
 )
 
+
 cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
-        exclude = ["TensorPbConvert.cc"],
+        exclude = [
+            "TensorPbConvert.cc",
+            "MultimodalPbConverter.cc",
+            "ResponseBuffer.cc",
+        ],
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "RPCPool.h",
+            # Owned by :response_buffer so its public header has a single cc_library.
+            "ResponseBuffer.h",
+        ],
     ),
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
+        ":response_buffer",
         ":rpc_error_code",
         ":tensor_pb_convert",
+        "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
         "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
         "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "@havenask//aios/autil:scope",
     ],
 )
 
@@ -76,7 +113,11 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":grpcio",
+        # model_rpc_client.py top-level hard-imports rtp_llm.telemetry; do not
+        # rely on consumers' transitive closures to provide it.
+        "//rtp_llm:telemetry",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:request_headers",
     ],
 )
 
@@ -87,5 +128,21 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+    ],
+)
+
+cc_library(
+    name = "response_buffer",
+    srcs = ["ResponseBuffer.cc"],
+    hdrs = ["ResponseBuffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        # ResponseBuffer.h includes <grpcpp/...> and exposes grpc:: types in
+        # its public interface; declare grpc explicitly instead of relying on
+        # the proto target's transitive dependency.
+        "@grpc//:grpc++",
+        "@havenask//aios/autil:time",
     ],
 )

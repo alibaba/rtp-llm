@@ -1,12 +1,10 @@
-import copy
 import json
 import logging
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RequestFormat, RoleAddr
-
-request_id_field_name = "__request_id__"
+from rtp_llm.structure.request_constants import request_id_field_name
 
 
 class Request(NamedTuple):
@@ -44,19 +42,36 @@ class RequestExtractor:
             ),
         )
 
+    @staticmethod
+    def _partition_generate_config_fields(
+        values: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        field_names = GenerateConfig.model_fields
+        config_values = {
+            key: value for key, value in values.items() if key in field_names
+        }
+        remain_values = {
+            key: value for key, value in values.items() if key not in field_names
+        }
+        return config_values, remain_values
+
     def _format_generate_config(
         self, kwargs: Dict[str, Any]
     ) -> Tuple[GenerateConfig, Dict[str, Any]]:
         config_json = kwargs.pop("generate_config", kwargs.pop("generation_config", {}))
-        generate_config = copy.deepcopy(self.default_generate_config)
-        remain_config_json = generate_config.update_and_pop(config_json)
-        remain_kwargs = generate_config.update_and_pop(kwargs)
+        nested_config, remain_config_json = self._partition_generate_config_fields(
+            config_json
+        )
+        top_level_config, remain_kwargs = self._partition_generate_config_fields(kwargs)
+        config_values = self.default_generate_config.model_dump()
+        config_values.update(nested_config)
+        config_values.update(top_level_config)
 
         def update_optional(key: str, params: List[str]) -> None:
             for source in [remain_config_json, remain_kwargs]:
                 for param in params:
                     if param in source:
-                        setattr(generate_config, key, source[param])
+                        config_values[key] = source[param]
                         return
 
         update_optional(
@@ -67,7 +82,14 @@ class RequestExtractor:
         update_optional("return_input_ids", ["return_input_ids", "output_input_ids"])
         update_optional("max_new_tokens", ["gen_length", "max_new_tokens"])
         if self.is_streaming(kwargs) or (kwargs.get("stream", False) == True):
-            generate_config.is_streaming = True
+            config_values["is_streaming"] = True
+        try:
+            generate_config = GenerateConfig.model_validate(config_values)
+        except Exception as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
+                f"generate_config validate failed: {str(e)}",
+            ) from e
         return generate_config, remain_kwargs
 
     def _format_request(
@@ -76,7 +98,7 @@ class RequestExtractor:
         generate_config, remain_kwargs = self._format_generate_config(kwargs)
 
         # Handle role_addrs parsing - convert dict to RoleAddr objects
-        if hasattr(generate_config, "role_addrs") and generate_config.role_addrs:
+        if generate_config.role_addrs:
             try:
                 # Check if we have dict objects that need conversion
                 if generate_config.role_addrs and isinstance(
@@ -165,7 +187,11 @@ class RequestExtractor:
     def _get_adapter(
         self, generate_config: GenerateConfig, input_len: int
     ) -> List[GenerateConfig]:
-        generate_configs: List[GenerateConfig] = [generate_config] * input_len
+        # Each prompt is prepared independently downstream. Keep mutable
+        # GenerateConfig state isolated across the streams in one raw batch.
+        generate_configs = [
+            generate_config.model_copy(deep=True) for _ in range(input_len)
+        ]
         adapter_name = generate_config.adapter_name
         if adapter_name != None:
             if (isinstance(adapter_name, str) and input_len != 1) or (
@@ -176,7 +202,6 @@ class RequestExtractor:
                     "adapter_name is not alignment",
                 )
             for i in range(input_len):
-                generate_configs[i] = copy.copy(generate_configs[i])
                 generate_configs[i].adapter_name = (
                     adapter_name[i] if isinstance(adapter_name, list) else adapter_name
                 )

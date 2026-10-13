@@ -16,11 +16,4 @@ public class SyncLBStatusResp {
     private String msg;
     private String lbStatus;
 
-    public static SyncLBStatusResp err(String msg) {
-        SyncLBStatusResp resp = new SyncLBStatusResp();
-        resp.success = false;
-        resp.msg = msg;
-        return resp;
-    }
-
 }

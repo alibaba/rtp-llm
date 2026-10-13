@@ -1,5 +1,34 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
+
+cc_library(
+    name = "cache_async_context",
+    srcs = ["AsyncContext.cc"],
+    hdrs = [
+        "AsyncContext.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:profiling_scope",
+    ],
+)
+
+cc_library(
+    name = "cp_slot_mapper",
+    srcs = ["CPSlotMapper.cc"],
+    hdrs = ["CPSlotMapper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_config",
+        ":cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
 
 cc_library(
     name = "cache_group_type",
@@ -7,28 +36,6 @@ cc_library(
         "CacheGroupType.h",
     ],
     copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "kv_cache_spec_desc",
-    hdrs = [
-        "KVCacheSpecDesc.h",
-        "KVCacheSpecType.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cache_group_type",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/models_py/bindings/core:types",
-    ],
-)
-
-alias(
-    name = "kvcache_spec_desc",
-    actual = ":kv_cache_spec_desc",
     visibility = ["//visibility:public"],
 )
 
@@ -42,23 +49,83 @@ cc_library(
 )
 
 cc_library(
-    name = "cache_types",
+    name = "kv_cache_specs",
     srcs = [
-        "CacheConfig.cc",
         "KVCacheSpecDesc.cc",
-        "Types.cc",
     ],
     hdrs = [
-        "BufferTypes.h",
-        "CacheConfig.h",
-        "CacheGroupType.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "KVCacheSpecDesc.h",
-        "KVCacheSpecType.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
+        "OpaqueKVCacheSpec.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_info",
+        ":cache_group_type",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+alias(
+    name = "kv_cache_spec_desc",
+    actual = ":kv_cache_specs",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "kvcache_spec_desc",
+    actual = ":kv_cache_specs",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cache_config",
+    srcs = [
+        "CacheConfig.cc",
+        "CacheTopology.cc",
+    ],
+    hdrs = [
+        "CacheConfig.h",
+        "CacheTopology.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+        ":kv_cache_specs",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+cc_library(
+    name = "cache_layout",
+    hdrs = ["BufferTypes.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+)
+
+cc_library(
+    name = "cache_types",
+    srcs = [
+        "Types.cc",
+    ],
+    hdrs = [
+        "CacheConfig.h",
+        "CacheTier.h",
         "Types.h",
         "WarmUpResult.h",
     ],
@@ -67,98 +134,145 @@ cc_library(
     deps = [
         ":block_info",
         ":batch_kv_cache_resource",
+        ":cache_config",
         ":cache_group_type",
-        ":kv_cache_spec_desc",
-        "//:rtp_compute_ops",
+        ":cache_layout",
+        ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
 )
 
 cc_library(
-    name = "block_pool",
-    srcs = [
-        "BlockCache.cc",
-        "BlockPool.cc",
-        "MemoryLayoutStrategy.cc",
+    name = "recent_cache_key_window",
+    srcs = ["RecentCacheKeyWindow.cc"],
+    hdrs = ["RecentCacheKeyWindow.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
+)
+
+cc_library(
+    name = "prefill_cache_hit_metrics_reporter",
+    srcs = ["PrefillCacheHitMetricsReporter.cc"],
+    hdrs = ["PrefillCacheHitMetricsReporter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_types",
+        ":cp_slot_mapper",
+        ":recent_cache_key_window",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
+    name = "memory_layout_strategy",
+    srcs = ["MemoryLayoutStrategy.cc"],
     hdrs = [
-        "BlockCache.h",
-        "BlockPool.h",
-        "BlockPoolConfig.h",
-        "BlockPoolConfigHelper.h",
-        "BlockRefCounter.h",
-        "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
+        "MemoryLayoutStrategy.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-        "//rtp_llm/cpp/disaggregate/cache_store",
-        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:lru_cache",
-        "//rtp_llm/cpp/utils:profiling_scope",
-    ],
-)
-
-cc_library(
-    name = "kv_cache_group",
-    srcs = [
-        "FullKVCacheGroup.cc",
-        "KVCacheGroup.cc",
-        "LinearKVCacheGroup.cc",
-    ],
-    hdrs = [
-        "FullKVCacheGroup.h",
-        "KVCacheGroup.h",
-        "LinearKVCacheGroup.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":block_pool",
-        ":cache_types",
-    ],
-)
-
-cc_library(
-    name = "kv_cache_allocator_hdr",
-    hdrs = [
-        "KVCacheAllocator.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":block_pool",
-        ":cache_types",
-        "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
 )
 
 cc_library(
-    name = "kv_cache_allocator",
+    name = "device_block_pool_config_helper",
+    hdrs = ["DeviceBlockPoolConfigHelper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_transfer_planner",
     srcs = [
-        "HybridTypeKVCacheAllocator.cc",
-        "KVCacheAllocator.cc",
-        "SingleTypeKVCacheAllocator.cc",
+        "KVCacheTransferPlanner.cc",
     ],
     hdrs = [
-        "HybridTypeKVCacheAllocator.h",
-        "KVCacheAllocator.h",
-        "SingleTypeKVCacheAllocator.h",
+        "KVCacheTransferPlanner.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":kv_cache_allocator_hdr",
-        ":kv_cache_group",
+        ":cache_group_type",
+    ],
+)
+
+cc_library(
+    name = "single_type_cache_manager",
+    srcs = [
+        "FullCacheManager.cc",
+        "SingleTypeCacheManager.cc",
+        "LinearCacheManager.cc",
+        "SWACacheManager.cc",
+    ],
+    hdrs = [
+        "FullCacheManager.h",
+        "SingleTypeCacheManager.h",
+        "LinearCacheManager.h",
+        "SWACacheManager.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+    ],
+)
+
+cc_library(
+    name = "coordinator_cache_manager_hdr",
+    hdrs = [
+        "CoordinatorCacheManager.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        ":cp_slot_mapper",
+        ":single_type_cache_manager",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/models_py/bindings/core:gpu_block_copy",
+    ] + torch_deps(),
+)
+
+cc_library(
+    name = "coordinator_cache_manager",
+    srcs = [
+        "CoordinatorCacheManager.cc",
+    ],
+    hdrs = [
+        "CoordinatorCacheManager.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cp_slot_mapper",
+        ":device_block_pool_config_helper",
+        ":coordinator_cache_manager_hdr",
+        ":single_type_cache_manager",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:gpu_block_copy",
     ],
 )
 
@@ -172,8 +286,9 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_config",
+        ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/cache:cache_group_type",
     ],
 )
 
@@ -181,25 +296,23 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
-        "HybridConfigCreator.cc",
         "KVCacheHashUtil.cc",
         "MemoryEvaluationHelper.cc",
-        "SingleConfigCreator.cc",
     ],
     hdrs = [
         "CacheConfigCreator.h",
-        "HybridConfigCreator.h",
         "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",
-        "SingleConfigCreator.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
         ":cache_types",
-        ":kv_cache_allocator",
+        ":coordinator_cache_manager",
+        ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
@@ -242,16 +355,40 @@ cc_library(
     name = "cache",
     srcs = [
         "KVCacheManager.cc",
+        "KVCacheMetrics.cc",
     ],
     hdrs = [
         "KVCacheManager.h",
+        "KVCacheMetrics.h",
     ],
-    copts = copts(),
+    copts = copts() + select({
+        "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
+        ":cache_async_context",
         ":cache_core",
-        "//rtp_llm/cpp/cache/connector",
+        ":cp_slot_mapper",
+        ":prefill_cache_hit_metrics_reporter",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "//:using_remote_kv_cache": [
+            "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_library(
+    name = "block_ref_counter",
+    hdrs = ["BlockRefCounter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
 )

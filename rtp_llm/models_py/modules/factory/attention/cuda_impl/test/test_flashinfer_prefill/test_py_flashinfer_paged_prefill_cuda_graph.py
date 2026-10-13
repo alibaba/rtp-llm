@@ -7,29 +7,30 @@ identical results to forward() without copy_params.
 import logging
 import math
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillPagedAttnOp,
+    quantize_to_fp8_if_needed,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
     BaseAttentionTest,
     compare_tensors,
+    fill_paged_kv_cache,
 )
-from rtp_llm.ops.compute_ops import (
-    LayerKVCache,
-    PyAttentionInputs,
-    PyPrefillCudaGaphCopyParams,
-)
+from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyPrefillCudaGaphCopyParams
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 PAGE_SIZE = 16
 
 
-class TestPrefillPagedCudaGraph(BaseAttentionTest):
-    """Compare forward() output: CUDA graph copy path vs normal path."""
+class _PrefillPagedCudaGraphTestMixin:
+    """Shared setup for BASE and FP8 CUDA graph tests."""
 
     def _make_inputs(
         self, input_lengths, prefix_lengths, with_copy_params=False, max_seq_len=0
@@ -43,10 +44,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         inp = PyAttentionInputs()
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
-        inp.input_lengths = torch.tensor(input_lengths, dtype=torch.int32).pin_memory()
+        inp.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32, device="cuda"
+        )
         inp.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32
-        ).pin_memory()
+            prefix_lengths, dtype=torch.int32, device="cuda"
+        )
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         inp.sequence_lengths = torch.tensor(seq_lengths, dtype=torch.int32).pin_memory()
 
@@ -54,14 +57,13 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-        else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+        # Device, in both cases. These are what FlashInfer keeps as its persistent
+        # graph buffers and dereferences on the device at each replay, and the
+        # field names say _device. The copy-params path uses device metadata too,
+        # including cuda_graph_prefill_batch_size below; pinned host tensors do
+        # not satisfy that contract.
+        inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
+        inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -76,43 +78,13 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [batch_size], dtype=torch.int32
-            ).pin_memory()
+                [batch_size], dtype=torch.int32, device="cuda"
+            )
             cp.max_seq_len = ms
             cp.max_batch_size = batch_size
             inp.prefill_cuda_graph_copy_params = cp
 
         return inp
-
-    def _make_paged_kv_cache(self, k, v, seq_lengths, num_kv_heads, head_dim):
-        if isinstance(seq_lengths, int):
-            seq_lengths = [seq_lengths]
-        total_pages = sum(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
-        cache = torch.zeros(
-            total_pages,
-            2,
-            num_kv_heads,
-            PAGE_SIZE,
-            head_dim,
-            dtype=k.dtype,
-            device=self.device,
-        )
-        page_idx, token_offset = 0, 0
-        for seq_len in seq_lengths:
-            for i in range(math.ceil(seq_len / PAGE_SIZE)):
-                s, e = i * PAGE_SIZE, min((i + 1) * PAGE_SIZE, seq_len)
-                n = e - s
-                cache[page_idx, 0, :, :n, :] = k[
-                    token_offset + s : token_offset + e
-                ].transpose(0, 1)
-                cache[page_idx, 1, :, :n, :] = v[
-                    token_offset + s : token_offset + e
-                ].transpose(0, 1)
-                page_idx += 1
-            token_offset += seq_len
-        kv = LayerKVCache()
-        kv.kv_cache_base = cache
-        return kv
 
     def _test_forward_match(
         self,
@@ -124,6 +96,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         size_per_head=64,
         capture_input_lengths=None,
         capture_prefix_lengths=None,
+        verify_cast_buffer_reuse=False,
     ):
         if isinstance(input_lengths, int):
             input_lengths = [input_lengths]
@@ -158,17 +131,48 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             dtype=torch.float16,
             device=self.device,
         )
-        kv_cache = self._make_paged_kv_cache(
-            k, v, seq_lengths, head_num_kv, size_per_head
+        normal_inp = self._make_inputs(input_lengths, prefix_lengths)
+        cache_dtype = self.cache_dtype(config.attn_configs)
+        offsets = [0]
+        for seq_len in seq_lengths:
+            offsets.append(offsets[-1] + seq_len)
+        kv_cache = fill_paged_kv_cache(
+            [k[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            [v[offsets[i] : offsets[i + 1]] for i in range(len(seq_lengths))],
+            seq_lengths,
+            normal_inp.kv_cache_kernel_block_id,
+            PAGE_SIZE,
+            head_num_kv,
+            size_per_head,
+            cache_dtype,
+            self.device,
         )
 
         # Normal path
-        normal_inp = self._make_inputs(input_lengths, prefix_lengths)
         normal_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, normal_inp)
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay
+        # CUDA graph copy/plan contract (not an actual capture/replay).
+        #
+        # Scope, because this test has already been over-trusted once: it exercises
+        # the *contract* the graph path depends on -- persistent buffers, plan()
+        # under forbid_realloc, prepare-then-forward with updated inputs, compared
+        # against the eager result -- but it does not create a torch CUDAGraph and
+        # replay it, and it does not reproduce how the engine captures.
+        #
+        # The engine drives capture from C++ across 16 decode graphs plus a prefill
+        # graph sharing one at::cuda::graph_pool_handle(). A commit that made these
+        # buffers device-resident passed this test and then broke both cudagraph
+        # eagle smoke cases -- measured 12/12 passing at main's file state versus
+        # 0/12 with the change -- so passing here is not evidence about the engine.
+        # Adding a single-graph Python capture would not close that gap either; it
+        # would just look like it had. Engine-level coverage belongs in the smoke
+        # cases, which is where that regression was actually caught. In
+        # suites_h20_oss.bzl, eagle_mtp_cudagraph_concurrent disables competing
+        # TRT prefill backends to force this native paged implementation through
+        # the real C++ runner, its shared graph pool and concurrent metadata
+        # updates. Neither test enables generation-prefill graphs for MTP.
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(
@@ -176,9 +180,52 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         )
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
+        kv_ptr_address = cg_op.prefill_wrapper._paged_kv_indptr_buf.data_ptr()
+        kv_last_address = cg_op.prefill_wrapper._paged_kv_last_page_len_buf.data_ptr()
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
-        cg_op.prepare(cg_replay, forbid_realloc=True)
+        plan = cg_op.prefill_wrapper.plan
+
+        def checked_plan(qo_indptr, kv_indptr, indices, last_page_len, *args, **kwargs):
+            # Check before entering native code: malformed metadata can crash
+            # rather than reliably producing a numerical mismatch.
+            self.assertEqual(kv_indptr.numel(), qo_indptr.numel())
+            self.assertEqual(last_page_len.numel(), qo_indptr.numel() - 1)
+            self.assertEqual(kv_indptr.data_ptr(), kv_ptr_address)
+            self.assertEqual(last_page_len.data_ptr(), kv_last_address)
+            active = len(input_lengths)
+            self.assertEqual(
+                last_page_len[active:].cpu().tolist(),
+                [0] * (len(capture_input_lengths) - active),
+            )
+            self.assertEqual(
+                kv_indptr[active:].cpu().tolist(),
+                [sum(math.ceil(s / PAGE_SIZE) for s in seq_lengths)]
+                * (len(capture_input_lengths) - active + 1),
+            )
+            return plan(qo_indptr, kv_indptr, indices, last_page_len, *args, **kwargs)
+
+        with patch.object(cg_op.prefill_wrapper, "plan", side_effect=checked_plan):
+            cg_op.prepare(cg_replay, forbid_realloc=True)
+        self.assertTrue(
+            cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.is_cuda
+        )
+        self.assertTrue(cg_op.input_lengths.is_cuda)
+        self.assertTrue(cg_op.cu_seq_lens.is_cuda)
         cg_out = cg_op.forward(q, kv_cache)
+
+        if verify_cast_buffer_reuse:
+            cast_buf = cg_op._aligned_q_cast_buf
+            self.assertIsNotNone(cast_buf)
+            first_out = cg_out.clone()
+            replay_out = cg_op.forward(q, kv_cache)
+            self.assertIs(cg_op._aligned_q_cast_buf, cast_buf)
+            compare_tensors(
+                first_out,
+                replay_out,
+                rtol=0,
+                atol=0,
+                name="FP8 CUDA graph replay",
+            )
 
         compare_tensors(
             normal_out,
@@ -187,6 +234,10 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             atol=1e-3,
             name=f"input={input_lengths}, prefix={prefix_lengths}",
         )
+
+
+class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTest):
+    """Compare forward() output: CUDA graph copy path vs normal path."""
 
     # === Single batch ===
 
@@ -228,6 +279,104 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
 
     def test_multi_batch_single_tokens(self):
         self._test_forward_match([1, 1, 1], [100, 200, 300])
+
+    def test_replay_metadata_shrink_and_grow(self):
+        self._test_replay_metadata_shrink_and_grow(host_metadata=False)
+
+    def test_replay_host_metadata_shrink_and_grow(self):
+        self._test_replay_metadata_shrink_and_grow(host_metadata=True)
+
+    def _test_replay_metadata_shrink_and_grow(self, host_metadata):
+        def make_inputs(active):
+            inputs = self._make_inputs([5] * active, [200] * active, True, 5)
+            if host_metadata:
+                # Production sets device mirrors from C++; their Python
+                # bindings are read-only. Supply the same fields for this
+                # Python operator test without changing the bindings.
+                inputs = SimpleNamespace(
+                    **{
+                        name: getattr(inputs, name)
+                        for name in dir(inputs)
+                        if not name.startswith("_")
+                    }
+                )
+                inputs.input_lengths_device = inputs.input_lengths
+                inputs.input_lengths = inputs.input_lengths.cpu().pin_memory()
+                inputs.prefix_lengths = inputs.prefix_lengths.cpu().pin_memory()
+            return inputs
+
+        config = self._create_config(
+            head_num=8, head_num_kv=2, size_per_head=64, seq_size_per_block=PAGE_SIZE
+        )
+        inputs = make_inputs(4)
+        op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, inputs)
+        op.prepare(inputs)
+        ptr = op.prefill_wrapper._paged_kv_indptr_buf
+        last = op.prefill_wrapper._paged_kv_last_page_len_buf
+        addresses = (ptr.data_ptr(), last.data_ptr())
+        plan = op.prefill_wrapper.plan
+
+        for active in (3, 1, 4, 2, 4):
+            with self.subTest(active=active):
+                inputs = make_inputs(active)
+
+                def checked_plan(qo, kv, indices, lengths, *args, **kwargs):
+                    self.assertEqual(qo.numel(), 5)
+                    self.assertEqual(kv.numel(), 5)
+                    self.assertEqual(lengths.numel(), 4)
+                    self.assertEqual((kv.data_ptr(), lengths.data_ptr()), addresses)
+                    self.assertEqual(
+                        kv.cpu().tolist(), [13 * min(i, active) for i in range(5)]
+                    )
+                    self.assertEqual(
+                        lengths.cpu().tolist(), [13] * active + [0] * (4 - active)
+                    )
+                    return plan(qo, kv, indices, lengths, *args, **kwargs)
+
+                with patch.object(op.prefill_wrapper, "plan", side_effect=checked_plan):
+                    op.prepare(inputs, forbid_realloc=True)
+
+        with patch.object(op.prefill_wrapper, "plan") as native_plan:
+            with self.assertRaisesRegex(ValueError, "captured batch size"):
+                op._plan_prefill_wrapper(op.qo_indptr[:4])
+            native_plan.assert_not_called()
+
+
+class TestPrefillPagedCudaGraphFP8(TestPrefillPagedCudaGraph):
+    kv_cache_dtype = KvCacheDataType.FP8
+
+    def test_q_cast_buffer_reused_across_replay(self):
+        self._test_forward_match(
+            [2, 4, 3],
+            [100, 50, 200],
+            max_seq_len=5,
+            capture_input_lengths=[5, 5, 5, 5],
+            capture_prefix_lengths=[200, 200, 200, 200],
+            verify_cast_buffer_reuse=True,
+        )
+
+    def test_unit_scale_cast_saturates_outliers(self):
+        values = torch.tensor(
+            [-1000.0, -448.0, 448.0, 1000.0],
+            dtype=torch.float16,
+            device=self.device,
+        )
+        quantized = quantize_to_fp8_if_needed(values, torch.float8_e4m3fn).float()
+        expected = torch.tensor(
+            [-448.0, -448.0, 448.0, 448.0],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        torch.testing.assert_close(quantized, expected, rtol=0, atol=0)
+        self.assertFalse(torch.isnan(quantized).any().item())
+
+    def test_non_fp8_dtype_mismatch_raises(self):
+        values = torch.ones(1, dtype=torch.float16, device=self.device)
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported dtype conversion from torch.float16 to torch.bfloat16",
+        ):
+            quantize_to_fp8_if_needed(values, torch.bfloat16)
 
 
 if __name__ == "__main__":

@@ -89,6 +89,24 @@ def upload_pkg(name, **kwargs):
 
     _upload_pkg( name = name, **kwargs)
 
+def _runfiles_alias_impl(ctx):
+    src = ctx.file.src
+    return DefaultInfo(
+        files = depset([src]),
+        runfiles = ctx.runfiles(
+            files = [src],
+            symlinks = {ctx.attr.runfile_path: src},
+        ),
+    )
+
+runfiles_alias = rule(
+    implementation = _runfiles_alias_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+        "runfile_path": attr.string(mandatory = True),
+    },
+)
+
 def upload_wheel(name, src, dir, wheel_prefix):
     oss_path = "oss://search-ad/%s/%s" % (dir, wheel_prefix) + "_$$(date '+%Y-%m-%d_%H_%M_%S')"
     native.genrule(
@@ -174,6 +192,7 @@ def rpm_library(
         static_link=False,
         deps=[],
         header_only=False,
+        origin_rpath=False,
         tags={},
         **kwargs):
     hdrs = [ "include/" + hdr for hdr in hdrs ]
@@ -198,9 +217,13 @@ def rpm_library(
         bash_cmd += "&& cp -L " + lib_path + "/*.a" + " ../$(@D)/"
     if shared_lib:
         bash_cmd += "&& echo $$PATH && which patchelf && patchelf --version && cp -L " + lib_path + "/" + shared_lib + " ../$(@D) && patchelf --set-soname " + shared_lib + " ../$(@D)/" + shared_lib
+        if origin_rpath:
+            bash_cmd += " && patchelf --set-rpath '$$ORIGIN' ../$(@D)/" + shared_lib
     for share_lib in shared_libs:
         outs.append(share_lib)
         bash_cmd += "&& cp -L " + lib_path + "/" + share_lib + " ../$(@D) && patchelf --set-soname " + share_lib + " ../$(@D)/" + share_lib
+        if origin_rpath:
+            bash_cmd += " && patchelf --set-rpath '$$ORIGIN' ../$(@D)/" + share_lib
     for path in bins:
         outs.append(path)
         bash_cmd += "&& cp -rL " + path + " ../$(@D)"

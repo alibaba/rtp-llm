@@ -79,83 +79,87 @@ def chunk_gla_fwd_kernel_o(
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(
-            q + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_q_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_q_m0 = (p_q_i0 >= 0) & (p_q_i0 < (T))
+        p_q_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_q_m1 = (p_q_i1 >= 0) & (p_q_i1 < (K))
+        p_q = (
+            (q + (bos * H + i_h) * K)
+            + p_q_i0[:, None] * (H * K)
+            + p_q_i1[None, :] * (1)
         )
-        p_g = tl.make_block_ptr(
-            g + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_g_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_g_m0 = (p_g_i0 >= 0) & (p_g_i0 < (T))
+        p_g_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_g_m1 = (p_g_i1 >= 0) & (p_g_i1 < (K))
+        p_g = (
+            (g + (bos * H + i_h) * K)
+            + p_g_i0[:, None] * (H * K)
+            + p_g_i1[None, :] * (1)
         )
         if TRANSPOSE_STATE:
-            p_h = tl.make_block_ptr(
-                h + (i_tg * H + i_h) * K * V,
-                (V, K),
-                (K, 1),
-                (i_v * BV, i_k * BK),
-                (BV, BK),
-                (1, 0),
+            p_h_i0 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+            p_h_m0 = (p_h_i0 >= 0) & (p_h_i0 < (V))
+            p_h_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_h_m1 = (p_h_i1 >= 0) & (p_h_i1 < (K))
+            p_h = (
+                (h + (i_tg * H + i_h) * K * V)
+                + p_h_i0[:, None] * (K)
+                + p_h_i1[None, :] * (1)
             )
         else:
-            p_h = tl.make_block_ptr(
-                h + (i_tg * H + i_h) * K * V,
-                (K, V),
-                (V, 1),
-                (i_k * BK, i_v * BV),
-                (BK, BV),
-                (1, 0),
+            p_h_i0 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_h_m0 = (p_h_i0 >= 0) & (p_h_i0 < (K))
+            p_h_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+            p_h_m1 = (p_h_i1 >= 0) & (p_h_i1 < (V))
+            p_h = (
+                (h + (i_tg * H + i_h) * K * V)
+                + p_h_i0[:, None] * (V)
+                + p_h_i1[None, :] * (1)
             )
 
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=p_q_m0[:, None] & p_q_m1[None, :], other=0)
         # [BT, BK]
-        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+        b_g = tl.load(p_g, mask=p_g_m0[:, None] & p_g_m1[None, :], other=0).to(
+            tl.float32
+        )
         # [BT, BK]
         if USE_EXP2:
             b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
         else:
             b_qg = (b_q * exp(b_g)).to(b_q.dtype)
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, mask=p_h_m0[:, None] & p_h_m1[None, :], other=0)
         if i_k >= 0:
             if TRANSPOSE_STATE:
                 b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
             else:
                 b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
     b_o *= scale
-    p_v = tl.make_block_ptr(
-        v + (bos * H + i_h) * V,
-        (T, V),
-        (H * V, 1),
-        (i_t * BT, i_v * BV),
-        (BT, BV),
-        (1, 0),
-    )
-    p_o = tl.make_block_ptr(
-        o + (bos * H + i_h) * V,
-        (T, V),
-        (H * V, 1),
-        (i_t * BT, i_v * BV),
-        (BT, BV),
-        (1, 0),
-    )
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+    p_v_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_v_m0 = (p_v_i0 >= 0) & (p_v_i0 < (T))
+    p_v_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+    p_v_m1 = (p_v_i1 >= 0) & (p_v_i1 < (V))
+    p_v = (v + (bos * H + i_h) * V) + p_v_i0[:, None] * (H * V) + p_v_i1[None, :] * (1)
+    p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+    p_o_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+    p_o_m1 = (p_o_i1 >= 0) & (p_o_i1 < (V))
+    p_o = (o + (bos * H + i_h) * V) + p_o_i0[:, None] * (H * V) + p_o_i1[None, :] * (1)
+    p_A_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_A_m0 = (p_A_i0 >= 0) & (p_A_i0 < (T))
+    p_A_i1 = tl.arange(0, BT).to(tl.int64) + (0)
+    p_A_m1 = (p_A_i1 >= 0) & (p_A_i1 < (BT))
+    p_A = (
+        (A + (bos * H + i_h) * BT) + p_A_i0[:, None] * (H * BT) + p_A_i1[None, :] * (1)
     )
     # [BT, BV]
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, mask=p_v_m0[:, None] & p_v_m1[None, :], other=0)
     # [BT, BT]
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_A = tl.load(p_A, mask=p_A_m0[:, None] & p_A_m1[None, :], other=0)
     b_A = tl.where(m_s, b_A, 0.0).to(b_v.dtype)
     b_o += tl.dot(b_A, b_v)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_m0[:, None] & p_o_m1[None, :])
 
 
 def chunk_gla_fwd_o_gk(

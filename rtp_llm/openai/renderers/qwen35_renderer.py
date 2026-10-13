@@ -43,4 +43,5 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
 
 register_renderer("qwen35_moe", Qwen35Renderer)
 register_renderer("qwen35_dense", Qwen35Renderer)
+register_renderer("qwen35_dense_mtp", Qwen35Renderer)
 register_renderer("qwen35_moe_mtp", Qwen35Renderer)

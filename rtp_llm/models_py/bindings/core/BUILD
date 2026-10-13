@@ -2,6 +2,22 @@ load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "gpu_block_copy",
+    srcs = ["GpuBlockCopy.cc"],
+    hdrs = ["GpuBlockCopy.h"],
+    deps = torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",
@@ -54,6 +70,16 @@ cc_library(
 )
 
 cc_library(
+    name = "tensor_holder",
+    hdrs = [
+        "TensorHolder.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_data",
     hdrs = [
         "OpData.h",
@@ -64,6 +90,7 @@ cc_library(
     deps = [
         ":type_convert",
         ":common_defines",
+        ":tensor_holder",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",
@@ -98,14 +125,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
 cc_library(
@@ -122,6 +141,8 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -133,7 +154,7 @@ cc_library(
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
@@ -182,7 +203,7 @@ filegroup(
 # lives in exactly ONE .so.
 #
 # exec_ctx_state: ExecOps.cc
-#   Defines the non-inline globalRuntime() singleton + comm op callbacks.
+#   Defines process-global runtime and Python callback state.
 #   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
 #
 # exec_ctx_ops: CudaOps.cc + sample ops
@@ -204,6 +225,8 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -215,7 +238,7 @@ cc_library(
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
@@ -268,6 +291,7 @@ cc_library(
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
@@ -302,6 +326,7 @@ cc_library(
         ":op_data",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
     ] + torch_deps() + select({
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
@@ -314,13 +339,29 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+# Isolate CudaSampleOp.cc from GPU-only dependencies so the generic PyTorch
+# fallback remains compile- and testable under --config=cpu.
+cc_library(
+    name = "generic_sampler_fallback_test_lib",
+    srcs = ["CudaSampleOp.cc"],
+    deps = [
+        ":common_defines",
+        ":op_data",
+    ] + torch_deps(),
+    copts = copts(),
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
 )
 
 # Combined target for backward compatibility — pulls in both state + ops.
@@ -342,10 +383,14 @@ cc_library(
     hdrs = ["CacheStoreAsyncWriter.h"],
     srcs = ["CacheStoreAsyncWriter.cc"],
     deps = [
+        ":exec_ops_hdr",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = copts(),
 )

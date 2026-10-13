@@ -3,8 +3,8 @@
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
+#include <functional>
 #include <memory>
-#include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 
@@ -26,10 +26,19 @@ namespace rtp_llm {
 // Mock model that returns random logits for testing NormalEngine without Python
 class MockModel: public ModelBase {
 public:
-    MockModel(size_t vocab_size): vocab_size_(vocab_size) {}
+    using ForwardHook = std::function<void(const GptModelInputs&)>;
+
+    MockModel(size_t vocab_size, ForwardHook forward_hook = {}):
+        vocab_size_(vocab_size), forward_hook_(std::move(forward_hook)) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
+        if (forward_hook_) {
+            forward_hook_(inputs);
+        }
         GptModelOutputs outputs;
+        if (inputs.skip_lm_head) {
+            return outputs;
+        }
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
         outputs.logits     = torch::randn({num_tokens, (int64_t)vocab_size_},
@@ -38,13 +47,22 @@ public:
     }
 
 private:
-    size_t vocab_size_;
+    size_t      vocab_size_;
+    ForwardHook forward_hook_;
 };
 
 struct CustomConfig {
-    bool                                    reuse_cache        = false;
-    DataType                                kv_cache_data_type = DataType::TYPE_FP16;
+    bool                                    reuse_cache         = false;
+    bool                                    enable_device_cache = true;
+    DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
+    RoleType                                role_type           = RoleType::PDFUSION;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
+    bool                                    prefill_cp_enabled             = false;
+    bool                                    speculative_enabled            = false;
+    bool                                    warm_up_with_loss              = false;
+    int                                     output_dispatcher_worker_count = 0;
+    int                                     tokens_per_block               = 2;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -66,6 +84,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.activation_type                                = ActivationType::Silu;
     kv_cache_config.test_block_num                              = 100;
     kv_cache_config.reuse_cache                                 = config.reuse_cache;
+    kv_cache_config.enable_device_cache                         = config.enable_device_cache;
     kv_cache_config.multi_task_prompt_tokens                    = config.multi_task_prompt_tokens;
     runtime_config.max_generate_batch_size                      = 128;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
@@ -77,9 +96,10 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
 
     const size_t inter_size = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
-    model_config.attn_config.tokens_per_block = 2;
-    kv_cache_config.seq_size_per_block        = model_config.attn_config.tokens_per_block;
-    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.tokens_per_block;
+    model_config.attn_config.tokens_per_block        = config.tokens_per_block;
+    model_config.attn_config.kernel_tokens_per_block = config.tokens_per_block;
+    kv_cache_config.seq_size_per_block               = model_config.attn_config.tokens_per_block;
+    kv_cache_config.kernel_seq_size_per_block        = model_config.attn_config.kernel_tokens_per_block;
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 
@@ -126,7 +146,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     // Create all config objects with defaults
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
-    rtp_llm::ParallelismConfig           parallelism_config;
+    rtp_llm::ParallelismConfig parallelism_config;
+    model_config.output_vocab_ids = config.output_vocab_ids;
+    if (!config.output_vocab_ids.empty()) {
+        model_config.output_vocab_padded_size = static_cast<int64_t>(config.output_vocab_ids.size());
+    }
+    if (config.prefill_cp_enabled) {
+        parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    }
     rtp_llm::PDSepConfig                 pd_sep_config;
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;
@@ -136,12 +163,16 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MoeConfig                   moe_config;
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
-    rtp_llm::CacheStoreConfig            cache_store_config;
-    rtp_llm::MiscellaneousConfig         misc_config;
-    rtp_llm::ArpcConfig                  arpc_config;
-    rtp_llm::GrpcConfig                  grpc_config;
-    rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
-    rtp_llm::VitConfig                   vit_config;
+    sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
+    runtime_config.warm_up_with_loss = config.warm_up_with_loss;
+    rtp_llm::CacheStoreConfig      cache_store_config;
+    rtp_llm::MiscellaneousConfig   misc_config;
+    rtp_llm::ArpcConfig            arpc_config;
+    rtp_llm::GrpcConfig            grpc_config;
+    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
+    rtp_llm::VitConfig             vit_config;
+    runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
+    pd_sep_config.role_type                       = config.role_type;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
@@ -177,9 +208,12 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
-    NormalExecutor::test_model_factory   = nullptr;
-    return engine;
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
 }
 
 }  // namespace rtp_llm

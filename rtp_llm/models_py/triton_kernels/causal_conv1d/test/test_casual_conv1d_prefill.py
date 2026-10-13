@@ -163,9 +163,12 @@ class TestCausalConv1dPrefill(unittest.TestCase):
 
             # 对齐成二维tensor，右边补-1
             max_blocks = max(block_num) if block_num else 0
-            block_indices_tensor = torch.full(
-                (batch, max_blocks), -1, device=device, dtype=torch.int32
+            # Match CUDA graph replay, where the active block table is a
+            # narrow view backed by a wider persistent allocation.
+            block_indices_storage = torch.full(
+                (batch, max_blocks + 1), -1, device=device, dtype=torch.int32
             )
+            block_indices_tensor = block_indices_storage[:, :max_blocks]
             for i, indices in enumerate(block_indices_list):
                 block_indices_tensor[i, : len(indices)] = indices
 
@@ -278,9 +281,10 @@ class TestCausalConv1dPrefill(unittest.TestCase):
                 offset += block_num[i]
             # 对齐成二维tensor，右边补-1
             max_blocks = max(block_num) if block_num else 0
-            block_indices_tensor = torch.full(
-                (batch, max_blocks), -1, device=device, dtype=torch.int32
+            block_indices_storage = torch.full(
+                (batch, max_blocks + 1), -1, device=device, dtype=torch.int32
             )
+            block_indices_tensor = block_indices_storage[:, :max_blocks]
             for i, indices in enumerate(block_indices_list):
                 block_indices_tensor[i, : len(indices)] = indices
 

@@ -25,6 +25,32 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+// KV-cache protocol compatibility contract:
+// Grouped topology and independent block pools change block addressing and
+// payload structures. Prefill, decode, P2P, remote-cache, and host-cache
+// peers that exchange KV-cache RPCs must run the same build. Mixed-version
+// rollout across this protocol change is intentionally unsupported; no legacy
+// dual-read/write fallback is provided.
+message GroupBlockPB {
+    // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
+    int32 deprecated_group_id = 1;
+    int32 block_id = 2;
+    string tag = 3;
+}
+
+message TaggedBlockIdsPB {
+    string tag = 1;
+    repeated int32 block_ids = 2;
+}
+
+enum RoleTypePB {
+    ROLE_TYPE_PDFUSION = 0;
+    ROLE_TYPE_PREFILL = 1;
+    ROLE_TYPE_DECODE = 2;
+    ROLE_TYPE_VIT = 3;
+    ROLE_TYPE_FRONTEND = 4;
+}
+
 message RoleAddrPB {
     enum RoleType {
         PDFUSION = 0;
@@ -37,9 +63,21 @@ message RoleAddrPB {
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
+    string role_str = 5;
 }
 
 message GenerateConfigPB {
+    enum ThinkingModePB {
+        THINKING_MODE_UNSPECIFIED = 0;
+        THINKING_MODE_DISABLED = 1;
+        THINKING_MODE_ADAPTIVE = 2;
+        THINKING_MODE_ENABLED = 3;
+    }
+
+    // Keep this as a plain proto3 scalar for wire compatibility. Because omitted and explicitly assigned 0
+    // are indistinguishable on the wire, a bare zero retains the legacy target-prefill/internal-zero behavior.
+    // An unflagged zero with return_prompt_logits retains legacy prompt-scoring normalization. Positive values
+    // mean normal generation; negative values are invalid.
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -97,8 +135,8 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_batch = 55;
-    google.protobuf.Int32Value batch_group_timeout = 56;
+    reserved 55;
+    google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     int32 combo_token_size = 58;
@@ -114,6 +152,19 @@ message GenerateConfigPB {
     int32 prompt_logits_start = 65;
     int32 prompt_logits_end = 66;
     bool return_target_logprob = 67;
+    repeated int32 begin_think_token_ids = 68;
+    google.protobuf.StringValue json_schema = 69;
+    google.protobuf.StringValue regex = 70;
+    google.protobuf.StringValue ebnf = 71;
+    google.protobuf.StringValue structural_tag = 72;
+    ThinkingModePB thinking_mode = 73;
+    // 请求级 L3 写入开关；RPC 缺失时为 false。
+    bool enable_disk_cache = 74;
+    // Missing on legacy clients: preserve the engine's historical default true.
+    google.protobuf.BoolValue aux_info = 75;
+    // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
+    // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
+    bool prefill_only = 76;
 }
 
 message MMPreprocessConfigPB {
@@ -126,6 +177,7 @@ message MMPreprocessConfigPB {
     int32 max_frames = 7;
     repeated float crop_positions = 8;
     int32 mm_timeout_ms = 9;
+    int32 max_long_side_pixel = 11;
 }
 
 message MultimodalInputPB {
@@ -137,6 +189,55 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // LLM can receive the output through GPUDirect RDMA.
+    bool support_rdma = 2;
+    // Correlates frontend, ViT and content-inspection work.
+    int64 request_id = 3;
+    V41RequestInputsPB v41_inputs = 5;
+    // Remaining request budget for typed prepared images (no URL configs).
+    int64 timeout_ms = 4;
+}
+
+enum TensorDataTypePB {
+    RDMA_TENSOR_FLOAT32 = 0;
+    RDMA_TENSOR_INT32 = 1;
+    RDMA_TENSOR_FLOAT16 = 2;
+    RDMA_TENSOR_BFLOAT16 = 3;
+}
+
+message RdmaNicKeyPB {
+    uint32 nic_id = 1;
+    uint32 rkey = 2;
+}
+
+message TensorMetaPB {
+    repeated int64 shape = 1;
+    TensorDataTypePB data_type = 2;
+    uint64 offset = 3;
+    uint64 nbytes = 4;
+}
+
+message RdmaDescriptorPB {
+    uint64 remote_addr = 1;
+    repeated RdmaNicKeyPB nic_keys = 2;
+    string lease_id = 3;
+    string host = 4;
+    uint32 port = 5;
+    uint64 payload_bytes = 6;
+    repeated TensorMetaPB tensors = 7;
+}
+
+message MMRdmaSlotPB {
+    enum Role {
+        ROLE_UNSPECIFIED = 0;
+        EMBEDDING = 1;
+        POS_ID = 2;
+        EXTRA_INPUT = 3;
+    }
+    RdmaDescriptorPB rdma_descriptor = 1;
+    // Must have the same length as rdma_descriptor.tensors and match it by index.
+    // EXTRA_INPUT entries preserve their original order across all slots.
+    repeated Role roles = 2;
 }
 
 message MultimodalOutputPB {
@@ -144,6 +245,56 @@ message MultimodalOutputPB {
     TensorPB multimodal_pos_id = 2;
     repeated TensorPB multimodal_extra_input = 3;
     repeated int32 split_size = 4;
+    // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
+    repeated MMRdmaSlotPB output_rdma_slots = 5;
+    // Compact CPU row hashes stay inline for either transport.
+    TensorPB multimodal_feature_hash = 7;
+}
+
+message ReleaseLeasePB {
+    repeated string lease_id = 1;
+}
+
+message TraceContextPB {
+    string traceparent = 1;
+    string tracestate = 2;
+}
+
+message RequestInfoPB {
+    string frontend_ip = 1;
+    string dash_ip = 2;
+    string trace_id = 3;
+    string request_id = 4;
+    string source_role = 5;
+    TraceContextPB trace_context = 6;
+}
+
+message MultimodalTokenSpanPB {
+    int32 offset = 1;
+    int32 length = 2;
+}
+
+message MultimodalTokenLayoutPB {
+    reserved 1;
+    // In ViT output segment order, including all segments of a video.
+    repeated MultimodalTokenSpanPB spans = 2;
+}
+
+message V41ImageInputPB {
+    int32 start = 1;
+    int32 n_vit_h = 2;
+    int32 n_vit_w = 3;
+    TensorPB patches = 4;
+    repeated int32 types = 5;
+    string content_sha256 = 6;
+    string processor_identity = 7;
+}
+
+message V41RequestInputsPB {
+    int32 schema_version = 1;
+    repeated sint32 token_types = 2;
+    repeated bool image_mask = 3;
+    repeated V41ImageInputPB images = 4;
 }
 
 message GenerateInputPB {
@@ -153,8 +304,16 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    int32 batch_group_size = 7;
-    google.protobuf.Int64Value batch_group_id = 8;
+    int32 group_size = 7;
+    google.protobuf.Int64Value group_id = 8;
+    RequestInfoPB request_info = 9;
+    // Auto-TPM QoS priority (task40): 1-100; 0 = not set (request carries no
+    // priority). Used as a metrics tag on engine-side TPS
+    // reporting; never affects engine scheduling.
+    int32 priority = 10;
+    // token_ids are already expanded when this field is present.
+    MultimodalTokenLayoutPB multimodal_token_layout = 11;
+    V41RequestInputsPB v41_inputs = 12;
 }
 
 message AuxInfoPB {
@@ -184,6 +343,12 @@ message AuxInfoPB {
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
     map<int32, int32> multimodal_lengths = 27;
+    int32 speculative_draft_rounds = 28;
+    repeated int32 speculative_accepted_tokens_per_pos = 29;
+    string generation_prefill_cuda_graph_status = 30;
+    int32 disk_reuse_len = 31;
+    int32 prefill_disk_reuse_len = 32;
+    int32 decode_disk_reuse_len = 33;
 }
 
 message PromptLogitsOutputPB {
@@ -204,6 +369,8 @@ message FlattenOutputPB {
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
     PromptLogitsOutputPB prompt_logits = 9;
+    // Output of the deployment-registered post-layers CustomHandler.
+    TensorPB custom_output = 10;
 }
 
 message GenerateOutputsPB {
@@ -216,6 +383,8 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    // Advertised only by the Decode ALLOCATE response.
+    bool supports_prefill_completion = 10;
 }
 
 // return to python client
@@ -251,6 +420,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    INVALID_PARAMS = 26;
+    EXECUTION_EXCEPTION = 27;
 }
 
 // transfer between prefill and decode
@@ -265,6 +436,8 @@ enum RemoteStage {
     ALLOCATE = 0;
     LOAD = 1;
     GENERATE = 2;
+    // Prefill completed locally after LOAD; no Decode execution is required.
+    PREFILL_COMPLETE = 3;
 }
 
 message GenerateRequestPB {
@@ -281,26 +454,34 @@ message GenerateRequestPB {
     TensorPB propose_hidden = 11;
 }
 
-// in tp case, decode master broadcast to decode worker
+// In the TP case, the decode master broadcasts to decode workers.
+// This request uses the tagged grouped-cache layout. Legacy group-addressing
+// field numbers stay reserved even though mixed-version KV-cache deployment is
+// outside the supported protocol contract documented above.
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
     repeated string peer_addrs = 3;
     repeated int64 cache_keys = 4;
-    repeated int32 block_ids = 5;
+    reserved 5;
+    reserved "block_ids";
     int64 block_num = 6;
     int64 reuse_block_size = 7;
     int64 timeout_ms = 8;
     int64 dp_rank = 9;
     int32 partition_count = 10;
     int32 partition_id = 11;
-    repeated IntVector group_block_ids = 12;
+    reserved 12;
+    reserved "group_block_ids";
+    int32 prefill_cp_size = 13;
+    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
 
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    int64 loaded_cache_block_count = 3;
 }
 
 message RemoteFinishRequestPB {
@@ -369,6 +550,15 @@ message CacheStatusPB {
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    MultimodalCacheStatusPB multimodal_cache = 6;
+}
+
+message MultimodalCacheStatusPB {
+    string worker_instance = 1;
+    reserved 2;
+    repeated string keys = 3;
+    repeated string gpu_embedding_keys = 4;
+    repeated string cpu_embedding_keys = 5;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -392,6 +582,27 @@ message StartProfileInternalRequestPB {
     int32 num_steps = 3;
 }
 
+message TorchAllocatorDumpRequestPB {
+    string auth_token = 1;
+    string dump_id = 2;
+}
+
+message TorchAllocatorDumpResultPB {
+    int64 world_rank = 1;
+    int64 dp_rank = 2;
+    int64 tp_rank = 3;
+    int64 local_rank = 4;
+    int64 pid = 5;
+    bool success = 6;
+    string file_path = 7;
+    string error = 8;
+    string dump_id = 9;
+}
+
+message TorchAllocatorDumpResponsePB {
+    repeated TorchAllocatorDumpResultPB results = 1;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -399,6 +610,19 @@ message CheckHealthResponsePB {
 message UpdateEplbConfigRequestPB {
     string mode = 1;
     int32 update_time = 2;
+}
+
+enum TaskPhase {
+    TASK_PHASE_PENDING = 0;
+    TASK_PHASE_RECEIVED = 1;
+    TASK_PHASE_KV_ALLOCATED = 2;
+    TASK_PHASE_RUNNING = 3;
+}
+
+enum PriorityPreemptionProgressPB {
+    PRIORITY_PREEMPTION_NONE = 0;
+    PRIORITY_PREEMPTION_CANCELING = 1;
+    PRIORITY_PREEMPTION_CANCELED = 2;
 }
 
 message TaskInfoPB {
@@ -412,6 +636,12 @@ message TaskInfoPB {
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
     bool is_waiting = 9;
+    ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
+    TaskPhase phase = 12;
+    int64 execution_time_ms = 13;
+    PriorityPreemptionProgressPB priority_preemption_progress = 14;
+    int32 priority = 15;
 }
 
 message UpdateWeightsRequestPB {
@@ -421,7 +651,10 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    string role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
+    // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
+    // protobuf returns the default value 0. Keep it for wire compatibility, but
+    // do not use it for routing, admission control, or batch-size decisions.
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -435,6 +668,16 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 dp_rank = 16;
+    int64 available_kv_cache = 17;
+    int64 total_kv_cache = 18;
+    reserved 19;
+    reserved "role_str";
+    RoleTypePB role_type = 20;
+    // Static limits used by the running Engine. FlexLB uses these values to
+    // avoid constructing a group that the Engine can never admit.
+    int64 max_seq_len = 21;
+    int64 max_batch_tokens_size = 22;
 }
 
 message EmbeddingInputPB {
@@ -464,6 +707,7 @@ message EmbeddingOutputPB {
 }
 
 service EmbeddingRpcService {
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
@@ -471,18 +715,35 @@ service EmbeddingRpcService {
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
-        repeated int32 gpu_blocks = 2;
+        int32 disk_block = 2;
+        repeated GroupBlockPB group_blocks = 3;
+        // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
+        uint64 deprecated_group_set_id = 4;
+        repeated string group_tags = 5;
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+        H2DISK = 2;
+        DISK2H = 3;
+        D2DISK = 4;
+        DISK2D = 5;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    int64 timeout_ms = 3;
 }
 
 message MemoryOperationResponsePB {
-    bool success = 1;
+    // gRPC status reports the RPC/transport outcome; this code reports the transfer
+    // business outcome of a handler that ran to completion. CODE_UNSPECIFIED is the
+    // protobuf default and means the handler never filled in a result.
+    enum Code {
+        CODE_UNSPECIFIED = 0;
+        OK = 1;
+        FAILED = 2;
+    }
+    Code code = 1;
 }
 
 message TPWorkerInfoPB {
@@ -494,6 +755,7 @@ message LayerCacheBlockPB {
     uint32 layer_id = 1;
     repeated int64 cache_keys = 2;
     repeated uint32 block_ids = 3;
+    string cache_tag = 4;
 }
 
 enum P2PConnectorBroadcastType {
@@ -557,12 +819,13 @@ message P2PConnectorStartLoadResponsePB {
     reserved 1 to 8;
     reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
 
-    // Error handling - preserve field numbers 9, 10 for backward compatibility with deployed nodes
+    // Keep error field numbers stable within this schema. This does not imply
+    // mixed-version support for grouped/independent-pool KV-cache deployments.
     ErrorCodePB error_code = 9;
     string error_message = 10;
 
     // New side-channel payload: all data carried as structured map + scalars
-    // Field number 12+ to avoid conflict with legacy error_code (was field 9 in old proto)
+    // Field 12 avoids conflict with the error fields in the current schema.
     SideChannelPayloadPB payload = 12;
 }
 
@@ -589,11 +852,16 @@ message FunctionRequestPB {
 }
 
 message RemoteOperationRequestPB {
+    // group_tags is the only valid group identity. Remote/memory connector
+    // peers must follow the same-build KV-cache protocol contract documented
+    // above; the legacy numeric identity remains reserved without a fallback.
     RemoteOpType op = 1;
     string trace_id = 2;
-    repeated int32 group_ids = 3;
+    reserved 3;
+    reserved "group_ids";
     repeated int32 block_ids = 4;
     repeated string uris = 5;
+    repeated string group_tags = 6;
 }
 
 message RemoteOperationResponsePB {
@@ -622,6 +890,74 @@ message BatchGenerateOutputsPB {
     repeated BatchGenerateResultPB results = 1;
 }
 
+message EnqueueBatchExternalInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueBatchDpSlotPB {
+    int32 dp_rank = 1;
+    repeated EnqueueBatchExternalInputPB requests = 2;
+}
+
+message EnqueueBatchRequestPB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchDpSlotPB dp_slots = 2;
+    // Lease between successful enqueue and FetchResponse attachment. Zero uses
+    // the Prefill server default.
+    int64 fetch_attach_timeout_ms = 3;
+}
+
+message EnqueueGroupInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueGroupRequestPB {
+    int64 batch_id = 1;
+    int32 dp_rank = 2;
+    repeated EnqueueGroupInputPB requests = 3;
+    int64 fetch_attach_timeout_ms = 4;
+}
+
+message EnqueueBatchSuccessPB {
+    int64 request_id = 1;
+}
+
+message EnqueueBatchErrorPB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message EnqueueBatchResponsePB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchSuccessPB successes = 2;
+    repeated EnqueueBatchErrorPB errors = 3;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+message CancelRequestPB {
+    int64 request_id = 1;
+}
+
+enum CancelStatusPB {
+    CANCEL_STATUS_UNSPECIFIED = 0;
+    // The original Prefill atomically installed the priority-preemption
+    // latch/intent and triggered current-or-future P-to-D cancellation. This
+    // is not a resource-release acknowledgement.
+    CANCEL_STATUS_ACCEPTED = 1;
+    CANCEL_STATUS_NOT_FOUND = 2;
+    // No active request was visible, so Prefill installed (or found) a
+    // short-lived request-id tombstone. A later Enqueue for the same id is
+    // rejected with 8429 before it can reach the Engine scheduler.
+    CANCEL_STATUS_TOMBSTONED = 3;
+}
+
+message CancelResponsePB {
+    CancelStatusPB status = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -639,6 +975,8 @@ service RpcService {
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
+    rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
+    rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
@@ -648,12 +986,52 @@ service RpcService {
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    // AutoTPM priority-preemption Cancel targets the original Prefill role.
+    // Prefill triggers the existing Prefill->Decode stream cancellation;
+    // Decode does not implement this RPC. Completion is reported separately
+    // by Prefill WorkerStatus as priority_preemption_progress=CANCELED with
+    // error code 8429. The original Enqueue/Fetch path also returns 8429.
+    rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }
 
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
 // because VIT proxy and LLM backend are always deployed together in this service.
+// Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
+// inputs computes missing hashes and waits for any enabled safety inspection.
+message MultimodalHashRequestPB {
+    repeated string keys = 1;
+    MultimodalInputsPB inputs = 2;
+    int64 timeout_ms = 3;
+}
+
+message MultimodalHashEntryPB {
+    string key = 1;
+    bool hash_hit = 2;
+    bool embedding_hit = 3;
+    string embedding_tier = 4;
+    bool greennet_passed = 5;
+    string entry_generation = 6;
+    repeated uint32 split_size = 7;
+    // Flattened little-endian signed int32 hashes, one per output token.
+    bytes feature_hashes = 8;
+}
+
+message MultimodalHashResponsePB {
+    string worker_instance = 1;
+    reserved 2;
+    repeated MultimodalHashEntryPB entries = 3;
+}
+
 service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // Best-effort release after the LLM finishes reading remote slots.
+    rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
+    rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
+    rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
 }

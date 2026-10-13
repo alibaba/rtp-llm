@@ -2,10 +2,6 @@ from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    MultimodalOutputPB,
-    TensorPB,
-)
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.vit_metrics import (
     collect_vit_preprocess_metrics,
@@ -13,48 +9,9 @@ from rtp_llm.multimodal.vit_metrics import (
     video_resized_pixel_count,
     vit_preprocess_timer,
 )
-from rtp_llm.server.vit_rpc_server import _report_output_metrics, _tensor_pb_bytes
 
 
 class VitMetricsTest(TestCase):
-    def test_tensor_pb_bytes_counts_data_fields(self):
-        tensor = TensorPB(
-            fp32_data=b"1234",
-            int32_data=b"12",
-            fp16_data=b"1",
-            bf16_data=b"",
-        )
-        self.assertEqual(_tensor_pb_bytes(tensor), 7)
-
-    def test_multimodal_output_bytes_and_split_size_are_available(self):
-        output = MultimodalOutputPB(
-            multimodal_embedding=TensorPB(bf16_data=b"1234"),
-            split_size=[3, 5],
-        )
-        self.assertGreater(output.ByteSize(), 0)
-        self.assertEqual(sum(output.split_size), 8)
-
-    def test_report_output_metrics_counts_extra_input_bytes(self):
-        output = MultimodalOutputPB(
-            multimodal_embedding=TensorPB(bf16_data=b"1234"),
-            multimodal_pos_id=TensorPB(int32_data=b"12345678"),
-            split_size=[3, 5],
-        )
-        output.multimodal_extra_input.extend(
-            [TensorPB(fp16_data=b"12"), TensorPB(bf16_data=b"123")]
-        )
-
-        with patch("rtp_llm.server.vit_rpc_server.kmonitor.report") as report:
-            _report_output_metrics(output, {"source": "test"})
-
-        samples = {call.args[0]: call.args[1] for call in report.call_args_list}
-        self.assertEqual(report.call_count, 5)
-        self.assertGreater(samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], 0)
-        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 4)
-        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 8)
-        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 5)
-        self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 8)
-
     def test_collect_vit_preprocess_metrics_records_values_and_timers(self):
         with collect_vit_preprocess_metrics() as metrics:
             record_vit_preprocess_value(
@@ -81,7 +38,11 @@ class VitMetricsTest(TestCase):
             url="memory://video",
             mm_preprocess_config=SimpleNamespace(),
         )
-        vit_config = SimpleNamespace(download_headers={})
+        vit_config = SimpleNamespace(
+            download_headers={},
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=2048,
+        )
         processor = SimpleNamespace(
             video_processor=MagicMock(
                 return_value={
@@ -94,7 +55,7 @@ class VitMetricsTest(TestCase):
 
         with patch.object(
             qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
-        ), patch.object(
+        ) as get_bytes, patch.object(
             qwen3_vl_mixin.Qwen3_VLImageEmbedding,
             "load_video",
             return_value=video,
@@ -107,6 +68,11 @@ class VitMetricsTest(TestCase):
 
         self.assertEqual(tuple(pixel_values.shape), (1, 3, 10, 12))
         self.assertEqual(video_grid_thw.tolist(), [[1, 1, 1]])
+        get_bytes.assert_called_once_with(
+            "memory://video",
+            {},
+            max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+        )
         load_video.assert_called_once_with(
             b"video",
             mm_input.mm_preprocess_config,
@@ -130,7 +96,11 @@ class VitMetricsTest(TestCase):
                 height=-1, width=-1, min_pixels=-1, max_pixels=-1
             ),
         )
-        vit_config = SimpleNamespace(download_headers={})
+        vit_config = SimpleNamespace(
+            download_headers={},
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=2048,
+        )
         processor = SimpleNamespace(
             image_processor=MagicMock(
                 return_value={
@@ -142,12 +112,17 @@ class VitMetricsTest(TestCase):
 
         with patch.object(
             qwen3_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ), patch.object(qwen3_vl_mixin.Image, "open", return_value=image):
+        ) as get_bytes, patch.object(qwen3_vl_mixin.Image, "open", return_value=image):
             with collect_vit_preprocess_metrics() as metrics:
                 qwen3_vl_mixin.Qwen3_VLImageEmbedding.preprocess_input(
                     [mm_input], vit_config, processor
                 )
 
+        get_bytes.assert_called_once_with(
+            "memory://image",
+            {},
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         samples = {sample.metric: sample for sample in metrics.samples}
         self.assertEqual(
             samples[GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC].tags,
@@ -174,7 +149,11 @@ class VitMetricsTest(TestCase):
             url="memory://image",
             mm_preprocess_config=SimpleNamespace(),
         )
-        vit_config = SimpleNamespace(download_headers={})
+        vit_config = SimpleNamespace(
+            download_headers={},
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=2048,
+        )
         processor = MagicMock(
             return_value={
                 "pixel_values": torch.zeros((1, 3, 10, 12)),
@@ -184,7 +163,7 @@ class VitMetricsTest(TestCase):
 
         with patch.object(
             qwen2_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ), patch.object(
+        ) as get_bytes, patch.object(
             qwen2_vl_mixin.Qwen2_VLImageEmbedding,
             "load_image",
             return_value=image,
@@ -195,6 +174,11 @@ class VitMetricsTest(TestCase):
                 )
 
         expected_tags = {"model": "qwen2_vl", "mm_type": "image"}
+        get_bytes.assert_called_once_with(
+            "memory://image",
+            {},
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         load_image.assert_called_once_with(
             b"image", mm_input.mm_preprocess_config, vit_metrics_tags=expected_tags
         )
@@ -219,7 +203,11 @@ class VitMetricsTest(TestCase):
             url="memory://image",
             mm_preprocess_config=SimpleNamespace(),
         )
-        vit_config = SimpleNamespace(download_headers={})
+        vit_config = SimpleNamespace(
+            download_headers={},
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=2048,
+        )
         processor = MagicMock(
             return_value={
                 "pixel_values": torch.zeros((1, 3, 10, 12)),
@@ -229,7 +217,7 @@ class VitMetricsTest(TestCase):
 
         with patch.object(
             qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"image"
-        ), patch.object(
+        ) as get_bytes, patch.object(
             qwen2_5_vl_mixin.Qwen2_VLImageEmbedding,
             "load_image",
             return_value=image,
@@ -240,6 +228,11 @@ class VitMetricsTest(TestCase):
                 )
             )
 
+        get_bytes.assert_called_once_with(
+            "memory://image",
+            {},
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         self.assertEqual(tuple(pixel_values.shape), (1, 3, 10, 12))
         self.assertEqual(image_grid_thw.tolist(), [[1, 1, 1]])
         load_image.assert_called_once_with(
@@ -263,7 +256,11 @@ class VitMetricsTest(TestCase):
             url="memory://video",
             mm_preprocess_config=SimpleNamespace(),
         )
-        vit_config = SimpleNamespace(download_headers={})
+        vit_config = SimpleNamespace(
+            download_headers={},
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=2048,
+        )
         processor = MagicMock(
             return_value={
                 "pixel_values_videos": torch.zeros((1, 3, 10, 12)),
@@ -273,7 +270,7 @@ class VitMetricsTest(TestCase):
 
         with patch.object(
             qwen2_5_vl_mixin, "get_bytes_io_from_url", return_value=b"video"
-        ), patch.object(
+        ) as get_bytes, patch.object(
             qwen2_5_vl_mixin.Qwen2_5_VLImageEmbedding,
             "load_video",
             return_value=video,
@@ -284,6 +281,11 @@ class VitMetricsTest(TestCase):
                 )
             )
 
+        get_bytes.assert_called_once_with(
+            "memory://video",
+            {},
+            max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+        )
         self.assertEqual(tuple(pixel_values.shape), (1, 3, 10, 12))
         self.assertEqual(video_grid_thw.tolist(), [[1, 1, 1]])
         load_video.assert_called_once_with(

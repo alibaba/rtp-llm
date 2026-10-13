@@ -5,8 +5,8 @@
 #include <optional>
 #include <mutex>
 
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/Meta.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -20,7 +20,7 @@ public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input):
         GenerateStream(input, createMockModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
 
-    ErrorResult<GenerateOutputs> nextOutput() override {
+    ErrorResult<GenerateOutputs> nextOutput(int64_t = 0) override {
         return ErrorResult<GenerateOutputs>(GenerateOutputs{});
     }
     void updateOutput(const StreamUpdateInfo&) override {}
@@ -36,7 +36,7 @@ private:
 /// @brief Mock Meta implementation for testing P2P routing.
 /// Holds routing context directly; GenerateStream* is optional and only
 /// needed for decode-side tests that exercise side-channel apply.
-class MockMeta: public rtp_llm::Meta {
+class MockMeta: public Meta {
 public:
     MockMeta() = default;
 

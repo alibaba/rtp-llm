@@ -1,0 +1,71 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "query_result": [
+        {
+            "name": "capital",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is the capital of France? Answer with only the city name."
+                }
+            ],
+            "expected_text": "Paris",
+            "result": {
+                "response": "Paris",
+                "output_ids": [
+                    [
+                        59604,
+                        151645
+                    ]
+                ]
+            }
+        },
+        {
+            "name": "arithmetic",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is 2 + 2? Answer with only the number."
+                }
+            ],
+            "expected_text": "4",
+            "result": {
+                "response": "4",
+                "output_ids": [
+                    [
+                        19,
+                        151645
+                    ]
+                ]
+            }
+        },
+        {
+            "name": "sentence",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Write exactly this sentence and nothing else: The red fox jumps over the blue fence."
+                }
+            ],
+            "expected_text": "The red fox jumps over the blue fence.",
+            "result": {
+                "response": "The red fox jumps over the blue fence.",
+                "output_ids": [
+                    [
+                        785,
+                        2518,
+                        38835,
+                        34208,
+                        916,
+                        279,
+                        6303,
+                        24650,
+                        13,
+                        151645
+                    ]
+                ]
+            }
+        }
+    ]
+}

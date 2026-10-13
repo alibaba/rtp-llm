@@ -50,6 +50,7 @@ The core features include:
    backend/server_arguments.md
    backend/sampling_params.md
    backend/attention_backend.md
+   backend/backend_registration.md
 
 .. toctree::
    :maxdepth: 1
@@ -66,6 +67,7 @@ The core features include:
 
    backend/speculative_decoding.md
    backend/reuse_kv_cache.md
+   backend/kv_cache_event_publisher.md
    backend/function_calling.ipynb
    backend/separate_reasoning.ipynb
    backend/quantization.md
@@ -94,5 +96,4 @@ The core features include:
       references/developer
       references/cli/Guide.md
       README.md
-
 

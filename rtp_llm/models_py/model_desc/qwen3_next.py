@@ -1,15 +1,22 @@
 import logging
 import sys
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -22,7 +29,6 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -31,6 +37,20 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
+    AiterFlydslGdnDecodeStateMetadata,
+    _is_aiter_flydsl_gdn_decode_disabled,
+    aiter_flydsl_gdn_decode,
+    is_aiter_flydsl_gdn_decode_supported,
+    prepare_aiter_flydsl_gdn_decode_state_indices,
+    validate_aiter_flydsl_gdn_decode_real_state_indices,
+)
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
+    build_aiter_flydsl_gdn_prefill_metadata,
+    chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states,
+    is_aiter_flydsl_gdn_prefill_available,
+    is_aiter_flydsl_gdn_prefill_supported,
+)
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -60,7 +80,34 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.swizzle_utils import (
+    can_fuse_swizzled_kn,
+    should_swizzle_linear_attn_ba,
+)
 from rtp_llm.utils.util import to_torch_dtype
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _warn_qkvz_ba_swizzle_fallback(
+    qkvz_shape: tuple[int, ...], ba_shape: tuple[int, ...]
+) -> None:
+    logger.warning(
+        "Disabling Qwen3Next qkvz+ba fusion because ROCm swizzle cannot safely "
+        "combine qkvz shape %s with ba shape %s; using separate swizzled qkvz "
+        "and unswizzled ba GEMMs",
+        qkvz_shape,
+        ba_shape,
+    )
+
+
+@dataclass(frozen=True)
+class _AiterFlydslGdnDecodeCacheEntry:
+    state_metadata: AiterFlydslGdnDecodeStateMetadata
+    read_indices: torch.Tensor
+    write_indices: torch.Tensor
+    invalid_row_flags: torch.Tensor
 
 
 class Qwen3NextMetadata(object):
@@ -73,7 +120,10 @@ class Qwen3NextMetadata(object):
         cp_restore_indices: Optional[torch.Tensor] = None,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
-        cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
+        is_cuda_graph: bool = False,
+        aiter_gdn_prefill_metadata: (
+            dict[int, tuple[torch.Tensor, object]] | None
+        ) = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -82,14 +132,279 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
-        self.cp_write_cache_store_impl = cp_write_cache_store_impl
+        self.is_cuda_graph = is_cuda_graph
+        self.aiter_gdn_prefill_metadata = aiter_gdn_prefill_metadata or {}
+        # One metadata instance is shared by all layers in a model forward.
+        # Decode state indices are layer-independent, so cache them by the
+        # backing block-table/length storage and reuse them across GDN layers.
+        self.aiter_flydsl_gdn_decode_indices: dict[
+            tuple[object, ...], _AiterFlydslGdnDecodeCacheEntry
+        ] = {}
+        self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
 
+    def get_aiter_gdn_prefill_metadata(self, cu_seqlens: torch.Tensor) -> object | None:
+        entry = self.aiter_gdn_prefill_metadata.get(id(cu_seqlens))
+        if entry is None or entry[0] is not cu_seqlens:
+            return None
+        return entry[1]
+
     @property
     def is_cp_linear_attn(self) -> bool:
         return self.cp_restore_indices is not None
+
+
+def _write_cp_cache_store(
+    attention_inputs: PyAttentionInputs, kv_cache: LayerKVCache
+) -> None:
+    """Write a CP linear layer using that layer's tag-local cache metadata."""
+    cache_store_inputs = attention_inputs.cache_store_inputs
+    cache_store_writer = attention_inputs.cache_store_writer
+    if cache_store_inputs is None or cache_store_writer is None:
+        return
+    cache_store_writer.write(cache_store_inputs, kv_cache)
+
+
+def _maybe_write_cp_cache_store(
+    attention_inputs: PyAttentionInputs,
+    kv_cache: Optional[LayerKVCache],
+    attn_meta: Qwen3NextMetadata,
+) -> None:
+    """Keep CacheStore writes on the CP linear-attention path only."""
+    if kv_cache is None or not attn_meta.is_cp_linear_attn:
+        return
+    _write_cp_cache_store(attention_inputs, kv_cache)
+
+
+def _is_aiter_flydsl_gdn_prefill_enabled() -> bool:
+    """Automatically select the complete optional ROCm backend when present."""
+    return is_aiter_flydsl_gdn_prefill_available()
+
+
+def _cpu_sequence_lengths(lengths: torch.Tensor) -> tuple[int, ...] | None:
+    """Reuse host lengths without introducing a device synchronization."""
+    if lengths.device.type != "cpu":
+        return None
+    return tuple(int(length) for length in lengths.tolist())
+
+
+def _validate_aiter_flydsl_gdn_decode_eager_state(
+    state_metadata: AiterFlydslGdnDecodeStateMetadata,
+    *,
+    is_cuda_graph: bool,
+) -> None:
+    """Validate live normal-forward state without touching graph capture data.
+
+    A disabled graph and a graph miss both call ``prepare_fmha_impl(...,
+    False)`` before normal forward, so ``is_cuda_graph`` is false in both eager
+    cases. Captured inputs use synthetic zero block tables and are validated
+    later by the model's replay hook after live host metadata has been copied.
+    """
+    if not is_cuda_graph:
+        validate_aiter_flydsl_gdn_decode_real_state_indices(state_metadata)
+
+
+class _QwenGraphAttentionImpls(dict):
+    """Keep the existing FMHA callback set and carry graph identity."""
+
+    def __init__(self, impls, replay=None):
+        super().__init__(impls)
+        self.replay = replay
+
+    def bind_graph_inputs(self, inputs):
+        if self.replay is not None:
+            self.replay.bind_graph_inputs(inputs)
+
+
+@dataclass(frozen=True)
+class _GdnReplayBuffers:
+    sequence_lengths: torch.Tensor
+    kv_cache_kernel_block_id: torch.Tensor
+    sequence_lengths_plus_1_device: torch.Tensor
+
+
+class _QwenGdnGraphDelegate:
+    """Bind actual capture tensors, then validate through one FMHA callback.
+
+    Each warmup/capture forward registers its bucket's real destination
+    tensors. Replay copies into these tensors before the existing callback.
+    No assumption about different buckets sharing storage is required.
+    """
+
+    def __init__(self, bounds_by_tag, anchor, delegate):
+        self.bounds_by_tag = bounds_by_tag
+        self.anchor = anchor
+        self.delegate = delegate
+        self._buckets = {}
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    @staticmethod
+    def _key(lengths):
+        return (lengths.data_ptr(), tuple(lengths.shape), lengths.stride())
+
+    def bind_graph_inputs(self, inputs):
+        if not self.bounds_by_tag:
+            return
+        groups = get_attention_inputs_value(inputs)
+        if isinstance(groups, PyAttentionInputs):
+            groups = {"": groups}
+        anchor_lengths = groups[self.anchor].sequence_lengths
+        registrations = []
+        cleared = set()
+        for tag, bounds in self.bounds_by_tag.items():
+            group = groups[tag]
+            buffers = _GdnReplayBuffers(
+                group.sequence_lengths,
+                group.kv_cache_kernel_block_id,
+                group.sequence_lengths_plus_1_device,
+            )
+            clear_key = (
+                self._key(buffers.sequence_lengths),
+                self._key(buffers.sequence_lengths_plus_1_device),
+            )
+            registrations.append(
+                (_GdnDecodeGraphReplay(bounds), buffers, clear_key not in cleared)
+            )
+            cleared.add(clear_key)
+        # Retain the anchor owner too, so pointer reuse cannot match an old
+        # registry entry after its original storage has been released.
+        self._buckets[self._key(anchor_lengths)] = (anchor_lengths, registrations)
+
+    def prepare_cuda_graph(self, inputs):
+        if self.bounds_by_tag:
+            key = self._key(inputs.sequence_lengths)
+            if key not in self._buckets:
+                raise RuntimeError(
+                    "GDN replay bucket was not registered during capture"
+                )
+            _, registrations = self._buckets[key]
+            for hook, buffers, clear in registrations:
+                hook.prepare_cuda_graph(buffers, clear_padding=clear)
+        if self.delegate is not None:
+            self.delegate.prepare_cuda_graph(inputs)
+
+
+class _GdnDecodeGraphReplay:
+    """Qwen ROCm-only replay hook using the existing attention callback.
+
+    Each captured implementation owns its pool bounds. The graph runner has
+    already refreshed CPU lengths (zero padded) and block tables before this
+    callback; no device-to-host copy or synchronization is needed here.
+    """
+
+    def __init__(self, bounds, delegate=None):
+        self.bounds = tuple(sorted(set(bounds)))
+        self.delegate = delegate
+        self._host_views = None
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def prepare_cuda_graph(self, inputs, *, clear_padding=True):
+        if not self.bounds:
+            if self.delegate is not None:
+                self.delegate.prepare_cuda_graph(inputs)
+            return
+        lengths = inputs.sequence_lengths
+        blocks = inputs.kv_cache_kernel_block_id
+        views = self._host_views
+        if (
+            views is None
+            or views[0] is not blocks
+            or views[1] is not lengths
+            or views[2].shape != tuple(blocks.shape)
+            or views[3].shape != tuple(lengths.shape)
+        ):
+            if (
+                lengths.device.type != "cpu"
+                or lengths.ndim != 1
+                or lengths.dtype not in (torch.int32, torch.int64)
+                or blocks.device.type != "cpu"
+                or blocks.ndim != 2
+                or blocks.dtype != torch.int32
+                or blocks.stride(1) != 1
+                or blocks.shape[0] != lengths.numel()
+            ):
+                raise RuntimeError(
+                    "GDN graph replay requires matching CPU integer length/block mirrors"
+                )
+            # Keep owning tensors alive; a new capture/view must rebuild these
+            # zero-copy views. Replays update their contents, never snapshots.
+            # Publish one complete tuple, and use the local tuple throughout
+            # this invocation if another graph bucket replaces the cache.
+            views = (blocks, lengths, blocks.numpy(), lengths.numpy())
+            self._host_views = views
+        values = views[3].tolist()
+        live_batch = next(
+            (i for i, length in enumerate(values) if length == 0), len(values)
+        )
+        if any(length <= 0 for length in values[:live_batch]) or any(
+            values[live_batch:]
+        ):
+            raise RuntimeError(
+                "GDN graph lengths must be positive live rows followed by zero padding"
+            )
+        # View the existing host mirror without copying. Scalar host checks
+        # avoid dispatching many tiny Torch CPU ops on the replay hot path.
+        table = views[2]
+        for pool_size, block_size in self.bounds:
+            if pool_size <= 0 or block_size <= 0 or blocks.shape[1] <= 0:
+                raise RuntimeError("GDN graph replay requires positive cache bounds")
+            for row, length in enumerate(values[:live_batch]):
+                read_pos = (length - 1) // block_size
+                write_pos = length // block_size
+                if write_pos >= blocks.shape[1]:
+                    raise RuntimeError(
+                        "GDN decode real request exceeds host block-table width"
+                    )
+                read_id = int(table[row, read_pos])
+                write_id = int(table[row, write_pos])
+                if not (0 < read_id < pool_size and 0 < write_id < pool_size):
+                    raise RuntimeError(
+                        f"GDN decode real request has invalid state block IDs at row {row}"
+                    )
+        # Only the tail is cleared; valid lengths were updated by the existing
+        # graph input copy. Keep the captured GDN index kernel unchanged.
+        if clear_padding and live_batch < len(values):
+            inputs.sequence_lengths_plus_1_device[live_batch : len(values)].zero_()
+        if self.delegate is not None:
+            self.delegate.prepare_cuda_graph(inputs)
+
+
+def _is_cuda_graph_forward(inputs: PyModelInputs, fmha_impl=None) -> bool:
+    """Return the graph state propagated by any prepared attention group."""
+    if torch.version.hip is not None and isinstance(
+        fmha_impl,
+        (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate),
+    ):
+        # PyModelInputs crosses pybind by value; the implementation identity,
+        # unlike scalar fields changed on an earlier wrapper, survives.
+        return True
+    attention_inputs = get_attention_inputs_value(inputs)
+    if isinstance(attention_inputs, PyAttentionInputs):
+        return attention_inputs.is_cuda_graph
+    # Only FMHA groups are prepared by prepare_fmha_impl. In a mixed cache,
+    # their true flag is the model-wide graph signal for LINEAR groups too.
+    return any(group_inputs.is_cuda_graph for group_inputs in attention_inputs.values())
+
+
+def _should_use_aiter_flydsl_gdn_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    prefill_metadata: object | None,
+) -> bool:
+    return (
+        _is_aiter_flydsl_gdn_prefill_enabled()
+        and prefill_metadata is not None
+        and is_aiter_flydsl_gdn_prefill_supported(q, k, v, g, beta)
+    )
 
 
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
@@ -215,6 +530,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -271,11 +587,42 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        prefill_metadata = attn_meta.get_aiter_gdn_prefill_metadata(
+            cu_seqlens_without_padding
+        )
+        use_aiter_flydsl_gdn = _should_use_aiter_flydsl_gdn_prefill(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            prefill_metadata,
+        )
         use_flydsl_chunk_gdn = (
-            is_flydsl_chunk_gdn_enabled()
+            not use_aiter_flydsl_gdn
+            and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
-        if use_flydsl_chunk_gdn:
+        if use_aiter_flydsl_gdn:
+            attn_out, h, final_state = (
+                chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states(
+                    query,
+                    key,
+                    value,
+                    g,
+                    beta,
+                    initial_state=initial_states,
+                    output_final_state=True,
+                    cu_seqlens=cu_seqlens_without_padding,
+                    # Match RTP's original prefill: accumulate and expose
+                    # chunk/final state in FP32, then cast only on cache store.
+                    state_dtype=torch.float32,
+                    snapshot_dtype=torch.float32,
+                    prefill_metadata=prefill_metadata,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            )
+        elif use_flydsl_chunk_gdn:
             # When ssm_states is provided the megakernel writes cache blocks
             # directly, so final_state is not consumed — skip allocation.
             need_final_state = ssm_states is None
@@ -286,7 +633,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 g,
                 beta,
                 prefix_lengths=(
-                    attn_inputs.prefix_lengths_device if ssm_states is not None else None
+                    attn_inputs.prefix_lengths_device
+                    if ssm_states is not None
+                    else None
                 ),
                 block_map=(
                     attn_inputs.kv_cache_kernel_block_id_device
@@ -351,21 +700,54 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
+            mixed_qkv,
+            b,
+            a,
+            kv_cache_tensor,
+            seq_size_per_block,
+            attn_inputs,
+            attn_meta,
         )
-        if kv_cache is not None:
-            # write kvcache to cache store
-            compute_ops.write_cache_store(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
-                attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        cache_store_inputs = attn_inputs.cache_store_inputs
+        cache_store_writer = attn_inputs.cache_store_writer
+        if (
+            kv_cache is not None
+            and cache_store_inputs is not None
+            and cache_store_writer is not None
+        ):
+            cache_store_writer.write(cache_store_inputs, kv_cache)
         return attn_out
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    @staticmethod
+    def _is_target_verify(
+        attn_inputs: PyAttentionInputs, attn_meta: Qwen3NextMetadata
+    ) -> bool:
+        is_target_verify = attn_meta.is_target_verify
+        if (
+            torch.version.hip is not None
+            and is_target_verify
+            and attn_inputs.prefix_lengths.numel() == 0
+        ):
+            return False
+        return is_target_verify
+
+    def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        block_map = attn_inputs.kv_cache_kernel_block_id_device
+        if (
+            attn_inputs.is_cuda_graph
+            and block_map is not None
+            and block_map.ndim == 2
+            and block_map.shape[1] > 1
+        ):
+            # CUDA graph capture allocates a fixed-width block table, while the
+            # recurrent FLA decode kernel consumes only the first logical block.
+            # Keep the original row stride in this narrow view: FLA receives it
+            # explicitly and uses it to advance between batch rows.
+            return block_map[:, :1]
+        return block_map
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -403,8 +785,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
-        is_target_verify: bool,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
+        is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
@@ -425,26 +808,106 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
-
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        g = g.view(batch, seq, self.local_num_v_heads)
-        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            g=g,
-            beta=beta,
-            scale=None,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
-            use_qk_l2norm_in_kernel=True,
-        )
+        block_map = attn_inputs.kv_cache_kernel_block_id_device
+        cache_entry = None
+        # The state-index adapter resolves one recurrent transition per request.
+        # Target verification advances multiple tokens and retains Triton.
+        if (
+            torch.version.hip is not None
+            and not is_target_verify
+            and block_map is not None
+        ):
+            # Graph replay validation belongs to the model's per-tag hook.
+            sequence_lengths = attn_inputs.sequence_lengths_plus_1_device
+            state_metadata = AiterFlydslGdnDecodeStateMetadata(
+                block_map=block_map,
+                host_block_map=attn_inputs.kv_cache_kernel_block_id,
+                # The host mirror retains the logical table width even when a
+                # graph consumer later uses a narrow device view.
+                block_map_width=attn_inputs.kv_cache_kernel_block_id.shape[1],
+                sequence_lengths_plus_1=sequence_lengths,
+                seq_size_per_block=seq_size_per_block,
+                host_sequence_lengths=attn_inputs.sequence_lengths,
+                state_pool_size=ssm_states.shape[0],
+            )
+            cache_key = state_metadata.cache_key(ssm_states.dtype)
+            cache_entry = attn_meta.aiter_flydsl_gdn_decode_indices.get(cache_key)
+            if (
+                cache_entry is None
+                and cache_key not in attn_meta.aiter_flydsl_gdn_decode_unsupported
+            ):
+                supported = is_aiter_flydsl_gdn_decode_supported(
+                    query,
+                    key,
+                    value,
+                    a,
+                    b,
+                    ssm_states,
+                    self.alog,
+                    self.dt_bias,
+                    state_metadata=state_metadata,
+                    scale=None,
+                )
+                if supported:
+                    # Graph capture uses synthetic zero block tables and is
+                    # validated by the model callback before each real replay
+                    # using that capture's cache pool bounds. Both graph-off
+                    # decode and a graph miss enter normal forward with this
+                    # flag false, so validate their live host metadata here
+                    # before selecting AITER instead of silently mapping a bad
+                    # row to the kernel's skip sentinel.
+                    _validate_aiter_flydsl_gdn_decode_eager_state(
+                        state_metadata,
+                        is_cuda_graph=attn_meta.is_cuda_graph,
+                    )
+                    read_indices, write_indices, invalid_row_flags = (
+                        prepare_aiter_flydsl_gdn_decode_state_indices(state_metadata)
+                    )
+                    cache_entry = _AiterFlydslGdnDecodeCacheEntry(
+                        state_metadata=state_metadata,
+                        read_indices=read_indices,
+                        write_indices=write_indices,
+                        invalid_row_flags=invalid_row_flags,
+                    )
+                    attn_meta.aiter_flydsl_gdn_decode_indices[cache_key] = cache_entry
+                else:
+                    attn_meta.aiter_flydsl_gdn_decode_unsupported.add(cache_key)
+
+        if cache_entry is not None:
+            core_attn_out = aiter_flydsl_gdn_decode(
+                A_log=self.alog,
+                a=a,
+                dt_bias=self.dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                b=b,
+                state=ssm_states,
+                read_indices=cache_entry.read_indices,
+                write_indices=cache_entry.write_indices,
+                scale=None,
+            )
+        else:
+            # NVIDIA CUDA and unsupported ROCm inputs retain the original path.
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            # contiguous is applied by fused_recurrent_gated_delta_rule.
+            g = g.view(batch, seq, self.local_num_v_heads)
+            beta = beta.view(batch, seq, self.local_num_v_heads)
+            core_attn_out, _ = fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                scale=None,
+                initial_state=ssm_states,
+                inplace_final_state=True,
+                block_map=self._get_fla_block_map(attn_inputs),
+                seq_size_per_block=seq_size_per_block,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+                use_qk_l2norm_in_kernel=True,
+            )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
@@ -466,7 +929,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor = kv_cache.kv_cache_base.reshape(
             kv_cache.kv_cache_base.shape[0], -1
         )
-        is_target_verify = attn_meta.is_target_verify
+        is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
@@ -481,7 +944,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
-            is_target_verify,
+            attn_meta,
         )
 
         return attn_out
@@ -501,9 +964,10 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         assert (
             token % attention_inputs.prefix_lengths.size(0) == 0
         ), f"token: {token} is not divisible by prefill_lengths size: {attention_inputs.prefix_lengths.size(0)} when target verify"
-        b, s = attention_inputs.prefix_lengths.size(
-            0
-        ), token // attention_inputs.prefix_lengths.size(0)
+        b, s = (
+            attention_inputs.prefix_lengths.size(0),
+            token // attention_inputs.prefix_lengths.size(0),
+        )
         return b, s
 
 
@@ -576,15 +1040,25 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # Saves a small kernel launch on each forward; on decode (M=1) HBM-access
         # merging shaves a few us per layer (trace measurement: -0.094 ms/step
         # on Qwen3.5-9B TP=2 in the original session).
-        # FP8/quantized: qkvz has scales but ba doesn't, dtypes mismatch -> fall
-        # back to the original 2-GEMM path.
-        self._qkvz_ba_fused = weights.get(W.linear_attn_qkvz_s) is None
+        # Fall back to two GEMMs when qkvz is quantized, or when ROCm swizzle
+        # cannot represent both source weights and their fused output layout.
+        qkvz_w = weights[W.linear_attn_qkvz_w]
+        ba_w = weights[W.linear_attn_ba_w]
+        qkvz_is_bf16 = weights.get(W.linear_attn_qkvz_s) is None
+        _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+        rocm_swizzle_enabled = (
+            _is_rocm and hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        )
+        rocm_fused_layout_safe = not rocm_swizzle_enabled or can_fuse_swizzled_kn(
+            qkvz_w, ba_w
+        )
+        self._qkvz_ba_fused = qkvz_is_bf16 and rocm_fused_layout_safe
+        if qkvz_is_bf16 and rocm_swizzle_enabled and not rocm_fused_layout_safe:
+            _warn_qkvz_ba_swizzle_fallback(tuple(qkvz_w.shape), tuple(ba_w.shape))
+
         if self._qkvz_ba_fused:
-            qkvz_w = weights[W.linear_attn_qkvz_w]
-            ba_w = weights[W.linear_attn_ba_w]
             self._qkvz_size = qkvz_w.shape[1]
             self._ba_size = ba_w.shape[1]
-            _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
             if _is_rocm:
                 # ROCm: cat in [N, K] space then .t() to preserve column-major
                 # physical layout that hipb_mm / swizzle kernels expect.
@@ -617,13 +1091,19 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
+            # BA stays BF16 when qkvz is quantized. Keep runtime dispatch paired
+            # with the loader's shape-based layout decision: aligned TP-local
+            # BA uses WithSwizzle; unaligned BA uses NoSwizzle.
+            ba_hw_kernel_config = hw_kernel_config
+            if rocm_swizzle_enabled and not should_swizzle_linear_attn_ba(ba_w):
+                ba_hw_kernel_config = None
             self.in_proj_ba = LinearFactory.create_linear_from_weights(
                 weights,
                 W.linear_attn_ba_w,
                 None,
                 None,
                 quant_config,
-                hw_kernel_config=hw_kernel_config,
+                hw_kernel_config=ba_hw_kernel_config,
             )
             self.in_proj_fused = None
 
@@ -847,8 +1327,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 chunk_size=64,
             )
 
-        if kv_cache is not None and attn_meta.cp_write_cache_store_impl is not None:
-            attn_meta.cp_write_cache_store_impl(kv_cache)
+        _maybe_write_cp_cache_store(attention_inputs, kv_cache, attn_meta)
 
         full_attn_out = attn_out.squeeze_(0)
 
@@ -863,11 +1342,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
         local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.head_v_dim),
-            z.reshape(-1, self.head_v_dim),
-        )
-        local_attn_out = local_attn_out.reshape(
-            -1, self.local_num_v_heads * self.head_v_dim
+            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
         )
         local_attn_out = self.out_proj(local_attn_out)
         return local_attn_out
@@ -904,10 +1379,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
         attn_output = self.norm(
-            attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
+            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
         )
-        # from [token * head, dim] -> [token, head * dim]
-        attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
@@ -953,7 +1426,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        if config.moe_style == 2:
+        if config.moe_style in (1, 2):
             self.mlp = GenericMoeLayer(
                 config,
                 parallelism_config,
@@ -1053,6 +1526,74 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states if residual is None else hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Forward owns final normalization, independently of capture.
+        return hidden_states
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        if torch.version.hip is None:
+            return impls
+        attention_inputs = get_attention_inputs_value(inputs)
+        groups = (
+            {"": attention_inputs}
+            if isinstance(attention_inputs, PyAttentionInputs)
+            else attention_inputs
+        )
+        for group in groups.values():
+            group.is_cuda_graph = is_cuda_graph
+        if not is_cuda_graph or self.kv_cache is None:
+            return impls
+        bounds_by_tag = {}
+        for idx, layer in enumerate(self.layers):
+            if (
+                layer.layer_type != HybridAttentionType.LINEAR
+                or _is_aiter_flydsl_gdn_decode_disabled()
+            ):
+                continue
+            for cache in self.kv_cache.get_layer_cache_groups(idx):
+                tag = str(cache.tag) if isinstance(impls, dict) else ""
+                # Target verification retains Triton and may refresh its
+                # block table again after the normal attention callback.
+                if groups[tag].is_prefill or groups[tag].is_target_verify:
+                    continue
+                bounds_by_tag.setdefault(tag, []).append(
+                    (cache.kv_cache_base.shape[0], cache.seq_size_per_block)
+                )
+        if isinstance(impls, dict):
+            if not bounds_by_tag:
+                return _QwenGraphAttentionImpls(impls)
+            anchor = next(iter(impls), next(iter(bounds_by_tag)))
+            replay = _QwenGdnGraphDelegate(bounds_by_tag, anchor, impls.get(anchor))
+            return _QwenGraphAttentionImpls({**impls, anchor: replay}, replay)
+        return _QwenGdnGraphDelegate(bounds_by_tag, "", impls)
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self.kv_cache is None:
+            return None
+        full_attention_layers = (
+            layer_idx
+            for layer_idx, layer in enumerate(self.layers)
+            if layer.layer_type != HybridAttentionType.LINEAR
+        )
+        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def _build_cp_linear_attn_metadata(
         self,
@@ -1117,11 +1658,43 @@ class Qwen3NextModel(GptModelBase):
         return self.embed_tokens(input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if torch.version.hip is not None and isinstance(
+            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
+        ):
+            fmha_impl.bind_graph_inputs(inputs)
         hidden_states = self.word_embedding(inputs)
+        capture = self.capture_context(inputs.capture_hidden_states)
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        linear_layer_idx = next(
+            (
+                layer_idx
+                for layer_idx, layer in enumerate(self.layers)
+                if layer.layer_type == HybridAttentionType.LINEAR
+            ),
+            None,
+        )
+        if linear_layer_idx is not None:
+            linear_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, linear_layer_idx
+            )
+            if isinstance(linear_attention_inputs, list):
+                raise RuntimeError(
+                    "Qwen3Next LINEAR layer must map to exactly one attention-input tag"
+                )
+            attention_inputs = linear_attention_inputs
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
+        if (
+            torch.version.hip is not None
+            and is_target_verify
+            and attention_inputs.prefix_lengths.numel() == 0
+        ):
+            # A genuine target-verify batch has one prefix row per request.
+            # ROCm normal decode can carry the generic flag with no prefixes;
+            # normalize only that impossible speculative shape.
+            is_target_verify = False
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
 
         full_prefill_conv1d_meta = None
@@ -1129,8 +1702,7 @@ class Qwen3NextModel(GptModelBase):
         cp_restore_indices = None
         cp_local_extract_indices = None
         cp_local_valid_mask = None
-        cp_write_cache_store_impl = None
-
+        aiter_gdn_prefill_metadata: dict[int, tuple[torch.Tensor, object]] = {}
         if attention_inputs.is_prefill and not is_target_verify:
             if is_cp:
                 (
@@ -1142,20 +1714,46 @@ class Qwen3NextModel(GptModelBase):
                 ) = self._build_cp_linear_attn_metadata(
                     attention_inputs, hidden_states.device
                 )
-                if attention_inputs.cache_store_inputs:
-                    cp_info = attention_inputs.context_parallel_info
-                    cp_write_cache_store_impl = WriteCacheStoreOp(
-                        cp_info.prefill_actual_input_lengths_cpu,
-                        attention_inputs.prefix_lengths,
-                        attention_inputs.kv_cache_block_id,
-                        attention_inputs.cache_store_inputs,
-                    )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                     query_start_loc=cu_seqlen_without_padding,
                     device=hidden_states.device,
                 )
+
+        if (
+            attention_inputs.is_prefill
+            and not is_target_verify
+            and not is_cp
+            and _is_aiter_flydsl_gdn_prefill_enabled()
+        ):
+            for layer_idx, layer in enumerate(self.layers):
+                if layer.layer_type != HybridAttentionType.LINEAR:
+                    continue
+                selected_inputs = select_attention_inputs_for_layer(
+                    inputs, self.kv_cache, layer_idx
+                )
+                input_groups = (
+                    selected_inputs
+                    if isinstance(selected_inputs, list)
+                    else [selected_inputs]
+                )
+                for linear_inputs in input_groups:
+                    cu_seqlens = linear_inputs.cu_seqlens_device
+                    if id(cu_seqlens) in aiter_gdn_prefill_metadata:
+                        continue
+                    sequence_lengths = _cpu_sequence_lengths(
+                        linear_inputs.input_lengths
+                    )
+                    if sequence_lengths is None:
+                        continue
+                    metadata = build_aiter_flydsl_gdn_prefill_metadata(
+                        sequence_lengths, cu_seqlens
+                    )
+                    aiter_gdn_prefill_metadata[id(cu_seqlens)] = (
+                        cu_seqlens,
+                        metadata,
+                    )
 
         attn_meta = Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
@@ -1165,27 +1763,48 @@ class Qwen3NextModel(GptModelBase):
             cp_restore_indices=cp_restore_indices,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
-            cp_write_cache_store_impl=cp_write_cache_store_impl,
+            is_cuda_graph=is_cuda_graph,
+            aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, i
+            )
+            layer_fmha_impl = (
+                None
+                if decoder_layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if i in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(i, hidden_states, residual)
+            capture.capture_layer(i, hidden_states, residual)
+
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        outputs = capture.finalize(hidden_states)
+        if capture_aux_hidden:
+            assert self._mtp_target_hidden_states is not None
+            outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):

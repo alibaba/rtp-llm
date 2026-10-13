@@ -35,12 +35,18 @@ public:
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers);
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key);
 
+    // Test hook only: shrink the tombstone TTL so reclamation can be exercised
+    // without sleeping for the production default (one hour).
+    void setExpiredRequestCacheTtlUsForTest(int64_t ttl_us) {
+        expired_request_cache_ttl_us_ = ttl_us;
+    }
+
 private:
     std::shared_ptr<RequestBlockBuffer> getRequestBlockBuffer(const std::string& requestid) const;
     std::shared_ptr<RequestBlockBuffer> getOrInsertRequestBlockBuffer(const std::string& requestid);
     bool                                isValidBlock(const std::shared_ptr<BlockBuffer>& block);
-    std::shared_ptr<BlockBuffer>        makeValidBlock(const std::shared_ptr<BlockBuffer>& block);
-    bool copyBlock(const std::shared_ptr<BlockBuffer>& dst, const std::shared_ptr<BlockBuffer>& src);
+    // Stages every block into one pinned host allocation with a single batched copy.
+    std::vector<std::shared_ptr<BlockBuffer>> makeValidBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
@@ -48,6 +54,8 @@ private:
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;
     std::vector<std::pair<std::string, int64_t>>                         expired_request_caches_;
+    // currentTimeUs() is microseconds: 1e6 us/s * 3600 s = one hour.
+    int64_t expired_request_cache_ttl_us_ = 1000LL * 1000LL * 60LL * 60LL;
 
     std::shared_mutex                                             buffer_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffer_map_;

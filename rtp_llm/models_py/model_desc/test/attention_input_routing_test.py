@@ -1,0 +1,542 @@
+import unittest
+from collections.abc import Iterator, Mapping
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import torch
+from torch import nn
+
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.qwen3_next import (
+    Qwen3NextGatedDeltaNetDecode,
+    Qwen3NextMetadata,
+    Qwen3NextModel,
+    _cpu_sequence_lengths,
+    _is_cuda_graph_forward,
+    _maybe_write_cp_cache_store,
+    _should_use_aiter_flydsl_gdn_prefill,
+    _validate_aiter_flydsl_gdn_decode_eager_state,
+    _write_cp_cache_store,
+)
+from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+
+class FakeKVCache:
+    def __init__(self, layer_tags: list[list[str]]):
+        self.layer_tags = layer_tags
+
+    def get_layer_cache_groups(self, layer_idx: int):
+        return [SimpleNamespace(tag=tag) for tag in self.layer_tags[layer_idx]]
+
+
+class DuplicateSparseTagMapping(Mapping[str, object]):
+    def __init__(self):
+        self.values = {"default": object(), "indexer_kv": object()}
+
+    def __getitem__(self, key: str) -> object:
+        return self.values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("default", "indexer_kv", "indexer_kv"))
+
+    def __len__(self) -> int:
+        return 3
+
+
+class RoutingModel(GptModelBase):
+    def __init__(self, fmha_group_tags: list[str] | None):
+        nn.Module.__init__(self)
+        self.config = object()
+        self.parallelism_config = object()
+        self.weight = object()
+        self.fmha_config = object()
+        self.fmha_group_tags = fmha_group_tags
+
+    def _get_fmha_group_tags(self) -> list[str] | None:
+        return self.fmha_group_tags
+
+
+class AttentionInputRoutingTest(unittest.TestCase):
+    @staticmethod
+    def _invalid_gdn_state_metadata():
+        return SimpleNamespace(
+            host_block_map=torch.tensor([[1, 0]], dtype=torch.int32),
+            host_sequence_lengths=torch.tensor([1024], dtype=torch.int32),
+            block_map_width=2,
+            seq_size_per_block=1024,
+            state_pool_size=3,
+        )
+
+    def test_graph_disabled_decode_rejects_invalid_live_state_block(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid state block IDs"):
+            _validate_aiter_flydsl_gdn_decode_eager_state(
+                self._invalid_gdn_state_metadata(),
+                is_cuda_graph=False,
+            )
+
+    def test_graph_miss_normal_forward_rejects_invalid_live_state_block(self):
+        # PyWrappedModel calls prepare_fmha_impl(..., False) after canRun()
+        # rejects a graph, so a miss has the same explicit eager contract as a
+        # graph-disabled request.
+        with self.assertRaisesRegex(RuntimeError, "invalid state block IDs"):
+            _validate_aiter_flydsl_gdn_decode_eager_state(
+                self._invalid_gdn_state_metadata(),
+                is_cuda_graph=False,
+            )
+
+    def test_graph_capture_defers_synthetic_state_block_validation(self):
+        _validate_aiter_flydsl_gdn_decode_eager_state(
+            self._invalid_gdn_state_metadata(),
+            is_cuda_graph=True,
+        )
+
+    def test_mixed_cache_propagates_fmha_graph_state_to_linear_layers(self):
+        inputs = SimpleNamespace(
+            attention_inputs={
+                "full": SimpleNamespace(is_cuda_graph=True),
+                "linear": SimpleNamespace(is_cuda_graph=False),
+            }
+        )
+        self.assertTrue(_is_cuda_graph_forward(inputs))
+
+    def test_aiter_prefill_metadata_is_bound_to_exact_cu_seqlens(self):
+        cu_seqlens = torch.tensor([0, 8], dtype=torch.int32)
+        metadata = object()
+        attn_meta = Qwen3NextMetadata(
+            aiter_gdn_prefill_metadata={
+                id(cu_seqlens): (cu_seqlens, metadata),
+            }
+        )
+
+        self.assertIs(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens), metadata)
+        self.assertIsNone(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens.clone()))
+
+    def test_aiter_prefill_requires_metadata_and_supported_inputs(self):
+        tensors = [Mock() for _ in range(5)]
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=True,
+        ) as supported:
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(*tensors, prefill_metadata=None)
+            )
+            supported.assert_not_called()
+            self.assertTrue(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *tensors, prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_falls_back_for_unsupported_inputs(self):
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=False,
+        ):
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *[Mock() for _ in range(5)], prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_metadata_uses_only_existing_cpu_lengths(self):
+        lengths = torch.tensor([3, 5], dtype=torch.int32)
+        self.assertEqual(_cpu_sequence_lengths(lengths), (3, 5))
+
+    def test_sparse_mla_cacheless_single_input_prepares_one_shared_impl(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            kv_cache=None,
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        attention_inputs = PyAttentionInputs()
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            routes = model.prepare_fmha_impl(inputs)
+            factory.assert_called_once_with(
+                model_config=model.config,
+                parallelism_config=model.parallelism_config,
+                weight=model.weight,
+                attn_inputs=attention_inputs,
+                fmha_config=model.fmha_config,
+                is_cuda_graph=False,
+                cuda_graph_selection_mode=None,
+            )
+            self.assertIs(routes["default"], factory.return_value)
+            self.assertIs(routes["indexer_kv"], factory.return_value)
+
+            model.__dict__["kv_cache"] = FakeKVCache([["default", "indexer_kv"]])
+            factory.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, "exactly.*tags"):
+                model.prepare_fmha_impl(inputs)
+            factory.assert_not_called()
+
+    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            kv_cache=None,
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        attention_inputs = PyAttentionInputs()
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            routes = model.prepare_fmha_impl(
+                inputs,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="generation_prefill_graph",
+            )
+            factory.assert_called_once_with(
+                model_config=model.config,
+                parallelism_config=model.parallelism_config,
+                weight=model.weight,
+                attn_inputs=attention_inputs,
+                fmha_config=model.fmha_config,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="generation_prefill_graph",
+            )
+            self.assertIs(routes["default"], factory.return_value)
+            self.assertIs(routes["indexer_kv"], factory.return_value)
+
+    def test_qwen3_next_prepare_forwards_generation_prefill_selection_mode(self):
+        model = object.__new__(Qwen3NextModel)
+        model.__dict__.update(
+            config=SimpleNamespace(attn_config=SimpleNamespace()),
+            kv_cache=None,
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        attention_inputs = PyAttentionInputs()
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            impls = model.prepare_fmha_impl(
+                inputs,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
+            )
+            factory.assert_called_once_with(
+                model_config=model.config,
+                parallelism_config=model.parallelism_config,
+                weight=model.weight,
+                attn_inputs=attention_inputs,
+                fmha_config=model.fmha_config,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
+            )
+            self.assertIs(impls, factory.return_value)
+
+    def test_dsv4_prepare_rejects_generation_prefill_selection_mode(self):
+        model = object.__new__(DeepSeekV4Model)
+        with self.assertRaises(GenerationPrefillCudaGraphUnsupportedBackend):
+            model.prepare_fmha_impl(
+                None,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
+            )
+        # Legacy eager/decode contract is unchanged without a selection mode.
+        self.assertIsNone(model.prepare_fmha_impl(None, is_cuda_graph=False))
+
+    def test_dspark_prepare_rejects_generation_prefill_selection_mode(self):
+        model = object.__new__(DeepSeekV4DSparkModel)
+        with self.assertRaises(GenerationPrefillCudaGraphUnsupportedBackend):
+            model.prepare_fmha_impl(
+                None,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
+            )
+        # Legacy decode-graph contract is unchanged without a selection mode.
+        impl = model.prepare_fmha_impl(None, is_cuda_graph=True)
+        self.assertEqual(impl.sched_meta_cache, {})
+        self.assertIsNone(model.prepare_fmha_impl(None, is_cuda_graph=False))
+
+    def test_generic_sparse_mla_prepares_only_exact_semantic_groups(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+        )
+
+        self.assertEqual(model._get_fmha_group_tags(), ["default", "indexer_kv"])
+
+    def test_generic_sparse_mla_cacheless_forward_passes_none(self):
+        model = object.__new__(GenericMoeModel)
+        nn.Module.__init__(model)
+        hidden_states = torch.zeros((2, 4), dtype=torch.float32)
+        residual = torch.zeros_like(hidden_states)
+        decoder_layer = Mock(
+            return_value=SimpleNamespace(
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        )
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True),
+                hidden_state_capture_layer_ids=[],
+            ),
+            layer_num=1,
+            layers=[decoder_layer],
+            kv_cache=None,
+            embed_tokens=Mock(return_value=hidden_states),
+            norm=Mock(return_value=(hidden_states, None)),
+        )
+        model._init_capture_context(
+            model._capture_canonical_layer,
+            model._capture_canonical_final,
+        )
+        fmha_impl = {"default": object(), "indexer_kv": object()}
+
+        outputs = model.forward(
+            SimpleNamespace(
+                input_ids=torch.tensor([1, 2]), capture_hidden_states=False
+            ),
+            fmha_impl,
+        )
+
+        self.assertIsNone(decoder_layer.call_args.kwargs["kv_cache"])
+        self.assertIs(outputs.hidden_states, hidden_states)
+        model.norm.assert_called_once_with(hidden_states, residual)
+
+    def test_generic_dense_mla_keeps_scalar_group_selection(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=False, use_mla=True)
+        )
+
+        self.assertIsNone(model._get_fmha_group_tags())
+
+    def test_generic_sparse_non_mla_keeps_scalar_group_selection(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__["config"] = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=True, use_mla=False)
+        )
+
+        self.assertIsNone(model._get_fmha_group_tags())
+
+    def test_generic_sparse_mla_rejects_invalid_raw_tags_before_factory(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        invalid_mappings = (
+            {"default": object(), "indexer_kv": object(), "extra": object()},
+            {"default": object()},
+            {"default": object(), "wrong": object()},
+            DuplicateSparseTagMapping(),
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            for attention_inputs in invalid_mappings:
+                with self.subTest(tags=list(attention_inputs)):
+                    with self.assertRaisesRegex(RuntimeError, "exactly.*tags"):
+                        model.prepare_fmha_impl(
+                            SimpleNamespace(attention_inputs=attention_inputs)
+                        )
+
+        factory.assert_not_called()
+
+    def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
+        block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=True,
+            kv_cache_kernel_block_id_device=block_map,
+        )
+        decode = object.__new__(Qwen3NextGatedDeltaNetDecode)
+
+        narrowed = decode._get_fla_block_map(attention_inputs)
+
+        self.assertEqual(narrowed.shape, (3, 1))
+        self.assertEqual(narrowed.stride(0), block_map.stride(0))
+        self.assertEqual(narrowed[:, 0].tolist(), [0, 4, 8])
+
+    def test_qwen3_next_non_graph_keeps_full_block_map(self):
+        block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=False,
+            kv_cache_kernel_block_id_device=block_map,
+        )
+        decode = object.__new__(Qwen3NextGatedDeltaNetDecode)
+
+        self.assertIs(decode._get_fla_block_map(attention_inputs), block_map)
+
+    def test_cp_cache_store_uses_each_layer_tag_metadata(self):
+        layer_inputs = {}
+        for tag in ("full", "linear0", "linear1"):
+            cache_store_inputs = SimpleNamespace(tag=tag)
+            kv_cache = SimpleNamespace(tag=tag)
+            cache_store_writer = Mock()
+            layer_inputs[tag] = (
+                SimpleNamespace(
+                    cache_store_inputs=cache_store_inputs,
+                    cache_store_writer=cache_store_writer,
+                ),
+                kv_cache,
+            )
+
+        for tag in ("full", "linear0", "linear1"):
+            attention_inputs, kv_cache = layer_inputs[tag]
+            _write_cp_cache_store(attention_inputs, kv_cache)
+            attention_inputs.cache_store_writer.write.assert_called_once_with(
+                attention_inputs.cache_store_inputs, kv_cache
+            )
+
+    def test_cp_cache_store_skips_layer_without_store_inputs(self):
+        cache_store_writer = Mock()
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=None, cache_store_writer=cache_store_writer
+        )
+
+        _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+        cache_store_writer.write.assert_not_called()
+
+    def test_cp_cache_store_skips_layer_without_writer(self):
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            cache_store_writer=None,
+        )
+
+        _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+    def test_non_cp_linear_attention_does_not_write_cache_store(self):
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            cache_store_writer=Mock(),
+            context_parallel_info=SimpleNamespace(
+                prefill_actual_input_lengths_cpu=torch.tensor([1], dtype=torch.int32)
+            ),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            kv_cache_block_id=torch.tensor([[1]], dtype=torch.int32),
+        )
+
+        _maybe_write_cp_cache_store(
+            attention_inputs,
+            SimpleNamespace(tag="linear0"),
+            Qwen3NextMetadata(),
+        )
+
+        attention_inputs.cache_store_writer.write.assert_not_called()
+
+    def test_get_group_tags_for_model_selected_layers(self):
+        kv_cache = FakeKVCache([["full"], ["linear0"], ["linear1"], ["full", "aux"]])
+
+        self.assertEqual(get_group_tags_for_layers(kv_cache, [0, 3]), ["full", "aux"])
+
+    def test_prepare_fmha_impl_only_for_model_selected_tags(self):
+        inputs_by_tag = {
+            "full": object(),
+            "linear0": object(),
+            "linear1": object(),
+        }
+        inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
+        model = RoutingModel(["full"])
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
+        ) as factory:
+            fmha_impl = model.prepare_fmha_impl(
+                inputs,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="generation_prefill_graph",
+            )
+
+        self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
+        factory.assert_called_once()
+        self.assertEqual(
+            factory.call_args.kwargs["cuda_graph_selection_mode"],
+            "generation_prefill_graph",
+        )
+
+    def test_default_model_prepares_every_tag(self):
+        inputs_by_tag = {"group0": object(), "group1": object()}
+        inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
+        model = RoutingModel(None)
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
+        ) as factory:
+            fmha_impl = model.prepare_fmha_impl(inputs)
+
+        self.assertEqual(fmha_impl, inputs_by_tag)
+        self.assertEqual(factory.call_count, 2)
+
+    def test_dspark_commit_publishes_only_with_swa_inputs(self):
+        model = object.__new__(DeepSeekV4DSparkModel)
+        nn.Module.__init__(model)
+        model.v4 = SimpleNamespace(layers=[object(), object()])
+        published = []
+
+        class DraftKVCache:
+            group_tags = ["csa_kv", "swa_kv"]
+
+            def get_layer_cache(self, layer_idx, tag):
+                return SimpleNamespace(layer_idx=layer_idx, tag=tag)
+
+        model.kv_cache = DraftKVCache()
+        model._swa_block_table = Mock(return_value=torch.ones(1, 1, dtype=torch.int32))
+        model._commit_layer_features = Mock()
+        csa_inputs = SimpleNamespace(tag="csa_kv")
+        swa_inputs = SimpleNamespace(tag="swa_kv")
+        inputs = SimpleNamespace(
+            attention_inputs={"csa_kv": csa_inputs, "swa_kv": swa_inputs}
+        )
+
+        def make_writer(group_inputs, kv_cache):
+            self.assertIs(group_inputs, swa_inputs)
+            self.assertIs(kv_cache, model.kv_cache)
+            return lambda layer_cache: published.append(layer_cache)
+
+        module = "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model"
+        with patch(f"{module}.require_pool_tokens_per_block", return_value=16), patch(
+            f"{module}.create_write_cache_store_impl", side_effect=make_writer
+        ):
+            model.commit_feature_rows(
+                torch.zeros(1, 4),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                torch.ones(1, dtype=torch.int32),
+                inputs,
+            )
+
+        self.assertEqual(
+            [(cache.layer_idx, cache.tag) for cache in published],
+            [(0, "swa_kv"), (1, "swa_kv")],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

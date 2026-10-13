@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/api_server/ApiServerMetrics.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -93,6 +94,7 @@ public:
             std::map<std::string, std::string> tag_map;
             tag_map["source"]     = source;
             tag_map["error_code"] = std::to_string(error_code);
+            tag_map["priority"]   = "0";
             auto tags             = kmonitor::MetricsTags(tag_map);
             metric_reporter->report(1, "py_rtp_framework_error_qps", kmonitor::MetricType::QPS, &tags, true);
         }
@@ -105,6 +107,16 @@ private:
     Type        type_;
     std::string message_;
 };
+
+inline HttpApiServerException streamErrorToHttpException(const ErrorInfo& status) {
+    auto http_error = HttpApiServerException::UNKNOWN_ERROR;
+    if (status.code() == ErrorCode::GENERATE_TIMEOUT) {
+        http_error = HttpApiServerException::GENERATE_TIMEOUT_ERROR;
+    } else if (status.code() == ErrorCode::CANCELLED) {
+        http_error = HttpApiServerException::CANCELLED_ERROR;
+    }
+    return HttpApiServerException(http_error, status.ToString());
+}
 
 template<typename T>
 inline std::string formatException(const T& e) {

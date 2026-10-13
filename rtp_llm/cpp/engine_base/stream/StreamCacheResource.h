@@ -1,16 +1,23 @@
 #pragma once
 
-#include <atomic>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
 class AsyncContext;
 class GenerateStream;
+struct MallocResult;
 
 class StreamCacheResource {
 public:
@@ -29,13 +36,16 @@ public:
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
-    absl::Status         incrKVBlock();
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    absl::Status         waitForAllocatorLoad();
+    // Empty while pending; a terminal status preserves retryable materialization failures.
+    std::optional<absl::Status> pollAllocatorLoad();
+    absl::Status                incrKVBlock(int seq_len_override = -1);
+    void                        fakeInitKVBlock(size_t reserved_blocks = 0);
+    int                         tryReleaseKVBlock(size_t nums);
+    void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void                        releaseResource();
+    bool                        asyncLoadCache();
+    bool                        loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -47,32 +57,17 @@ public:
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
+    // Count each decision to retry, even if cancelled before the next allocation.
+    void reportMallocRetry() const;
+    bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
-    // update kv block based on the source of new batches and generate block copy mapping.
-    // used in beam search or multiple return sequences
-    //
-    // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i should be
-    //                           forked from old batch block_src_batch[i],
-    // @params copy_last_block: bool, if ture, copy the last block from the old batch for each batch
-    //
-    // Note: This method may allocate and free KV cache blocks, but the caller must
-    // execute the block copy maunually (e.g., via `getKVBlockUpdateMapping` and
-    // `KVCacheManager::blockBatchCopy`) before using the cache
-    //
-    // Example: given old batch size 3, block_src_batch = [1, 2, 2, 2], the copy mapping of
-    // old blocks to new blocks is
-    //
-    // old batch 0 --free  /--- new batch 0
-    // old batch 1 -------/ /-- new batch 1
-    // old batch 2 --------+--- new batch 2
-    //                      \-- new batch 3
-    //
-    // @returns true if success, false otherwise
-    //
+    // Rebuild KV block ownership for beam/multiple-return sequences.
+    // This records copy mappings; caller must execute them via
+    // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.
     bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
 
     // clear block copy mapping
@@ -81,7 +76,7 @@ public:
     }
 
     // get block copy mapping of last kv cache update
-    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() const {
+    const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;
     }
 
@@ -93,6 +88,12 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
+    // KVCacheResource reuse counters follow the topology's canonical cache-key namespace.
+    int reuseBlockTokens() const {
+        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
+        return mapper ? mapper->reuseBlockTokens(resource_context_.cache_manager->cacheConfig()) : seqSizePerBlock();
+    }
+
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
     }
@@ -101,11 +102,20 @@ public:
         return resource_released_;
     }
 
+    // Borrow the owning stream pointer; used by GenerateStateMachine to query
+    // async-bookkeeping state without duplicating accessors here. Lifetime is
+    // bound by the GenerateStream that owns this StreamCacheResource.
+    GenerateStream* stream() const {
+        return stream_;
+    }
+
     bool reuseCache() const;
     bool enableMemoryCache() const;
-    bool enableRemoteCache() const;
     bool enableDeviceCache() const;
-    bool enableTieredMemoryCache() const;
+    bool enableDiskCache() const;
+    bool enableCacheLookup() const;
+    Tier storeTarget() const;
+    void reportCacheReuseMetrics();
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -122,35 +132,28 @@ public:
     }
 
 private:
-    void loadCacheSync();
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
-    void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
-    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
-                                                  bool                                         enable_memory_cache,
-                                                  bool                                         enable_remote_cache);
-    void                          evictDeviceCacheToMemory();
-    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+    void         clearCacheReuseState();
+    void         recordCacheReuseMallocResult(const MallocResult& result);
+    void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
+    absl::Status finalizeAllocatorLoad();
 
-private:
-    GenerateStream*          stream_;
-    BatchKVCacheResourcePtr  batch_kv_cache_resource_;
-    ResourceContext          resource_context_;
-    std::vector<BlockIdPair> block_update_mapping_;
+    GenerateStream*                stream_;
+    BatchKVCacheResourcePtr        batch_kv_cache_resource_;
+    ResourceContext                resource_context_;
+    std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                          need_release_resource_ = true;
-    bool                          last_block_aligned_    = false;
-    int                           malloc_failed_times_   = 0;
-    bool                          fake_inited_           = false;
-    bool                          resource_released_     = false;
-    std::shared_ptr<AsyncContext> load_cache_context_;
-    int                           load_cache_retry_count_ = 0;
+    bool                             need_release_resource_ = true;
+    bool                             last_block_aligned_    = false;
+    int                              malloc_failed_times_   = 0;
+    bool                             fake_inited_           = false;
+    bool                             resource_released_     = false;
+    std::shared_ptr<AsyncContext>    allocator_load_context_;
+    RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
+    int64_t                          malloc_begin_time_us_    = 0;
+    int64_t                          load_wait_begin_time_us_ = 0;
 
-    // Connector reference counting for PD separation (RAII auto-release)
+    // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
-    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
-    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
-    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
-    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm

@@ -37,6 +37,7 @@ public:
     bool                              is_multimodal         = false;
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
+    int64_t                           mm_padding_size       = 0;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 };
 
@@ -45,6 +46,10 @@ public:
     // model variant params used in ft
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
+
+    // Startup-only target-prefill capture profile. An empty layer list disables capture.
+    std::vector<int64_t>    hidden_state_capture_layer_ids = {};
+    HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
 
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;
@@ -82,20 +87,31 @@ public:
     bool use_norm_input_residual    = false;
     bool use_norm_attn_out_residual = false;
 
-    int64_t max_seq_len                = 0;
-    int64_t gen_num_per_cycle          = 0;  // speculative decoding: tokens per cycle
-    int64_t vocab_size                 = 0;
-    int64_t input_vocab_size           = 0;  // 0 if not set
-    int64_t type_vocab_size            = 0;
-    int64_t embedding_size             = 0;
-    int64_t expert_num                 = 0;
-    int64_t moe_k                      = 0;
-    bool    moe_normalize_expert_scale = false;
+    int64_t max_seq_len       = 0;
+    int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
+    int64_t vocab_size        = 0;
+    // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
+    // ascending and deduplicated, each in [0, vocab_size), and output_vocab_padded_size >= ids.size().
+    std::vector<int64_t> output_vocab_ids;
+    int64_t              output_vocab_padded_size   = 0;
+    int64_t              input_vocab_size           = 0;  // 0 if not set
+    int64_t              type_vocab_size            = 0;
+    int64_t              embedding_size             = 0;
+    int64_t              expert_num                 = 0;
+    int64_t              moe_k                      = 0;
+    bool                 moe_normalize_expert_scale = false;
     // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     int64_t moe_style = 0;
-    // 0 for softmax; 1 for sigmoid
+    // 0 for softmax; 1 for sigmoid; 2 for sqrt_softplus (DeepSeek-V4)
     int64_t              scoring_func    = 0;
     std::vector<int64_t> moe_layer_index = {};
+
+    // DeepSeek-V4 specific.
+    int64_t hc_mult           = 1;
+    int64_t hc_sinkhorn_iters = 0;
+    double  hc_eps            = 1e-6;
+    double  swiglu_limit      = 0.0;
+    int64_t num_hash_layers   = 0;
 
     bool   has_positional_encoding    = false;
     bool   has_pre_decoder_layernorm  = false;
@@ -128,6 +144,9 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Model policy for prefix recomputation; live P/D transfers are unaffected.
+    int     cache_min_replay_tokens = 1;
+    int64_t cache_key_hash_seed     = 0;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

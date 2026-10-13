@@ -1,36 +1,69 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#include <limits>
 #include <stdexcept>
 
 namespace rtp_llm {
 
 torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
-    void*                data_ptr = nullptr;
+    const std::string*   payload      = nullptr;
+    c10::ScalarType      scalar_type  = torch::kFloat32;
+    size_t               element_size = 0;
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            payload      = &tensor_pb.fp32_data();
+            scalar_type  = torch::kFloat32;
+            element_size = sizeof(float);
+            break;
         }
         case TensorPB::INT32: {
-            data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kInt32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            payload      = &tensor_pb.int32_data();
+            scalar_type  = torch::kInt32;
+            element_size = sizeof(int32_t);
+            break;
         }
         case TensorPB::FP16: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            payload      = &tensor_pb.fp16_data();
+            scalar_type  = torch::kFloat16;
+            element_size = sizeof(c10::Half);
+            break;
         }
         case TensorPB::BF16: {
-            data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            payload      = &tensor_pb.bf16_data();
+            scalar_type  = torch::kBFloat16;
+            element_size = sizeof(c10::BFloat16);
+            break;
         }
         default:
             throw std::runtime_error("Unsupported data type.");
     }
+
+    if (shape.empty() && payload->empty()) {
+        return torch::empty({0}, torch::TensorOptions().dtype(scalar_type));
+    }
+
+    size_t numel = 1;
+    for (int64_t dim : shape) {
+        if (dim < 0) {
+            throw std::runtime_error("TensorPB shape contains a negative dimension.");
+        }
+        const size_t unsigned_dim = static_cast<size_t>(dim);
+        if (unsigned_dim > 0 && numel > std::numeric_limits<size_t>::max() / unsigned_dim) {
+            throw std::runtime_error("TensorPB element count overflows.");
+        }
+        numel *= unsigned_dim;
+    }
+    if (element_size > 0 && numel > std::numeric_limits<size_t>::max() / element_size) {
+        throw std::runtime_error("TensorPB byte size overflows.");
+    }
+    const size_t expected_bytes = numel * element_size;
+    if (payload->size() != expected_bytes) {
+        throw std::runtime_error("TensorPB payload size does not match shape and dtype.");
+    }
+
+    void* data_ptr = const_cast<char*>(payload->data());
+    return torch::from_blob(data_ptr, shape, torch::TensorOptions().dtype(scalar_type)).clone();
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {

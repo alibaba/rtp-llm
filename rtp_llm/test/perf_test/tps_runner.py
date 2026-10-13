@@ -22,6 +22,7 @@ class TpsBinarySearchRunner:
         generate_config: Optional[Dict[str, Any]] = None,
         dump_json_path: str = ".",
         num_measures: int = 5,
+        log_path: str = "",
     ):
         self._port = port
         self._dp_size = dp_size
@@ -31,6 +32,11 @@ class TpsBinarySearchRunner:
         self._generate_config = generate_config or {}
         self._dump_json_path = dump_json_path
         self._num_measures = num_measures
+        self._log_path = log_path
+        # Byte offset into the server log past the last "profiler trace
+        # saved" line, threaded through every BatchPerfImpl call so
+        # consecutive search steps only scan new log content.
+        self._log_flush_offset = 0
 
     def warmup(self, query: str) -> None:
         logging.info(f"TPS warmup: port={self._port}, dp_size={self._dp_size}")
@@ -44,13 +50,15 @@ class TpsBinarySearchRunner:
             self._decode_test_length,
             False,
             self._generate_config,
+            log_path=self._log_path,
+            log_flush_offset=self._log_flush_offset,
         ).run()
 
     def _test_bs(
         self, bs: int, queries: Any, trace_label: str = ""
     ) -> Tuple[bool, float, float]:
         trace_name = f"bs{bs}_{trace_label}_decode" if trace_label else f"bs{bs}_decode"
-        metric = BatchPerfImpl(
+        impl = BatchPerfImpl(
             self._port,
             self._dp_size,
             bs * self._dp_size,
@@ -61,7 +69,11 @@ class TpsBinarySearchRunner:
             True,
             self._generate_config,
             trace_name,
-        ).run(num_measures=self._num_measures)
+            log_path=self._log_path,
+            log_flush_offset=self._log_flush_offset,
+        )
+        metric = impl.run(num_measures=self._num_measures)
+        self._log_flush_offset = impl.log_flush_offset
         sr = (
             metric.success_requests / metric.total_requests
             if metric.total_requests > 0

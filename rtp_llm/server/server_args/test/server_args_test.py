@@ -1,11 +1,394 @@
 import importlib
+import io
+import json
 import os
+import pickle
 import sys
+import tempfile
+from pathlib import Path
 from unittest import TestCase, main
+from unittest.mock import patch
+
+from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
+from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
+from rtp_llm.utils import backend_registry
+from rtp_llm.utils.backend_registry import register_backend_hook
+
+
+class CustomAllReduceArgumentsTest(TestCase):
+    def test_explicit_cli_value_is_preserved_for_python_collectives(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            disabled = server_args.setup_args(["--ft_disable_custom_ar", "1"])
+            enabled = server_args.setup_args(["--ft_disable_custom_ar", "0"])
+            unspecified = server_args.setup_args([])
+
+        self.assertIs(disabled.ft_disable_custom_ar_override, True)
+        self.assertIs(enabled.ft_disable_custom_ar_override, False)
+        self.assertIsNone(unspecified.ft_disable_custom_ar_override)
+
+    def test_environment_value_is_preserved_for_python_collectives(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
+            configs = server_args.setup_args([])
+
+        self.assertIs(configs.ft_disable_custom_ar_override, True)
+
+
+class CacheConfigArgumentsTest(TestCase):
+    # Keep the supported startup fields explicit, independently of parser registration.
+    samples = {
+        "enable_vipserver": True,
+        "vipserver_domain": "vip.example",
+        "server_address": "127.0.0.1:1234",
+        "instance_group": "legacy-group",
+        "meta_channel_retry_time": 7,
+        "meta_channel_connection_timeout": 123,
+        "meta_channel_call_timeout": 234,
+        "storage_thread_num": 5,
+        "storage_queue_size": 17,
+        "put_timeout_ms": 345,
+        "get_timeout_ms": 456,
+        "model_sdk_config": '[{"type":"local"}]',
+        "model_user_data": "legacy-data",
+        "model_extra_info": "legacy-extra",
+        "instance_id_salt": "legacy-salt",
+        "asyncwrapper_thread_num": 6,
+        "asyncwrapper_queue_size": 19,
+        "get_broadcast_timeout": 567,
+        "put_broadcast_timeout": 678,
+        "client_config": '{"legacy":{}}',
+    }
+
+    tier_samples = {
+        "enable_memory_cache": ("enable_host_cache", True),
+        "enable_disk_cache": ("enable_memory_cache_disk", True),
+        "memory_cache_size_mb": ("host_cache_size_mb", 1024),
+        "memory_cache_sync_timeout_ms": ("host_cache_sync_timeout_ms", 1234),
+        "block_tree_memory_evict_low_watermark_ratio": (
+            "block_tree_host_evict_low_watermark_ratio",
+            0.72,
+        ),
+        "block_tree_memory_evict_high_watermark_ratio": (
+            "block_tree_host_evict_high_watermark_ratio",
+            0.82,
+        ),
+        "disk_cache_paths": ("memory_cache_disk_paths", "/tmp/cache-args-test"),
+        "disk_cache_size_mb": ("memory_cache_disk_size_mb", 2048),
+        "disk_cache_buffered_io": ("memory_cache_disk_buffered_io", False),
+        "disk_cache_sync_timeout_ms": ("memory_cache_disk_sync_timeout_ms", 2345),
+    }
+
+    @classmethod
+    def startup_samples(cls):
+        return {
+            **{f"kvcm_{name}": value for name, value in cls.samples.items()},
+            **{name: value for name, (_, value) in cls.tier_samples.items()},
+        }
+
+    @classmethod
+    def startup_env(cls, samples):
+        # Deployments keep the historical RECO_* environment contract while
+        # the public CLI and in-process config use kvcm_* names.
+        return {
+            **{
+                f"RECO_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in cls.samples
+            },
+            **{name.upper(): str(samples[name]) for name in cls.tier_samples},
+        }
+
+    @classmethod
+    def removed_names(cls):
+        return {
+            **{f"kvcm_{name}": f"reco_{name}" for name in cls.samples},
+            **{name: old_name for name, (old_name, _) in cls.tier_samples.items()},
+        }
+
+    def parse_cache_config(self, args, env, use_sys_argv=False):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_kv_cache_group_args(parser, config)
+        argv = ["server", *args] if use_sys_argv else ["server"]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
+            parser.parse_args(None if use_sys_argv else args)
+        return config
+
+    def test_canonical_env_and_cli_bind_all_fields(self):
+        samples = self.startup_samples()
+        env = self.startup_env(samples)
+        args = [
+            part
+            for name, value in samples.items()
+            for part in (f"--{name}", str(value))
+        ]
+        for config in (
+            self.parse_cache_config(None, env),
+            self.parse_cache_config([], env),
+            self.parse_cache_config(args, {}),
+        ):
+            for name, value in samples.items():
+                with self.subTest(name=name):
+                    self.assertEqual(getattr(config, name), value)
+
+    def test_canonical_env_preserves_false_zero_and_empty(self):
+        samples = self.startup_samples()
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name, value in samples.items():
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, name), type(value)())
+
+    def test_canonical_cli_overrides_environment(self):
+        samples = self.startup_samples()
+        empty_samples = {name: type(value)() for name, value in samples.items()}
+        env = self.startup_env(empty_samples)
+        for equals in (False, True):
+            args = []
+            for name, value in samples.items():
+                flag = f"--{name}"
+                args.extend([f"{flag}={value}"] if equals else [flag, str(value)])
+            for use_sys_argv in (False, True):
+                config = self.parse_cache_config(args, env, use_sys_argv)
+                for name, value in samples.items():
+                    with self.subTest(
+                        name=name, equals=equals, use_sys_argv=use_sys_argv
+                    ):
+                        self.assertEqual(getattr(config, name), value)
+
+    def test_removed_cli_names_are_rejected(self):
+        samples = self.startup_samples()
+        for name, old_name in self.removed_names().items():
+            with self.subTest(old_name=old_name), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config([f"--{old_name}", str(samples[name])], {})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(
+                    f"unrecognized arguments: --{old_name}", stderr.getvalue()
+                )
+
+    def test_removed_kvcm_and_tier_environment_names_do_not_change_defaults(self):
+        samples = self.startup_samples()
+        env = {
+            **{
+                f"KVCM_{name.upper()}": str(samples[f"kvcm_{name}"])
+                for name in self.samples
+            },
+            **{
+                old_name.upper(): str(samples[name])
+                for name, (old_name, _) in self.tier_samples.items()
+            },
+        }
+        defaults = self.parse_cache_config([], {})
+        for args in (None, []):
+            config = self.parse_cache_config(args, env)
+            for name in samples:
+                with self.subTest(name=name, args=args):
+                    self.assertEqual(getattr(config, name), getattr(defaults, name))
+
+    def test_removed_sm_copy_cli_is_rejected(self):
+        # This copy optimization was removed with the old connector. It is
+        # not an alias for the independent disk-cache tier switch.
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                self.parse_cache_config(["--enable_memory_cache_sm_copy", "1"], {})
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(
+            "unrecognized arguments: --enable_memory_cache_sm_copy", stderr.getvalue()
+        )
+
+    def test_removed_sm_copy_env_does_not_enable_disk_cache(self):
+        defaults = self.parse_cache_config([], {})
+        for value in ("0", "1"):
+            for args in (None, []):
+                with self.subTest(value=value, args=args):
+                    config = self.parse_cache_config(
+                        args, {"ENABLE_MEMORY_CACHE_SM_COPY": value}
+                    )
+                    self.assertFalse(hasattr(config, "enable_memory_cache_sm_copy"))
+                    self.assertEqual(config.__getstate__(), defaults.__getstate__())
+                    self.assertFalse(config.enable_disk_cache)
+
+    def test_memory_names_match_config_attributes_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args.kv_cache_group_args import (
+            init_kv_cache_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = KVCacheConfig()
+        parser = EnvArgumentParser()
+        init_kv_cache_group_args(parser, config)
+        mappings = parser.get_env_mappings()
+        for field_name, (old_name, value) in self.tier_samples.items():
+            if "memory" not in field_name:
+                continue
+            with self.subTest(field_name=field_name):
+                action = parser._option_string_actions[f"--{field_name}"]
+                self.assertEqual(action.dest, field_name)
+                self.assertEqual(mappings[field_name], field_name.upper())
+                self.assertNotIn(f"--{old_name}", parser._option_string_actions)
+                self.assertFalse(hasattr(config, old_name))
+                setattr(config, field_name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        for field_name, (_, value) in self.tier_samples.items():
+            if "memory" in field_name:
+                self.assertEqual(getattr(restored, field_name), value)
+
+    def test_properties_share_storage_and_pickle(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        for name, value in self.samples.items():
+            setattr(config, f"reco_{name}", value)
+            self.assertEqual(getattr(config, f"kvcm_{name}"), value)
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in self.samples.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(restored, f"reco_{name}"), value)
+                setattr(restored, f"kvcm_{name}", type(value)())
+                self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_dsv4_mega_moe_public_choices(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            nonse = server_args.setup_args(["--moe_strategy", "mega_moe"])
+            fused_se = server_args.setup_args(["--moe_strategy", "mega_moe_se"])
+            grouped = server_args.setup_args(["--moe_strategy", "grouped_fp4"])
+            local = server_args.setup_args(["--moe_strategy", "local_loop"])
+        self.assertEqual(nonse.moe_config.moe_strategy, "mega_moe")
+        self.assertEqual(fused_se.moe_config.moe_strategy, "mega_moe_se")
+        self.assertEqual(grouped.moe_config.moe_strategy, "grouped_fp4")
+        self.assertEqual(local.moe_config.moe_strategy, "local_loop")
+
+    def test_dsv4_single_card_strategy_from_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for strategy in ("grouped_fp4", "local_loop"):
+            with self.subTest(strategy=strategy), patch.dict(
+                os.environ, {"MOE_STRATEGY": strategy}, clear=True
+            ), patch.object(sys, "argv", ["rtp_llm_server"]):
+                configs = server_args.setup_args()
+                self.assertEqual(configs.moe_config.moe_strategy, strategy)
+
+    def test_public_no_quant_cpp_choice_uses_correct_spelling(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(["--moe_strategy", "no_quant_cpp"])
+            rocm_configs = server_args.setup_args(
+                ["--moe_strategy", "rocm_ep_low_latency"]
+            )
+        self.assertEqual(configs.moe_config.moe_strategy, "no_quant_cpp")
+        self.assertEqual(rocm_configs.moe_config.moe_strategy, "rocm_ep_low_latency")
+
+        for unsupported in ("no_auant_cpp",):
+            with self.subTest(unsupported=unsupported), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--moe_strategy", unsupported])
+
+    def test_dsv4_strategy_choices_reject_invalid_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for argv in (
+            ["rtp_llm_server"],
+            ["rtp_llm_server", "--tp_size", "1"],
+        ):
+            with self.subTest(argv=argv), patch.dict(
+                os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True
+            ), patch.object(sys, "argv", argv), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args()
+
+    def test_equal_form_cli_strategy_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_value in ("mega_moe", "not_a_strategy"):
+            with self.subTest(env_value=env_value), patch.dict(
+                os.environ, {"MOE_STRATEGY": env_value}, clear=True
+            ):
+                configs = server_args.setup_args(["--moe_strategy=local_loop"])
+                self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
+
+    def test_abbreviated_cli_option_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MOE_STRATEGY": "mega_moe"}, clear=True):
+            configs = server_args.setup_args(["--moe_strat", "local_loop"])
+
+        self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
+
+    def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
+        from rtp_llm.server.server_args import server_args
+
+        loaded = False
+
+        def load_backend():
+            nonlocal loaded
+            if not loaded:
+                register_backend_hook(
+                    "moe_strategy_choices",
+                    lambda parser: next(
+                        action
+                        for action in parser._actions
+                        if "--moe_strategy" in action.option_strings
+                    ).choices.append("external_test_strategy"),
+                )
+                loaded = True
+            return True
+
+        with (
+            patch.object(backend_registry, "_hooks", {}),
+            patch.object(backend_registry, "_started", set()),
+            patch.object(backend_registry, "_repeatable", set()),
+            patch.object(backend_registry, "_inflight", {}),
+            patch.object(backend_registry, "_failures", {}),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                server_args,
+                "ensure_backend_entrypoint_loaded",
+                side_effect=load_backend,
+            ),
+            patch.object(
+                backend_registry,
+                "ensure_backend_entrypoint_loaded",
+                return_value=True,
+            ),
+        ):
+            first_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
+            )
+            second_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
+            )
+        self.assertEqual(
+            first_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
+        self.assertEqual(
+            second_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
 
 
 class ServerArgsSetTest(TestCase):
@@ -19,6 +402,106 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_allocator_dump_config_requires_secret_and_valid_cooldown(self):
+        from rtp_llm.config.py_config_modules import ServerConfig
+
+        config = ServerConfig()
+        config.enable_torch_allocator_dump = True
+        with self.assertRaisesRegex(ValueError, "auth_token"):
+            config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_auth_token = "secret"
+        for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
+            config.torch_allocator_dump_cooldown_seconds = cooldown
+            with self.subTest(cooldown=cooldown), self.assertRaisesRegex(
+                ValueError, "finite and non-negative"
+            ):
+                config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_cooldown_seconds = 0
+        config.torch_allocator_dump_auth_header = "bad header"
+        with self.assertRaisesRegex(ValueError, "valid HTTP header"):
+            config.validate_allocator_dump_config()
+
+    def test_graph_capture_bootstrap_pickle_and_trace_json_round_trip(self):
+        from rtp_llm.config.model_config import ModelConfig, _apply_model_override_args
+        from rtp_llm.ops import HiddenStateCaptureDtype
+        from rtp_llm.server.server_args import server_args
+        from rtp_llm.telemetry.config import CONFIG_ENV, parse_trace_config
+
+        trace_json = json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "http://127.0.0.1:4318/v1/traces",
+                "headers": {"x-test": "round-trip"},
+                "sampler_ratio": 0.25,
+            }
+        )
+        for dtype_name in ("bf16", "fp8_e4m3"):
+            with self.subTest(dtype=dtype_name), patch.dict(
+                os.environ,
+                {
+                    CONFIG_ENV: trace_json,
+                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [1],
+                            "hidden_state_capture_dtype": (
+                                "fp8_e4m3" if dtype_name == "bf16" else "bf16"
+                            ),
+                        }
+                    ),
+                },
+            ):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "3",
+                        "--max_context_batch_size",
+                        "3",
+                        "--generation_prefill_capture_config",
+                        "32,64",
+                        "--json_model_override_args",
+                        json.dumps(
+                            {
+                                "hidden_state_capture_layer_ids": [2, 0],
+                                "hidden_state_capture_dtype": dtype_name,
+                            }
+                        ),
+                    ]
+                )
+                # ModelConfig has no pickle contract; transport the existing
+                # bootstrap inputs and apply them through the production path.
+                hw_config, model_args, restored_trace_json = pickle.loads(
+                    pickle.dumps(
+                        (
+                            configs.py_hw_kernel_config,
+                            configs.model_args,
+                            os.environ[CONFIG_ENV],
+                        )
+                    )
+                )
+                model_config = ModelConfig()
+                model_config.num_layers = 4
+                _apply_model_override_args(model_config, model_args)
+                self.assertEqual(model_config.hidden_state_capture_layer_ids, [2, 0])
+                self.assertEqual(
+                    model_config.hidden_state_capture_dtype,
+                    HiddenStateCaptureDtype.__members__[dtype_name.upper()],
+                )
+                self.assertTrue(hw_config.enable_cuda_graph)
+                self.assertEqual(
+                    hw_config.generation_prefill_cuda_graph_max_requests, 3
+                )
+                self.assertEqual(
+                    hw_config.generation_prefill_capture_token_buckets, [32, 64]
+                )
+                trace_config = parse_trace_config(restored_trace_json)
+                self.assertEqual(trace_config, parse_trace_config(trace_json))
+                self.assertTrue(trace_config.enabled)
+                self.assertEqual(trace_config.sampler_ratio, 0.25)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -29,9 +512,29 @@ class ServerArgsSetTest(TestCase):
         os.environ["DP_SIZE"] = "2"
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
+        os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
+        os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
+        os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
+        os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
+        os.environ["RTP_LLM_ENABLE_TORCH_ALLOCATOR_DUMP"] = "true"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_TOKEN"] = "test-secret"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_HEADER"] = "X-Test-Dump-Token"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS"] = "30"
+        os.environ["LOADER_RECYCLE_HANDLES"] = "false"
+        os.environ["MOE_PURE_TP_PRESHARD"] = "true"
+        os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
+        os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
+        os.environ["THINK_MODE"] = "adaptive"
+        os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_CUDA_GRAPH"] = "1"
+        os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
+        os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
+        os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
 
         sys.argv = ["prog"]
 
@@ -54,16 +557,98 @@ class ServerArgsSetTest(TestCase):
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
 
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            256,
+        )
+        restored_pd_config = pickle.loads(
+            pickle.dumps(py_env_configs.pd_separation_config)
+        )
+        self.assertEqual(restored_pd_config.prefill_prepare_resource_pool_size, 256)
+
         # Verify fifo_scheduler_config
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
+            2048,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
+            False,
+        )
+        restored_fifo_config = pickle.loads(
+            pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
+        )
+        self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        # Old pickles carry only the two original slots; every field added later
+        # must fall back to its default instead of raising.
+        fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
+        legacy_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        legacy_fifo_config.__setstate__((32, 8192))
+        self.assertEqual(legacy_fifo_config.max_context_batch_size, 32)
+        self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
+        self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
+        self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
+
+        # Verify frontend and DashSc pre-stop windows are configured independently.
+        self.assertEqual(
+            py_env_configs.server_config.frontend_pre_stop_drain_seconds, 2.5
+        )
+        self.assertEqual(
+            py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
+        )
+        self.assertTrue(py_env_configs.server_config.enable_torch_allocator_dump)
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_token,
+            "test-secret",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_header,
+            "X-Test-Dump-Token",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_cooldown_seconds,
+            30.0,
+        )
+        self.assertNotIn("test-secret", py_env_configs.server_config.to_string())
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
+        self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
+
+        # Verify load_config: the flag came from LOADER_RECYCLE_HANDLES=false.
+        self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
+        # MOE_PURE_TP_PRESHARD=true explicitly enables the opt-in path.
+        self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+        self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
+        self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
+        self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
+        self.assertEqual(
+            py_env_configs.jit_config.remote_jit_dir,
+            "dfs://bucket/jit/cache",
+        )
+
+        # Verify disable_flashinfer_hybrid_prefill
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128, 256],
+        )
+        self.assertTrue(py_env_configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            4,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 3
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -83,8 +668,16 @@ class ServerArgsSetTest(TestCase):
             "32",
             "--concurrency_limit",
             "128",
+            "--prefill_prepare_resource_pool_size",
+            "384",
             "--max_context_batch_size",
             "64",
+            "--max_batch_tokens_without_cache",
+            "4096",
+            "--cp_force_single_prefill",
+            "false",
+            "--max_inited_kv_cache_streams",
+            "16",
             "--warm_up",
             "0",
             "--cache_store_rdma_io_thread_count",
@@ -99,6 +692,10 @@ class ServerArgsSetTest(TestCase):
             "false",
             "--disable_flashinfer_native",
             "true",
+            "--disable_flashinfer_hybrid_prefill",
+            "true",
+            "--output_dispatcher_worker_count",
+            "4",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -124,14 +721,37 @@ class ServerArgsSetTest(TestCase):
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
 
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            384,
+        )
         # Verify fifo_scheduler_config
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             64,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
+            4096,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
+            False,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams,
+            16,
+        )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+        self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
+        self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
+
+        # Pins the shipped defaults: neither env nor argv sets the flags here.
+        self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
+        self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -144,6 +764,538 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            1,
+        )
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            HWKernelConfig().generation_prefill_capture_token_buckets,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.output_dispatcher_worker_count, 4
+        )
+
+    def test_generation_prefill_cuda_graph_cli_binding_and_validation(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.config.model_config import (
+            ModelConfig,
+            get_task_type_from_ckpt_path,
+        )
+        from rtp_llm.server.server_args import hw_kernel_group_args, server_args
+
+        def resolved_task_type(configs, checkpoint_path=""):
+            # Mirror build_model_config(): explicit task strings are normalized
+            # by ModelConfig, while an unset task may be inferred from the
+            # checkpoint layout or the legacy embedding switch.
+            resolved = get_task_type_from_ckpt_path(
+                configs.model_args.task_type,
+                checkpoint_path,
+                configs.embedding_config,
+            )
+            model_config = ModelConfig()
+            model_config.task_type = resolved
+            return model_config.task_type
+
+        def validate_resolved_config(configs, task_type=None, engine_config=None):
+            if engine_config is None:
+                engine_config = EngineConfig.create(configs)
+            hw_kernel_group_args.validate_hw_kernel_group_args(
+                engine_config.hw_kernel_config,
+                max_context_batch_size=(
+                    engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size
+                ),
+                concurrency_limit=engine_config.concurrency_config.concurrency_limit,
+                role_type=engine_config.parallelism_config.role_type,
+                speculative_type=engine_config.sp_config.type,
+                task_type=(
+                    resolved_task_type(configs) if task_type is None else task_type
+                ),
+            )
+
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "3",
+                "--max_context_batch_size",
+                "3",
+                "--generation_prefill_capture_config",
+                "7,19,31",
+            ]
+        )
+        self.assertTrue(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests, 3
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [7, 19, 31],
+        )
+        validate_resolved_config(configs)
+
+        # The shipped defaults are internally usable: the default reachable
+        # context capacity is one, so enabling only the master switch and a
+        # capture bucket must not fail startup.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            1,
+        )
+        validate_resolved_config(configs)
+
+        # These processes/wrappers do not own the optional normal-generation
+        # prefill runner. A deployment-wide retained config must not constrain
+        # their scheduler capacity.
+        non_owner_modes = {
+            "prefill_role": (["--role_type", "PREFILL"], TaskType.LANGUAGE_MODEL),
+            "decode_role": (["--role_type", "DECODE"], TaskType.LANGUAGE_MODEL),
+            "frontend_role": (["--role_type", "FRONTEND"], TaskType.LANGUAGE_MODEL),
+            "embedding_prefill": (["--embedding_model", "1"], TaskType.DENSE_EMBEDDING),
+        }
+        for mode, (mode_args, task_type) in non_owner_modes.items():
+            with self.subTest(mode=mode):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "8",
+                        "--max_context_batch_size",
+                        "1",
+                        "--concurrency_limit",
+                        "1",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        *mode_args,
+                    ]
+                )
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                    8,
+                )
+                validate_resolved_config(configs, task_type=task_type)
+
+        # P/D roles ignore retained generation-prefill configuration with or
+        # without speculative execution, including its capacity constraints.
+        for role_type in ("PREFILL", "DECODE"):
+            for speculative_type in (None, "mtp", "dspark"):
+                with self.subTest(
+                    role_type=role_type, speculative_type=speculative_type
+                ):
+                    mode_args = ["--role_type", role_type]
+                    if speculative_type is not None:
+                        mode_args.extend(["--sp_type", speculative_type])
+                    configs = server_args.setup_args(
+                        [
+                            "--enable_cuda_graph",
+                            "1",
+                            "--generation_prefill_capture_config",
+                            "64",
+                            "--generation_prefill_cuda_graph_max_requests",
+                            "8",
+                            "--max_context_batch_size",
+                            "1",
+                            "--concurrency_limit",
+                            "1",
+                            *mode_args,
+                        ]
+                    )
+                    validate_resolved_config(configs)
+
+        # Parsing preserves both options so NormalEngine can reject the PDFUSION
+        # combination in C++. This is not a successful-service-startup test:
+        # the constructor rejection is covered by NormalEngineTest.
+        for speculative_type in ("mtp", "dspark"):
+            with self.subTest(deferred_cpp_conflict=speculative_type):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        "--sp_type",
+                        speculative_type,
+                    ]
+                )
+                engine_config = EngineConfig.create(configs)
+                self.assertTrue(engine_config.hw_kernel_config.enable_cuda_graph)
+                self.assertEqual(
+                    engine_config.hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [64],
+                )
+                self.assertNotEqual(
+                    engine_config.sp_config.type,
+                    hw_kernel_group_args.SpeculativeType.NONE,
+                )
+                validate_resolved_config(configs, engine_config=engine_config)
+
+        # VIT_SEPARATION=ROLE implicitly replaces the parser-visible PDFUSION
+        # role. The final EngineConfig role is the ownership source of truth.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+                "--vit_separation",
+                "1",
+            ]
+        )
+        engine_config = EngineConfig.create(configs)
+        self.assertEqual(engine_config.parallelism_config.role_type, RoleType.VIT)
+        validate_resolved_config(
+            configs,
+            task_type=TaskType.LANGUAGE_MODEL,
+            engine_config=engine_config,
+        )
+
+        # Explicit non-language tasks and checkpoint-inferred sentence
+        # transformers both create embedding wrappers, not the secondary
+        # generation-prefill runner.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+                "--task_type",
+                "SEQ_CLASSIFICATION",
+            ]
+        )
+        explicit_task_type = resolved_task_type(configs)
+        self.assertEqual(explicit_task_type, TaskType.SEQ_CLASSIFICATION)
+        validate_resolved_config(configs, task_type=explicit_task_type)
+
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            Path(checkpoint_path, "modules.json").write_text(
+                '[{"type": "sentence_transformers.models.Transformer"}]',
+                encoding="utf-8",
+            )
+            inferred_task_type = resolved_task_type(configs, checkpoint_path)
+        self.assertEqual(inferred_task_type, TaskType.DENSE_EMBEDDING)
+        validate_resolved_config(configs, task_type=inferred_task_type)
+
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS,
+            HWKernelConfig.generation_prefill_cuda_graph_max_capture_tokens,
+        )
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS,
+            HWKernelConfig.generation_prefill_cuda_graph_max_capture_buckets,
+        )
+        self.assertEqual(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+            HWKernelConfig.generation_prefill_cuda_graph_max_requests_limit,
+        )
+        for invalid_max_requests in (
+            "0",
+            "-1",
+            str(
+                hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+                + 1
+            ),
+            str(hw_kernel_group_args.CPP_INT_MAX),
+            str(hw_kernel_group_args.CPP_INT_MAX + 1),
+        ):
+            with self.subTest(invalid_max_requests=invalid_max_requests):
+                with self.assertRaises(ArgumentTypeError):
+                    hw_kernel_group_args._generation_prefill_cuda_graph_max_requests(
+                        invalid_max_requests
+                    )
+        self.assertEqual(
+            hw_kernel_group_args._generation_prefill_cuda_graph_max_requests(
+                str(
+                    hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+                )
+            ),
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+        )
+        overflow_value = str(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT + 1
+        )
+        with self.assertRaises(SystemExit):
+            server_args.setup_args(
+                ["--generation_prefill_cuda_graph_max_requests", overflow_value]
+            )
+        with patch.dict(
+            os.environ,
+            {"GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": overflow_value},
+            clear=True,
+        ):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args([])
+
+        # A retained child configuration must not block rollback through the
+        # master switch, even when the active scheduler capacity is smaller.
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "0",
+                "--generation_prefill_cuda_graph_max_requests",
+                "8",
+                "--max_context_batch_size",
+                "1",
+                "--concurrency_limit",
+                "1",
+                "--generation_prefill_capture_config",
+                "64,128",
+            ]
+        )
+        self.assertFalse(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128],
+        )
+        validate_resolved_config(configs)
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_CUDA_GRAPH": "0",
+                "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": "8",
+                "GENERATION_PREFILL_CAPTURE_CONFIG": "64,128",
+                "MAX_CONTEXT_BATCH_SIZE": "1",
+                "CONCURRENCY_LIMIT": "1",
+            },
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+        self.assertFalse(configs.py_hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+            [64, 128],
+        )
+
+        max_requests_boundary = str(
+            hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT
+        )
+        configs = server_args.setup_args(
+            [
+                "--enable_cuda_graph",
+                "1",
+                "--generation_prefill_cuda_graph_max_requests",
+                max_requests_boundary,
+                "--max_context_batch_size",
+                max_requests_boundary,
+                "--concurrency_limit",
+                max_requests_boundary,
+                "--generation_prefill_capture_config",
+                "64",
+            ]
+        )
+        self.assertEqual(
+            configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            int(max_requests_boundary),
+        )
+        validate_resolved_config(configs)
+
+        for capacity_args in (
+            ["--max_context_batch_size", "2", "--concurrency_limit", "4"],
+            ["--max_context_batch_size", "4", "--concurrency_limit", "2"],
+        ):
+            with self.subTest(capacity_args=capacity_args):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "3",
+                        "--generation_prefill_capture_config",
+                        "64",
+                        *capacity_args,
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "reachable context batch capacity"
+                ):
+                    validate_resolved_config(configs)
+
+        for empty_config in ("", "   \t"):
+            with self.subTest(empty_config=empty_config):
+                self.assertEqual(
+                    hw_kernel_group_args._parse_generation_prefill_capture_config(
+                        empty_config
+                    ),
+                    [],
+                )
+                configs = server_args.setup_args(
+                    ["--generation_prefill_capture_config", empty_config]
+                )
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [],
+                )
+                with patch.dict(
+                    os.environ,
+                    {"GENERATION_PREFILL_CAPTURE_CONFIG": empty_config},
+                    clear=True,
+                ):
+                    configs = server_args.setup_args([])
+                self.assertEqual(
+                    configs.py_hw_kernel_config.generation_prefill_capture_token_buckets,
+                    [],
+                )
+        for invalid_config in (
+            "0,32",
+            "-1,32",
+            f"32,{hw_kernel_group_args.GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS + 1}",
+        ):
+            with self.subTest(invalid_config=invalid_config):
+                with self.assertRaises(ArgumentTypeError):
+                    hw_kernel_group_args._parse_generation_prefill_capture_config(
+                        invalid_config
+                    )
+
+        self.assertEqual(
+            hw_kernel_group_args._parse_generation_prefill_capture_config("64:1"),
+            list(range(1, 65)),
+        )
+        with self.assertRaises(ArgumentTypeError):
+            hw_kernel_group_args._parse_generation_prefill_capture_config("65:1")
+
+        with self.assertRaises(ArgumentTypeError):
+            hw_kernel_group_args._parse_generation_prefill_capture_config(
+                ",".join(str(i) for i in range(1, 66))
+            )
+
+        for bucket_count, should_pass in ((64, True), (65, False)):
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as config_file:
+                config_file.write("\n".join(str(i) for i in range(1, bucket_count + 1)))
+                config_path = config_file.name
+            try:
+                if should_pass:
+                    self.assertEqual(
+                        hw_kernel_group_args._parse_generation_prefill_capture_config(
+                            config_path
+                        ),
+                        list(range(1, bucket_count + 1)),
+                    )
+                else:
+                    with self.assertRaises(ArgumentTypeError):
+                        hw_kernel_group_args._parse_generation_prefill_capture_config(
+                            config_path
+                        )
+            finally:
+                os.unlink(config_path)
+
+    def test_generation_prefill_invalid_bucket_preserves_exception_cause(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            _parse_generation_prefill_capture_config,
+        )
+
+        with self.assertRaisesRegex(ArgumentTypeError, "invalid literal") as caught:
+            _parse_generation_prefill_capture_config("64,invalid")
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
+
+    def test_output_dispatcher_worker_count_boundaries(self):
+        from rtp_llm.server.server_args import server_args
+
+        for source in ("cli", "env", "env_only"):
+            for value in ("0", "2", "-1", "1.5", "invalid"):
+                with self.subTest(source=source, value=value):
+                    env = (
+                        {"OUTPUT_DISPATCHER_WORKER_COUNT": value}
+                        if source != "cli"
+                        else {}
+                    )
+                    args = (
+                        ["--output_dispatcher_worker_count", value]
+                        if source == "cli"
+                        else []
+                    )
+                    if source == "env_only":
+                        args = None
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        sys, "argv", ["prog"]
+                    ):
+                        if value in ("0", "2"):
+                            configs = server_args.setup_args(args)
+                            self.assertEqual(
+                                configs.runtime_config.output_dispatcher_worker_count,
+                                int(value),
+                            )
+                        else:
+                            with self.assertRaises(SystemExit):
+                                server_args.setup_args(args)
+
+    def test_model_warm_up_env_and_global_master(self):
+        os.environ["WARM_UP"] = "0"
+        os.environ["WARM_UP_WITH_LOSS"] = "1"
+        os.environ["MODEL_WARM_UP"] = "1"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertFalse(py_env_configs.runtime_config.warm_up)
+        self.assertTrue(py_env_configs.runtime_config.warm_up_with_loss)
+        self.assertTrue(py_env_configs.runtime_config.model_warm_up)
+        self.assertEqual(os.environ["WARM_UP"], "0")
+        self.assertEqual(os.environ["WARM_UP_WITH_LOSS"], "1")
+        self.assertEqual(os.environ["MODEL_WARM_UP"], "1")
+
+    def test_warm_up_with_loss_is_independent_of_model_warm_up(self):
+        os.environ["WARM_UP"] = "1"
+        os.environ["WARM_UP_WITH_LOSS"] = "1"
+        os.environ["MODEL_WARM_UP"] = "0"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertTrue(py_env_configs.runtime_config.warm_up)
+        self.assertTrue(py_env_configs.runtime_config.warm_up_with_loss)
+        self.assertFalse(py_env_configs.runtime_config.model_warm_up)
+
+        restored_runtime_config = pickle.loads(
+            pickle.dumps(py_env_configs.runtime_config)
+        )
+        self.assertTrue(restored_runtime_config.warm_up)
+        self.assertTrue(restored_runtime_config.warm_up_with_loss)
+        self.assertFalse(restored_runtime_config.model_warm_up)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
@@ -153,6 +1305,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["ACT_TYPE"] = "BF16"
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
+        os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -167,6 +1320,8 @@ class ServerArgsSetTest(TestCase):
             "8",
             "--concurrency_limit",
             "64",
+            "--disable_flashinfer_hybrid_prefill",
+            "false",
         ]
 
         # Import and setup args
@@ -184,6 +1339,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)  # Overridden
         self.assertEqual(
             py_env_configs.concurrency_config.concurrency_limit, 64
+        )  # Overridden
+        self.assertFalse(
+            py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
 
     def test_mixed_env_and_cmd_args(self):
@@ -228,6 +1386,9 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+
+        # Not set via env or cmd args: verify the default value
+        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
 
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""
@@ -329,6 +1490,58 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
+    def test_kv_cache_event_env_vars_bind_to_config(self):
+        for env_name, _, raw_value, _ in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[env_name] = raw_value
+        # Exercise the mixed CLI + environment path rather than argparse's
+        # environment-to-argv fallback.
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for _, field_name, _, expected_value in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    expected_value,
+                    getattr(py_env_configs.kv_cache_config, field_name),
+                )
+
+    def test_kv_cache_event_env_vars_bind_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[case.env_name] = case.raw_value
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=case.field_name):
+                self.assertEqual(
+                    case.expected_value,
+                    getattr(py_env_configs.kv_cache_config, case.field_name),
+                )
+
+    def test_kv_cache_event_cli_rejects_unknown_publisher_type(self):
+        sys.argv = [
+            "prog",
+            "--model_type",
+            "qwen",
+            "--kv_cache_event_publisher_type",
+            "KVCM",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.server.server_args.server_args import (
@@ -343,6 +1556,201 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_repetition_detection_config(self):
+        """Test that repetition detection args bind to PyEnvConfigs."""
+        sys.argv = [
+            "prog",
+            "--tool_call_loop_threshold",
+            "7",
+            "--tool_call_loop_begin_marker",
+            "<tool_call>",
+            "--tool_call_loop_end_marker",
+            "</tool_call>",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        cfg = py_env_configs.repetition_detection_config
+        self.assertEqual(cfg.tool_call_loop_threshold, 7)
+        self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
+        self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_output_repetition_max_period_cli_boundaries(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.repetition_detection_group_args import (
+            MAX_OUTPUT_REPETITION_PERIOD,
+            init_repetition_detection_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        def parse_period(value: int):
+            configs = PyEnvConfigs()
+            parser = EnvArgumentParser()
+            parser.set_root_config(configs)
+            init_repetition_detection_group_args(
+                parser, configs.repetition_detection_config
+            )
+            parser.parse_args(["--output_repetition_max_period", str(value)])
+            return configs.repetition_detection_config.output_repetition_max_period
+
+        self.assertEqual(parse_period(0), 1)
+        self.assertEqual(parse_period(-7), 1)
+        self.assertEqual(
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD),
+            MAX_OUTPUT_REPETITION_PERIOD,
+        )
+        with self.assertRaises(SystemExit):
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD + 1)
+
+    def test_dash_sc_default_allows_large_requests_on_both_ends(self):
+        from rtp_llm.server.server_args.grpc_group_args import (
+            default_dash_sc_grpc_config_json,
+        )
+
+        config = json.loads(default_dash_sc_grpc_config_json())
+        expected = 1024 * 1024 * 1024
+        self.assertEqual(
+            config["client_config"]["grpc.max_receive_message_length"], expected
+        )
+        self.assertEqual(
+            config["server_config"]["grpc.max_receive_message_length"], expected
+        )
+
+
+class ServerArgsGrammarConfigTest(TestCase):
+    """Cover every CLI-wired field on GrammarConfig (--grammar_* /
+    --constrained_json_*): default values and CLI binding."""
+
+    def setUp(self):
+        environ_backup = os.environ.copy()
+        argv_backup = sys.argv.copy()
+
+        # Register restoration BEFORE mutating global state so it runs even if
+        # setUp itself (or _setup) raises — a bare tearDown would be skipped on a
+        # setUp failure and leave os.environ cleared for the rest of the suite.
+        def _restore():
+            os.environ.clear()
+            os.environ.update(environ_backup)
+            sys.argv = argv_backup
+
+        self.addCleanup(_restore)
+
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def _setup(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_grammar_defaults(self):
+        """All fields match defaults when no input is given.
+        Regression guard for the wiring in init_grammar_group_args."""
+        py_env_configs = self._setup()
+        g = py_env_configs.grammar_config
+
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
+
+    def test_grammar_parser_defaults_override_config_initial_values(self):
+        """The CLI declaration is the source of truth for grammar defaults."""
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.grammar_group_args import (
+            init_grammar_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        cfgs = PyEnvConfigs()
+        g = cfgs.grammar_config
+        g.constrained_json_disable_any_whitespace = True
+        g.terminate_without_stop_token = True
+        g.num_workers = 17
+        g.compile_timeout_ms = 1
+        g.compile_concurrency = 2
+        g.compile_queue_size = 3
+        g.compiler_cache_bytes = 1
+
+        parser = EnvArgumentParser()
+        parser.set_root_config(cfgs)
+        init_grammar_group_args(parser, g, cfgs.grammar_admission_config)
+        parser.parse_args([])
+
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
+
+    def test_grammar_cmd_args(self):
+        """Every CLI flag binds to the right config field, with correct types."""
+        sys.argv = [
+            "prog",
+            "--constrained_json_disable_any_whitespace",
+            "1",
+            "--grammar_terminate_without_stop_token",
+            "1",
+            "--grammar_num_workers",
+            "7",
+            "--grammar_compile_timeout_ms",
+            "1234",
+            "--grammar_compile_concurrency",
+            "3",
+            "--grammar_compile_queue_size",
+            "5",
+            "--grammar_compiler_cache_bytes",
+            "67108864",
+        ]
+
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        self.assertEqual(g.constrained_json_disable_any_whitespace, True)
+        self.assertEqual(g.terminate_without_stop_token, True)
+        self.assertEqual(g.num_workers, 7)
+        self.assertEqual(g.compile_timeout_ms, 1234)
+        self.assertEqual(g.compile_concurrency, 3)
+        self.assertEqual(g.compile_queue_size, 5)
+        self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+    def test_grammar_env_args(self):
+        os.environ.update(
+            {
+                "GRAMMAR_NUM_WORKERS": "9",
+                "GRAMMAR_COMPILE_TIMEOUT_MS": "3456",
+                "GRAMMAR_COMPILE_CONCURRENCY": "4",
+                "GRAMMAR_COMPILE_QUEUE_SIZE": "6",
+                "GRAMMAR_COMPILER_CACHE_BYTES": "33554432",
+            }
+        )
+
+        g = self._setup().grammar_config
+        self.assertEqual(g.num_workers, 9)
+        self.assertEqual(g.compile_timeout_ms, 3456)
+        self.assertEqual(g.compile_concurrency, 4)
+        self.assertEqual(g.compile_queue_size, 6)
+        self.assertEqual(g.compiler_cache_bytes, 33554432)
+
+    def test_non_positive_bounded_compile_args_are_rejected(self):
+        for flag in (
+            "--grammar_compile_timeout_ms",
+            "--grammar_compile_concurrency",
+            "--grammar_compile_queue_size",
+        ):
+            with self.subTest(flag=flag):
+                sys.argv = ["prog", flag, "0"]
+                with self.assertRaises(SystemExit):
+                    self._setup()
 
 
 if __name__ == "__main__":

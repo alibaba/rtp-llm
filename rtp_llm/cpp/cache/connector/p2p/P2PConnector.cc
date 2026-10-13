@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
-#include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/Meta.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
@@ -74,11 +74,12 @@ std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourc
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
-                                                      const std::shared_ptr<Meta>&              meta,
-                                                      const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                      int                                       start_read_block_index,
-                                                      int                                       read_block_num) {
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
+P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
+                        const std::shared_ptr<Meta>&              meta,
+                        const std::shared_ptr<AsyncMatchContext>& match_context,
+                        int                                       start_read_block_index,
+                        int                                       read_block_num) {
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
@@ -106,13 +107,13 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&    resource,
-                                                       const std::shared_ptr<Meta>& meta) {
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&    resource,
+                                                                               const std::shared_ptr<Meta>& meta) {
     // p2p connector not support async write
     return nullptr;
 }
 
-std::shared_ptr<AsyncContext>
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
     worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
@@ -272,10 +273,16 @@ bool P2PConnector::executeRead(int64_t                                 request_i
                                FunctionResponsePB&                     response) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
-        auto layer_id           = layer_block_pb.layer_id();
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        const auto  layer_id  = static_cast<int>(layer_block_pb.layer_id());
+        const auto& cache_tag = layer_block_pb.cache_tag();
+        RTP_LLM_CHECK_WITH_INFO(!cache_tag.empty(), "P2P layer block requires cache_tag for layer=%d", layer_id);
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
+        RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_ids.size(),
+                                "P2P layer block key/id size mismatch for layer=%d tag=%s",
+                                layer_id,
+                                cache_tag.c_str());
         for (size_t i = 0; i < cache_keys.size(); i++) {
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }

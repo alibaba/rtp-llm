@@ -15,6 +15,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "stl_utils",
+    hdrs = [
+        "StlUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # New modular targets
 cc_library(
     name = "core_utils",
@@ -41,6 +50,27 @@ cc_library(
         "//rtp_llm/cpp/config:static_config",
     ],
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "torch_cuda_oom",
+    srcs = ["TorchCudaOom.cc"],
+    hdrs = ["TorchCudaOom.h"],
+    copts = copts(),
+    deps = [
+        ":core_utils",
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

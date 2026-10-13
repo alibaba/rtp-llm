@@ -1,0 +1,120 @@
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+
+py_test(
+    name = "codec_test",
+    srcs = ["codec_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "grammar_validator_test",
+    srcs = ["inference/grammar_validator_test.py"],
+    main = "inference/grammar_validator_test.py",
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    imports = [],
+)
+
+py_test(
+    name = "core_dump_control_test",
+    srcs = ["inference/core_dump_control_test.py"],
+    main = "inference/core_dump_control_test.py",
+    deps = ["//rtp_llm/dash_sc:xgrammar_core_dump_control"],
+)
+
+py_test(
+    name = "think_test",
+    srcs = ["think_test.py"],
+    main = "think_test.py",
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    imports = [],
+)
+
+py_test(
+    name = "inference_servicer_test",
+    srcs = ["inference/servicer_test.py"],
+    main = "inference/servicer_test.py",
+    # telemetry_test_deps() declares the opentelemetry runtime for the locks that
+    # carry it, so DashScInferenceTracingTest (guarded by skipUnless(OTEL_AVAILABLE))
+    # cannot silently vanish when this target is run on its own.
+    deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
+    imports = [],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "logging_consent_test",
+    srcs = ["inference/logging_consent_test.py"],
+    main = "inference/logging_consent_test.py",
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
+    name = "mrcr_smoke_test",
+    srcs = ["inference/mrcr_smoke_test.py"],
+    data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
+    main = "inference/mrcr_smoke_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "proxy_servicer_test",
+    srcs = ["proxy/servicer_test.py"],
+    main = "proxy/servicer_test.py",
+    # Same reason as inference_servicer_test: keep ProxyTracingTest unskippable
+    # on the locks that carry opentelemetry.
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"] + telemetry_test_deps(),
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    imports = [],
+)
+
+py_test(
+    name = "access_log_test",
+    srcs = ["access_log_test.py"],
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "repetition_monitor_test",
+    srcs = ["repetition_monitor_test.py"],
+    data = [
+        "//rtp_llm/cpp/repetition:online_repetition_tracker",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
+    imports = [],
+)
+
+py_test(
+    name = "app_test",
+    srcs = ["app_test.py"],
+    deps = [
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+        # dash_sc/app.py pulls rtp_llm.model_factory and the rpc/server stack
+        # at module level. Keep the pure-py tree (rtp_llm_lib carries no
+        # :th_transformer / :rtp_compute_ops data) plus the two modules that
+        # are not part of it.
+        "//rtp_llm:device",
+        "//rtp_llm:rtp_llm_lib",
+        "//rtp_llm:sdk",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    imports = [],
+)

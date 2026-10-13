@@ -1,3 +1,5 @@
+import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -6,18 +8,23 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_groups,
+    select_fmha_impl_for_group,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
     FakeBalanceExpert,
-    FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
     SelectTopk,
@@ -29,6 +36,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+logger = logging.getLogger(__name__)
 
 
 class GenericMoeLayer(nn.Module):
@@ -47,6 +56,8 @@ class GenericMoeLayer(nn.Module):
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -76,17 +87,15 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        router = self.fused_moe.router
+        router_tp_size = router.tp_collective_size
 
-        self.w1 = weights.get(W.moe_w1, None)
-        self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
-        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
-        self.ep_size = parallelism_config.ep_size
+        self.num_local_experts = self.num_experts // max(self.ep_size, 1)
+        self.add_shared_expert = (
+            config.moe_style == 2 and not self.fused_moe.includes_shared_expert
+        )
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -114,13 +123,57 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        self.use_ep_shared_allreduce = (
+            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
+        )
+        self.use_unified_tp_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size == 1
+            and self.ffn_tp_size == router_tp_size
+            and router.supports_skip_tp_allreduce
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "GenericMoE unified TP all-reduce %s "
+                "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
+                "enabled" if self.use_unified_tp_allreduce else "disabled",
+                type(router).__name__,
+                self.ffn_tp_size,
+                router_tp_size,
+                self.ep_size,
+            )
+
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+
+    def _merge_shared_expert_output(
+        self,
+        hidden_states: torch.Tensor,
+        experts_output: torch.Tensor,
+        shared_expert_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.shared_expert_gate is not None:
+            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            self.sigmoid_gate_scale_add(
+                gate_output, shared_expert_output, experts_output
+            )
+            return experts_output
+        return experts_output + shared_expert_output
+
+    def _gate_shared_expert_output(
+        self,
+        hidden_states: torch.Tensor,
+        shared_expert_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.shared_expert_gate is not None:
+            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            return torch.sigmoid(gate_output) * shared_expert_output
+        return shared_expert_output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -146,7 +199,7 @@ class GenericMoeLayer(nn.Module):
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                scores=router_logits_fp32,
+                scores=router_logits,
                 correction_bias=self.correction_bias,
                 n_group=self.num_expert_group,
                 topk_group=self.topk_group,
@@ -155,51 +208,55 @@ class GenericMoeLayer(nn.Module):
                 routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            self.select_topk(router_logits, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        is_ep_mode = self.ep_size > 1
-        # EP mode: routed expert output is already complete (EP combine handles it).
-        # Shared expert output is TP-partial and needs separate allreduce.
-        use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
-        )
-
+        # In pure-TP mode both the routed experts and the shared expert produce
+        # TP-partial outputs.  Reduce their sum once instead of reducing each
+        # path separately.  This is especially important for decode, where the
+        # hidden dimension is small enough that collective launch latency
+        # dominates the payload transfer.
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
-                skip_allreduce=use_ep_shared_allreduce,
+                skip_allreduce=(
+                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                ),
             )
-            if use_ep_shared_allreduce:
+            if self.use_unified_tp_allreduce:
+                # Both paths are still TP-partial.  The shared-expert gate is
+                # rank-consistent because hidden_states are replicated across
+                # TP ranks, so it is safe to apply it before the single
+                # all-reduce.
+                experts_output = self._merge_shared_expert_output(
+                    hidden_states, experts_output, shared_expert_output
+                )
+                experts_output = all_reduce(experts_output, group=Group.TP)
+            elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
-                if self.shared_expert_gate is not None:
-                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                    shared_expert_output = (
-                        torch.sigmoid(gate_output) * shared_expert_output
-                    )
+                shared_expert_output = self._gate_shared_expert_output(
+                    hidden_states, shared_expert_output
+                )
                 shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
                 experts_output = experts_output + shared_expert_output
             else:
-                # TP-only mode: same as main - each component does its own allreduce.
-                if self.shared_expert_gate is not None:
-                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
-                    self.sigmoid_gate_scale_add(
-                        gate_output, shared_expert_output, experts_output
-                    )
-                else:
-                    experts_output = experts_output + shared_expert_output
+                # Fallback path: each path is already complete independently.
+                # This includes ffn_tp_size == 1 and routers that retain their
+                # own finalize reduction, so only local merging remains.
+                experts_output = self._merge_shared_expert_output(
+                    hidden_states, experts_output, shared_expert_output
+                )
 
         return experts_output
 
@@ -287,8 +344,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: Any,
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -332,6 +389,11 @@ class GenericMoeModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if model_config.mm_model_config.is_multimodal
+            else None
+        )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -357,29 +419,139 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
+
+    def _uses_sparse_mla(self) -> bool:
+        return bool(
+            self.config.attn_config.use_mla and self.config.attn_config.is_sparse
+        )
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self._uses_sparse_mla():
+            return ["default", "indexer_kv"]
+        return None
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ) -> Any:
+        if self._uses_sparse_mla():
+            attention_inputs = get_attention_inputs_value(inputs)
+            if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
+                # Cacheless warmup shares one input and skips the indexer.
+                fmha_impl = super().prepare_fmha_impl(
+                    inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
+                return {"default": fmha_impl, "indexer_kv": fmha_impl}
+            raw_tags = (
+                list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
+            )
+            required_tags = {"default", "indexer_kv"}
+            if len(raw_tags) != len(required_tags) or set(raw_tags) != required_tags:
+                raise RuntimeError(
+                    "sparse MLA requires exactly attention input tags "
+                    f"{sorted(required_tags)}; available tags={raw_tags}"
+                )
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+
+    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build token embeddings and inject features for an MM request.
+
+        The model-level flag controls whether the injector is constructed;
+        the request-level feature list controls whether this invocation uses
+        the multimodal path. This keeps text-only requests on the original
+        embedding kernel even when a VL model serves a mixed workload.
+        """
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
+        injector = getattr(self, "multimodal_embedding_injector", None)
+        if injector is None or not multimodal_features:
+            return self.embed_tokens(inputs.input_ids)
+
+        inputs_embeds = self.embed_tokens(
+            inputs.input_ids,
+            inputs.combo_position_ids,
+            inputs.embedding_inputs.combo_tokens_type_ids,
+            inputs.embedding_inputs.text_tokens_mask,
+        )
+        return injector(
+            inputs_embeds,
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+        capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
+        is_sparse_mla = self._uses_sparse_mla()
+        if is_sparse_mla:
+            required_tags = {"default", "indexer_kv"}
+            if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
+                available_tags = (
+                    list(fmha_impl) if isinstance(fmha_impl, Mapping) else []
+                )
+                raise RuntimeError(
+                    "sparse MLA requires exactly FMHA tags "
+                    f"{sorted(required_tags)}; available tags={available_tags}"
+                )
+            sparse_fmha_impl = {
+                group_tag: select_fmha_impl_for_group(fmha_impl, group_tag)
+                for group_tag in ("default", "indexer_kv")
+            }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            if is_sparse_mla:
+                layer_fmha_impl = sparse_fmha_impl
+                layer_kv_cache = (
+                    get_layer_caches_for_groups(
+                        self.kv_cache, i, ("default", "indexer_kv")
+                    )
+                    if self.kv_cache is not None
+                    else None
+                )
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                layer_kv_cache = (
+                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                )
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                layer_fmha_impl,
+                kv_cache=layer_kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            capture.capture_layer(i, hidden_states, residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return capture.finalize(hidden_states, residual)
 
 
 __all__ = [

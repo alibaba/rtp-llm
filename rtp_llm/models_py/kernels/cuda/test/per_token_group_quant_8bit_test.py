@@ -1,6 +1,8 @@
 import itertools
+import os
 from typing import Tuple
 from unittest import SkipTest, TestCase, main
+from unittest.mock import patch
 
 import torch
 import triton
@@ -9,6 +11,7 @@ from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from rtp_llm.models_py.utils.arch import is_hip
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
@@ -321,10 +324,40 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f"x_q_triton = {x_q_triton}")
-        print(f"x_s_triton = {x_s_triton}")
-        print(f"x_q_sglang = {x_q_sglang}")
-        print(f"x_s_sglang = {x_s_sglang}")
+        # Compare, do not just print. This target runs on L20 rather than A10
+        # precisely so the Triton reference above can execute (it stores fp8e4nv,
+        # which Triton only permits at capability >= 89), and printing both
+        # results meant the reference cost a GPU slot while gating nothing -- the
+        # two could disagree completely and the test would still pass.
+        #
+        # Quantized values are compared to within one fp8 ULP, not exactly. Both
+        # paths round the same fp16 input to the same fp8 grid with a per-group
+        # scale that agrees to the tolerance asserted below, but they are
+        # independent implementations and round half-way cases at the grid
+        # boundary differently. That shows up as a data-dependent handful of
+        # elements off by a single code (observed greatest relative difference
+        # 0.125, i.e. exactly one e4m3 mantissa step), so an exact comparison is
+        # flaky across GPU archs while a >= 2 ULP disagreement is still caught.
+        # finfo.eps is one mantissa step; finfo.tiny*eps is one subnormal step,
+        # which bounds the near-zero region where the relative term vanishes.
+        q_finfo = torch.finfo(dst_dtype)
+        torch.testing.assert_close(
+            x_q_sglang.to(torch.float32),
+            x_q_triton.to(torch.float32),
+            rtol=q_finfo.eps,
+            atol=q_finfo.tiny * q_finfo.eps,
+            msg=lambda m: (
+                "quantized values differ from the Triton reference by more "
+                f"than one fp8 ULP: {m}"
+            ),
+        )
+        torch.testing.assert_close(
+            x_s_sglang.to(torch.float32),
+            x_s_triton.to(torch.float32),
+            rtol=1e-6,
+            atol=1e-8,
+            msg=lambda m: f"scales differ from the Triton reference: {m}",
+        )
 
     def test_per_token_group_quant(self):
         for params in itertools.product(
@@ -344,6 +377,48 @@ class PerTokenGroupQuantTest(TestCase):
                 scale_tma_aligned=params[5],
             ):
                 self._run_quant_test(*params)
+
+    def test_v2_input_offset_above_int32_elements(self):
+        if _is_hip:
+            self.skipTest("v2 fp8 kernel path is CUDA-only")
+
+        hidden_dim = 4096
+        group_size = 128
+        num_tokens = (2**31 // hidden_dim) + 8
+        input_bytes = num_tokens * hidden_dim * torch.bfloat16.itemsize
+        output_bytes = num_tokens * hidden_dim * fp8_type_.itemsize
+        scale_bytes = num_tokens * (hidden_dim // group_size) * torch.int.itemsize
+        required_bytes = input_bytes + output_bytes + scale_bytes
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        if total_bytes < 16 * 1024**3 or free_bytes < required_bytes + 2 * 1024**3:
+            self.skipTest(
+                "insufficient GPU memory for large-offset quant test: "
+                f"free={free_bytes} required={required_bytes}"
+            )
+
+        x = torch.empty(
+            (num_tokens, hidden_dim),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        x.zero_()
+        torch.cuda.synchronize()
+
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
+            x_q, x_s = sgl_per_token_group_quant_fp8(
+                x,
+                group_size=group_size,
+                eps=1e-10,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
+        torch.cuda.synchronize()
+
+        self.assertEqual(x_q.shape, x.shape)
+        self.assertEqual(x_q.dtype, fp8_type_)
+        self.assertEqual(x_s.shape[0], num_tokens)
+        self.assertTrue(torch.all(x_q[-1] == 0).item())
 
 
 if __name__ == "__main__":

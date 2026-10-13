@@ -37,6 +37,20 @@ py_test (
 )
 
 py_test (
+    name = "test_generic_moe_allreduce",
+    srcs = ["test_generic_moe_allreduce.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    env = {"GPU_COUNT": "2"},
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test (
     name = "rocm_fp8_fused_moe_test",
     srcs = ["rocm_fp8_fused_moe_test.py"],
     deps = [

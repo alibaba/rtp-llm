@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,14 +13,38 @@ namespace rtp_llm {
 
 struct StreamGroups {
 public:
+    struct TokenCounts {
+        int64_t context            = 0;
+        int64_t context_with_cache = 0;
+        int64_t generate           = 0;
+        int64_t total              = 0;
+    };
+    using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
-            auto cur_batch_size  = stream->currentBatchSize();
-            auto next_batch_size = stream->nextBatchSize();
+            // A cache snapshot is published only for an established decode
+            // stream. Avoid reading is_context_stream_ while the prior worker
+            // redundantly commits the same decode state.
+            const auto mtp_state        = stream->getMtpAsyncDeviceState();
+            const bool use_mtp_snapshot = GenerateStream::hasMtpCacheSnapshot(mtp_state);
+            const bool is_context       = use_mtp_snapshot ? false : stream->isContextStream();
+            // A speculative stream is admitted only with one fixed sequence.
+            // currentBatchSize()/nextBatchSize() derive their answer from the
+            // mutable output-token history, which belongs to the bookkeeping
+            // worker while a device snapshot is active. Do not read that
+            // history merely to rediscover the invariant batch size.
+            if (use_mtp_snapshot) {
+                RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
+                                        "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
+                                        stream->streamId());
+            }
+            const auto cur_batch_size  = use_mtp_snapshot ? 1 : stream->currentBatchSize();
+            const auto next_batch_size = use_mtp_snapshot ? 1 : stream->nextBatchSize();
             if (stream->isFakeStream()) {
                 is_fake_stream_ = true;
             }
-            if (stream->isContextStream()) {
+            if (is_context) {
                 context_streams_.push_back(stream);
                 total_context_batch_size_ += cur_batch_size;
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
@@ -32,24 +57,57 @@ public:
             } else {
                 decode_streams_.push_back(stream);
                 total_decode_batch_size_ += cur_batch_size;
-                if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
+                // Decode does not consume multimodal feature tensors. Avoid
+                // multimodalFeaturesLength(), which also derives a multiplier
+                // from worker-owned output-token history.
+                if (!use_mtp_snapshot && !has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
             }
             auto block_update_copy_num = stream->streamCacheResource().getKVBlockUpdateMapping().size();
-            if (stream->isContextStream()) {
+            if (is_context) {
                 context_block_update_copy_num_ += block_update_copy_num;
             } else {
                 decode_block_update_copy_num_ += block_update_copy_num;
             }
-            model_execute_token_size_ += stream->currentExecuteTokenSize();
-            total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
+            // A decode round always executes one input row per live sequence.
+            // While an async MTP commit is pending, complete_token_ids is
+            // worker-owned; do not read it merely to rediscover cur_batch_size.
+            auto execute_token_size = use_mtp_snapshot ? static_cast<size_t>(cur_batch_size) :
+                                                         static_cast<size_t>(stream->currentExecuteTokenSize());
+            if (is_context) {
+                auto reuse_length = stream->reuseLength();
+                context_execute_token_size_ += execute_token_size;
+                context_execute_token_size_with_cache_ += execute_token_size;
+                if (reuse_length > 0) {
+                    context_execute_token_size_with_cache_ += static_cast<size_t>(reuse_length) * cur_batch_size;
+                }
+            }
+            model_execute_token_size_ += execute_token_size;
+            total_sampler_batch_size_in_ +=
+                !use_mtp_snapshot && stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
-            max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
-            max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
+            max_blocks_num_ =
+                std::max(max_blocks_num_,
+                         use_mtp_snapshot ? static_cast<size_t>(mtp_state.next_kv_cache_block_id_gpu.size(2)) :
+                                            stream->curBlocksNum());
+            // cache_keys are context/CacheStore metadata and are not consumed
+            // by a decode-only model input.  Avoid traversing them while the
+            // speculative worker updates the corresponding token history.
+            if (!use_mtp_snapshot && stream->hasCacheKeys()) {
+                for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
+                    max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys(batch_id).size());
+                }
+            }
+            const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
+            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
+                                                static_cast<size_t>(snapshot_seq_len) :
+                                                static_cast<size_t>(stream->seqLength());
+            max_seq_len_                  = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= stream->genTimeline();
+            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
+                                                stream->genTimeline();
         }
     }
 
@@ -80,8 +138,37 @@ public:
     size_t curBlocksNum() const {
         return max_blocks_num_;
     }
+    size_t maxCacheKeysNum() const {
+        return max_cache_keys_num_;
+    }
     size_t modelExecuteTokenSize() const {
         return model_execute_token_size_;
+    }
+    size_t contextExecuteTokenSize() const {
+        return context_execute_token_size_;
+    }
+    size_t contextExecuteTokenSizeWithCache() const {
+        return context_execute_token_size_with_cache_;
+    }
+
+    TokenCountsByPriority tokenCountsByPriority() const {
+        TokenCountsByPriority token_counts;
+        for (const auto& stream : context_streams_) {
+            auto& counts             = token_counts[stream->priority()];
+            auto  execute_token_size = stream->currentExecuteTokenSize();
+            counts.context += execute_token_size;
+            counts.context_with_cache += execute_token_size;
+            counts.total += execute_token_size;
+            if (stream->reuseLength() > 0) {
+                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            auto& counts = token_counts[stream->priority()];
+            counts.generate += stream->currentBatchSize();
+            counts.total += stream->currentExecuteTokenSize();
+        }
+        return token_counts;
     }
     size_t maxSeqLen() const {
         return max_seq_len_;
@@ -235,9 +322,11 @@ public:
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << totalBlockUpdateCopyNum()
-                     << ", max_blocks_num_: " << max_blocks_num_
-                     << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
-                     << ", is_fake_stream: " << is_fake_stream_ << "}";
+                     << ", max_blocks_num_: " << max_blocks_num_ << ", max_cache_keys_num_: " << max_cache_keys_num_
+                     << ", model_execute_token_size: " << model_execute_token_size_
+                     << ", context_execute_token_size: " << context_execute_token_size_
+                     << ", context_execute_token_size_with_cache: " << context_execute_token_size_with_cache_
+                     << ", max_seq_len: " << max_seq_len_ << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
 
@@ -256,23 +345,26 @@ public:
 private:
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
-    size_t                       total_sampler_batch_size_in_   = 0;
-    size_t                       total_sampler_batch_size_out_  = 0;
-    size_t                       total_decode_batch_size_       = 0;
-    size_t                       total_context_batch_size_      = 0;
-    size_t                       decode_block_update_copy_num_  = 0;
-    size_t                       context_block_update_copy_num_ = 0;
-    size_t                       max_blocks_num_                = 0;
-    size_t                       model_execute_token_size_      = 0;
-    size_t                       max_seq_len_                   = 0;
-    size_t                       max_context_seq_len_           = 0;
-    size_t                       max_reuse_length_              = 0;
-    size_t                       cum_context_seq_len_           = 0;
-    size_t                       multimodal_features_len_       = 0;
-    size_t                       total_score_batch_size_        = 0;
-    bool                         has_multimodal_input_          = false;
-    bool                         gen_timeline_                  = false;
-    bool                         is_fake_stream_                = false;
+    size_t                       total_sampler_batch_size_in_           = 0;
+    size_t                       total_sampler_batch_size_out_          = 0;
+    size_t                       total_decode_batch_size_               = 0;
+    size_t                       total_context_batch_size_              = 0;
+    size_t                       decode_block_update_copy_num_          = 0;
+    size_t                       context_block_update_copy_num_         = 0;
+    size_t                       max_blocks_num_                        = 0;
+    size_t                       max_cache_keys_num_                    = 0;
+    size_t                       model_execute_token_size_              = 0;
+    size_t                       context_execute_token_size_            = 0;
+    size_t                       context_execute_token_size_with_cache_ = 0;
+    size_t                       max_seq_len_                           = 0;
+    size_t                       max_context_seq_len_                   = 0;
+    size_t                       max_reuse_length_                      = 0;
+    size_t                       cum_context_seq_len_                   = 0;
+    size_t                       multimodal_features_len_               = 0;
+    size_t                       total_score_batch_size_                = 0;
+    bool                         has_multimodal_input_                  = false;
+    bool                         gen_timeline_                          = false;
+    bool                         is_fake_stream_                        = false;
     std::list<std::string>       adapter_names;
 };
 

@@ -63,6 +63,10 @@ class MlaImplBase(object):
         """Check if CUDA graph is supported."""
         return callable(getattr(self, "prepare_cuda_graph", None))
 
+    def supports_generation_prefill_cuda_graph(self) -> bool:
+        """Whether this backend can be captured by generation-prefill CUDA Graph."""
+        return False
+
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Prepare for attention computation."""
         pass
@@ -101,6 +105,8 @@ class FMHAImplBase(ABC):
     该类定义了 FMHA 实现必须提供的接口方法。
     所有具体的实现类都应该继承此类并实现这些方法。
     """
+
+    accepts_fmha_config = False
 
     @abstractmethod
     def forward(
@@ -167,6 +173,10 @@ class FMHAImplBase(ABC):
             如果想支持cuda graph需要子类支持prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):这个函数
         """
         return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def supports_generation_prefill_cuda_graph(self) -> bool:
+        """Whether this backend can be captured by generation-prefill CUDA Graph."""
+        return False
 
     @classmethod
     def support_prefill_cp(cls) -> bool:

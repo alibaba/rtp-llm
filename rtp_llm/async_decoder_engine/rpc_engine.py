@@ -41,7 +41,6 @@ class LanguageCppEngine(BaseEngine):
         self.token_processor = TokenProcessor(
             self.tokenizer, self.model.model_config.special_tokens
         )
-
         self.mm_process_engine = None
         if (
             self.model.is_multimodal()

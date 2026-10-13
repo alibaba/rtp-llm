@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
+#include "rtp_llm/cpp/api_server/Exception.h"
 
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockGenerateStream.h"
@@ -44,11 +45,9 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
     GenerateOutputs outputs;
-    EXPECT_CALL(*mock_stream, nextOutput())
+    EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
-
-    EXPECT_CALL(*mock_stream, getStatus()).Times(2).WillRepeatedly(Return(StreamState::RUNNING));
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
 
     EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
     EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(std::vector<std::string>()));
@@ -76,6 +75,59 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, true);
+    }
+}
+
+TEST_F(GenerateStreamWrapperTest, generateResponseMapsStreamErrors) {
+    const auto verify_error_mapping = [](ErrorCode                    code,
+                                         HttpApiServerException::Type expected_type,
+                                         const std::string&           expected_message) {
+        auto mock_stream = CreateMockGenerateStream();
+        EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(Return(ErrorResult<GenerateOutputs>(code, expected_message)));
+
+        GenerateStreamWrapper stream_wrapper(nullptr, nullptr);
+        stream_wrapper.init(std::dynamic_pointer_cast<GenerateStream>(mock_stream), nullptr);
+
+        try {
+            stream_wrapper.generateResponse();
+            FAIL() << "expected stream error";
+        } catch (const HttpApiServerException& error) {
+            EXPECT_EQ(error.getType(), expected_type);
+            EXPECT_EQ(error.getMessage(), expected_message);
+        }
+    };
+
+    verify_error_mapping(
+        ErrorCode::GENERATE_TIMEOUT, HttpApiServerException::GENERATE_TIMEOUT_ERROR, "generation timed out");
+    verify_error_mapping(ErrorCode::CANCELLED, HttpApiServerException::CANCELLED_ERROR, "generation cancelled");
+    verify_error_mapping(
+        ErrorCode::EXECUTION_EXCEPTION, HttpApiServerException::UNKNOWN_ERROR, "private backend detail");
+}
+
+TEST_F(GenerateStreamWrapperTest, generateResponseMapsErrorAfterOutput) {
+    auto mock_token_processor = std::make_shared<MockTokenProcessor>();
+    auto token_processor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor);
+    auto mock_stream          = CreateMockGenerateStream();
+
+    GenerateOutputs outputs;
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::EXECUTION_EXCEPTION, "private backend detail")));
+    EXPECT_CALL(*mock_token_processor, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_token_processor, decodeTokens(_, _, _, _)).WillOnce(Return(std::vector<std::string>()));
+
+    GenerateStreamWrapper stream_wrapper(nullptr, token_processor);
+    stream_wrapper.init(std::dynamic_pointer_cast<GenerateStream>(mock_stream), nullptr);
+
+    const auto [response, finished] = stream_wrapper.generateResponse();
+    EXPECT_FALSE(finished);
+
+    try {
+        stream_wrapper.generateResponse();
+        FAIL() << "expected stream error after initial output";
+    } catch (const HttpApiServerException& error) {
+        EXPECT_EQ(error.getType(), HttpApiServerException::UNKNOWN_ERROR);
+        EXPECT_EQ(error.getMessage(), "private backend detail");
     }
 }
 

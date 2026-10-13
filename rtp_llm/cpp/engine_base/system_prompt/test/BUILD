@@ -17,6 +17,8 @@ cc_library(
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "//rtp_llm/cpp/cache:cache_async_context",
+    "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     "//rtp_llm/cpp/test:test_utils",
@@ -39,7 +41,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -49,9 +52,12 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

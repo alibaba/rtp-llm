@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
-from rtp_llm.utils.fuser import Fuser, retry_with_timeout
+import rtp_llm.utils.fuser as fuser
+from rtp_llm.utils.fuser import Fuser, _redact_uri, retry_with_timeout
 
 
 class TestFuser(unittest.TestCase):
@@ -93,6 +94,33 @@ class TestFuser(unittest.TestCase):
 
         # Assert everything was umounted
         self.assertEqual(self.fuser._mount_src_map, {})
+
+    def test_module_umount_all_releases_fuse_and_nfs(self):
+        # The shutdown hook must force-unmount both FUSE and NFS (os._exit path).
+        # umount_all() only touches an already-constructed Fuser; force one so
+        # the hook has an instance to act on regardless of test ordering.
+        fuser._get_fuser()
+        with patch.object(fuser._fuser, "umount_all") as fuse_umount, patch.object(
+            fuser._nfs_manager, "unmount_all"
+        ) as nfs_umount:
+            fuser.umount_all()
+        fuse_umount.assert_called_once_with(force=True)
+        nfs_umount.assert_called_once_with()
+
+    def test_redact_oss_uri_credentials(self):
+        uri = (
+            "oss://bucket/prefix?OSS_ACCESS_ID=test-id"
+            "&OSS_ACCESS_KEY=test-secret"
+            "&OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com"
+        )
+
+        redacted = _redact_uri(uri)
+
+        self.assertNotIn("test-id", redacted)
+        self.assertNotIn("test-secret", redacted)
+        self.assertIn("OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com", redacted)
+        self.assertIn("OSS_ACCESS_ID=", redacted)
+        self.assertIn("OSS_ACCESS_KEY=", redacted)
 
 
 class RetryDecoratorTest(unittest.TestCase):

@@ -13,10 +13,10 @@ public:
     ~MockApiServerMetricReporter() override = default;
 
 public:
-    MOCK_METHOD1(reportQpsMetric, void(const std::string&));
-    MOCK_METHOD1(reportCancelQpsMetric, void(const std::string&));
-    MOCK_METHOD1(reportSuccessQpsMetric, void(const std::string&));
-    MOCK_METHOD2(reportErrorQpsMetric, void(const std::string&, int));
+    MOCK_METHOD2(reportQpsMetric, void(const std::string&, int));
+    MOCK_METHOD2(reportCancelQpsMetric, void(const std::string&, int));
+    MOCK_METHOD2(reportSuccessQpsMetric, void(const std::string&, int));
+    MOCK_METHOD3(reportErrorQpsMetric, void(const std::string&, int, int));
     MOCK_METHOD0(reportConflictQpsMetric, void());
     MOCK_METHOD0(reportResponseIterateQpsMetric, void());
 
