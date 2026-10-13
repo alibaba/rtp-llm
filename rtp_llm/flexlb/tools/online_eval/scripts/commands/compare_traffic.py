@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'src'))
 from traffic.catalog import profile_path
-from analysis.traffic_fidelity import run
+from diagnostics.traffic_fidelity import run
 from reporting.fidelity import write, markdown
 
 

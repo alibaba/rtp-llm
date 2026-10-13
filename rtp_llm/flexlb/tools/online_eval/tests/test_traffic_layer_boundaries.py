@@ -7,7 +7,7 @@ from traffic.codecs import decode_model, codec_for_version
 from traffic.lineage_model import LineageExpander
 from traffic.structure import model_shape
 from traffic.catalog import trace_models
-from analysis.traffic_fidelity import load_capture
+from diagnostics.traffic_fidelity import load_capture
 from adapters.playback_evidence import PlaybackEvidence
 
 

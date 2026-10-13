@@ -17,7 +17,8 @@ from traffic.synthetic.derivation import derive_parameters
 from traffic.synthetic.configuration import resolve
 from traffic.synthetic.generator import iter_requests
 from traffic.catalog import profile_path, trace_models
-from analysis.traffic_fidelity import audit,load_capture,run,compare,grade,ks,thresholds
+from analysis.traffic_fidelity import compare, grade, ks, thresholds
+from diagnostics.traffic_fidelity import audit, load_capture, run
 from reporting.fidelity import render,markdown
 
 

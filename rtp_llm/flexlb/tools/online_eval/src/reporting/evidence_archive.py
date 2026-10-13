@@ -1,5 +1,5 @@
 """Lossless shared series archives, linked into portable report bundles."""
-from artifacts.archive import file_digest
+from file_digest import sha256_file
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -82,10 +82,10 @@ def _archive(root, values):
                     compressed.write(b'}')
                 compressed.write(b'}}')
             raw.flush()
-            digest = file_digest(temporary)
+            digest = sha256_file(temporary)
             path = pool / (digest + '.json.gz')
             if path.exists():
-                if file_digest(path) != digest:
+                if sha256_file(path) != digest:
                     raise ValueError('shared series archive checksum mismatch')
                 temporary.unlink()
             else:
@@ -112,7 +112,7 @@ def project(root, bundle, analysis, files):
             except OSError:
                 shutil.copyfile(archive, destination)
         digest = archive.name.split('.')[0]
-        if file_digest(destination) != digest:
+        if sha256_file(destination) != digest:
             raise ValueError('bundle series archive checksum mismatch')
         files[name] = dict(path=name, sha256=digest)
         result[_REFERENCE] = EvidenceReference(name, digest, tuple(values)).to_dict()
@@ -124,7 +124,7 @@ def restore(bundle, analysis):
     if _REFERENCE in result:
         reference = EvidenceReference.parse(result.pop(_REFERENCE), result)
         path = Path(bundle) / reference.path
-        if path.resolve().parent != Path(bundle).resolve() or file_digest(path) != reference.sha256:
+        if path.resolve().parent != Path(bundle).resolve() or sha256_file(path) != reference.sha256:
             raise ValueError('series evidence checksum or path mismatch')
         with gzip.open(path, 'rt', encoding='utf-8') as stream:
             document = json.load(stream)
