@@ -87,7 +87,7 @@ class ZkHelperOps:
 
     @staticmethod
     def _fingerprints(paths):
-        from artifacts.archive import file_digest
+        from file_digest import sha256_file
         files = {}
         for path in paths:
             if not path.exists():
@@ -96,7 +96,7 @@ class ZkHelperOps:
             if not entries:
                 raise RuntimeError('ZooKeeper classpath entry is empty: ' + str(path))
             for entry in entries:
-                files[str(entry.resolve())] = file_digest(entry)
+                files[str(entry.resolve())] = sha256_file(entry)
         return files
 
     @staticmethod

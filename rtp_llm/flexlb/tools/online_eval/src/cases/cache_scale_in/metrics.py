@@ -8,7 +8,8 @@ from monitoring.archive import export_metrics
 
 
 def metric_contract(producer, identity, calculation):
-    from monitoring.contracts import implementation_measurement, implementation_identity
+    from monitoring.contracts import implementation_measurement
+    from implementation_identity import implementation_identity
     if producer != 'cache_windows' or calculation is not None:
         raise ValueError('cache producer owns its survivor-window calculation')
     if identity == 'derived/survivor_hit_ratio':

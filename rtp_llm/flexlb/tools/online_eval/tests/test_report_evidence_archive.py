@@ -8,7 +8,7 @@ import pytest
 
 from monitoring.metric_store import MetricStore, frozen_metric_reads
 from reporting import load_analysis, read_bundle, write_bundle
-from artifacts.archive import file_digest
+from file_digest import sha256_file
 from reporting.evidence_archive import EvidenceReference, archive_session, restore
 
 
@@ -97,7 +97,7 @@ def test_archive_document_requires_inventory_contract(tmp_path):
     content = gzip.compress(json.dumps(dict(series_evidence_schema_version=1, values={'series': []})).encode())
     digest_path = tmp_path / 'temporary'
     digest_path.write_bytes(content)
-    digest = file_digest(digest_path)
+    digest = sha256_file(digest_path)
     name = 'series-' + digest + '.json.gz'
     digest_path.rename(tmp_path / name)
     with pytest.raises(ValueError, match='document'):
