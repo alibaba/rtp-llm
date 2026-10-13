@@ -40,7 +40,7 @@ __device__ __forceinline__ unsigned v41_quant4(nv_bfloat162 a, nv_bfloat162 b, n
 
 // Override only these two epilogue operations in this translation unit.
 // The vendor mainloop, BF16 rounding, reductions and TMA stores stay intact.
-#define get_ue8m0_sf_exp V41QuantPolicy(epilogue_operator.alpha).template scale_exp
+#define get_ue8m0_sf_exp V41QuantPolicy(epilogue_op.alpha).template scale_exp
 #define scale_bf16x2_into_fp8x4 v41_quant4
 #include <deep_gemm/epilogue/sm100_store_cd.cuh>
 #include <deep_gemm/epilogue/sm100_store_cd_swap_ab.cuh>

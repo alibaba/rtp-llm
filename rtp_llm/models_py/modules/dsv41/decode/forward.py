@@ -44,6 +44,9 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
     swa_region_for_layer,
 )
+from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+    prepare_model_gate_routing_metadata,
+)
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -315,6 +318,7 @@ def forward_layers(
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
@@ -328,6 +332,7 @@ def forward_layers(
                 ),
                 preserve_output=layer_idx in capture_ids or _rt_on,
                 kv_cache=kv_cache,
+                routing_metadata=routing_metadata,
             )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)

@@ -17,6 +17,50 @@ from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 
 
 class PrefillQMemoryTest(unittest.TestCase):
+    def test_short_metadata_fails_before_any_projection_or_mla(self):
+        owner = SimpleNamespace(
+            dim=5,
+            _project_prefill_q=Mock(),
+            _prefill_output_all_reduce=Mock(),
+        )
+        qr = torch.zeros(9, 4, dtype=torch.bfloat16)
+        workspace = PrefillWorkspace(
+            torch.device("cpu"), q_rows=4, q_dim=16, reserve_cp=False, align_bytes=1
+        )
+        sources = (
+            torch.ones(9, 2, dtype=torch.complex64),
+            torch.zeros(9, 1, dtype=torch.int32),
+            torch.ones(9, dtype=torch.int32),
+        )
+        mla = Mock()
+        with patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 4), patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.modules.dsv41.flash_mla": SimpleNamespace(
+                    flash_mla_sparse_fwd=mla
+                )
+            },
+        ):
+            for source in range(3):
+                for rows in (0, 4, 8):
+                    values = list(sources)
+                    values[source] = values[source][:rows]
+                    with self.subTest(source=source, rows=rows), self.assertRaises(
+                        ValueError
+                    ):
+                        attention.AttentionV41FP8._prefill_sparse_attention(
+                            owner,
+                            SimpleNamespace(qr=qr),
+                            SimpleNamespace(freqs_cis=values[0], workspace=workspace),
+                            kv=torch.empty(1, 1, 8),
+                            indices=values[1],
+                            topk_length=values[2],
+                            profile_name="test.short.metadata",
+                        )
+        owner._project_prefill_q.assert_not_called()
+        owner._prefill_output_all_reduce.assert_not_called()
+        mla.assert_not_called()
+
     def test_workspace_capacity_is_chunk_bounded_despite_stale_switch(self):
         with patch.object(chunk_env, "FLASH_MLA_SPARSE_Q_CHUNK", 4):
             for legacy_flag in (None, "0", "1"):
@@ -50,7 +94,7 @@ class PrefillQMemoryTest(unittest.TestCase):
         owner.wq_b = project
         owner._prefill_output_all_reduce = Mock()
 
-        def output_project(o, freqs, *, out):
+        def output_project(o, freqs, *, out, workspace=None):
             events.append(("output", len(o)))
             attention.apply_rotary_emb(
                 o[..., -owner.rope_head_dim :].unsqueeze(0), freqs, inverse=True
@@ -97,7 +141,11 @@ class PrefillQMemoryTest(unittest.TestCase):
             stack.enter_context(
                 patch.dict(
                     sys.modules,
-                    {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=mla)},
+                    {
+                        "rtp_llm.models_py.modules.dsv41.flash_mla": SimpleNamespace(
+                            flash_mla_sparse_fwd=mla
+                        )
+                    },
                 )
             )
             result = owner._prefill_sparse_attention(

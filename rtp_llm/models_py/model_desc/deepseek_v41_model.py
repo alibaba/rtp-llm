@@ -7,7 +7,10 @@ from typing import Any
 
 import torch
 
-from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
+from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
+    DeepSeekV4Model,
+    _is_decode_fmha,
+)
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 
 
@@ -48,6 +51,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._engram_hash_state = None
         self._engram_layers = ()
         self._image_plan = None
+        self._engram_forward_active = False
+        self._engram_cpu_runtime = None
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
@@ -200,18 +205,59 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
-        if self.kv_cache is not None:
-            self._prepare_engram(inputs)
-        self._prepare_image_features(inputs)
+        from rtp_llm.models_py.modules.dsv41.engram import (
+            EngramCPULookupPrefetch,
+            EngramLookupPrefetch,
+            engram_cpu_lookup_enabled,
+            engram_lookup_prefetch_enabled,
+        )
+
+        if self._engram_forward_active:
+            raise RuntimeError("DeepSeek V4.1 forward is not reentrant")
+        previous_prefetch = getattr(self.v4, "_engram_lookup_prefetch", None)
+        self._engram_forward_active = True
+        prefetch = None
         try:
+            if self.kv_cache is not None:
+                self._prepare_engram(inputs)
+                attn = as_tagged_attention_inputs(inputs.attention_inputs)
+                if (
+                    (engram_cpu_lookup_enabled() or engram_lookup_prefetch_enabled())
+                    and bool(attn.is_prefill)
+                    and not bool(getattr(attn, "is_target_verify", False))
+                    and not _is_decode_fmha(fmha_impl)
+                    and self.v4.embed.weight.is_cuda
+                    and not torch.cuda.is_current_stream_capturing()
+                ):
+                    if engram_cpu_lookup_enabled():
+                        prefetch = EngramCPULookupPrefetch(
+                            self,
+                            getattr(inputs, "engram_token_windows_host", None),
+                            int(self._v4_args.v41_config.get("image_token_id", 129264)),
+                        )
+                    else:
+                        prefetch = EngramLookupPrefetch(
+                            (layer_id, self.v4.layers[layer_id])
+                            for layer_id, _ in self._engram_layers
+                        )
+                        # GPU lookup starts after metadata and embedding; CPU
+                        # lookup can safely run during those preceding steps.
+            self.v4._engram_lookup_prefetch = prefetch
+            self._prepare_image_features(inputs)
             return super().forward(inputs, fmha_impl)
         finally:
-            # Request-local lookup rows must not keep whole prompt tensors live.
-            for layer_id, _ in self._engram_layers:
-                layer = self.v4.layers[layer_id]
-                layer.engram_hashes = None
-                layer.engram_token_mask = None
-            self._image_plan = None
+            try:
+                if prefetch is not None:
+                    prefetch.clear()
+            finally:
+                self.v4._engram_lookup_prefetch = previous_prefetch
+                self._engram_forward_active = False
+                # Request-local rows must not keep whole prompt tensors live.
+                for layer_id, _ in self._engram_layers:
+                    layer = self.v4.layers[layer_id]
+                    layer.engram_hashes = None
+                    layer.engram_token_mask = None
+                self._image_plan = None
 
 
 __all__ = ["DeepSeekV41Model"]

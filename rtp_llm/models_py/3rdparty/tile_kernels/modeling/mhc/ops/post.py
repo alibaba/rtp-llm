@@ -32,4 +32,6 @@ def mhc_post(
     comb_res_mix: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
+        return mhc_post_fwd(x, residual, post_layer_mix, comb_res_mix, out)
     return MHCPost.apply(x, residual, post_layer_mix, comb_res_mix, out)

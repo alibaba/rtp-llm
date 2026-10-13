@@ -63,6 +63,7 @@ def forward_decode_layer(
     preserve_output: bool = False,
     kv_cache=None,
     attn_fn=None,
+    routing_metadata=None,
 ) -> torch.Tensor | PendingDecodePost:
     """Fuse only an unobserved layer boundary; retain the old call otherwise.
 
@@ -85,6 +86,8 @@ def forward_decode_layer(
         hidden = hidden.materialize() if prepared is None else prepared[0]
     defer_post = can_defer_decode_post(layer, next_layer, preserve_output)
     kwargs = {"kv_cache": kv_cache}
+    if routing_metadata is not None:
+        kwargs["routing_metadata"] = routing_metadata
     if attn_fn is not None:
         kwargs["attn_fn"] = attn_fn
     if prepared is not None or defer_post:

@@ -1075,7 +1075,7 @@ class AttentionFP8(nn.Module):
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
-        return base.view(torch.uint8)
+        return base if base.dtype == torch.uint8 else base.view(torch.uint8)
 
     def _swa_cp_byte_sliced(self) -> bool:
         cp_ctx = getattr(self, "_cp_ctx", None)

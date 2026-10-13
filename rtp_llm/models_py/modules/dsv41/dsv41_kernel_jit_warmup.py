@@ -22,6 +22,112 @@ _DENSE_WARMED: set[tuple] = set()
 _SHARED_WARMED: set[tuple] = set()
 _ENGRAM_WARMED: set[tuple] = set()
 _DECODE_QUERY_WARMED: set[tuple] = set()
+_MEGA_WARMED: set[tuple] = set()
+
+
+@torch.inference_mode()
+def warmup_v41_mega_jit(model, *, max_m, device, decode):
+    """Warm native module loading and reachable GEMM/insert specializations.
+
+    Every launch uses private KV/output allocations. Include the CUDA stream
+    and the real SWA page size so later cache binding cannot reuse an incomplete
+    pre-cache warmup entry.
+    """
+    if (
+        not model_warm_up_enabled()
+        or os.environ.get("DSV41_MEGA_ATTENTION", "0") != "1"
+        or not common._is_cuda_device(device)
+        or max_m <= 0
+    ):
+        return
+    common._assert_not_capturing()
+    from rtp_llm.models_py.modules.dsv41.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mega_attention
+    from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import pool_entry_count
+    from rtp_llm.models_py.modules.dsv41.kv_cache_utils import swa_region_for_layer
+
+    max_m = int(max_m) if decode else min(int(max_m), FLASH_MLA_SPARSE_Q_CHUNK)
+    cache = getattr(model, "kv_cache", None)
+    stream = torch.cuda.current_stream(device).cuda_stream
+    sms = common._get_deep_gemm_num_sms(device)
+    pending = {}
+    for name, attn in model.named_modules():
+        state = getattr(attn, "_mega_attention", None)
+        if state is None:
+            continue
+        entries = 32
+        if decode and cache is not None:
+            tag = swa_region_for_layer(cache, attn.layer_id)
+            base = cache.get_layer_cache(attn.layer_id, tag).kv_cache_base
+            if base is None or base.ndim != 2:
+                raise RuntimeError("Mega attention warmup requires allocated SWA pages")
+            entries = pool_entry_count(cache, tag)
+            if entries is None:
+                entries = base.shape[1] * base.element_size() // 528
+        grid = tuple(
+            sorted(
+                set(_dense_m_grid(max_m, state.heads * 512, attn.wq_b.K, sms))
+                | set(
+                    _dense_m_grid(
+                        max_m, attn.o_lora_rank, 4096, sms, groups=state.groups
+                    )
+                )
+                | set(_dense_m_grid(max_m, attn.wo_b.N, attn.wo_b.K, sms))
+            )
+        )
+        key = (
+            str(device),
+            stream,
+            decode,
+            entries,
+            grid,
+            state.heads,
+            state.groups,
+            attn.wq_b.K,
+            attn.o_lora_rank,
+            attn.window_size,
+            attn.index_topk if attn.compress_ratio else 0,
+            attn.wo_b.N,
+            attn.wo_b.K,
+            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto"),
+        )
+        if key not in _MEGA_WARMED:
+            pending.setdefault(key, (name, attn, entries, grid))
+
+    def launch():
+        for key, (name, attn, entries, grid) in pending.items():
+            for rows in grid:
+
+                def call():
+                    if not _v41_mega_attention.warmup(
+                        attn, rows=rows, decode=decode, swa_entries=entries
+                    ):
+                        raise RuntimeError("Mega attention rejected its startup warmup")
+
+                common._run_deepgemm_warmup_launch_with_retry(
+                    "DSV41 MegaAttention",
+                    f"{name} M={rows}",
+                    partial(
+                        common._run_triton_warmup_launch_with_retry,
+                        "DSV41 MegaAttention",
+                        f"{name} M={rows}",
+                        call,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            common._sync_cuda(device)
+            _MEGA_WARMED.add(key)
+            logging.info(
+                "[DSV41 MegaAttention] %s decode=%s SWA_entries=%d M=%s ready",
+                name,
+                decode,
+                entries,
+                grid,
+            )
+
+    if pending:
+        common._run_deepgemm_warmup_launches_serialized("DSV41 MegaAttention", launch)
 
 
 def collect_v41_dense_shapes(model):
@@ -99,9 +205,10 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_output_projection
 
         for (groups, n, k), (name, attn) in outputs.items():
-            _v41_output_projection.warmup_quantized_output(
+            quantized_ready = _v41_output_projection.warmup_quantized_output(
                 attn._wo_a_stk_w, attn._wo_a_stk_s
             )
+            logging.info("[DSV41 WoAQuant] %s startup ready=%s", name, quantized_ready)
             grid = _dense_m_grid(max_m, n, k, sms, groups)
             logging.info("[DSV41 BatchedFP8Einsum] %s M=%s recipe=32", name, grid)
             for m in grid:
@@ -242,7 +349,11 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if state is None:
         return
     common._assert_not_capturing()
-    from rtp_llm.models_py.modules.dsv41.engram import gated_engram_residual
+    from rtp_llm.models_py.modules.dsv41.engram import (
+        engram_lookup_prefetch_enabled,
+        gated_engram_residual,
+        prepare_engram_cpu_lookup,
+    )
 
     layers = [layer.engram for layer in model.v4.layers if layer.engram is not None]
     if not layers or max_m <= 0:
@@ -254,6 +365,16 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if min(lookup_sms) <= 0:
         raise ValueError("Engram lookup requires a positive physical SM count")
     sms = max(lookup_sms)
+    prefetch_config = None
+    prefetch_carveout = None
+    if engram_lookup_prefetch_enabled():
+        from rtp_llm.models_py.modules.dsv41._engram_triton import (
+            PREFETCH_LOOKUP_CARVEOUT,
+            PREFETCH_LOOKUP_CONFIG,
+        )
+
+        prefetch_config = PREFETCH_LOOKUP_CONFIG
+        prefetch_carveout = PREFETCH_LOOKUP_CARVEOUT
     key = (
         str(device),
         layout.layer_ids,
@@ -269,14 +390,30 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         ),
         max_m,
         lookup_sms,
+        prefetch_config,
+        prefetch_carveout,
     )
     if key in _ENGRAM_WARMED:
+        for layer in layers:
+            layer.prepare_lookup_prefetch()
+        common._sync_cuda(device)
+        prepare_engram_cpu_lookup(model, max_m=max_m)
         return
     # The UVA lookup uses GRID=min(ceil(tokens*heads/16),SMs) as constexpr.
     # Every reachable grid is represented, including the saturated grid and
     # aligned/unaligned token-count variants. Table contents stay on the host.
     limit = min(max_m, (sms * 16 + layout.n_hash_cols - 1) // layout.n_hash_cols + 16)
-    for rows in range(1, limit + 1):
+    prefetch_limit = (
+        min(
+            max_m,
+            32768,
+            (sms * prefetch_config[0] + layout.n_hash_cols - 1) // layout.n_hash_cols
+            + 16,
+        )
+        if prefetch_config is not None
+        else 0
+    )
+    for rows in range(1, max(limit, prefetch_limit) + 1):
         windows = torch.zeros(
             (rows, layout.max_ngram_size), dtype=torch.int32, device=device
         )
@@ -292,12 +429,20 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         )
         for layer in layers:
             ids = hashes[:, layer.layer_hash_index].contiguous()
-            common._run_triton_warmup_launch_with_retry(
-                "DSV41 Engram",
-                f"lookup rows={rows}",
-                partial(layer.embed_tokens, ids, device),
-                device=device,
-            )
+            if rows <= limit:
+                common._run_triton_warmup_launch_with_retry(
+                    "DSV41 Engram",
+                    f"lookup rows={rows}",
+                    partial(layer.embed_tokens, ids, device),
+                    device=device,
+                )
+            if rows <= prefetch_limit:
+                common._run_triton_warmup_launch_with_retry(
+                    "DSV41 Engram",
+                    f"prefetch lookup rows={rows} config={prefetch_config}",
+                    partial(layer.embed_tokens.warmup_prefetch, ids, device),
+                    device=device,
+                )
         if rows in (1, 16):
             for layer in layers:
                 hc, dim = layer.q_weight.shape
@@ -323,10 +468,20 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                         ),
                         device=device,
                     )
+    for layer in layers:
+        layer.prepare_lookup_prefetch()
     common._sync_cuda(device)
+    prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)
     logging.info(
-        "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens", limit
+        "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens; "
+        "async lookup ready=%s block_rows=%s warps=%s carveout=%s covered_tokens=%d",
+        limit,
+        all(layer._lookup_stream is not None for layer in layers),
+        prefetch_config[0] if prefetch_config else None,
+        prefetch_config[1] if prefetch_config else None,
+        prefetch_carveout,
+        prefetch_limit,
     )
 
 
@@ -435,6 +590,7 @@ def warmup_v41_decode_jit(model, *, device):
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
     warmup_v41_decode_query_jit(model, max_m=max_m, device=device)
+    warmup_v41_mega_jit(model, max_m=max_m, device=device, decode=True)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(
@@ -538,6 +694,7 @@ def warmup_v41_prefill_jit(model, *, device):
         device=device,
         kv_cache=model.kv_cache,
     )
+    warmup_v41_mega_jit(model, max_m=max_m, device=device, decode=False)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(
