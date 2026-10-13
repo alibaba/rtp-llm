@@ -917,6 +917,18 @@ def resolve_scr_worker_mapping(
     return worker_id, worker_num
 
 
+_scr_barrier_return_time: float | None = None
+
+
+def get_scr_barrier_return_time() -> float | None:
+    """Process-local monotonic timestamp after successful arrival, before fixup.
+
+    This is not the platform's restore start; it excludes checkpoint waiting
+    and native restore work inside Epsilon.
+    """
+    return _scr_barrier_return_time
+
+
 def arrive_scr_checkpoint_barrier(
     *,
     worker_id: int,
@@ -940,6 +952,9 @@ def arrive_scr_checkpoint_barrier(
     Calls from different processes are expected to happen concurrently.
     """
 
+    global _scr_barrier_return_time
+    _scr_barrier_return_time = None
+
     def _raise_if_strict(message: str, cause: BaseException | None = None):
         if fail_closed:
             if cause is not None:
@@ -956,7 +971,6 @@ def arrive_scr_checkpoint_barrier(
         )
         return _raise_if_strict("sCR arrival requested in an inactive phase")
 
-    started = time.monotonic()
     actual_generation = _scr_generation()
     if generation and generation != actual_generation:
         LOGGER.error(
@@ -1112,46 +1126,29 @@ def arrive_scr_checkpoint_barrier(
             # Do not let an exception or a provider that invokes the callback
             # asynchronously suppress synchronization on the next arrival.
             _scr_prepare_local.skip_next = False
-        elapsed_ms = (time.monotonic() - started) * 1000.0
+        # The saved clock origin belongs to the checkpoint process/host.
+        # Neither wall nor monotonic deltas across snapshot_arrival measure
+        # this restore's duration. Epsilon owns the passed timeout budget;
+        # preserve its status/exception instead of rejecting a resumed success.
         if result not in (None, 0):
             LOGGER.error(
                 "sCR snapshot arrival returned non-zero generation=%s phase=%s "
-                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f "
+                "worker_id=%d worker_num=%d result=%s "
                 "restore_elapsed_ms=%s",
                 _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
                 worker_id,
                 worker_num,
                 result,
-                elapsed_ms,
                 _restore_elapsed_ms(),
             )
             if fail_closed:
                 raise ScrArrivalError(f"sCR snapshot arrival returned status {result!r}")
-        elif elapsed_ms >= resolved_timeout * 1000.0:
-            LOGGER.error(
-                "sCR snapshot arrival exceeded timeout generation=%s phase=%s "
-                "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d result=%s "
-                "restore_elapsed_ms=%s",
-                _scr_generation(),
-                os.environ.get(SCR_PHASE_ENV, "<unset>"),
-                worker_id,
-                worker_num,
-                elapsed_ms,
-                resolved_timeout,
-                result,
-                _restore_elapsed_ms(),
-            )
-            if fail_closed:
-                raise ScrArrivalError(
-                    "sCR snapshot arrival exceeded timeout "
-                    f"generation={_scr_generation()} worker_id={worker_id} "
-                    f"worker_num={worker_num} elapsed_ms={elapsed_ms:.3f}"
-                )
         else:
+            _scr_barrier_return_time = time.monotonic()
             LOGGER.info(
                 "sCR snapstart checkpoint reached pid=%d generation=%s phase=%s "
-                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f "
+                "worker_id=%d worker_num=%d result=%s "
                 "restore_elapsed_ms=%s",
                 os.getpid(),
                 _scr_generation(),
@@ -1159,7 +1156,6 @@ def arrive_scr_checkpoint_barrier(
                 worker_id,
                 worker_num,
                 result,
-                elapsed_ms,
                 _restore_elapsed_ms(),
             )
         return result
@@ -1168,13 +1164,12 @@ def arrive_scr_checkpoint_barrier(
         # not take down a serving rank; the control plane can use a fallback.
         LOGGER.exception(
             "sCR snapshot barrier arrival failed generation=%s phase=%s "
-            "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d "
+            "worker_id=%d worker_num=%d timeout_s=%d "
             "restore_elapsed_ms=%s",
             _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
-            (time.monotonic() - started) * 1000.0,
             resolved_timeout,
             _restore_elapsed_ms(),
         )
@@ -1236,6 +1231,8 @@ def arrive_scr_template_barrier(
 def _reset_for_test() -> None:
     """Clear process-local registration state for unit tests."""
 
+    global _scr_barrier_return_time
+    _scr_barrier_return_time = None
     with _registration_lock:
         _registrations.clear()
         _registration_locks.clear()
@@ -1257,6 +1254,7 @@ __all__ = [
     "build_scr_participant_manifest",
     "epsilon_backend_mode",
     "configure_scr_environment",
+    "get_scr_barrier_return_time",
     "is_scr_enabled",
     "is_scr_template_phase_active",
     "register_for_scr",

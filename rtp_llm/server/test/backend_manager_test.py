@@ -89,6 +89,54 @@ class _FakeNfsManager:
 
 
 class BackendManagerStopTest(unittest.TestCase):
+    def test_scr_serving_waits_for_service_success_normal_remains_eager(self):
+        import rtp_llm.server.backend_manager as backend
+
+        for deferred, fail in ((False, False), (True, False), (True, True)):
+            with self.subTest(deferred=deferred, fail=fail), patch.object(
+                backend, "EngineConfig"
+            ) as config_class, patch.object(
+                backend, "ModelFactory"
+            ) as factory, patch.object(
+                backend, "get_world_info"
+            ), patch.object(
+                backend, "update_worker_addrs"
+            ), patch.object(
+                backend, "get_template_lifecycle"
+            ), patch.object(
+                backend.kmonitor, "start_serving_when_ready"
+            ) as serving:
+                config = config_class.create.return_value
+                config.parallelism_config.world_size = 1
+                config.moe_config.moe_strategy = ""
+                config.moe_config.use_deepep_moe = False
+                factory.create_model_config.return_value.task_type = (
+                    TaskType.LANGUAGE_MODEL
+                )
+                manager = BackendManager.__new__(BackendManager)
+                manager._distributed_server = Mock()
+                manager.py_env_configs = Mock()
+                manager._service_draining = None
+                manager.start(defer_service_start=deferred)
+                if not deferred:
+                    serving.assert_called_once_with()
+                    manager.engine.start_service.assert_not_called()
+                    continue
+                serving.assert_not_called()
+                if fail:
+                    manager.engine.start_service.side_effect = RuntimeError(
+                        "listener failed"
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "listener failed"):
+                        manager.start_service()
+                    serving.assert_not_called()
+                else:
+                    manager.engine.start_service.side_effect = (
+                        lambda: serving.assert_not_called()
+                    )
+                    manager.start_service()
+                    serving.assert_called_once_with()
+
     def _manager(self, engine):
         manager = BackendManager.__new__(BackendManager)
         manager.engine = engine

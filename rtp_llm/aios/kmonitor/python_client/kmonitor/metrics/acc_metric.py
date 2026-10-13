@@ -53,3 +53,9 @@ class AccMetric(MetricBase):
             for value_agg in self.tag_value_map.values():
                 data_list.append(value_agg.fetch_report_data(report_time_interval))
         return data_list
+
+    def reset_after_restore(self) -> None:
+        with self.lock:
+            self.last_report_time = time.time()
+            for value_agg in self.tag_value_map.values():
+                value_agg.acc_value = 0

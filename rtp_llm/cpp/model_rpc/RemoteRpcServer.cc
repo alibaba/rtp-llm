@@ -29,6 +29,13 @@ void RemoteRpcServer::startDeferredServices() {
         // Resolve host/peer identity only after the controller releases the
         // template barrier. This keeps the source host's identity and
         // cache-store TCP/RDMA resources out of the restored service.
+        // Match ordinary startup: prepare host cache before CacheStore starts
+        // ACCL/ANet collectors and network workers. Keep the engine loop stopped
+        // until RDMA initialization (including setenv/unsetenv) has finished.
+        const auto cache_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        engine_->resourceContext().cache_manager->startDeferredServices();
+        RTP_LLM_LOG_INFO("SCR cache connectors ready before CacheStore: cost_ms=%.3f",
+                         (autil::TimeUtility::currentTimeInMicroSeconds() - cache_begin_us) / 1000.0);
         initLocalHostInfo();
         initLocalPeerInfo();
         initCacheStore(maga_init_params_, nullptr);

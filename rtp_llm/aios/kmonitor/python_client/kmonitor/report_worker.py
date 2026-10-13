@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 
 from rtp_llm.aios.kmonitor.python_client.flume.pyflume import FlumeClient
 from rtp_llm.aios.kmonitor.python_client.flume.ttypes import ThriftFlumeEvent
+from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric import AccMetric
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
     MetricDataPoint,
@@ -174,6 +175,13 @@ class ReportWorker(object):
         """Start the deferred reporter once, after process identity is refreshed."""
         if not self._transport_deferred:
             return
+        # Discard seed samples and clock origins before starting the reporter.
+        with self.metric_lock:
+            for metric in self.metrics.values():
+                if isinstance(metric, AccMetric):
+                    metric.reset_after_restore()
+                else:
+                    metric.fetch_reported_data()
         # The shared runtime fixup has already refreshed HippoHelper. Preserve
         # custom defaults and the dict referenced by existing KMonitor instances.
         runtime_tags = HippoHelper.get_hippo_tags()

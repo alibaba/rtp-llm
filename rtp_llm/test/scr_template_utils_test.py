@@ -134,18 +134,80 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                     worker_id=0, worker_num=1, fail_closed=True
                 )
 
-    def test_fail_closed_late_success_is_treated_as_timeout(self):
-        epsilon = _EpsilonDouble(result=0)
+    def test_success_uses_post_barrier_clock_without_local_timeout(self):
+        # The destination may have a larger OR smaller monotonic clock origin.
+        for resumed_clock in (100000.0, 1.0):
+            for result in (0, None):
+                epsilon = _EpsilonDouble(result=result)
+                with self.subTest(
+                    clock=resumed_clock, result=result
+                ), self._enabled(), mock.patch.object(
+                    scr, "_load_epsilon", return_value=epsilon
+                ), mock.patch.object(
+                    scr.time, "monotonic", return_value=resumed_clock
+                ), mock.patch.object(
+                    scr.LOGGER, "info"
+                ) as log_info:
+                    self.assertEqual(
+                        scr.arrive_scr_checkpoint_barrier(
+                            worker_id=0,
+                            worker_num=1,
+                            timeout=1,
+                            fail_closed=True,
+                        ),
+                        result,
+                    )
+                    self.assertEqual(scr.get_scr_barrier_return_time(), resumed_clock)
+                self.assertEqual(epsilon.arrivals[0]["timeout"], 1)
+                reached = [
+                    c.args[0]
+                    for c in log_info.call_args_list
+                    if "checkpoint reached" in c.args[0]
+                ]
+                self.assertEqual(len(reached), 1)
+                self.assertNotIn(" elapsed_ms=", reached[0])
+
+    def test_failed_arrival_clears_previous_return_time(self):
         with self._enabled(), mock.patch.object(
-            scr, "_load_epsilon", return_value=epsilon
-        ), mock.patch.object(scr.time, "monotonic", side_effect=[0.0, 2.0, 2.0]):
-            with self.assertRaisesRegex(scr.ScrArrivalError, "exceeded timeout"):
+            scr, "_load_epsilon", return_value=_EpsilonDouble()
+        ):
+            scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1)
+            self.assertIsNotNone(scr.get_scr_barrier_return_time())
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=_EpsilonDouble(error=TimeoutError())
+        ):
+            with self.assertRaises(scr.ScrArrivalError):
                 scr.arrive_scr_checkpoint_barrier(
                     worker_id=0,
                     worker_num=1,
-                    timeout=1,
                     fail_closed=True,
                 )
+        self.assertIsNone(scr.get_scr_barrier_return_time())
+
+    def test_return_timestamp_precedes_fixup_and_release(self):
+        lifecycle = mock.Mock()
+        clock = [10.0]
+
+        def fixup(*args):
+            self.assertEqual(scr.get_scr_barrier_return_time(), 10.0)
+            clock[0] = 20.0
+
+        with mock.patch.dict(
+            os.environ,
+            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
+            clear=True,
+        ), mock.patch.object(
+            scr, "_load_epsilon", return_value=_EpsilonDouble()
+        ), mock.patch.object(
+            scr, "get_template_lifecycle", return_value=lifecycle
+        ), mock.patch.object(
+            scr, "fixup_runtime_after_restore", side_effect=fixup
+        ), mock.patch.object(
+            scr.time, "monotonic", side_effect=lambda: clock[0]
+        ):
+            scr.arrive_scr_template_barrier(worker_id=0, worker_num=1)
+            self.assertEqual(scr.get_scr_barrier_return_time(), 10.0)
+        lifecycle.release_template.assert_called_once()
 
     def test_timeout_budget_accepts_controller_values_and_rejects_invalid_values(self):
         with mock.patch.dict(
