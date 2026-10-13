@@ -31,14 +31,31 @@ class RMSNorm(BaseNorm):
 
 
 class RMSResNorm(BaseResNorm):
+    # First-layer fast-path support: forward() accepts ``residual=None`` and
+    # elides the add-with-zero (rmsnorm(x + 0) == rmsnorm(x)). Backends without
+    # this support keep feeding an explicit zero tensor; models probe this
+    # attribute before skipping the zeros_like fill.
+    supports_none_residual = True
+
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 
     def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor
+        self, hidden_states: torch.Tensor, residual: Optional[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         import flashinfer
 
+        if residual is None:
+            # First layer of a forward pass: no accumulated residual yet.
+            # Normalize directly and start the residual stream at the layer
+            # input (bit-equivalent to the former add-with-zero path, which
+            # computed residual = x + 0 = x and rmsnorm(x + 0) = rmsnorm(x)).
+            normed = flashinfer.norm.rmsnorm(
+                hidden_states,
+                self.weight.data,
+                eps=self.variance_epsilon,
+            )
+            return normed, hidden_states
         flashinfer.norm.fused_add_rmsnorm(
             hidden_states,
             residual,

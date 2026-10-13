@@ -97,7 +97,7 @@ def _configure_forward(layer, *, gate_enabled=False):
     if gate_enabled:
         layer.shared_expert_gate = Mock(return_value=gate_output)
         layer.sigmoid_gate_scale_add = Mock(
-            side_effect=lambda gate, shared, output: output.add_(
+            side_effect=lambda gate, shared, output, topk_sum=None: output.add_(
                 torch.sigmoid(gate) * shared
             )
         )

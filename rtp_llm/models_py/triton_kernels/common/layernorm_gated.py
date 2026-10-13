@@ -87,6 +87,61 @@ def _layer_norm_fwd_1pass_kernel(
     tl.store(Y + cols, y, mask=mask)
 
 
+@triton.jit
+def _rms_norm_gated_tiled_kernel(
+    X,  # pointer to the input, [M, ngroups * N] (last dim contiguous)
+    Y,  # pointer to the output, same layout as X
+    W,  # pointer to the weights: [N] when SHARED_WEIGHT else [ngroups * N]
+    Z,  # pointer to the gate, same layout as X
+    Rstd,  # pointer to the 1/std, [ngroups * M] (rstd[group * M + row])
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    M,  # number of rows in X
+    N,  # group size (number of columns per group)
+    eps,  # epsilon to avoid division by zero
+    BT: tl.constexpr,  # rows per program (tile height)
+    BLOCK_N: tl.constexpr,  # columns per program (padded group size)
+    SHARED_WEIGHT: tl.constexpr,  # whether W is shared across groups
+    ACTIVATION: tl.constexpr,  # "silu" or "sigmoid"
+):
+    # BT-tiled variant of _layer_norm_fwd_1pass_kernel for the RmsNormGated
+    # production config (RMS norm + gate applied after norm + no bias): each
+    # program normalizes BT rows of one group with the reduction along axis=1
+    # inside the block (vs one row per program), the same tiling that makes
+    # fla/l2norm.py fused_l2norm_qk_kernel_small ~2x the per-row bandwidth.
+    i_blk = tl.program_id(0)
+    group = tl.program_id(1)
+    rows = i_blk * BT + tl.arange(0, BT)
+    cols = tl.arange(0, BLOCK_N)
+    row_mask = rows < M
+    col_mask = cols < N
+    mask = row_mask[:, None] & col_mask[None, :]
+
+    x_base = X + rows[:, None] * stride_x_row + group * N
+    y_base = Y + rows[:, None] * stride_y_row + group * N
+    z_base = Z + rows[:, None] * stride_z_row + group * N
+    offs = cols[None, :]
+    if SHARED_WEIGHT:
+        w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+    else:
+        w = tl.load(W + group * N + cols, mask=col_mask, other=0.0).to(tl.float32)
+
+    b_x = tl.load(x_base + offs, mask=mask, other=0.0).to(tl.float32)
+    var = tl.sum(b_x * b_x, axis=1) / N
+    rstd = 1 / tl.sqrt(var + eps)
+    b_y = b_x * rstd[:, None] * w[None, :]
+    # NORM_BEFORE_GATE: gate applied after the normalization
+    b_z = tl.load(z_base + offs, mask=mask, other=0.0).to(tl.float32)
+    if ACTIVATION == "sigmoid":
+        b_y *= tl.sigmoid(b_z)
+    else:
+        b_y *= b_z * tl.sigmoid(b_z)
+    tl.store(y_base + offs, b_y, mask=mask)
+    # keep the layer_norm_fwd return contract: rstd[group * M + row]
+    tl.store(Rstd + group * M + rows, rstd, mask=row_mask)
+
+
 def layer_norm_fwd(
     x,
     weight,
@@ -133,6 +188,32 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
+    # BT-tiled fast path for the RmsNormGated config (RMS + post-norm gate,
+    # no bias): BT rows per program with an in-block axis=1 reduction. Same
+    # math and fp32 accumulation order as the per-row kernel below.
+    if is_rms_norm and bias is None and z is not None and norm_before_gate and BLOCK_N <= 512:
+        BT = 8
+        grid = (triton.cdiv(M, BT), ngroups)
+        with torch.cuda.device(x.device.index):
+            _rms_norm_gated_tiled_kernel[grid](
+                x,
+                out,
+                weight,
+                z,
+                rstd,
+                x.stride(0),
+                out.stride(0),
+                z.stride(0),
+                M,
+                group_size,
+                eps,
+                BT=BT,
+                BLOCK_N=BLOCK_N,
+                SHARED_WEIGHT=shared_weight,
+                ACTIVATION=activation,
+                num_warps=2,
+            )
+        return out, mean, rstd
     grid = (M, ngroups)
     with torch.cuda.device(x.device.index):
         _layer_norm_fwd_1pass_kernel[grid](

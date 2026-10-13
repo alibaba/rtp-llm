@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cuda.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <float.h>
 #include <math.h>
@@ -36,9 +37,12 @@ static constexpr int WARP_SIZE = 32;
 
 // ====================== Softmax ======================
 
-template<int TPB>
+// IN_T: router-logits storage type (float or __nv_bfloat16). Loads are widened to
+// fp32 immediately; all softmax accumulation stays fp32 so the fp32-input
+// instantiation is bit-exact against this bf16 path fed with the .float() cast.
+template<int TPB, typename IN_T>
 __launch_bounds__(TPB) __global__
-    void moeSoftmax(float const* input, bool const* finished, float* output, int64_t const num_cols) {
+    void moeSoftmax(IN_T const* input, bool const* finished, float* output, int64_t const num_cols) {
     using BlockReduce = cub::BlockReduce<float, TPB>;
     __shared__ typename BlockReduce::TempStorage tmpStorage;
     __shared__ float                             normalizing_factor;
@@ -57,7 +61,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = tidx; ii < num_cols; ii += TPB) {
         int64_t const idx = thread_row_offset + ii;
-        threadData        = max(input[idx], threadData);
+        threadData        = max(static_cast<float>(input[idx]), threadData);
     }
 
     float const maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
@@ -166,9 +170,9 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const*                    i
 }
 
 // moeTopK with bias
-template<int TPB>
-__launch_bounds__(TPB) __global__ void moeTopK(float const*                    inputs_after_softmax,
-                                               float const*                    input_with_bias,
+template<int TPB, typename IN_T>
+__launch_bounds__(TPB) __global__ void moeTopK(IN_T const*                     inputs_after_softmax,
+                                               IN_T const*                     input_with_bias,
                                                bool const*                     finished,
                                                float*                          output,
                                                int*                            indices,
@@ -202,7 +206,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const*                    i
         for (int expert = threadIdx.x; expert < num_experts; expert += TPB) {
             int64_t const idx = thread_read_offset + expert;
             inp_kvp.key       = expert;
-            inp_kvp.value     = input_with_bias[idx];
+            inp_kvp.value     = static_cast<float>(input_with_bias[idx]);
 
             for (int prior_k = startk; prior_k < k_idx; ++prior_k) {
                 int prior_winning_expert = indices[indice_offset + prior_k];
@@ -223,13 +227,13 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const*                    i
             bool const    should_process_row = row_is_active && node_uses_expert;
 
             int64_t const idx = indice_offset + k_idx;
-            output[idx]       = inputs_after_softmax[origin_idx];
+            output[idx]       = static_cast<float>(inputs_after_softmax[origin_idx]);
             indices[idx]      = should_process_row ? (expert - start_expert) : (num_experts + expert);
             assert(indices[idx] >= 0);
             source_rows[idx] = k_idx * num_rows + block_row;
 
             if (norm_mode == MOEExpertScaleNormalizationMode::RENORMALIZE) {
-                renorm_value += inputs_after_softmax[origin_idx];
+                renorm_value += static_cast<float>(inputs_after_softmax[origin_idx]);
             }
         }
         __syncthreads();
@@ -250,6 +254,14 @@ __launch_bounds__(TPB) __global__ void moeTopK(float const*                    i
 
 // ====================== TopK Gating Softmax (fused) ======================
 
+// IN_T contract for the routing kernels above and below (moeSoftmax / moeTopK /
+// topkGatingSoftmax): router logits may arrive as fp32 or bf16 (num_rows x
+// num_experts row-major, contiguous, base 16B-aligned). bf16 loads are widened
+// to fp32 immediately after the vectorized read; softmax, renormalize and the
+// top-k scan run entirely in fp32. The thread-to-expert partitioning and the
+// row-chunk element order are identical for both IN_T instantiations, so the
+// bf16-input result is bit-exact with the fp32-input kernel fed the .float()
+// cast of the same logits (bf16 -> fp32 is lossless).
 namespace detail {
 template<int EXPERTS, int BYTES_PER_LDG>
 struct TopkConstants {
@@ -262,9 +274,9 @@ struct TopkConstants {
 };
 }  // namespace detail
 
-template<int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, typename TOPK_T>
+template<int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, typename IN_T, typename TOPK_T>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
-    void topkGatingSoftmax(float const*                    input,
+    void topkGatingSoftmax(IN_T const*                     input,
                            bool const*                     finished,
                            float*                          output,
                            int64_t const                   num_rows,
@@ -298,19 +310,28 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
         return;
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
-    float const* thread_row_ptr           = input + thread_row * ELTS_PER_ROW;
+    IN_T const* thread_row_ptr           = input + thread_row * ELTS_PER_ROW;
     int const    thread_group_idx         = threadIdx.x % THREADS_PER_ROW;
     int const    first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
-    float const* thread_read_ptr          = thread_row_ptr + first_elt_read_by_thread;
+    IN_T const*  thread_read_ptr          = thread_row_ptr + first_elt_read_by_thread;
 
-    using AccessType = cutlass::AlignedArray<float, ELTS_PER_LDG>;
+    // Vectorized load of ELTS_PER_LDG IN_T elements (same element indices the
+    // fp32 instantiation reads; half the bytes for bf16), then immediate
+    // lossless widen to fp32.
+    using AccessType = cutlass::AlignedArray<IN_T, ELTS_PER_LDG>;
 
-    cutlass::Array<float, VPT> row_chunk;
-    AccessType*                row_chunk_vec_ptr   = reinterpret_cast<AccessType*>(&row_chunk);
+    cutlass::Array<IN_T, VPT>  row_chunk_in;
+    AccessType*                row_chunk_vec_ptr   = reinterpret_cast<AccessType*>(&row_chunk_in);
     AccessType const*          vec_thread_read_ptr = reinterpret_cast<AccessType const*>(thread_read_ptr);
 #pragma unroll
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
         row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+    }
+
+    cutlass::Array<float, VPT> row_chunk;
+#pragma unroll
+    for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = static_cast<float>(row_chunk_in[ii]);
     }
 
     float thread_max = row_chunk[0];
@@ -408,8 +429,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 
 // ====================== Launcher helpers ======================
 
-template<int EXPERTS, int WARPS_PER_TB, typename TOPK_T>
-void topkGatingSoftmaxLauncherHelper(float const*                    input,
+template<int EXPERTS, int WARPS_PER_TB, typename IN_T, typename TOPK_T>
+void topkGatingSoftmaxLauncherHelper(IN_T const*                     input,
                                      bool const*                     finished,
                                      float*                          output,
                                      TOPK_T*                         indices,
@@ -430,12 +451,12 @@ void topkGatingSoftmaxLauncherHelper(float const*                    input,
     int64_t const        num_warps                 = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
     int64_t const        num_blocks                = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
     dim3                 block_dim(WARP_SIZE, WARPS_PER_TB);
-    topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
+    topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, IN_T><<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, startk, endk, start_expert, end_expert, norm_mode);
 }
 
-template<typename TOPK_T>
-void topkGatingSoftmaxKernelLauncher(float const*                    input,
+template<typename TOPK_T, typename IN_T = float>
+void topkGatingSoftmaxKernelLauncher(IN_T const*                     input,
                                      float*                          output,
                                      float*                          softmax_temp_output,
                                      TOPK_T*                         indices,
@@ -453,26 +474,26 @@ void topkGatingSoftmaxKernelLauncher(float const*                    input,
 
 #define CASE(N)                                                                                                        \
     case N:                                                                                                            \
-        topkGatingSoftmaxLauncherHelper<N, WARPS_PER_TB>(input,                                                        \
-                                                         nullptr,                                                      \
-                                                         output,                                                       \
-                                                         indices,                                                      \
-                                                         source_row,                                                   \
-                                                         num_rows,                                                     \
-                                                         k,                                                            \
-                                                         startk,                                                       \
-                                                         endk,                                                         \
-                                                         start_expert,                                                 \
-                                                         end_expert,                                                   \
-                                                         norm_mode,                                                    \
-                                                         stream);                                                      \
+        topkGatingSoftmaxLauncherHelper<N, WARPS_PER_TB, IN_T>(input,                                                   \
+                                                               nullptr,                                                 \
+                                                               output,                                                  \
+                                                               indices,                                                 \
+                                                               source_row,                                              \
+                                                               num_rows,                                                \
+                                                               k,                                                       \
+                                                               startk,                                                  \
+                                                               endk,                                                    \
+                                                               start_expert,                                            \
+                                                               end_expert,                                              \
+                                                               norm_mode,                                               \
+                                                               stream);                                                 \
         break;
 
     switch (num_experts) {
         CASE(1) CASE(2) CASE(4) CASE(8) CASE(16) CASE(32) CASE(64) CASE(128) CASE(256) default: {
             static constexpr int TPB = 256;
             TLLM_CHECK(softmax_temp_output != nullptr);
-            moeSoftmax<TPB><<<num_rows, TPB, 0, stream>>>(input, nullptr, softmax_temp_output, num_experts);
+            moeSoftmax<TPB, IN_T><<<num_rows, TPB, 0, stream>>>(input, nullptr, softmax_temp_output, num_experts);
             moeTopK<TPB><<<num_rows, TPB, 0, stream>>>(softmax_temp_output,
                                                        nullptr,
                                                        output,
@@ -490,9 +511,9 @@ void topkGatingSoftmaxKernelLauncher(float const*                    input,
 #undef CASE
 }
 
-template<int TPB>
-void topkKernelLauncherHelper(float const*                    input,
-                              float const*                    input_with_bias,
+template<int TPB, typename IN_T>
+void topkKernelLauncherHelper(IN_T const*                     input,
+                              IN_T const*                     input_with_bias,
                               float*                          output,
                               float*                          softmax_temp_output,
                               int*                            indices,
@@ -506,24 +527,24 @@ void topkKernelLauncherHelper(float const*                    input,
                               int const                       end_expert,
                               MOEExpertScaleNormalizationMode norm_mode,
                               cudaStream_t                    stream) {
-    moeTopK<TPB><<<num_rows, TPB, 0, stream>>>(input,
-                                               input_with_bias,
-                                               nullptr,
-                                               output,
-                                               indices,
-                                               source_row,
-                                               num_experts,
-                                               k,
-                                               startk,
-                                               endk,
-                                               start_expert,
-                                               end_expert,
-                                               norm_mode);
+    moeTopK<TPB, IN_T><<<num_rows, TPB, 0, stream>>>(input,
+                                                     input_with_bias,
+                                                     nullptr,
+                                                     output,
+                                                     indices,
+                                                     source_row,
+                                                     num_experts,
+                                                     k,
+                                                     startk,
+                                                     endk,
+                                                     start_expert,
+                                                     end_expert,
+                                                     norm_mode);
 }
 
-template<typename TOPK_T>
-void topkKernelLauncher(float const*                    input,
-                        float const*                    input_with_bias,
+template<typename TOPK_T, typename IN_T = float>
+void topkKernelLauncher(IN_T const*                     input,
+                        IN_T const*                     input_with_bias,
                         float*                          output,
                         float*                          softmax_temp_output,
                         TOPK_T*                         indices,
@@ -540,40 +561,40 @@ void topkKernelLauncher(float const*                    input,
 
 #define CASE(N)                                                                                                        \
     case N:                                                                                                            \
-        topkKernelLauncherHelper<N>(input,                                                                             \
-                                    input_with_bias,                                                                   \
-                                    output,                                                                            \
-                                    softmax_temp_output,                                                               \
-                                    (int*)indices,                                                                     \
-                                    source_row,                                                                        \
-                                    num_rows,                                                                          \
-                                    num_experts,                                                                       \
-                                    k,                                                                                 \
-                                    startk,                                                                            \
-                                    endk,                                                                              \
-                                    start_expert,                                                                      \
-                                    end_expert,                                                                        \
-                                    norm_mode,                                                                         \
-                                    stream);                                                                           \
+        topkKernelLauncherHelper<N, IN_T>(input,                                                                        \
+                                          input_with_bias,                                                              \
+                                          output,                                                                       \
+                                          softmax_temp_output,                                                          \
+                                          (int*)indices,                                                                \
+                                          source_row,                                                                   \
+                                          num_rows,                                                                     \
+                                          num_experts,                                                                  \
+                                          k,                                                                            \
+                                          startk,                                                                       \
+                                          endk,                                                                         \
+                                          start_expert,                                                                 \
+                                          end_expert,                                                                   \
+                                          norm_mode,                                                                    \
+                                          stream);                                                                      \
         break;
 
     switch (num_experts) {
         CASE(1) CASE(2) CASE(4) CASE(8) CASE(16) CASE(32) CASE(64) CASE(128) CASE(256) default: {
-            topkKernelLauncherHelper<256>(input,
-                                          input_with_bias,
-                                          output,
-                                          softmax_temp_output,
-                                          (int*)indices,
-                                          source_row,
-                                          num_rows,
-                                          num_experts,
-                                          k,
-                                          startk,
-                                          endk,
-                                          start_expert,
-                                          end_expert,
-                                          norm_mode,
-                                          stream);
+            topkKernelLauncherHelper<256, IN_T>(input,
+                                                input_with_bias,
+                                                output,
+                                                softmax_temp_output,
+                                                (int*)indices,
+                                                source_row,
+                                                num_rows,
+                                                num_experts,
+                                                k,
+                                                startk,
+                                                endk,
+                                                start_expert,
+                                                end_expert,
+                                                norm_mode,
+                                                stream);
         }
     }
 #undef CASE
@@ -581,15 +602,18 @@ void topkKernelLauncher(float const*                    input,
 
 // ====================== Sparse Mixer ======================
 
-__global__ void sparseMixerMask(float const* input,
-                                float*       output,
-                                int const*   indices,
-                                int          k_idx,
-                                int          k,
-                                int          num_tokens,
-                                int          num_experts,
-                                int          start_expert,
-                                float        epsilon) {
+// IN_T: router-logits storage type (float or __nv_bfloat16); the masked logits
+// written to the fp32 mixer_temp_output buffer are the lossless fp32 widening.
+template<typename IN_T>
+__global__ void sparseMixerMask(IN_T const*   input,
+                                float*        output,
+                                int const*    indices,
+                                int           k_idx,
+                                int           k,
+                                int           num_tokens,
+                                int           num_experts,
+                                int           start_expert,
+                                float         epsilon) {
     int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (token_idx >= num_tokens)
         return;
@@ -600,20 +624,21 @@ __global__ void sparseMixerMask(float const* input,
     float max_val = -INFINITY;
     for (int i = 0; i < num_experts; ++i) {
         if (i != last_selected) {
-            float const val = input[token_idx * num_experts + i];
+            float const val = static_cast<float>(input[token_idx * num_experts + i]);
             max_val         = max(val, max_val);
         }
     }
 
     for (int i = 0; i < num_experts; ++i) {
-        float val                           = input[token_idx * num_experts + i];
+        float val                           = static_cast<float>(input[token_idx * num_experts + i]);
         float mask                          = (max_val - val) / max(abs(val), max_val);
         bool  mask_value                    = (mask > 2 * epsilon) || i == last_selected;
         output[token_idx * num_experts + i] = mask_value ? -INFINITY : val;
     }
 }
 
-void sparseMixerTopkSoftmax(float const*  input,
+template<typename IN_T>
+void sparseMixerTopkSoftmax(IN_T const*   input,
                             float*        output,
                             float*        mixer_temp_output,
                             float*        softmax_temp_output,
@@ -630,7 +655,7 @@ void sparseMixerTopkSoftmax(float const*  input,
     constexpr int threads_per_block = 256;
     int           num_blocks        = ceilDiv(num_rows, threads_per_block);
     for (int k_idx = 0; k_idx < k; ++k_idx) {
-        sparseMixerMask<<<num_blocks, threads_per_block, 0, stream>>>(
+        sparseMixerMask<IN_T><<<num_blocks, threads_per_block, 0, stream>>>(
             input, mixer_temp_output, indices, k_idx, k, num_rows, num_experts, start_expert, epsilon);
         topkGatingSoftmaxKernelLauncher(mixer_temp_output,
                                         output,
@@ -651,9 +676,13 @@ void sparseMixerTopkSoftmax(float const*  input,
 
 // ====================== invokeSelectExpertsForTokens ======================
 
-template<typename TOPK_T>
-void invokeSelectExpertsForTokens(float const*                    input,
-                                  float const*                    input_with_bias,
+// TOPK_T: indices dtype (int32/int64). IN_T: router-logits storage dtype
+// (fp32 default, __nv_bfloat16 for direct bf16 routing). outputs (softmax
+// scratch, expert scales) are always fp32. See the IN_T contract comment at
+// the fused topkGatingSoftmax kernel.
+template<typename TOPK_T, typename IN_T>
+void invokeSelectExpertsForTokens(IN_T const*                     input,
+                                  IN_T const*                     input_with_bias,
                                   float*                          output,
                                   float*                          mixer_temp_output,
                                   float*                          softmax_temp_output,
@@ -670,34 +699,34 @@ void invokeSelectExpertsForTokens(float const*                    input,
     if (input == input_with_bias) {
         if (norm_mode == MOEExpertScaleNormalizationMode::SPARSE_MIXER) {
             TLLM_CHECK_WITH_INFO(mixer_temp_output, "Sparse mixer output is null when running sparse mixer");
-            sparseMixerTopkSoftmax(input,
-                                   output,
-                                   mixer_temp_output,
-                                   softmax_temp_output,
-                                   (int*)indices,
-                                   source_row,
-                                   num_rows,
-                                   num_experts,
-                                   k,
-                                   start_expert,
-                                   end_expert,
-                                   mixer_epsilon,
-                                   stream);
+            sparseMixerTopkSoftmax<IN_T>(input,
+                                         output,
+                                         mixer_temp_output,
+                                         softmax_temp_output,
+                                         (int*)indices,
+                                         source_row,
+                                         num_rows,
+                                         num_experts,
+                                         k,
+                                         start_expert,
+                                         end_expert,
+                                         mixer_epsilon,
+                                         stream);
         } else {
-            topkGatingSoftmaxKernelLauncher(input,
-                                            output,
-                                            softmax_temp_output,
-                                            indices,
-                                            source_row,
-                                            num_rows,
-                                            num_experts,
-                                            k,
-                                            0,
-                                            k,
-                                            start_expert,
-                                            end_expert,
-                                            norm_mode,
-                                            stream);
+            topkGatingSoftmaxKernelLauncher<TOPK_T, IN_T>(input,
+                                                          output,
+                                                          softmax_temp_output,
+                                                          indices,
+                                                          source_row,
+                                                          num_rows,
+                                                          num_experts,
+                                                          k,
+                                                          0,
+                                                          k,
+                                                          start_expert,
+                                                          end_expert,
+                                                          norm_mode,
+                                                          stream);
         }
     } else {
         topkKernelLauncher(input,
@@ -750,6 +779,38 @@ template void invokeSelectExpertsForTokens<int64_t>(float const*,
                                                     float,
                                                     MOEExpertScaleNormalizationMode,
                                                     cudaStream_t);
+
+template void invokeSelectExpertsForTokens<int, __nv_bfloat16>(__nv_bfloat16 const*,
+                                                               __nv_bfloat16 const*,
+                                                               float*,
+                                                               float*,
+                                                               float*,
+                                                               int*,
+                                                               int*,
+                                                               int64_t const,
+                                                               int const,
+                                                               int const,
+                                                               int const,
+                                                               int const,
+                                                               float,
+                                                               MOEExpertScaleNormalizationMode,
+                                                               cudaStream_t);
+
+template void invokeSelectExpertsForTokens<int64_t, __nv_bfloat16>(__nv_bfloat16 const*,
+                                                                   __nv_bfloat16 const*,
+                                                                   float*,
+                                                                   float*,
+                                                                   float*,
+                                                                   int64_t*,
+                                                                   int*,
+                                                                   int64_t const,
+                                                                   int const,
+                                                                   int const,
+                                                                   int const,
+                                                                   int const,
+                                                                   float,
+                                                                   MOEExpertScaleNormalizationMode,
+                                                                   cudaStream_t);
 
 // ====================== CubKeyValueSorter ======================
 

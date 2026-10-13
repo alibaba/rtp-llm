@@ -7,6 +7,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.triton_kernels.common.sigmoid_mul import sigmoid_mul_
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -78,15 +79,21 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,
+        qkv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # ``qkv`` lets a subclass pass a precomputed (e.g. fused qkv+gate)
+        # projection so the qkv GEMM is not run twice.
         input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
+        if qkv is None:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            # Fused in-place sigmoid multiply (single kernel, bit-exact vs the
+            # aten sigmoid + mul chain).
+            attn_output = sigmoid_mul_(attn_output, gate)
         output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)

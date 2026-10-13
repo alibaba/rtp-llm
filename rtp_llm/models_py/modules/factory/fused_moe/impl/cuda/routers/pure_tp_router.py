@@ -47,6 +47,12 @@ class PureTpRouterBase(FusedMoeDataRouter):
     def supports_skip_tp_allreduce(self) -> bool:
         return True
 
+    @property
+    def consumes_unsummed_topk(self) -> bool:
+        """Pure-TP finalize can pass a deferred [M, topk, K] payload through."""
+
+        return True
+
     def _maybe_all_reduce_tp(
         self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
     ) -> torch.Tensor:
@@ -133,9 +139,17 @@ class PureTpRouterBase(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        return self._maybe_all_reduce_tp(
-            payload.fused_expert_output, extra_finalize_args
-        )
+        output = payload.fused_expert_output
+        if (
+            payload.unsummed_topk is not None
+            and self.tp_size > 1
+            and not should_skip_tp_allreduce(extra_finalize_args)
+        ):
+            # The TP collective payload must stay [M, K]: fold the deferred
+            # top-k sum before the all-reduce.  The skip_tp_allreduce path
+            # leaves the merge (and the fused top-k sum) to GenericMoeLayer.
+            output = output.sum(dim=1)
+        return self._maybe_all_reduce_tp(output, extra_finalize_args)
 
 
 class PureTpRouterNoQuant(PureTpRouterBase):

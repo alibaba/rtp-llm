@@ -1,5 +1,4 @@
 import itertools
-import os
 from types import SimpleNamespace
 from typing import Optional
 from unittest import SkipTest, TestCase, main
@@ -62,7 +61,7 @@ class FakeSharedExpert(nn.Module):
 
 
 class FakeSigmoidGateScaleAdd(nn.Module):
-    def forward(self, gate_output, shared_expert_output, experts_output):
+    def forward(self, gate_output, shared_expert_output, experts_output, topk_sum=None):
         experts_output.add_(torch.sigmoid(gate_output) * shared_expert_output)
 
 

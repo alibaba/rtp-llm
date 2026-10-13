@@ -2,13 +2,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import (
     Any,
-    Callable,
     Dict,
     Final,
     List,
     Literal,
     Optional,
-    Tuple,
     TypedDict,
     Union,
     final,
@@ -94,6 +92,13 @@ class CombineForwardPayload:
 
     fused_expert_output: torch.Tensor
     router_context: object | None = None
+    # When set, fused_expert_output is the unsummed routed output
+    # [M, unsummed_topk, K]: the top-k reduction is deferred to the consumer
+    # so it can be folded into the shared-expert gate combine kernel
+    # (GenericMoeLayer/SigmoidGateScaleAdd).  Routers whose finalize path
+    # needs a fully reduced [M, K] output fold the sum themselves or rely on
+    # FusedMoe._execute_payload's central fold.
+    unsummed_topk: Optional[int] = None
 
 
 def should_skip_tp_allreduce(
@@ -153,6 +158,18 @@ class FusedMoeDataRouter(ABC):
     @property
     def supports_gate_pack(self) -> bool:
         """Whether this router can pass raw gate output to its executor."""
+
+        return False
+
+    @property
+    def consumes_unsummed_topk(self) -> bool:
+        """Whether ``finalize`` accepts an unsummed [M, topk, K] payload.
+
+        Pure-TP routers can pass the deferred top-k output through to the
+        caller (folding it only when their TP collective needs [M, K]).
+        Routers that return False get the sum folded centrally by
+        ``FusedMoe._execute_payload`` before ``finalize`` runs.
+        """
 
         return False
 
@@ -411,6 +428,18 @@ class FusedMoe(torch.nn.Module):
         combine_payload.router_context = expert_payload.router_context
 
         if (
+            combine_payload.unsummed_topk is not None
+            and not self.router.consumes_unsummed_topk
+        ):
+            # This router's finalize path requires the fully reduced [M, K]
+            # output (e.g. the DeepEP combine buffer); fold the deferred
+            # top-k sum here instead of leaving it to the caller.
+            combine_payload.fused_expert_output = (
+                combine_payload.fused_expert_output.sum(dim=1)
+            )
+            combine_payload.unsummed_topk = None
+
+        if (
             expert_payload.expert_topk_weights is None
             or expert_payload.expert_topk_ids is None
         ):
@@ -442,8 +471,22 @@ class FusedMoe(torch.nn.Module):
             finalize_args,
         )
 
-        assert (
-            output.shape == hidden_states.shape
-        ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
+        if combine_payload.unsummed_topk is not None:
+            # The top-k reduction may be deferred to the caller (unsummed
+            # [M, topk, K]) or already folded by the router's finalize
+            # (TP collective paths); both are valid shapes.
+            expected_unsummed = (
+                hidden_states.size(0),
+                combine_payload.unsummed_topk,
+                hidden_states.size(1),
+            )
+            assert output.shape == hidden_states.shape or output.shape == expected_unsummed, (
+                f"output batch size mismatch: expected {hidden_states.shape} "
+                f"or {expected_unsummed}, got {output.shape}"
+            )
+        else:
+            assert (
+                output.shape == hidden_states.shape
+            ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output

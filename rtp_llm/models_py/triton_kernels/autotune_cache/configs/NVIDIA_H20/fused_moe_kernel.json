@@ -1,0 +1,116 @@
+{
+  "kernel_name": "fused_moe_kernel",
+  "triton_version": "3.6.0",
+  "gpu": "NVIDIA H20",
+  "torch_version": "2.11.0+cu130",
+  "note": "default_config is the generic CachedAutotuner single-config field (only read if this kernel is wrapped in cuda_cached_autotune). The production launch path resolves configs per (E, N, K, top_k) via the shape_configs block: fused_moe_kernel.get_default_config consults it when TRITON_AUTOTUNE_CACHE_MODE=cached, otherwise the identical compiled-in _TUNED_MOE_CONFIGS table applies. Per-entry kernel_top_k/mul_routed_weight/use_fp8_w8a8/dtype record the sweep context and are not matched at runtime; top_k is the model top_k passed to get_default_config.",
+  "default_config": {
+    "kwargs": {
+      "BLOCK_SIZE_M": 16,
+      "BLOCK_SIZE_N": 128,
+      "BLOCK_SIZE_K": 64,
+      "GROUP_SIZE_M": 1
+    },
+    "num_warps": 8,
+    "num_stages": 4,
+    "num_ctas": 1
+  },
+  "shape_configs": [
+    {
+      "E": 256,
+      "N": 1024,
+      "K": 2048,
+      "top_k": 8,
+      "gemm": "w1",
+      "kernel_top_k": 8,
+      "mul_routed_weight": false,
+      "use_fp8_w8a8": false,
+      "dtype": "bf16",
+      "timing_methods": "avg<=16 buckets: cuda_graph_replay (production decode regime); prefill buckets: L2-scrubbed eager (expert weights DRAM-cold per layer)",
+      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}",
+      "buckets": [
+        {
+          "max_avg_tokens_per_expert": 16.0,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+            "num_stages": 3
+          }
+        },
+        {
+          "max_avg_tokens_per_expert": 24.0,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 8,
+            "num_stages": 4
+          }
+        },
+        {
+          "max_avg_tokens_per_expert": null,
+          "config": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 8,
+            "num_warps": 4,
+            "num_stages": 3
+          }
+        }
+      ]
+    },
+    {
+      "E": 256,
+      "N": 2048,
+      "K": 512,
+      "top_k": 8,
+      "gemm": "w2",
+      "kernel_top_k": 1,
+      "mul_routed_weight": true,
+      "use_fp8_w8a8": false,
+      "dtype": "bf16",
+      "timing_methods": "avg<=16 buckets: cuda_graph_replay (production decode regime); prefill buckets: L2-scrubbed eager (expert weights DRAM-cold per layer)",
+      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}",
+      "buckets": [
+        {
+          "max_avg_tokens_per_expert": 16.0,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 8,
+            "num_warps": 4,
+            "num_stages": 3
+          }
+        },
+        {
+          "max_avg_tokens_per_expert": 24.0,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+            "num_stages": 3
+          }
+        },
+        {
+          "max_avg_tokens_per_expert": null,
+          "config": {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 8,
+            "num_warps": 4,
+            "num_stages": 3
+          }
+        }
+      ]
+    }
+  ]
+}

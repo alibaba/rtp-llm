@@ -95,6 +95,10 @@ class MiniCPMV47DSpark(Qwen3DSpark):
         if config.dspark_markov_rank <= 0:
             raise ValueError("MiniCPM DSpark requires markov_rank > 0")
         config.dspark_sample_from_anchor = bool(dspark.get("sample_from_anchor", False))
+        # Match the target's lm_head compute dtype so the borrowed
+        # embed/lm_head weights stay semantically compatible (the alias check
+        # compares this field).
+        config.enable_fp32_lm_head = False
         return config
 
     @staticmethod

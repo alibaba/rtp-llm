@@ -167,6 +167,49 @@ class SelectTopkOpTest(TestCase):
             ):
                 self._run_select_topk_op_test(*params)
 
+    def test_select_topk_bf16_direct_bit_exact(self):
+        """bf16 router logits passed directly (no .float() cast) must produce
+        bit-identical topk_ids/topk_weights vs the .float() reference path:
+        the kernel widens bf16 to fp32 at load, so all softmax/renorm math is
+        the same fp32 sequence."""
+        for num_tokens, num_expert, top_k in itertools.product(
+            [1, 7, 83, 599], [128, 256], [1, 8]
+        ):
+            with self.subTest(
+                num_tokens=num_tokens, num_expert=num_expert, top_k=top_k
+            ):
+                torch.manual_seed(3)
+                model_config = ModelConfig()
+                model_config.attn_config.head_num = 1
+                model_config.attn_config.size_per_head = 128
+                model_config.num_layers = 1
+                model_config.max_seq_len = 1
+                model_config.vocab_size = 5120
+                model_config.expert_num = num_expert
+                model_config.moe_k = top_k
+                model_config.has_moe_norm = True
+                select_topk_op = SelectTopkOp(model_config)
+
+                router_bf16 = (
+                    torch.randn(num_tokens, num_expert, device="cuda") * 3.0
+                ).to(torch.bfloat16)
+
+                def _run(logits):
+                    ids = torch.zeros(
+                        (num_tokens, top_k), dtype=torch.int32, device="cuda"
+                    )
+                    weights = torch.zeros(
+                        (num_tokens, top_k), dtype=torch.float32, device="cuda"
+                    )
+                    select_topk_op.forward(logits, ids, weights)
+                    return ids, weights
+
+                ids_bf16, weights_bf16 = _run(router_bf16)
+                ids_f32, weights_f32 = _run(router_bf16.float())
+
+                self.assertTrue(torch.equal(ids_bf16, ids_f32))
+                self.assertTrue(torch.equal(weights_bf16, weights_f32))
+
     def test_select_topk_fake_balance_expert(self):
         torch.manual_seed(1)
 

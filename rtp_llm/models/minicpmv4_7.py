@@ -55,6 +55,10 @@ class MiniCPMV4_7(Qwen35Moe):
         # selection and the MiniCPM multimodal token contract.
         config = ModelConfig()
         config.ckpt_path = ckpt_path
+        # lm_head runs in BF16: the vocab GEMV (248144 x 2048) is the largest
+        # per-step decode kernel and the fp32 upcast doubles its HBM traffic
+        # (598us -> 281us on H20, measured).  DSV4 serves with the same flag.
+        config.enable_fp32_lm_head = False
         cls._parse_basic_config(text_config_json, config)
         cls._parse_rope_config(text_config_json, config)
         cls._parse_normalization_config(text_config_json, config)

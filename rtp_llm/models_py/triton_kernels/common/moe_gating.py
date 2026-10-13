@@ -4,6 +4,8 @@ Provides fused elementwise operations for MoE shared-expert gating patterns,
 avoiding intermediate tensor allocations and redundant memory round-trips.
 """
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -28,15 +30,22 @@ _MAX_BLOCK_H = 4096  # Maximum BLOCK_H: prevents register spilling
 def _SigmoidGateScaleAdd_kernel(
     gate_ptr,  # [T, 1]  — scalar gate output from shared_expert_gate linear
     shared_ptr,  # [T, H]  — shared expert MLP output
-    output_ptr,  # [T, H]  — routed experts output (modified in-place)
+    experts_ptr,  # [T, TOPK, H] routed experts output (TOPK=1: [T, H] layout)
+    output_ptr,  # [T, H]  — result (aliases experts_ptr when TOPK == 1)
     T,
     H,
     stride_gate_t,  # gate stride along token dim (elements)
     stride_shared_t,  # shared stride along token dim (elements)
+    stride_experts_t,  # experts row stride (TOPK * H when TOPK > 1)
     stride_out_t,  # output stride along token dim (elements)
+    TOPK: tl.constexpr,  # top-k slots folded into the sum (1 = classic path)
     BLOCK_H: tl.constexpr,
 ):
-    """Fused: output[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + output[t, :]
+    """Fused: output[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + sum_k experts[t, k, :]
+
+    The top-k accumulation runs in fp32 in ascending k order, matching
+    torch.sum(dim=1) on the unsummed [T, TOPK, H] view.  With TOPK == 1 the
+    kernel is the classic in-place gate-scale-add (output aliases experts).
 
     Grid: (T, ceil(H / BLOCK_H))
       - axis-0: token index
@@ -58,19 +67,24 @@ def _SigmoidGateScaleAdd_kernel(
     mask = h_offsets < H
 
     # ------------------------------------------------------------------
-    # 3. Load shared-expert output and experts output
+    # 3. Load shared-expert output and accumulate the experts output
     # ------------------------------------------------------------------
     shared_base = shared_ptr + tid * stride_shared_t
-    out_base = output_ptr + tid * stride_out_t
+    experts_base = experts_ptr + tid * stride_experts_t
 
     shared_vec = tl.load(shared_base + h_offsets, mask=mask, other=0.0)
-    experts_vec = tl.load(out_base + h_offsets, mask=mask, other=0.0)
+    accumulator = tl.zeros([BLOCK_H], dtype=tl.float32)
+    for k in range(TOPK):
+        experts_vec = tl.load(
+            experts_base + k * H + h_offsets, mask=mask, other=0.0
+        )
+        accumulator += experts_vec.to(tl.float32)
 
     # ------------------------------------------------------------------
     # 4. Fused computation in fp32, then cast back to original dtype
     # ------------------------------------------------------------------
-    result = gate_val * shared_vec.to(tl.float32) + experts_vec.to(tl.float32)
-    tl.store(out_base + h_offsets, result.to(shared_vec.dtype), mask=mask)
+    result = gate_val * shared_vec.to(tl.float32) + accumulator
+    tl.store(output_ptr + tid * stride_out_t + h_offsets, result.to(shared_vec.dtype), mask=mask)
 
 
 # ---------------------------------------------------------------------------
@@ -111,32 +125,59 @@ def sigmoid_gate_scale_add_triton(
     gate: torch.Tensor,
     shared: torch.Tensor,
     experts: torch.Tensor,
+    topk_sum: Optional[int] = None,
 ) -> torch.Tensor:
     """Launch the fused Triton kernel.
 
-    Computes in-place on *experts*:
+    topk_sum is None or 1 (classic path): computes in-place on *experts*
         experts[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + experts[t, :]
+    with experts [T, H]; the same tensor object is returned.
+
+    topk_sum > 1 (deferred combine): *experts* is the unsummed routed output
+    [T, topk_sum, H] (row stride topk_sum * H, contiguous last dim) and the
+    top-k reduction is fused into the kernel:
+        out[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + sum_k experts[t, k, :]
+    The fp32 accumulation over ascending k matches torch.sum's reduce order;
+    a fresh [T, H] tensor is allocated and returned (torch.sum allocated the
+    same intermediate, so the total allocation count is unchanged).
 
     Args:
         gate:    [T, 1]  — scalar gate; dtype fp16 / bf16 / fp32.
         shared:  [T, H]  — shared expert MLP output.
-        experts: [T, H]  — routed experts output (modified in-place).
+        experts: [T, H] or [T, topk_sum, H] routed experts output.
+        topk_sum: deferred top-k to fold into the sum, None for the classic path.
 
     Returns:
-        experts tensor (same object, modified in-place).
+        experts (classic, in-place) or the summed [T, H] result (topk_sum).
     """
     T, H = shared.shape
+    assert gate.ndim == 2 and gate.size(1) == 1
+    assert shared.dim() == 2 and shared.stride(1) == 1
+    if topk_sum is not None and topk_sum > 1:
+        assert experts.dim() == 3 and experts.size(0) == T and experts.size(2) == H
+        assert experts.stride(2) == 1
+        output = torch.empty_like(shared)
+        experts_row_stride = experts.stride(0)
+    else:
+        assert experts.dim() == 2 and experts.shape == shared.shape
+        assert experts.stride(1) == 1
+        # Classic path: the result aliases the experts buffer in-place.
+        output = experts
+        experts_row_stride = experts.stride(0)
     BLOCK_H = _select_block_h(T, H)
     grid = (T, triton.cdiv(H, BLOCK_H))
     _SigmoidGateScaleAdd_kernel[grid](
         gate,
         shared,
         experts,
+        output,
         T,
         H,
         gate.stride(0),
         shared.stride(0),
-        experts.stride(0),
+        experts_row_stride,
+        output.stride(0),
+        TOPK=1 if topk_sum is None else topk_sum,
         BLOCK_H=BLOCK_H,
     )
-    return experts
+    return output

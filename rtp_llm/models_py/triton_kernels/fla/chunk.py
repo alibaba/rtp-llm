@@ -25,7 +25,6 @@ from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.l2norm import fused_l2norm_qk, l2norm_fwd
 from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
-    SUPPRESS_LEVEL,
     autocast_custom_fwd,
     env_flag,
     input_guard,
@@ -405,17 +404,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
-        q_orig = q
-        k_orig = k
-
         if use_qk_l2norm_in_kernel:
-            if is_amd:
-                q, k = fused_l2norm_qk(q, k)
-            else:
-                # NOTE: fused_l2norm_qk is only validated on AMD/ROCm backend.
-                # On CUDA, fall back to l2norm_fwd until the fused kernel is verified.
-                q = l2norm_fwd(q)
-                k = l2norm_fwd(k)
+            # fused_l2norm_qk normalizes q+k in a single BT-tiled kernel (~2x the
+            # per-row l2norm_fwd bandwidth). Parity with two l2norm_fwd calls is
+            # validated on both CUDA and ROCm (fla/test/test_l2norm.py::TestFusedL2NormQK).
+            q, k = fused_l2norm_qk(q, k)
 
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,

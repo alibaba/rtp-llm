@@ -1,5 +1,4 @@
 import logging
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -26,7 +25,6 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MultimodalEmbeddingInjector,
-    RMSNorm,
     RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
@@ -36,7 +34,10 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
+    scatter_qkv,
+    scatter_qkv_l2norm,
+)
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     AiterFlydslGdnDecodeStateMetadata,
     _is_aiter_flydsl_gdn_decode_disabled,
@@ -65,7 +66,6 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -559,10 +559,29 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
-        # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
-        # .contiguous() copies that torch.split + view triggers. Below 2048,
-        # kernel launch overhead beats the savings (microbench measured).
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        # CUDA: fused split+contiguous+l2norm (single pass over mixed_qkv) —
+        # q/k come out contiguous and pre-normalized, replacing
+        # scatter_qkv/torch.split plus the in-chunk fused_l2norm_qk; the FLA
+        # paths below then run with use_qk_l2norm_in_kernel=False. The former
+        # M >= 2048 threshold is dropped on this path: the fused kernel wins
+        # at every M (the old small-M microbench did not count the
+        # input_guard .contiguous() clones plus the separate l2norm kernels).
+        # ROCm keeps the original branches: the aiter/flydsl prefill paths
+        # consume un-normalized q/k with their own in-kernel l2norm.
+        use_qk_l2norm_in_kernel = True
+        if (
+            torch.version.hip is None
+            and self.local_num_k_heads == self.local_num_v_heads
+        ):
+            query, key, value = scatter_qkv_l2norm(
+                mixed_qkv,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+            use_qk_l2norm_in_kernel = False
+        elif mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
@@ -619,7 +638,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                     state_dtype=torch.float32,
                     snapshot_dtype=torch.float32,
                     prefill_metadata=prefill_metadata,
-                    use_qk_l2norm_in_kernel=True,
+                    use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
                 )
             )
         elif use_flydsl_chunk_gdn:
@@ -649,7 +668,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=need_final_state,
                 cu_seqlens=cu_seqlens_without_padding,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             )
         else:
             attn_out, h, final_state = chunk_gated_delta_rule(
@@ -661,7 +680,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -890,24 +909,48 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             )
         else:
             # NVIDIA CUDA and unsupported ROCm inputs retain the original path.
-            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
-            # contiguous is applied by fused_recurrent_gated_delta_rule.
-            g = g.view(batch, seq, self.local_num_v_heads)
-            beta = beta.view(batch, seq, self.local_num_v_heads)
-            core_attn_out, _ = fused_recurrent_gated_delta_rule(
-                q=query,
-                k=key,
-                v=value,
-                g=g,
-                beta=beta,
-                scale=None,
-                initial_state=ssm_states,
-                inplace_final_state=True,
-                block_map=self._get_fla_block_map(attn_inputs),
-                seq_size_per_block=seq_size_per_block,
-                sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
-                use_qk_l2norm_in_kernel=True,
-            )
+            if torch.version.hip is None:
+                # GDN gating fused into the recurrent kernel: softplus/sigmoid
+                # are computed per (batch, head) program in-kernel, eliding the
+                # standalone fused_gdn_gating kernel launch and the g/beta
+                # global-memory round trips (bit-exact vs the precomputed path).
+                core_attn_out, _ = fused_recurrent_gated_delta_rule(
+                    q=query,
+                    k=key,
+                    v=value,
+                    g=None,
+                    beta=None,
+                    scale=None,
+                    initial_state=ssm_states,
+                    inplace_final_state=True,
+                    block_map=self._get_fla_block_map(attn_inputs),
+                    seq_size_per_block=seq_size_per_block,
+                    sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+                    use_qk_l2norm_in_kernel=True,
+                    a_log=self.alog,
+                    a=a,
+                    b=b,
+                    dt_bias=self.dt_bias,
+                )
+            else:
+                g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+                # contiguous is applied by fused_recurrent_gated_delta_rule.
+                g = g.view(batch, seq, self.local_num_v_heads)
+                beta = beta.view(batch, seq, self.local_num_v_heads)
+                core_attn_out, _ = fused_recurrent_gated_delta_rule(
+                    q=query,
+                    k=key,
+                    v=value,
+                    g=g,
+                    beta=beta,
+                    scale=None,
+                    initial_state=ssm_states,
+                    inplace_final_state=True,
+                    block_map=self._get_fla_block_map(attn_inputs),
+                    seq_size_per_block=seq_size_per_block,
+                    sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+                    use_qk_l2norm_in_kernel=True,
+                )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
@@ -989,7 +1032,6 @@ class Qwen3NextAttention(CausalAttention):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
-        # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
             weights,
             W.attn_gate_w,
@@ -1770,7 +1812,14 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
+        # First-layer fast path: when the norm backend supports it, skip the
+        # zeros_like fill and let RMSResNorm start the residual stream at the
+        # layer input (bit-equivalent to add-with-zero).
+        residual = (
+            None
+            if getattr(self.layers[0].input_layernorm, "supports_none_residual", False)
+            else torch.zeros_like(hidden_states)
+        )
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
             self.begin_aux_hidden_capture(hidden_states, is_target_verify)
