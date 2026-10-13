@@ -291,7 +291,7 @@ class WorkloadPolicy:
     def render(self, ctx, result, analysis, deadline):
         from reporting.workload import write_views
         deadline.check()
-        view_links = write_views(ctx.artifact_dir, analysis, self.reports)
+        view_links = write_views(ctx.artifact_dir, analysis, self.reports, deadline=deadline)
         result["workload"]["report"] = str(next(iter(view_links.values())))
         result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}
         deadline.check()

@@ -75,3 +75,60 @@ def test_client_record_decoder_does_not_relabel_invalid_or_stale_rows():
     assert read_records(adapter, deadline, 2)[0]['wire_request_id'] == 1
     with pytest.raises(ValueError, match='stale'):
         read_records(adapter, deadline, 3)
+
+
+def test_snapshot_timeout_is_preserved_as_incomplete_evidence(tmp_path):
+    class Expired:
+        def read(self, deadline):
+            raise TimeoutError('source budget exhausted')
+    definition = CaseDefinition({'default': lambda case: None},
+        snapshot_sources={'state': SnapshotSource(lambda services, params: Expired())})
+    owner = RegisteredCase('trial', 'trial.program', tmp_path / 'program.py', definition)
+    with patch('case_api.registry._snapshot', CaseRegistry.build([owner])):
+        ctx = RuntimeContext({'implementation': {'configuration': {'case': 'trial'}}}, None,
+                             tmp_path, time.monotonic, time.sleep)
+        ctx.env = object()  # A custom source does not require Mock HTTP ports.
+        params = validate_snapshot({'sources': ['state']}, PlanContext('stage', {}, case='trial'))
+        payload = json.loads(Sources(ctx, params).capture(Deadline(time.monotonic() + 5)).encoded)
+        assert payload['status'] == 'partial'
+        assert payload['sources']['state']['errors'][0]['type'] == 'TimeoutError'
+
+
+def test_registered_client_records_use_the_common_snapshot_action(tmp_path):
+    class Client(MemoryClient):
+        def snapshot_records(self):
+            return [dict(client_record_schema_version=1, env_epoch=self.value,
+                         wire_request_id=1, attempt=1)]
+    definition = CaseDefinition({'default': lambda case: None}, clients={
+        'stream': ClientFactory(lambda services, params, deadline: Client(services.epoch))})
+    owner = RegisteredCase('trial', 'trial.program', tmp_path / 'program.py', definition)
+    with patch('case_api.registry._snapshot', CaseRegistry.build([owner])):
+        ctx = RuntimeContext({'implementation': {'configuration': {'case': 'trial'}}}, None,
+                             tmp_path, time.monotonic, time.sleep)
+        ctx.env = object()
+        deadline = Deadline(time.monotonic() + 5)
+        handle = ctx.services.client('stream', {}, deadline)
+        plan = PlanContext('stage', {'start': {'client': 'client'}}, case='trial')
+        params = validate_snapshot({'sources': ['client_records'],
+            'client': {'$ref': 'stages.start.output.client'}}, plan)
+        params['client'] = handle
+        payload = json.loads(Sources(ctx, params).capture(deadline).encoded)
+        assert payload['sources']['client_records']['data'][0]['wire_request_id'] == 1
+        assert payload['status'] == 'ok'
+        ctx.cleanup(5)
+
+
+def test_selected_report_receives_the_live_render_budget(tmp_path):
+    from reporting.workload import write_views
+    from case_api.registry import ReportView
+    deadline = Deadline(time.monotonic() + 5)
+    seen = []
+    def render(directory, analysis, presentation, budget):
+        budget.check()
+        seen.append(budget)
+        return directory / 'report.html'
+    capability = ReportView(lambda *args: None, lambda *args: None, deadline_renderer=render)
+    with patch('reporting.workload.view_capabilities', return_value={'trial.yaml': capability}), \
+         patch('reporting.workload.view', return_value=object()):
+        assert write_views(tmp_path, {}, ['trial.yaml'], deadline=deadline)['trial.yaml'] == tmp_path / 'report.html'
+    assert seen == [deadline]

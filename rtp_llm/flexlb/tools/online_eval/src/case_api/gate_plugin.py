@@ -67,6 +67,14 @@ class GatePlugin:
         evidence, result = load_gate(directory, self.name)
         return self.write_report(directory, evidence, result, run=run, presentation=presentation) / 'report.html'
 
+    def render_with_deadline(self, directory, run, presentation, deadline):
+        deadline.check()
+        evidence, result = load_gate(directory, self.name)
+        deadline.check()
+        path = self.write_report(directory, evidence, result, run=run, presentation=presentation) / "report.html"
+        deadline.check()
+        return path
+
     def publish(self, directory, evidence, result, *, report_options=None):
         """Publish an existing decision without running analyze, even in replay."""
         freeze_gate(directory, self.name, evidence, result)

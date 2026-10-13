@@ -32,6 +32,7 @@ def validate_snapshot(params, plan):
         "sources",
         "required",
         "flow",
+        "client",
         "requests",
         "targets",
         "master_include",
@@ -58,13 +59,13 @@ def validate_snapshot(params, plan):
     if type(params.get("required", True)) is not bool:
         _error(plan, "required must be boolean")
     result["required"] = params.get("required", True)
-    if "requests" in params and "flow" in params:
-        _error(plan, "choose requests or flow, not both")
-    for kind in ("requests", "flow"):
+    if len({"requests", "flow", "client"} & params.keys()) > 1:
+        _error(plan, "choose one requests, flow or client reference")
+    for kind in ("requests", "flow", "client"):
         if kind in params:
             plan.reference(params[kind], kind)
-    if "client_records" in sources and not ({"requests", "flow"} & params.keys()):
-        _error(plan, "client_records requires a requests or flow reference")
+    if "client_records" in sources and not ({"requests", "flow", "client"} & params.keys()):
+        _error(plan, "client_records requires a requests, flow or client reference")
     targets = params.get("targets", [])
     if not isinstance(targets, list) or any(
         not isinstance(x, str) or not x for x in targets

@@ -194,7 +194,8 @@ class PerformanceGateTest(unittest.TestCase):
                 resource=lambda name, kind: flow if kind == "java_flow" else e)
             from dataclasses import replace
             interrupted = replace(PERFORMANCE_GATE, analyze=mock.Mock(side_effect=RuntimeError("analysis interrupted")))
-            with mock.patch("cases.master_performance.program.GATE", interrupted):
+            ctx.services = SimpleNamespace(gate=mock.Mock(return_value=interrupted))
+            with mock.patch.object(ctx.services, "gate", return_value=interrupted):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())

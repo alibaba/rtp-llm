@@ -89,7 +89,7 @@ def observe(ctx, p, deadline):
         post_end=0,
         max_pacing_lag_ms=None,
     )
-    from cases.cache_scale_in import analysis as cache_gate, program, inputs
+    from cases.cache_scale_in import analysis as cache_gate, inputs
     path = ctx.artifact_dir / "cache-gate-evidence.json"
 
     def event(name, row=None):
@@ -123,7 +123,7 @@ def observe(ctx, p, deadline):
     pool = None
     futures = []
     try:
-        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__, inputs.__file__), analyzer_file=cache_gate.__file__))
+        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=ctx.services.source_files(), analyzer_file=cache_gate.__file__))
         first = sample()
         initial = sorted(first["engines"])
         evidence["initial_engines"] = initial
@@ -260,8 +260,7 @@ def check(ctx, p, deadline):
         evidence["max_pacing_lag_ms"] = max(lags)
     write_json(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
-    from cases.cache_scale_in.program import GATE
-    committed = GATE.commit(ctx.artifact_dir, evidence)
+    committed = ctx.services.gate('cache').commit(ctx.artifact_dir, evidence)
     result, path = committed.result, committed.path
     return StageOutput(
         checks=[

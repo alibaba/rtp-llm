@@ -13,7 +13,7 @@ from cases.cache_scale_in.inputs import (
 )
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
-from case_api.metric_inputs import bind_engine_metrics
+from case_api.metric_inputs import bind_mock_engine_metrics
 
 
 def default(case):
@@ -27,7 +27,7 @@ def default(case):
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
-    bind_engine_metrics(case, inputs["engine_counters"], ENGINE_FIELDS)
+    bind_mock_engine_metrics(case, inputs["engine_counters"], ENGINE_FIELDS)
     client, _ = normalize(flow["client"])
     gate["qps"] = float(client["SEND_MODE_QPS"])
     budget = (
@@ -69,7 +69,7 @@ from cases.cache_scale_in.analysis import analyze
 from cases.cache_scale_in.metrics import produce
 
 GATE = GatePlugin('cache', analyze, produce, write_report)
-REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render, frozenset({"expected_behavior", "observed_behavior"}))}
+REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render, frozenset({"expected_behavior", "observed_behavior"}), deadline_renderer=GATE.render_with_deadline)}
 
 
 from case_api.registry import CaseDefinition
@@ -80,6 +80,7 @@ from cases.cache_scale_in.metrics import metric_contract
 CASE = CaseDefinition(
     builders={"default": default},
     input_contract=INPUTS,
+    gates={'cache': GATE},
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={

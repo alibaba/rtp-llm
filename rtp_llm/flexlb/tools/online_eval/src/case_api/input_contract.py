@@ -33,10 +33,13 @@ class InputField:
             raise ValueError('input required must be boolean')
 
 
+@dataclass(frozen=True)
 class BoundInputs:
     """Sections have independent copies; no fixed set of five section names."""
-    def __init__(self, values):
-        self._values = deepcopy(values)
+    _values: object
+
+    def __post_init__(self):
+        object.__setattr__(self, "_values", MappingProxyType(deepcopy(self._values)))
 
     def __getattr__(self, name):
         if name not in self._values:
@@ -51,8 +54,12 @@ class BoundInputs:
 class InputContract:
     groups: Mapping
     numbers: tuple = ()
+    decode: object = None
 
     def __post_init__(self):
+        if self.decode is not None:
+            from case_api.extension_contracts import validate_call
+            validate_call(self.decode, 1, "input_contract.decode")
         groups = dict(self.groups)
         if any(type(name) is not str or not name.isidentifier() or
                not isinstance(group, InputGroup) for name, group in groups.items()):
@@ -69,6 +76,24 @@ class InputContract:
         object.__setattr__(self, 'groups', MappingProxyType(groups))
         object.__setattr__(self, 'numbers', numbers)
 
+    @classmethod
+    def from_fields(cls, sections, *, optional=(), decode=None):
+        """One field declaration derives required names and numeric paths."""
+        optional = frozenset(optional)
+        paths = {group + '.' + name for group, fields in sections.items() for name in fields}
+        if optional - paths:
+            raise ValueError('optional inputs are not declared')
+        groups, numbers = {}, []
+        for group, definitions in sections.items():
+            required, omitted = set(), set()
+            for name, rule in definitions.items():
+                path = group + '.' + name
+                (omitted if path in optional else required).add(name)
+                if rule is not None:
+                    numbers.append(InputField(path, rule, path not in optional))
+            groups[group] = InputGroup(required, omitted)
+        return cls(groups, tuple(numbers), decode)
+
     @property
     def numeric_parameters(self):
         return {item.path: item.number for item in self.numbers}
@@ -84,7 +109,7 @@ class InputContract:
             data = case.value(name)
             fields(data, group.required, 'parameters.' + name, optional=group.optional)
             values[name] = data
-        return BoundInputs(values)
+        return BoundInputs(values) if self.decode is None else self.decode(values)
 
 
 def numeric_fields(rules, *, optional=()):

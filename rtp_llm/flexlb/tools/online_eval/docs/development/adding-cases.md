@@ -284,3 +284,23 @@ handler 的错误路径同样遵守输出合同。数值在证据不足时可以
 ## 收尾指标扩展
 
 注册为 `ProducerPhase.FINALIZE` 的函数签名是 `execute(directory, context: FinalizationContext) -> dict`。从 `context.run` 读取调用快照，通过返回 metadata 提交自己的诊断信息，不修改主分析结果。自定义视图、producer 和来源必须在所属 `CASE` 声明；复用另一 case 的实现也须显式声明。调用边界和源码指纹见 [Case 插件结构](../architecture/case-plugins.md)。
+
+## 扩展功能时的修改边界
+
+先区分新增配置、业务算法与新协议，不把这些独立事实合并成一段隐式推导。新增数值字段优先用 `InputContract.from_fields` 单点声明类型、必填性与准入字段；新增指标检查用 `CheckSpec` 单点声明绑定和数值规则。YAML 负责具体取值，指标定义负责来源口径，纯分析负责业务算法。它们是必要的修改点；不要再手工重复维护 RULES、数字路径及分析字段集合。
+
+```python
+from case_api.input_contract import InputContract
+from case_api.numeric_parameters import NONNEGATIVE
+
+INPUTS = InputContract.from_fields(
+    {"custom": {"name": None, "threshold": NONNEGATIVE}},
+    optional={"custom.threshold"},
+)
+# CASE = CaseDefinition(builders={"default": default}, input_contract=INPUTS)
+# data = case.bind(INPUTS)
+```
+
+自定义客户端或采样器在 case 的实现文件编写协议，并在 program 的 `CASE` 注册；不修改公共 source 白名单或执行器分支。注册与实现可以同处一个小型 program，也可以拆成两个文件。调用客户端必须保存返回的真实资源句柄，采样器必须使用传入 deadline 限制 I/O；不要自建脱离 scope 的后台线程。接口职责与签名只在[case 插件结构](../architecture/case-plugins.md)维护。
+
+扩展验证应记录实际 diff 涉及的作者文件、重复合同声明与公共层修改数，测试文件单列。至少验证正向执行、错签名、未声明能力、缺失与非法输入、过期 epoch、超时与清理，以及冻结检查的投影不重新判定。新增能力不能改变原 case 的窗口、阈值、cohort、缺采处理或运行判定。

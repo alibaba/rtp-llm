@@ -30,6 +30,14 @@ class RuntimeCapabilities:
         return self._context.instance["implementation"]["configuration"]["case"]
 
     @property
+    def epoch(self):
+        return self._context.env_epoch
+
+    @property
+    def metrics(self):
+        return self._context.monitor.client
+
+    @property
     def directory(self):
         return self._context.artifact_dir
 
@@ -47,6 +55,8 @@ class RuntimeCapabilities:
         client = capability.factory(self, deepcopy(params), deadline)
         if not callable(getattr(client, "cleanup", None)):
             raise TypeError("registered client must implement cleanup(deadline)")
+        from case_api.extension_contracts import validate_call
+        validate_call(client.cleanup, 1, "client." + name + ".cleanup")
         handle = self._context.register_resource("client", client, client.cleanup, evidence=capability.evidence)
         deadline.check()
         return handle
@@ -55,7 +65,10 @@ class RuntimeCapabilities:
         reader = self.capability("snapshot", name).factory(self, deepcopy(params))
         if not callable(getattr(reader, "read", None)):
             raise TypeError("snapshot source must implement read(deadline)")
+        from case_api.extension_contracts import validate_call
+        validate_call(reader.read, 1, "snapshot." + name + ".read")
         if callable(getattr(reader, "close", None)):
+            validate_call(reader.close, 1, "snapshot." + name + ".close")
             self._context.add_cleanup("snapshot-" + name, reader.close)
         return reader
 

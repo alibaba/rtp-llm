@@ -28,9 +28,9 @@ def observe_validate(params, plan):
 
 def provenance(ctx, flow):
     from artifacts.provenance import gate_provenance
-    from cases.master_performance import analysis, program, inputs
+    from cases.master_performance import analysis, inputs
     return gate_provenance(ctx, flow,
-        source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__),
+        source_files=ctx.services.source_files(),
         analyzer_file=analysis.__file__)
 
 
@@ -114,8 +114,7 @@ def finish(ctx, p, deadline):
             e["errors"].append("engine TPS collection: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
-    from cases.master_performance.program import GATE
-    committed = GATE.commit(ctx.artifact_dir, e)
+    committed = ctx.services.gate('performance').commit(ctx.artifact_dir, e)
     result, path = committed.result, committed.path
     return StageOutput(
         checks=[

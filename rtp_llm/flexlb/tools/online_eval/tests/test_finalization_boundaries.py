@@ -34,7 +34,7 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
         issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
     flow = SimpleNamespace(directory=tmp_path, evidence_snapshot=lambda: snapshot)
     (tmp_path / "client_lifecycle.jsonl").write_text("")
-    ctx = RuntimeContext({}, None, tmp_path, lambda: 0, lambda _: None)
+    ctx = RuntimeContext({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
     if kind == "cache":
         e["client_attribution"] = {}
     f = ctx.register_resource("java_flow", flow)

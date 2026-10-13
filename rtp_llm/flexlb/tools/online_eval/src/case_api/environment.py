@@ -10,6 +10,7 @@ class EnvironmentView(Mapping):
         self.profiles = tuple(profiles)
         self.path = path
         self._resolved = {}
+        self._typed = None
 
     def __iter__(self):
         return iter(self._declaration)
@@ -27,16 +28,19 @@ class EnvironmentView(Mapping):
         from scenario.environment_declaration import environment_fields
         if name not in environment_fields():
             raise AttributeError('unknown environment field: ' + name)
+        declaration, _ = self._contracts()
+        normalized = declaration.to_dict()
+        if name in normalized:
+            return deepcopy(normalized[name])
         if name in self._declaration:
             return self[name]
-        if not self.profiles:
-            raise AttributeError('environment field requires a selected profile: ' + name)
-        rendered = [self.render(profile) for profile in self.profiles]
-        if any(row.get(name) != rendered[0].get(name) for row in rendered):
-            raise ValueError('environment field differs by profile: ' + name)
-        if name not in rendered[0]:
-            raise AttributeError('environment field is not declared: ' + name)
-        return deepcopy(rendered[0][name])
+        raise AttributeError('environment field is not declared: ' + name)
+
+    def _contracts(self):
+        if self._typed is None:
+            from scenario.environment_config import read_environment
+            self._typed = read_environment(self._declaration, self.path)
+        return self._typed
 
     def __deepcopy__(self, memo):
         return EnvironmentView(self._declaration, self.profiles, path=self.path)
@@ -45,8 +49,8 @@ class EnvironmentView(Mapping):
         if profile not in self.profiles:
             raise ValueError('profile is not selected: ' + str(profile))
         if profile not in self._resolved:
-            from scenario.environment_config import environment
-            self._resolved[profile] = environment(self._declaration, self.path, profile)
+            declaration, resolver = self._contracts()
+            self._resolved[profile] = resolver.resolve(declaration, self.path, profile).to_dict()
         return deepcopy(self._resolved[profile])
 
     def resolved_config(self, profile):

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def build(parameters):
-    case = CaseBuilder({}, parameters, number_rules=NUMERIC_PARAMETERS)
+    case = CaseBuilder({}, parameters, number_rules=NUMERIC_PARAMETERS, profiles=("single-nonbatch", "batch-window"))
     case.validate_numbers()
     default(case)
     return {step['id']: step for step in case.steps}

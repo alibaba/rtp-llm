@@ -27,14 +27,15 @@ def metric_fields(spec):
 ENGINE_IDENTITY_LABELS = ("role", "engine_name", "engine_incarnation")
 
 
-def bind_engine_metrics(case, spec, units):
-    """Assert consumer dimensions against the selected plan's authoritative metadata.
-
-    Extra identity labels are valid; a consumer states the minimum it needs.
-    The mock target is the registered TSDB target, not the metric-store backend.
-    """
+def bind_metrics(case, spec, units, *, labels=(), mode=None, namespace=None):
+    """Bind any registered metric namespace with explicit consumer dimensions."""
     bindings = metric_fields(spec)
     for field, binding in bindings.items():
-        if field not in units or not binding["metric"].startswith("mock/"):
-            raise ValueError("unknown raw engine metric binding: " + field)
-        case.metric(binding["metric"], unit=units[field], labels=ENGINE_IDENTITY_LABELS, mode="scrape")
+        if field not in units or (namespace is not None and not binding["metric"].startswith(namespace + "/")):
+            raise ValueError("unknown raw metric binding: " + field)
+        case.metric(binding["metric"], unit=units[field], labels=labels, mode=mode)
+
+
+def bind_mock_engine_metrics(case, spec, units):
+    """Mock scrape contract; other clients use bind_metrics with their dimensions."""
+    return bind_metrics(case, spec, units, labels=ENGINE_IDENTITY_LABELS, mode="scrape", namespace="mock")

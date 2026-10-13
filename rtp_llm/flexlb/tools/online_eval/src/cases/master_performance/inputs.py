@@ -30,8 +30,6 @@ NUMERIC_PARAMETERS = {
         'observation.sample_s',
         'traffic.client.playback.ramp_up_seconds',
     ),
-    **number_fields(FRACTION,
-    ),
     **number_fields(COUNT,
         'analysis.slo.e2e_ms',
         'analysis.slo.tpot_ms',
@@ -90,7 +88,7 @@ CHECKS = CheckSet('performance_gate', {
 RULES = CHECKS.rules
 NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
-CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
+CHECK_FIELDS = CHECKS.fields | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
 
 
 def compile_checks(case, checks, inputs):

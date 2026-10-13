@@ -20,18 +20,38 @@ def check_windows(data, *, available, path, single=False):
 
 
 @dataclass(frozen=True)
+class TimestampOutput:
+    stage: str
+    field: str = "epoch_s"
+    domain: str = "epoch_s"
+
+    def __post_init__(self):
+        if not self.stage or not self.field or self.domain != "epoch_s":
+            raise ValueError("observation boundaries require epoch seconds")
+
+    def reference(self):
+        return output(self.stage, self.field)
+
+
+@dataclass(frozen=True)
 class ObservationWindow:
     boundaries: dict
 
     @classmethod
     def read(cls, data, path, *, timestamp_stages):
         fields(data, (), path, optional={"from", "until"})
+        if isinstance(timestamp_stages, dict) and any(
+                not isinstance(value, TimestampOutput) or name != value.stage
+                for name, value in timestamp_stages.items()):
+            raise ScenarioError(path + ": timestamp declarations must match their stage identity")
+        declared = (dict.fromkeys(timestamp_stages, "epoch_s") if not isinstance(timestamp_stages, dict)
+                    else {name: value.field for name, value in timestamp_stages.items()})
         params = {}
         for side, boundary in data.items():
             loc = f"{path}.{side}"
             fields(boundary, {"stage", "field"}, loc, optional={"offset_s"})
             if (type(boundary["stage"]) is not str or boundary["stage"] not in timestamp_stages
-                    or boundary["field"] != "epoch_s"):
+                    or boundary["field"] != declared[boundary["stage"]]):
                 raise ScenarioError(f"{loc}: unknown timestamp output")
             params[side] = output(boundary["stage"], boundary["field"])
             if "offset_s" in boundary:

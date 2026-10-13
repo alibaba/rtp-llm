@@ -23,7 +23,7 @@
 
 不创建空的层次。小型 case 可以只写 program；大型协议实现可拆文件，但必须归属一个明确能力。公共能力只有跨 case 的合同相同才抽取，不能仅因函数名字相同就合并算法。
 
-依赖方向是输入与纯测量 → 现场能力 → program 的能力组合。现场能力需要使用 program 声明的门禁插件时，在执行函数内读取，不能在模块导入时反向导入 program。输入模块不得混入监控查询；分析器不得调用报告；报告不得触发重判。所有模块导入无网络、进程或运行产物副作用。
+依赖方向是输入与纯测量 → 现场能力 → program 的能力组合。门禁通过 `CASE.gates` 注册，现场能力通过 `ctx.services.gate(name)` 获取；动作不反向导入 program。输入模块不得混入监控查询；分析器不得调用报告；报告不得触发重判。所有模块导入无网络、进程或运行产物副作用。
 
 ## 整窗门禁能力
 
@@ -57,7 +57,7 @@ GATE = GatePlugin(
 
 报告回调收到已校验的 `ViewDefinition`，通过属性访问配置；声明校验器也收到同一对象，区块列数通过 `validate_section_contract` 验证。报告的共用时间轴、运行信息补充和 bundle 写入由 `reporting.gate_report` 承担。case 提供业务 spec 与已有来源信息，明确选择在线 `write_gate_report(..., run=...)` 或离线 `write_archived_gate_report`；装配逻辑保留在公共发布函数中。报告时间轴与门禁窗口的职责见[报告契约](reporting.md)。
 
-分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。专属协议来源通过 `CASE.sources` 注册；数据来源与指标合同见[指标契约](metrics.md)。
+分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。数值采样来源通过 `CASE.sources` 注册，结构化快照通过 `CASE.snapshot_sources` 注册；数据来源与指标合同见[指标契约](metrics.md)。
 
 ## 新作者的接入路径
 
@@ -99,3 +99,25 @@ GATE = GatePlugin(
 FINALIZE producer 接收 `FinalizationContext(directory, run)`，而非可写的主分析结果。`run` 顶层只读，嵌套数据是该次调用独立的深拷贝；修改嵌套数据不会影响主结果。producer 返回可 JSON 序列化且不含非有限数值的 metadata mapping，公共层将其写入 `producer_results`。指标发布仍走 `MetricStore`，不能通过返回 metadata 覆盖检查或判定。
 
 编译结果的 `implementation.case_sources` 记录 case 目录全部 Python 文件的相对路径与 SHA256，`case_sources_sha256` 绑定这份确定性清单。它涵盖业务分析、操作及子模块；公共依赖的复现仍需整个仓库代码版本，不能把 case 指纹当作全部代码身份。
+
+## 作者输入与运行时扩展合同
+
+`InputContract` 由 case 持有。`InputContract.from_fields()` 从字段声明派生准入字段与数值规则；嵌套共享规则可使用 `numeric_fields()`。`CASE.input_contract` 将规则提供给编译器，program 通过 `case.bind(contract)` 读取。组名由 case 声明；五个常用组是组织约定。`decode` 可将校验后的分组转换为 case 自己的 frozen dataclass。预校验数值不消费参数；未知字段和未读取叶子仍被拒绝。
+
+可选数值用 `InputField(..., required=False)` 或 `from_fields(..., optional=...)` 声明。缺失不会补默认值；存在时必须满足类型与范围，启用检查时仍须显式提供阈值。`CheckSet` 的每个 `CheckSpec` 同时声明分析字段、指标、比较、单位、窗口和数值规则，派生 numeric_parameters、分析字段集合和指标依赖。业务算法、统计对象和 YAML 的具体阈值仍由 case 持有。
+
+`case.env` 与 `plan.env` 提供严格字段访问；未知属性立即报错。`resolved_config(profile)` 只接受本次选中的 profile，渲染结果在视图内缓存，返回副本。case 不导入 compiler。不同 profile 的值不一致时，读取必须明确指定 profile。
+
+| 扩展 | 注册 | 调用与资源边界 |
+|---|---|---|
+| 自定义客户端 | `CASE.clients[name] = ClientFactory(factory, evidence=...)` | factory 接收 `(services, params, deadline)`；返回实现 `cleanup(deadline)` 的客户端。`ctx.services.client()` 登记 epoch 句柄与清理；证据 exporter 接收 `(client, profile, deadline)` |
+| 结构化采样 | `CASE.snapshot_sources[name] = SnapshotSource(factory)` | factory 接收 `(services, params)`，只构造 reader；`read(deadline)` 执行 I/O，可选 `close(deadline)` 自动登记清理。snapshot/observe 负责 epoch、样本和字节预算及错误记录 |
+| 门禁 | `CASE.gates[name] = GatePlugin(...)` | `ctx.services.gate(name)` 只解析当前 case 声明的能力 |
+
+这些名称在 case 内解析，同名扩展可以属于不同 case。foundation action 的名字以及数值 producer/source/view 的显式共享身份继续执行既有冲突检查。factory 在构造失败时负责回收未返回的资源；返回后的资源由 scope 管理。扩展的回调签名在注册时校验，返回协议在使用时校验。
+
+`ctx.services.environment` 提供当前环境、Master 地址与客户端进程操作。`ClientRecordAdapter(read, decode)` 将特殊记录明确转换为 client-record v1；公共读取器检查 schema 与 epoch，不替原始 Java 记录伪造身份。`FinalizationContext.deadline` 将收尾预算传给 producer。`ReportView.deadline_renderer` 可接收第四个 deadline 参数；整窗插件提供 `render_with_deadline`，离线 renderer 仍可独立调用。
+
+分阶段检查的发布使用 `StagedGateProjection(action, project)`：公共层只读取 result.json、筛选已完成检查和保存指标，case 回调负责标签、时间与投影口径。它不重新执行判定。`ProducerDescriptions` 提供 `(producer, metric)` 表驱动口径，复杂动态口径仍可提供 describe 回调。
+
+任意指标命名空间使用 `bind_metrics()`，显式提供 labels、mode 与可选 namespace；`bind_mock_engine_metrics()` 明确限定 mock scrape 的引擎身份维度。profile 阈值从选中的 `case.profiles` 校验，其他维度须显式传给 `metric_criterion(..., dimensions=...)`。`TimestampOutput` 集中声明时间输出字段和 epoch 秒域，窗口不依赖字段必须命名为 epoch_s。

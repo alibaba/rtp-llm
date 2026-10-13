@@ -34,8 +34,6 @@ NUMERIC_PARAMETERS = {
     "traffic.max_requests": NumberRule(integer=True, minimum=1, maximum=1000000),
     **JAVA_FLOW_NUMBERS,
     **CAPTURE_NUMBERS,
-    **number_fields(FRACTION,
-    ),
     **number_fields(NONNEGATIVE,
         'checks.collapse.expected',
         'analysis.collapse.absolute_min_hit',
@@ -95,7 +93,7 @@ CHECKS = CheckSet('cache_gate', {
 RULES = CHECKS.rules
 NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
-CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'sustain_s', 'absolute_min_hit', 'max_drop'}
+CHECK_FIELDS = CHECKS.fields | {'sustain_s', 'absolute_min_hit', 'max_drop'}
 
 
 def compile_checks(case, checks, policy):
@@ -140,7 +138,7 @@ def validate_criteria(params, plan):
     if p["removal_mode"] not in ("graceful", "abrupt"):
         raise ValueError("removal_mode must be graceful or abrupt")
     plan.reference(p["flow"], "java_flow")
-    if plan.environment.get("discovery") != "discovery_file":
+    if plan.env.discovery != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
     for k in FIELDS - {"flow", "removal_mode", "expected_behavior"}:
         if not finite_number(p[k]) or p[k] < 0:
@@ -153,12 +151,12 @@ def validate_criteria(params, plan):
         raise ValueError("unknown expected cache behavior")
     if p["expected_behavior"] == "collapse" and p["post_affinity_ms"] != 0:
         raise ValueError("collapse control requires post_affinity_ms=0")
-    if not plan.environment.get("master_test_control", False) or plan.environment.get("master_layout", "single") != "single":
+    if not plan.env.master_test_control or plan.env.master_layout != "single":
         raise ValueError("affinity intervention requires one opted-in Master")
     for k in ("target_p", "min_completed"):
         if type(p[k]) is not int or p[k] < 1:
             raise ValueError(k + " must be a positive integer")
-    if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
+    if not 1 <= p["target_p"] < plan.env.n_prefill <= 512:
         raise ValueError("scale-in requires fewer target P and at most 512 initial P")
     for k in (
         "qps_tolerance",

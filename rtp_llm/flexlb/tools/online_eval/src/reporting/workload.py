@@ -42,7 +42,7 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
                         meta=provenance_from(payload, run=run), producer="workload")
 
 
-def _write_views(directory, analysis, names=None):
+def _write_views(directory, analysis, names=None, *, deadline=None):
     """One canonical selected report, with optional explicit additional views."""
     analysis = dict(analysis)
     if "unavailable_report_views" in analysis:
@@ -57,7 +57,14 @@ def _write_views(directory, analysis, names=None):
         if capability is None or capability.renderer is None:
             raise ValueError("selected view has no registered renderer: " + name)
         try:
-            paths[name] = capability.renderer(directory, analysis, presentation)
+            if deadline is not None:
+                deadline.check()
+            if deadline is not None and capability.deadline_renderer is not None:
+                paths[name] = capability.deadline_renderer(directory, analysis, presentation, deadline)
+            else:
+                paths[name] = capability.renderer(directory, analysis, presentation)
+            if deadline is not None:
+                deadline.check()
         except ArtifactNotProduced:
             if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
                 raise
@@ -77,7 +84,7 @@ def _write_views(directory, analysis, names=None):
     return {name: paths[name] for name in ordered}
 
 
-def write_views(directory, analysis, names=None):
+def write_views(directory, analysis, names=None, *, deadline=None):
     from monitoring.metric_store import frozen_metric_reads
     with frozen_metric_reads(), archive_session():
-        return _write_views(directory, analysis, names)
+        return _write_views(directory, analysis, names, deadline=deadline)

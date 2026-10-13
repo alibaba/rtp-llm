@@ -85,34 +85,24 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
-def metric_contract(producer, identity, calculation):
-    from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
-    from monitoring.contracts import implementation_measurement
-    from implementation_identity import implementation_identity
-    if calculation is not None:
-        raise ValueError('HA producer owns its case-specific calculation')
-    if producer == 'ha_gates' and identity in {'ha_gate/' + name for name in HA_METRICS}:
-        function, source, population = measure_client_metric, 'client_journal', 'declared_request_window_and_selection'
-    elif producer == 'ha_evidence':
-        key = identity.removeprefix('ha/')
-        if not identity.startswith('ha/'):
-            raise ValueError('unknown HA evidence metric: ' + identity)
-        if key in STATE_FIELDS:
-            function, source, population = _state_series, 'debug_api', 'master_instance'
-        elif key in {'sent', 'success', 'failed'}:
-            function, source, population = _request_series, 'client_journal', 'ha_requests_by_send_time'
-        elif key in {'prefill_peak_qps', 'prefill_mean_qps', 'prefill_skew'}:
-            function, source, population = _prefill_balance_series, 'client_journal', 'declared_prefill_fleet'
-        else:
-            raise ValueError('unknown HA evidence metric: ' + identity)
-    else:
-        raise ValueError('unknown HA metric: ' + identity)
-    contract = dict(source_type=source, implementation=implementation_identity(function), measurement=implementation_measurement(function,
-        population=population, accuracy='sampled' if source == 'debug_api' else 'request_ledger',
-        request_identity=source == 'client_journal'))
-    if source == 'debug_api':
-        contract['collection'] = dict(source='master_inflight', field=key)
-    return contract
+from case_api.producer_descriptions import MeasurementDescription, ProducerDescriptions
+from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
+
+_DESCRIPTIONS = ProducerDescriptions({
+    **{('ha_gates', 'ha_gate/' + name): MeasurementDescription(measure_client_metric,
+        'client_journal', 'declared_request_window_and_selection', 'request_ledger', True)
+        for name in HA_METRICS},
+    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_state_series,
+        'debug_api', 'master_instance', 'sampled', False,
+        dict(source='master_inflight', field=name)) for name in STATE_FIELDS},
+    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_request_series,
+        'client_journal', 'ha_requests_by_send_time', 'request_ledger', True)
+        for name in ('sent', 'success', 'failed')},
+    **{('ha_evidence', 'ha/' + name): MeasurementDescription(_prefill_balance_series,
+        'client_journal', 'declared_prefill_fleet', 'request_ledger', True)
+        for name in ('prefill_peak_qps', 'prefill_mean_qps', 'prefill_skew')},
+})
+metric_contract = _DESCRIPTIONS.describe
 
 
 def produce(directory, payload):
@@ -163,31 +153,22 @@ def gate_labels(params):
 
 
 
-def produce_gates(directory):
-    """Publish completed checks from the persisted run; never re-evaluate a gate."""
-    from monitoring.metric_store import MetricStore
+def _project_gate(store, stage, check):
     from monitoring.publication import publish
-    directory = Path(directory)
-    result = json.loads((directory / "result.json").read_text())
-    store = MetricStore.read(directory)
-    for stage in result["stages"]:
-        if stage["action"] != "master_client_check":
-            continue
-        for check in stage["checks"]:
-            evidence = check["evidence"]
-            identity = evidence["metric"]
-            if check["status"] not in {"PASS", "FAIL", "WARNING"}:
-                continue
-            labels = evidence["labels"]
-            observations = [row for row in store.document["metrics"].get(identity, [])
-                            if row["labels"] != labels]
-            stamp = evidence["observed_request_bounds"]
-            if stamp is None:
-                raise MetricUnavailable("HA gate evidence lacks observed request bounds")
-            timestamp = stamp[1]
-            current = series_row([[timestamp, check["actual"]]], epoch=evidence["env_epoch"],
-                                source="ha_gate", labels=labels)
-            publish(store, identity, store.document["definitions"][identity], [current],
-                    producer="ha_gates", evidence=dict(evidence, check=stage["id"] + "." + check["id"]))
-            store.document["metrics"][identity] = observations + store.document["metrics"][identity]
-    store.save(directory)
+    evidence = check["evidence"]
+    identity = evidence["metric"]
+    labels = evidence["labels"]
+    observations = [row for row in store.document["metrics"].get(identity, [])
+                    if row["labels"] != labels]
+    stamp = evidence["observed_request_bounds"]
+    if stamp is None:
+        raise MetricUnavailable("HA gate evidence lacks observed request bounds")
+    current = series_row([[stamp[1], check["actual"]]], epoch=evidence["env_epoch"],
+                        source="ha_gate", labels=labels)
+    publish(store, identity, store.document["definitions"][identity], [current],
+            producer="ha_gates", evidence=dict(evidence, check=stage["id"] + "." + check["id"]))
+    store.document["metrics"][identity] = observations + store.document["metrics"][identity]
+
+
+from case_api.staged_gate import StagedGateProjection
+produce_gates = StagedGateProjection('master_client_check', _project_gate)

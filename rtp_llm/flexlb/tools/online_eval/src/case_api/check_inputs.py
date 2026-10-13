@@ -6,7 +6,7 @@ from case_api.windows import check_windows
 
 
 def metric_criterion(case, spec, *, metric, unit, windows, op, path,
-                     profiles=False):
+                     profiles=False, dimensions=None):
     fields(spec, {"metric", "unit", "windows", "op", "expected"}, path,
            optional={"expected_by_profile"} if profiles else ())
     check_windows(spec["windows"], available=windows, path=path + ".windows")
@@ -20,9 +20,9 @@ def metric_criterion(case, spec, *, metric, unit, windows, op, path,
     overrides = spec.get("expected_by_profile", {})
     if not isinstance(overrides, dict):
         raise ValueError(path + ": expected_by_profile must be a mapping")
-    from flexlb_profile_data import PROFILES
+    allowed = frozenset(case.profiles if dimensions is None else dimensions)
     for profile, expected in overrides.items():
-        if type(profile) is not str or profile not in PROFILES:
+        if type(profile) is not str or profile not in allowed:
             raise ValueError(path + ": expected_by_profile requires registered profiles")
         validate_comparison(op, expected)
         if type(expected) not in (int, float):

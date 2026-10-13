@@ -32,11 +32,11 @@ class Sources:
         self.env = ctx.env
         if self.env is None:
             raise DebugUnavailable("snapshot requires setup")
-        self.master_port = self.env.master_http_port
-        self.mock_port = self.env.mock_http_port
+        self.master_port = self.env.master_http_port if "master_debug" in params["sources"] else None
+        self.mock_port = self.env.mock_http_port if {"engine_snapshot", "engine_requests"} & set(params["sources"]) else None
         self.custom = {name: ctx.services.snapshot(name, params) for name in params["sources"] if name not in SOURCES}
         self.records = None
-        for kind in ("requests", "flow"):
+        for kind in ("requests", "flow", "client"):
             if kind in params:
                 self.records = ctx.resource(params[kind], kind)
                 if not callable(getattr(self.records, "snapshot_records", None)):

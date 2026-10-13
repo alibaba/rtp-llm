@@ -97,10 +97,7 @@ REPORT_VIEWS = {
 }
 
 
-def produce_gate_metrics(directory):
-    from cases.master_ha_failover.metrics import produce_gates
-    produce_gates(directory)
-
+from cases.master_ha_failover.metrics import produce_gates as produce_gate_metrics
 
 from case_api.registry import CaseDefinition
 from case_api.registry import MetricProducer

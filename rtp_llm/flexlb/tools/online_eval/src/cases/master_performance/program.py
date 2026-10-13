@@ -12,7 +12,7 @@ from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
-from case_api.metric_inputs import bind_engine_metrics
+from case_api.metric_inputs import bind_mock_engine_metrics
 
 
 def default(case):
@@ -36,7 +36,7 @@ def default(case):
     allowed = c["qps"] * (1 + c["qps_tolerance"])
     if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
         raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")
-    bind_engine_metrics(case, inputs["engine_tps"],
+    bind_mock_engine_metrics(case, inputs["engine_tps"],
         {field: "tokens/s" for field in inputs["engine_tps"]["fields"]})
     budget = c["warmup_s"] + c["measure_s"]
     uniform_gate_flow(flow, duration_s=budget + 10, trace_duration_s=int(client["DURATION_S"]))
@@ -68,7 +68,7 @@ from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 
 GATE = GatePlugin('performance', analyze, produce, write_report)
-REPORT_VIEWS = {'master_performance.yaml': ReportView(validate_view, GATE.render)}
+REPORT_VIEWS = {'master_performance.yaml': ReportView(validate_view, GATE.render, deadline_renderer=GATE.render_with_deadline)}
 
 
 from case_api.registry import CaseDefinition
@@ -79,6 +79,7 @@ from cases.master_performance.metrics import metric_contract
 CASE = CaseDefinition(
     builders={"default": default},
     input_contract=INPUTS,
+    gates={'performance': GATE},
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={
