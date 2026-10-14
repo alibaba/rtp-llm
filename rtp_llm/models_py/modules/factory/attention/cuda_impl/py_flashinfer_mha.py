@@ -1,5 +1,6 @@
 from typing import Any, Optional
 
+import math
 import torch
 from flashinfer.cascade import merge_state_in_place
 from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
@@ -20,6 +21,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
+from rtp_llm.models_py.triton_kernels.attention.paged_kv_lse import (
+    paged_kv_lse,
+    paged_kv_lse_prefill,
+    ragged_kv_lse,
+)
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -684,10 +690,20 @@ class PyFlashinferPrefillPagedAttnOp(_LayerSinksMixin):
             # Paged FP8 defaults to unit scales and the output dtype from plan().
             sinks = self._sinks_for(layer_idx)
             if sinks is not None:
-                result, lse = self.prefill_wrapper.run(
-                    quantize_to_fp8_if_needed(q, self.q_dtype),
+                q_eff = quantize_to_fp8_if_needed(q, self.q_dtype)
+                result = self.prefill_wrapper.run(q_eff, paged_kv_cache)
+                lse = paged_kv_lse_prefill(
+                    q_eff,
                     paged_kv_cache,
-                    return_lse=True,
+                    self.fmha_params.qo_indptr_d,
+                    self.fmha_params.decode_page_indptr_d.view(-1),
+                    self.fmha_params.page_indice_d,
+                    self.fmha_params.paged_kv_last_page_len_d.view(-1),
+                    self.local_head_num,
+                    self.local_kv_head_num,
+                    self.head_dim_qk,
+                    self.page_size,
+                    1.0 / math.sqrt(self.head_dim_qk),
                 )
                 result = self._apply_layer_sinks(result, lse, sinks)
             else:
@@ -1558,7 +1574,21 @@ class PyFlashinferDecodeAttnOp(_LayerSinksMixin):
         # Decode FP8 defaults to unit scales and the output dtype from plan().
         sinks = self._sinks_for(layer_idx)
         if sinks is not None:
-            out, lse = self.decode_wrapper.run(q, paged_kv_cache, return_lse=True)
+            out = self.decode_wrapper.run(q, paged_kv_cache)
+            # flashinfer's returned LSE has undocumented log-space semantics;
+            # compute our own natural-log LSE over the same paged KV.
+            lse = paged_kv_lse(
+                q,
+                paged_kv_cache,
+                self.fmha_params.decode_page_indptr_d.view(-1),
+                self.fmha_params.page_indice_d,
+                self.fmha_params.paged_kv_last_page_len_d.view(-1),
+                self.local_head_num,
+                self.local_kv_head_num,
+                self.head_dim_qk,
+                self.seq_size_per_block,
+                1.0 / math.sqrt(self.head_dim_qk),
+            )
             return self._apply_layer_sinks(out, lse, sinks)
         return self.decode_wrapper.run(q, paged_kv_cache)
 

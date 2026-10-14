@@ -103,3 +103,15 @@ py_test(
     srcs = ["gpt_oss_sink_fallback_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "gpt_oss_paged_lse_test",
+    srcs = ["gpt_oss_paged_lse_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "SM103_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)

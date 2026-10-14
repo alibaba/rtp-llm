@@ -67,6 +67,12 @@ py_library(
 )
 
 py_library(
+    name = "attention",
+    srcs = glob(["attention/*.py"]),
+    deps = ["//rtp_llm/models_py:utils"],
+)
+
+py_library(
     name = "triton_kernels",
     srcs = ["legacy_fp8_indexer_score.py"],
     deps = [
@@ -75,6 +81,7 @@ py_library(
         ":kimi_kda",
         ":causal_conv1d",
         ":moe",
+        ":attention",
         ":common",
         ":sparse_mla",
     ],
