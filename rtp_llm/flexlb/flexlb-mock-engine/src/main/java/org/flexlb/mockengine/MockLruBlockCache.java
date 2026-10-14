@@ -80,6 +80,7 @@ final class MockLruBlockCache {
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
+    private Set<Long> keySnapshot;
     private java.util.function.DoubleConsumer evictionLifetimeListener = ignored -> {};
 
     synchronized void setEvictionLifetimeListener(java.util.function.DoubleConsumer listener) {
@@ -331,6 +332,7 @@ final class MockLruBlockCache {
             Integer ref = blocks.get(key);
             if (ref == null) {
                 blocks.put(key, 0);
+                keySnapshot = null;
                 changed = true;
             } else {
                 blocks.put(key, ref); // already indexed — refresh LRU order only
@@ -368,6 +370,7 @@ final class MockLruBlockCache {
             if (references == null || references == 0) referencedBlocks++;
             if (references == null) {
                 blocks.put(key, 1);
+                keySnapshot = null;
             } else {
                 blocks.put(key, references + 1);
             }
@@ -404,6 +407,7 @@ final class MockLruBlockCache {
             // refreshed, exactly like the lease-based admit path.
             if (!blocks.containsKey(key)) {
                 blocks.put(key, 0);
+                keySnapshot = null;
                 changed = true;
             }
         }
@@ -427,6 +431,7 @@ final class MockLruBlockCache {
         for (Long key : keys) {
             Integer ref = blocks.get(key);
             if (ref != null && ref == 0 && blocks.remove(key) != null) {
+                keySnapshot = null;
                 reportEvictionLifetime(key);
                 removeNode(key);
                 evictions++;
@@ -447,6 +452,7 @@ final class MockLruBlockCache {
      */
     synchronized void clear() {
         blocks.clear();
+        keySnapshot = null;
         referencedBlocks = 0;
         tree.clear();
         leaves.clear();
@@ -499,7 +505,8 @@ final class MockLruBlockCache {
     }
 
     synchronized Set<Long> snapshotKeys() {
-        return Set.copyOf(blocks.keySet());
+        if (keySnapshot == null) keySnapshot = Set.copyOf(blocks.keySet());
+        return keySnapshot;
     }
 
     /** Pool size in blocks (== ceil(totalKvTokens / spb)). */
@@ -696,6 +703,7 @@ final class MockLruBlockCache {
                 key = chain.get(i);
                 if (!Integer.valueOf(0).equals(blocks.get(key))) continue;
                 blocks.remove(key);
+                keySnapshot = null;
                 reportEvictionLifetime(key);
                 removeNode(key);
                 removed++;
@@ -718,6 +726,7 @@ final class MockLruBlockCache {
         // Tree maintenance can touch the access-order map; finish iteration first.
         for (Long key : victims) {
             blocks.remove(key);
+            keySnapshot = null;
             reportEvictionLifetime(key);
             removeNode(key);
         }

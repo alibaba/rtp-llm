@@ -41,4 +41,10 @@ public class NoOpFlexMonitor implements FlexMonitor {
     public String toString() {
         return "NoOpFlexMonitor";
     }
+
+    @Override
+    public void reportLazy(String metricName, FlexMetricTags tags,
+                           java.util.function.DoubleSupplier value) {
+        // No measurement work when monitoring is disabled.
+    }
 }

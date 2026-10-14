@@ -34,6 +34,7 @@ final class MockMemoryBlockCache {
     private final DoubleConsumer onEviction;
     private long evictions, writeRejected, generation, accessSequence;
     private int pinned;
+    private Set<Long> keySnapshot;
 
     MockMemoryBlockCache(int capacity, DoubleConsumer onEviction) {
         this(capacity, true, onEviction, System::nanoTime);
@@ -141,6 +142,7 @@ final class MockMemoryBlockCache {
                             entry.born = clock.getAsLong();
                             entry.accessSequence = ++accessSequence;
                             entries.put(r.getKey(), entry);
+                            keySnapshot = null;
                             indexNode(r.getKey(), item.parent());
                             tree.get(r.getKey()).entry = entry;
                             updateSubtree(r.getKey(), 1);
@@ -236,6 +238,7 @@ final class MockMemoryBlockCache {
         if (entries.get(key) != expected) return;
         victims.remove(expected);
         entries.remove(key);
+        keySnapshot = null;
         tree.get(key).entry = null;
         updateSubtree(key, -1);
         pruneNode(key);
@@ -270,11 +273,17 @@ final class MockMemoryBlockCache {
     synchronized int availableBlocks() { return capacity - pinnedBlocks() - pending.size(); }
     synchronized long writeRejected() { return writeRejected; }
     synchronized List<Long> keys() { return List.copyOf(entries.keySet()); }
+    /** Membership snapshot; pinning and LRU touches do not change published keys. */
+    synchronized Set<Long> keySnapshot() {
+        if (keySnapshot == null) keySnapshot = Set.copyOf(entries.keySet());
+        return keySnapshot;
+    }
     synchronized int size() { return entries.size(); }
     int capacity() { return capacity; }
     synchronized long evictions() { return evictions; }
     boolean prefixTreeEnabled() { return prefixTreeEnabled; }
     synchronized void clear() {
         generation++; pinned = 0; entries.clear(); tree.clear(); pending.clear(); victims.clear();
+        keySnapshot = null;
     }
 }

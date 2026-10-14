@@ -293,7 +293,7 @@ public final class JavaMockEngineCluster {
      * {@link #startRole} so dynamic scale-out ({@link DynamicEngineManager}
      * /add_engine) can create engines at runtime with the same construction
      * rules: shared scheduler/stats/eventLoopGroups, per-role cache capacity,
-     * SO_REUSEADDR, direct executor.
+     * SO_REUSEADDR, cluster-owned RPC executors.
      *
      * <p>Registration is rolled back if the port cannot be bound, so a failed
      * dynamic add leaves no services-map residue.
@@ -382,9 +382,11 @@ public final class JavaMockEngineCluster {
                     .withOption(ChannelOption.SO_REUSEADDR, true)
                     // SO_REUSEADDR on accepted (child) sockets — defense in depth.
                     .withChildOption(ChannelOption.SO_REUSEADDR, true)
-                    .directExecutor()
+                    .executor(config.rpcExecutors(workerGroup).executor(
+                            RpcServiceGrpc.getGetWorkerStatusMethod().getFullMethodName()))
+                    .callExecutor(config.rpcExecutors(workerGroup))
                     .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(service)
+                    .addService(CacheStatusResponseCache.bind(service))
                     .build()
                     .start();
             serversByPort.put(grpcPort, server);
@@ -1402,6 +1404,7 @@ public final class JavaMockEngineCluster {
         private final LongAdder lifetimeContextRequests = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final CounterRateMetrics workerStatusRates = new CounterRateMetrics();
+        private final CacheStatusResponseCache cacheStatusResponses = new CacheStatusResponseCache();
         private final CounterRateMetrics.Reader prometheusWorkerStatus = new CounterRateMetrics.Reader();
         private final AtomicLong workerStatusRtUs = new AtomicLong();
         java.util.function.LongConsumer statusMetricReporter = ignored -> {};
@@ -5224,17 +5227,16 @@ public final class JavaMockEngineCluster {
             // WorkerStatus.availableKvCache and /snapshot available_kv_tokens
             // (previously getCacheStatus ignored kv_pressure while WorkerStatus
             // subtracted it).
-            EngineRpcService.CacheStatusPB.Builder status = EngineRpcService.CacheStatusPB.newBuilder()
-                    .setAvailableKvCache(availableKvTokens())
-                    .setTotalKvCache(totalKvTokens)
-                    .setBlockSize(performance.blockSize())
-                    .setVersion(cacheVersion.get());
-            if (request.getNeedCacheKeys()) {
-                for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
-                if (memoryCache != null)
-                    for (Long key : memoryCache.keys()) status.putCacheKeys(key, true);
-            }
-            observer.onNext(status.build());
+            // Mutations publish their version after the keys. Read the cursor
+            // first so a concurrent mutation cannot pair old keys with a newer
+            // cursor and make the Master skip the corrected snapshot.
+            long version = cacheVersion.get();
+            Set<Long> device = request.getNeedCacheKeys() ? cache.snapshotKeys() : null;
+            Set<Long> memory = request.getNeedCacheKeys() && memoryCache != null
+                    ? memoryCache.keySnapshot() : Set.of();
+            var status = cacheStatusResponses.response(availableKvTokens(), totalKvTokens,
+                    performance.blockSize(), version, device, memory);
+            observer.onNext(status);
             observer.onCompleted();
         }
 
@@ -6985,6 +6987,19 @@ public final class JavaMockEngineCluster {
     }
 
     static final class Config {
+        private MockRpcExecutors rpcExecutors;
+        private EventLoopGroup rpcTransport;
+        synchronized MockRpcExecutors rpcExecutors(EventLoopGroup transport) {
+            if (rpcExecutors == null || rpcTransport.isTerminated()) {
+                rpcExecutors = new MockRpcExecutors(eventLoopThreads,
+                        Math.max(1024, 4 * (nPrefill + nDecode)));
+                rpcTransport = transport;
+                MockRpcExecutors owned = rpcExecutors;
+                transport.terminationFuture().addListener(ignored -> owned.close());
+            }
+            if (rpcTransport != transport) throw new IllegalStateException("RPC runtime belongs to another transport");
+            return rpcExecutors;
+        }
         java.util.function.Consumer<FastRpcService> engineInitializer;
         boolean whale = false;
         boolean whaleBundle = false;

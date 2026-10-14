@@ -83,6 +83,14 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。
 
+## Mock RPC 与缓存同步
+
+Mock cluster 的 Netty 线程只处理传输，RPC 方法由同一 cluster 所有的有界执行器运行。缓存 RPC 与普通、状态 RPC 使用独立队列；队列饱和时拒绝执行，不让调用方或 Netty 线程代跑。动态引擎复用所属 cluster 的执行器，单引擎移除不关闭共享线程池；传输线程组结束后回收执行器。
+
+Device 与 Memory 缓存维护不可变的 keys 成员快照，仅成员增删和清空使其失效，引用计数和 LRU 访问不重建集合。缓存 RPC 仍返回完整 keys，包括请求方已经持有同一版本的情况；响应字段及 keys 快照不变时复用 protobuf 和编码字节，每次发送使用独立读取游标。容量或 keys 变化使响应缓存失效，不能以响应复用为由隐藏容量变化。
+
+Master 在所属 worker 代次与索引版本检查后，才在回调执行器中复制 keys 并更新索引。成功取得同版本、已经索引的 Prefill 响应时，向动态缓存刷新间隔反馈零差异；旧版本、失效代次、尚未成功索引的响应和 RPC 失败不产生零差异反馈。刷新策略沿用配置的上下限，不能只以出现变化的样本估计刷新频率。
+
 ## 执行与资源契约
 
 每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
