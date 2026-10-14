@@ -92,14 +92,6 @@ cc_binary(
     ],
 )
 
-cc_binary(
-    name = "pace_publisher_smoke",
-    testonly = True,
-    srcs = ["pace_publisher_smoke.cc"],
-    copts = ["-std=c++17"],
-    deps = ["//rtp_llm/cpp/cache/events:kv_cache_event_publisher"],
-)
-
 py_library(
     name = "pace_smoke_fixture",
     srcs = [
@@ -117,7 +109,6 @@ py_test(
 
 _PACE_SMOKE_DATA = [
     ":pace_sdk_smoke",
-    ":pace_publisher_smoke",
     "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
 ]
 
@@ -127,7 +118,7 @@ py_test(
     main = "pace_contract_smoke.py",
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
-    args = ["--sdk", "$(location :pace_sdk_smoke)", "--publisher", "$(location :pace_publisher_smoke)"],
+    args = ["--sdk", "$(location :pace_sdk_smoke)"],
     # The contract uses CPU buffers with either a CPU-only or CUDA SDK.
     tags = ["manual", "smoke_case", "no-remote", "requires-pace"],
     timeout = "long",
