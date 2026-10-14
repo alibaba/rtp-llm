@@ -29,7 +29,9 @@ class GridRunner:
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        log_path: str = "",
     ):
+        self._log_path = log_path
         self._port = port
         self._dp_size = dp_size
         self._batch_size_list = batch_size_list
