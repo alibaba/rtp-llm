@@ -274,7 +274,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const bool load_success  = allocator_load_context_->success();
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
-    const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         const size_t total = load_context->matchedBlocks();
@@ -302,6 +302,14 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
+        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_,
+                                                                             stream_->reuseLength())) {
+            // Re-enter admission with no request refs if detaching the writable
+            // suffix cannot fit. Never compute into cache/other-request blocks.
+            resource_context_.cache_manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
+            clearCacheReuseState();
+            malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        }
     } else {
         clearCacheReuseState();
     }

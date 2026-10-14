@@ -442,6 +442,11 @@ bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
     return coordinator_manager_ != nullptr && coordinator_manager_->abortPendingLoad(context);
 }
 
+bool KVCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
+                                                    int                            device_ready_reuse_length) {
+    return coordinator_manager_->detachSharedBlocksForRecompute(resource, device_ready_reuse_length);
+}
+
 uint64_t KVCacheManager::allocationGeneration() const {
     return allocation_wait_state_->generation.load(std::memory_order_acquire);
 }

@@ -1296,6 +1296,86 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachesSharedSuffix) {
+    for (bool cache_owned : {false, true}) {
+        SCOPED_TRACE(cache_owned);
+        prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        auto&      batch    = resource.kvCacheMutable();
+        const auto original = batch.blocks(0, "default");
+        ASSERT_EQ(original.size(), 3u);
+        const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+        // Keep the device-ready prefix shared; only the writable suffix must detach.
+        pool->incTreeRef(original[0], BlockTreeRefType::CACHE);
+        if (cache_owned) {
+            pool->incTreeRef(original[1], BlockTreeRefType::CACHE);
+        } else {
+            pool->incRef(original[1]);  // Another request joined the failed load.
+        }
+        stream_->setReuseLength(2);
+        stream_->setInitialReuseLength(2);
+        stream_->setLocalReuseLength(2);
+        resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_FALSE(stream_->hasError());
+        EXPECT_EQ(stream_->reuseLength(), 2);
+        const auto replacement = batch.blocks(0, "default")[1];
+        EXPECT_NE(replacement, original[1]);
+        for (int b = 0; b < batch.batchSize(); ++b) {
+            EXPECT_EQ(batch.blocks(b, "default")[0], original[0]);
+            EXPECT_EQ(batch.blocks(b, "default")[1], replacement);
+            EXPECT_EQ(batch.blocks(b, "default")[2], original[2]);
+            EXPECT_EQ(batch.mutableBlockIds(b, "default").kernelBlocks()[1], replacement);
+        }
+        EXPECT_EQ(pool->refCount(original[1]), 1u);
+        EXPECT_EQ(pool->refCount(replacement), batch.batchSize());
+        pool->decTreeRef(original[0], BlockTreeRefType::CACHE);
+        if (cache_owned) {
+            pool->decTreeRef(original[1], BlockTreeRefType::CACHE);
+        } else {
+            pool->decRef(original[1]);
+        }
+        stream_->releaseResource();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto blocks = resource.kvCache().blocks(0, "default");
+    const auto pool   = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    pool->incTreeRef(blocks[1], BlockTreeRefType::CACHE);
+    pool->incTreeRef(blocks[2], BlockTreeRefType::CACHE);
+    // Leave room for only one of the two replacements; the batch cannot fit.
+    auto held_blocks = pool->malloc(pool->freeBlocksNum() - 1);
+    ASSERT_TRUE(held_blocks.has_value());
+    pool->incRef(*held_blocks);
+    stream_->setReuseLength(2);
+    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+    stream_->reportEvent(StreamEvents::CanRun);
+    stream_->reportEvent(StreamEvents::LoadInitiated);
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(resource.mallocFailedTimes(), 1);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[2]), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), 2u);  // Unused free block plus released prefix.
+    pool->decRef(*held_blocks);
+    pool->decTreeRef(blocks[1], BlockTreeRefType::CACHE);
+    pool->decTreeRef(blocks[2], BlockTreeRefType::CACHE);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocatorLoad) {
     auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::PREFILL);
     kmonitor::MetricsTags tags;
