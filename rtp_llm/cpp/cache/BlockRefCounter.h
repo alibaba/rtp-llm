@@ -30,8 +30,8 @@ public:
 
     void incrementRefCounter(const std::vector<int>& block_indices) {
         for (int index : block_indices) {
-            ref_counter[index]++;
-            if (ref_counter[index] == 1) {
+            auto& count = ref_counter[index];
+            if (++count == 1) {
                 busy_block_num_++;
             }
         }
@@ -39,15 +39,15 @@ public:
 
     void decrementRefCounter(const std::vector<int>& block_indices) {
         for (int index : block_indices) {
-            if (ref_counter[index] == 0) {
+            auto it = ref_counter.find(index);
+            if (it == ref_counter.end() || it->second == 0) {
                 RTP_LLM_FAIL("block:%d decrease zero ref count.", index);
                 return;
             } else {
-                ref_counter[index]--;
-                if (ref_counter[index] == 0) {
+                if (--it->second == 0) {
                     busy_block_num_--;
                     if (sparse_) {
-                        ref_counter.erase(index);
+                        ref_counter.erase(it);
                     }
                 }
             }

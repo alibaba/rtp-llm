@@ -242,8 +242,14 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         latest_finished_version,
         maga_init_params_.pd_sep_config.role_type);
 
-    WorkerStatusInfo status_info              = getWorkerStatusInfo(latest_finished_version);
-    int64_t          request_after_ws_time_us = currentTimeUs();
+    // WorkerStatusPB has no last_schedule_delta field. Computing that unused
+    // value calls FIFOScheduler::empty() and waits on its admission/cache lock.
+    WorkerStatusInfo status_info;
+    {
+        RTP_LLM_PROFILE_SCOPE("rpc.worker.runtime_metadata");
+        status_info = getWorkerStatusInfo(latest_finished_version, /*include_schedule_delta=*/false);
+    }
+    int64_t request_after_ws_time_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
@@ -304,16 +310,20 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_dp_rank(status_info.dp_rank);
     response->set_max_seq_len(maga_init_params_.model_config_.max_seq_len);
     response->set_max_batch_tokens_size(maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
-    auto kv_info = engine_->getCacheStatusInfo(-1, false);
-    response->set_available_kv_cache(kv_info.available_kv_cache);
-    response->set_total_kv_cache(kv_info.total_kv_cache);
+    {
+        RTP_LLM_PROFILE_SCOPE("rpc.worker.cache_capacity");
+        auto kv_info = engine_->getCacheStatusInfo(-1, false);
+        response->set_available_kv_cache(kv_info.available_kv_cache);
+        response->set_total_kv_cache(kv_info.total_kv_cache);
+    }
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }
 
-WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
+WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version, bool include_schedule_delta) {
     WorkerStatusInfo status_info;
-    status_info.engine_schedule_info    = getEngineScheduleInfo(latest_finished_version);
+    status_info.engine_schedule_info    = include_schedule_delta ? getEngineScheduleInfo(latest_finished_version) :
+                                                                   meta_->getEngineScheduleInfo(latest_finished_version);
     status_info.role                    = maga_init_params_.pd_sep_config.role_type;
     status_info.dp_size                 = maga_init_params_.parallelism_config.dp_size;
     status_info.tp_size                 = maga_init_params_.parallelism_config.tp_size;
@@ -362,8 +372,8 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
 }
 
 KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
-    int64_t     request_begin_time_us = currentTimeUs();
-    const auto& cache_info            = engine_->getCacheStatusInfo(latest_version, need_cache_keys);
+    int64_t request_begin_time_us = currentTimeUs();
+    auto    cache_info            = engine_->getCacheStatusInfo(latest_version, need_cache_keys);
     reportCacheStatusTime(request_begin_time_us);
     return cache_info;
 }

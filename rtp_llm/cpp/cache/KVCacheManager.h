@@ -168,6 +168,8 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    // Version the merged device/host observation, not just device-cache edits.
+    mutable std::atomic<int64_t> cache_status_generation_{0};
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

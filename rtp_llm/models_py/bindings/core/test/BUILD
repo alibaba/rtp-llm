@@ -20,6 +20,22 @@ cc_test(
 )
 
 cc_test(
+    name = "exec_ops_blocking_wait_l20a_test",
+    srcs = ["ExecOpsTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    env = {"GPU_COUNT": "4", "RTP_LLM_CUDA_BLOCKING_WAIT": "1"},
+)
+
+cc_test(
     name = "distributed_comm_test",
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

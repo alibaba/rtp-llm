@@ -1,18 +1,42 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <gtest/gtest.h>
+#include <cstdlib>
+#include <cstring>
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 
 using namespace rtp_llm;
 
 class ExecOpsTest: public ::testing::Test {
 protected:
+#if USING_CUDA
+    inline static unsigned int initial_flags_ = 0;
+#endif
     static void SetUpTestSuite() {
+#if USING_CUDA
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+        ASSERT_EQ(cudaGetDeviceFlags(&initial_flags_), cudaSuccess);
+#endif
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
     }
 };
+
+#if USING_CUDA
+TEST_F(ExecOpsTest, testWaitPolicyPreservesOtherFlags) {
+    unsigned int flags = 0;
+    ASSERT_EQ(cudaGetDeviceFlags(&flags), cudaSuccess);
+    const char*        env     = std::getenv("RTP_LLM_CUDA_BLOCKING_WAIT");
+    const bool         enabled = env != nullptr && std::strcmp(env, "0") != 0 && std::strcmp(env, "") != 0;
+    const unsigned int expected =
+        enabled ? (initial_flags_ & ~cudaDeviceScheduleMask) | cudaDeviceScheduleBlockingSync : initial_flags_;
+    EXPECT_EQ(flags, expected);
+}
+#endif
 
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
     // Second call should be a no-op (already initialized).

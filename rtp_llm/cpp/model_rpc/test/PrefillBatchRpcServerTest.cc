@@ -64,10 +64,15 @@ public:
     KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
         return KVCacheInfo();
     }
+    int64_t getLastScheduleTime() override {
+        ++last_schedule_reads;
+        return 0;
+    }
 
     std::vector<bool>              enqueue_successes;
     std::vector<GenerateStreamPtr> streams;
     int                            enqueue_multiple_calls{0};
+    int                            last_schedule_reads{0};
 };
 
 class TestPrefillBatchRpcServer: public PrefillBatchRpcServer {
@@ -267,6 +272,24 @@ TEST(PrefillBatchRpcServerTest, FailsFastWhenMultiDpIsConfigured) {
     EnqueueBatchRequestPB  request;
     EnqueueBatchResponsePB response;
     EXPECT_DEATH({ (void)server.EnqueueBatch(nullptr, &request, &response); }, "");
+}
+
+TEST(PrefillBatchRpcServerTest, WorkerStatusDoesNotReadUnusedSchedulerDelta) {
+    TestPrefillBatchRpcServer server;
+    auto                      engine = std::make_shared<PartialEnqueueEngine>();
+    server.engine_                   = engine;
+    server.meta_                     = std::make_shared<RpcServerRuntimeMeta>();
+    grpc::ServerContext context;
+    StatusVersionPB     request;
+    request.set_latest_finished_version(-1);
+    WorkerStatusPB response;
+    ASSERT_TRUE(server.GetWorkerStatus(&context, &request, &response).ok());
+    EXPECT_TRUE(response.alive());
+    EXPECT_EQ(response.latest_finished_version(), -1);
+    EXPECT_EQ(engine->last_schedule_reads, 0);
+    // Internal consumers requesting schedule delta keep the existing behavior.
+    server.getWorkerStatusInfo(-1);
+    EXPECT_EQ(engine->last_schedule_reads, 1);
 }
 
 TEST(PrefillBatchRpcServerTest, FailsFastWhenEnqueueGroupOmitsAResult) {

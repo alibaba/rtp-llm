@@ -81,4 +81,88 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
 }
 
+TEST_F(ModelDataTest, PrefillHostGeometryTracksTensorIdentityAndMutation) {
+    GptModelInputs inputs;
+    inputs.input_lengths = torch::tensor({80, 81, 419}, torch::kInt32);
+    inputs.setPrefillHostCuSeqlens(torch::tensor({0, 80, 161, 580}, torch::kInt32));
+    ASSERT_TRUE(inputs.hasPrefillHostCuSeqlens());
+    auto copy = inputs;
+    EXPECT_TRUE(copy.hasPrefillHostCuSeqlens());
+
+    copy.input_lengths = inputs.input_lengths.clone();
+    EXPECT_FALSE(copy.hasPrefillHostCuSeqlens());
+    EXPECT_TRUE(inputs.hasPrefillHostCuSeqlens());
+    copy               = inputs;
+    copy.input_lengths = inputs.input_lengths.view({3});
+    EXPECT_FALSE(copy.hasPrefillHostCuSeqlens());
+    copy = inputs;
+    inputs.input_lengths.add_(1);
+    EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+    EXPECT_FALSE(copy.hasPrefillHostCuSeqlens());
+
+    inputs.setPrefillHostCuSeqlens(torch::tensor({0, 81, 163, 583}, torch::kInt32));
+    EXPECT_TRUE(inputs.hasPrefillHostCuSeqlens());
+    inputs.setPrefillHostCuSeqlens(torch::Tensor{});
+    EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+}
+
+TEST_F(ModelDataTest, PrefillHostGeometryRejectsInvalidOrUnversionedMirrors) {
+    GptModelInputs inputs;
+    inputs.input_lengths = torch::tensor({80, 81}, torch::kInt32);
+    inputs.setPrefillHostCuSeqlens(torch::tensor({0, 80}, torch::kInt32));
+    EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+    inputs.setPrefillHostCuSeqlens(torch::tensor({0, 80, 161}, torch::kInt64));
+    EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+    inputs.setPrefillHostCuSeqlens(torch::tensor({0, 80, 161}, torch::kInt32).cuda());
+    EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+    {
+        c10::InferenceMode guard(true);
+        inputs.input_lengths = torch::tensor({80, 81}, torch::kInt32);
+        inputs.setPrefillHostCuSeqlens(torch::tensor({0, 80, 161}, torch::kInt32));
+        EXPECT_FALSE(inputs.hasPrefillHostCuSeqlens());
+    }
+}
+
+TEST_F(ModelDataTest, PrefillHostPrefixTracksTensorIdentityAndMutation) {
+    GptModelInputs inputs;
+    inputs.prefix_lengths = torch::tensor({80, 81, 419}, torch::kInt32);
+    inputs.setPrefillHostPrefixLengths(torch::tensor({0, 128, 8192}, torch::kInt32));
+    ASSERT_TRUE(inputs.hasPrefillHostPrefixLengths());
+    auto copy = inputs;
+    EXPECT_TRUE(copy.hasPrefillHostPrefixLengths());
+
+    copy.prefix_lengths = inputs.prefix_lengths.clone();
+    EXPECT_FALSE(copy.hasPrefillHostPrefixLengths());
+    EXPECT_TRUE(inputs.hasPrefillHostPrefixLengths());
+    copy                = inputs;
+    copy.prefix_lengths = inputs.prefix_lengths.view({3});
+    EXPECT_FALSE(copy.hasPrefillHostPrefixLengths());
+    copy = inputs;
+    inputs.prefix_lengths.add_(1);
+    EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+    EXPECT_FALSE(copy.hasPrefillHostPrefixLengths());
+
+    inputs.setPrefillHostPrefixLengths(torch::tensor({1, 129, 8193}, torch::kInt32));
+    EXPECT_TRUE(inputs.hasPrefillHostPrefixLengths());
+    inputs.setPrefillHostPrefixLengths(torch::Tensor{});
+    EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+}
+
+TEST_F(ModelDataTest, PrefillHostPrefixRejectsInvalidOrUnversionedMirrors) {
+    GptModelInputs inputs;
+    inputs.prefix_lengths = torch::tensor({80, 81}, torch::kInt32);
+    inputs.setPrefillHostPrefixLengths(torch::tensor({0}, torch::kInt32));
+    EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+    inputs.setPrefillHostPrefixLengths(torch::tensor({0, 128}, torch::kInt64));
+    EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+    inputs.setPrefillHostPrefixLengths(torch::tensor({0, 128}, torch::kInt32).cuda());
+    EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+    {
+        c10::InferenceMode guard(true);
+        inputs.prefix_lengths = torch::tensor({80, 81}, torch::kInt32);
+        inputs.setPrefillHostPrefixLengths(torch::tensor({0, 128}, torch::kInt32));
+        EXPECT_FALSE(inputs.hasPrefillHostPrefixLengths());
+    }
+}
+
 }  // namespace rtp_llm

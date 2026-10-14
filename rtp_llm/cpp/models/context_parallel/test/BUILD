@@ -38,3 +38,14 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test(
+    name = "context_parallel_async_output_l20a_test",
+    srcs = ["context_parallel_py_wrapper_test.py"],
+    main = "context_parallel_py_wrapper_test.py",
+    data = [":th_context_parallel_py_wrapper_test"],
+    deps = ["//rtp_llm:torch"],
+    tags = ["manual", "L20A_DEV"],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+)

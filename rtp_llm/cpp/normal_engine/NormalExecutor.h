@@ -23,16 +23,19 @@ struct GptModelInitParams;
 
 class NormalExecutor: public Executor {
 public:
+    using CacheStatusSnapshotRefreshCallback = std::function<void(const std::list<GenerateStreamPtr>&)>;
+
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up                 = false,
-                            bool                                   is_propose              = false,
-                            int                                    propose_model_index     = 0,
-                            MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
-                            int32_t                                kv_cache_group_num      = 1,
-                            const std::vector<int32_t>&            kv_cache_layer_to_group = {},
-                            std::function<void()>                  profile_step_start      = nullptr,
-                            std::function<void()>                  profile_step_finish     = nullptr);
+                            bool                                   warm_up                       = false,
+                            bool                                   is_propose                    = false,
+                            int                                    propose_model_index           = 0,
+                            MlaOpsType                             mla_ops_type                  = MlaOpsType::AUTO,
+                            int32_t                                kv_cache_group_num            = 1,
+                            const std::vector<int32_t>&            kv_cache_layer_to_group       = {},
+                            std::function<void()>                  profile_step_start            = nullptr,
+                            std::function<void()>                  profile_step_finish           = nullptr,
+                            CacheStatusSnapshotRefreshCallback     cache_status_snapshot_refresh = {});
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
@@ -112,6 +115,7 @@ private:
     ParallelismConfig     parallelism_config_;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
+    CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_;
 
     // Stream-async worker owns a CUDA stream/thread for pinned D2H,
     // per-stream update, and KV release off the main thread.

@@ -1,4 +1,5 @@
 #pragma once
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 #include <mutex>
@@ -48,6 +49,8 @@ private:
     void            setPendingFrontendMetricTerminalError(bool pending);
     GenerateOutputs takeLatestFrontendMetricOutput(GenerateOutputs&& marker);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
+
+    const bool output_predicate_wait_ = autil::EnvUtil::getEnv("RTP_LLM_OUTPUT_PREDICATE_WAIT", true);
 
     int64_t                                   request_id_{0};
     bool                                      finished_{false};

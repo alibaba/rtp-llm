@@ -106,6 +106,58 @@ struct GptModelInputs {
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
+    // Optional CPU geometry from the normal prefill producer. Bind it to the
+    // exact input tensor/version so slicing, replacement or ATen mutation
+    // invalidates it automatically. Raw device writers must clear the mirror.
+    torch::Tensor prefill_cu_seqlens_host;
+    torch::Tensor prefill_input_lengths_source;
+    uint32_t      prefill_input_lengths_version = 0;
+
+    void setPrefillHostCuSeqlens(torch::Tensor cu) {
+        prefill_cu_seqlens_host      = std::move(cu);
+        prefill_input_lengths_source = input_lengths;
+        if (input_lengths.defined()) {
+            const auto& version           = input_lengths.unsafeGetTensorImpl()->version_counter();
+            prefill_input_lengths_version = version.enabled() ? version.current_version() : 0;
+        }
+    }
+
+    bool hasPrefillHostCuSeqlens() const {
+        if (!prefill_cu_seqlens_host.defined() || !input_lengths.defined() || !prefill_input_lengths_source.defined()
+            || !prefill_input_lengths_source.is_same(input_lengths) || !prefill_cu_seqlens_host.device().is_cpu()
+            || prefill_cu_seqlens_host.scalar_type() != torch::kInt32 || prefill_cu_seqlens_host.dim() != 1
+            || prefill_cu_seqlens_host.numel() != input_lengths.numel() + 1) {
+            return false;
+        }
+        const auto& version = input_lengths.unsafeGetTensorImpl()->version_counter();
+        return version.enabled() && version.current_version() == prefill_input_lengths_version;
+    }
+
+    torch::Tensor prefill_prefix_lengths_host;
+    torch::Tensor prefill_prefix_lengths_source;
+    uint32_t      prefill_prefix_lengths_version = 0;
+
+    void setPrefillHostPrefixLengths(torch::Tensor host) {
+        prefill_prefix_lengths_host   = std::move(host);
+        prefill_prefix_lengths_source = prefix_lengths;
+        if (prefix_lengths.defined()) {
+            const auto& version            = prefix_lengths.unsafeGetTensorImpl()->version_counter();
+            prefill_prefix_lengths_version = version.enabled() ? version.current_version() : 0;
+        }
+    }
+
+    bool hasPrefillHostPrefixLengths() const {
+        if (!prefill_prefix_lengths_host.defined() || !prefix_lengths.defined()
+            || !prefill_prefix_lengths_source.defined() || !prefill_prefix_lengths_source.is_same(prefix_lengths)
+            || !prefill_prefix_lengths_host.device().is_cpu()
+            || prefill_prefix_lengths_host.scalar_type() != torch::kInt32 || prefill_prefix_lengths_host.dim() != 1
+            || prefill_prefix_lengths_host.numel() != prefix_lengths.numel()) {
+            return false;
+        }
+        const auto& version = prefix_lengths.unsafeGetTensorImpl()->version_counter();
+        return version.enabled() && version.current_version() == prefill_prefix_lengths_version;
+    }
+
 public:
     std::string debugString(bool force = false) const;
 };

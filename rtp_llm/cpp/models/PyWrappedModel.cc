@@ -346,6 +346,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                             context_batch_size,
                             decode_batch_size);
 
+    py_attn_inputs.cu_seqlens_host     = torch::Tensor{};
+    py_attn_inputs.prefix_lengths_host = torch::Tensor{};
     if (context_batch_size > 0) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(context_metadata)");
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.size(0)) : 0;
@@ -354,8 +356,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // cu_kv_seqlens[-1] on device; do not D2H here just to fill this field.
         py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens;
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
+        if (!inputs.is_target_verify && !inputs.is_draft_extend && inputs.hasPrefillHostCuSeqlens()) {
+            py_attn_inputs.cu_seqlens_host = inputs.prefill_cu_seqlens_host;
+        }
+        if (!inputs.is_target_verify && !inputs.is_draft_extend && inputs.hasPrefillHostPrefixLengths()) {
+            py_attn_inputs.prefix_lengths_host = inputs.prefill_prefix_lengths_host;
+        }
+        py_attn_inputs.cu_kv_seqlens  = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.padding_offset = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths,
                                           py_attn_inputs.prefix_lengths,

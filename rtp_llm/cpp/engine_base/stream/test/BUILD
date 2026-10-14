@@ -143,3 +143,20 @@ cc_test(
     },
     exec_properties = {"gpu": "L20A_DEV"},
 )
+
+# Run the existing stream suite, including terminal-output wakeups, on the
+# four-GPU CPU-performance worker. The original target remains unchanged.
+cc_test(
+    name = "generate_stream_output_wait_l20a_test",
+    srcs = ["GenerateStreamTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "GPU_COUNT": "4",
+        "RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "true",
+        "RTP_LLM_OUTPUT_PREDICATE_WAIT": "true",
+    },
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    tags = ["manual"],
+)

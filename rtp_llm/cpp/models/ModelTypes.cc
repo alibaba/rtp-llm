@@ -109,7 +109,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     }
 
-    shape_hints_ptr[GptModelInputIndex::hasKernelBlockHostSnapshot] = inputs.kv_cache_kernel_block_id_host.defined();
+    shape_hints_ptr[GptModelInputIndex::hasKernelBlockHostSnapshot]  = inputs.kv_cache_kernel_block_id_host.defined();
+    shape_hints_ptr[GptModelInputIndex::hasPrefillHostCuSeqlens]     = inputs.hasPrefillHostCuSeqlens();
+    shape_hints_ptr[GptModelInputIndex::hasPrefillHostPrefixLengths] = inputs.hasPrefillHostPrefixLengths();
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
@@ -317,6 +319,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_kernel_block_id_host = torch::Tensor{};
     }
 
+    if (shape_hints_ptr[GptModelInputIndex::hasPrefillHostCuSeqlens]) {
+        if (is_non_root) {
+            inputs.prefill_cu_seqlens_host = torch::empty(
+                {inputs.input_lengths.numel() + 1}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        }
+    } else {
+        inputs.setPrefillHostCuSeqlens(torch::Tensor{});
+    }
+
+    if (shape_hints_ptr[GptModelInputIndex::hasPrefillHostPrefixLengths]) {
+        if (is_non_root) {
+            inputs.prefill_prefix_lengths_host = torch::empty(
+                {inputs.prefix_lengths.numel()}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        }
+    } else {
+        inputs.setPrefillHostPrefixLengths(torch::Tensor{});
+    }
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -328,6 +348,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     collect(inputs.combo_tokens);
     collect(inputs.input_lengths);
+    collect(inputs.prefill_cu_seqlens_host);
+    collect(inputs.prefill_prefix_lengths_host);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
@@ -491,6 +513,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
             flush_fused_copy();
         }
+    }
+    if (shape_hints_ptr[GptModelInputIndex::hasPrefillHostCuSeqlens]) {
+        inputs.setPrefillHostCuSeqlens(inputs.prefill_cu_seqlens_host);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::hasPrefillHostPrefixLengths]) {
+        inputs.setPrefillHostPrefixLengths(inputs.prefill_prefix_lengths_host);
     }
 }
 

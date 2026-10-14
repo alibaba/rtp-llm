@@ -44,3 +44,13 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "model_data_l20a_test",
+    srcs = ["ModelDataTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA", "GPU_COUNT": "4"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    tags = ["manual"],
+)

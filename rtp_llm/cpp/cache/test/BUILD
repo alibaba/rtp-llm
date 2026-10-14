@@ -276,6 +276,21 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_manager_status_l20a_test",
+    srcs = ["KVCacheManagerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+cc_test(
     name = "kv_cache_manager_cp_test",
     srcs = [
         "KVCacheManagerCPSlotMapperTest.cc",
@@ -426,4 +441,13 @@ cc_test(
         "//rtp_llm/cpp/cache:shared_cache_arena",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "block_pool_l20a_test",
+    srcs = ["BlockPoolTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":block_pool_test_helper"],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
 )

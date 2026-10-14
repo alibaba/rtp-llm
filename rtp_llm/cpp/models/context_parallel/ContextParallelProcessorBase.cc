@@ -324,6 +324,12 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_shuffle_indices          = shuffle_indices.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
+    // Both source tensors were built on CPU above. Resolve the dynamic mask
+    // here, then enqueue a pinned H2D copy before any model GPU work. A CUDA
+    // nonzero in handleOutputs would otherwise drain the entire forward.
+    auto valid_rows                            = torch::nonzero(qkv_padding_mask).squeeze(-1);
+    auto valid_restore                         = qkv_restore_indice.index_select(0, valid_rows).pin_memory();
+    cp_params.prefill_valid_qkv_restore_indice = valid_restore.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
 #endif
 }

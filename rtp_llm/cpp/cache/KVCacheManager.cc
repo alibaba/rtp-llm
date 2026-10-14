@@ -628,20 +628,32 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
         }
         // memory cache keys
         RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
                                 "getKVCacheInfo called before KVCacheManager coordinator initialized");
-        const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
+        auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
 
-        std::unordered_set<CacheKeyType> all_keys;
-        all_keys.reserve(device_cache_keys.size() + mem_cache_keys.size());
-        all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
-        all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
-
-        info.cached_keys.reserve(all_keys.size());
-        info.cached_keys.assign(all_keys.begin(), all_keys.end());
+        // Each source enumerates unique keys. A single source needs no union
+        // or second allocation, which is common with host-only prefix caching.
+        if (device_cache_keys.empty()) {
+            info.cached_keys = std::move(mem_cache_keys);
+        } else if (mem_cache_keys.empty()) {
+            info.cached_keys = std::move(device_cache_keys);
+        } else {
+            std::unordered_set<CacheKeyType> all_keys;
+            all_keys.reserve(device_cache_keys.size() + mem_cache_keys.size());
+            all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
+            all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
+            info.cached_keys.reserve(all_keys.size());
+            info.cached_keys.assign(all_keys.begin(), all_keys.end());
+        }
+        // FlexLB ignores a full key set unless its version advances. Device
+        // cache can stay unchanged (or disabled) while host cache grows/evicts.
+        // Give each newly built observation a generation; repeated reads of
+        // an immutable snapshot keep that snapshot's generation. No second
+        // key traversal, hash, or sort is needed on the refresh hot path.
+        info.version = cache_status_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?

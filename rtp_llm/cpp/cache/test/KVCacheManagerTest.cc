@@ -1033,6 +1033,41 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     EXPECT_EQ(got, expected);
 }
 
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_HostOnlyChangesAdvanceVersion) {
+    for (const auto* enabled : {"0", "1"}) {
+        ScopedEnvVar  snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", enabled);
+        auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig config;
+        config.enable_memory_cache = false;
+        config.reuse_cache         = false;
+        auto manager               = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
+        ASSERT_TRUE(manager->init());
+        auto connector = std::make_shared<KVCacheMemoryConnector>(
+            cache_config, config, manager->allocator_, std::vector<std::string>{});
+        connector->block_cache_                  = std::make_shared<MemoryDiskBlockCache>();
+        manager->coordinator_->memory_connector_ = connector;
+        const auto device_version                = manager->allocator_->sharedBlockCache()->version();
+        manager->refreshKVCacheInfoSnapshot();
+        auto before = manager->getKVCacheInfo(-1, true);
+        EXPECT_TRUE(before.cached_keys.empty());
+        MemoryBlockCache::CacheItem item;
+        item.cache_key   = 123;
+        item.block_index = 101;
+        item.block_size  = 1;
+        ASSERT_TRUE(connector->block_cache_->put(item).first);
+        manager->refreshKVCacheInfoSnapshot();
+        auto added = manager->getKVCacheInfo(before.version, true);
+        EXPECT_GT(added.version, before.version);
+        EXPECT_EQ(added.cached_keys, (std::vector<CacheKeyType>{123}));
+        ASSERT_TRUE(connector->block_cache_->remove(123).has_value());
+        manager->refreshKVCacheInfoSnapshot();
+        auto removed = manager->getKVCacheInfo(added.version, true);
+        EXPECT_GT(removed.version, added.version);
+        EXPECT_TRUE(removed.cached_keys.empty());
+        EXPECT_EQ(manager->allocator_->sharedBlockCache()->version(), device_version);
+    }
+}
+
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
 
@@ -1091,7 +1126,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
 }
 
-TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesTokenPoolsRatherThanFixedConcurrencySlots) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -1107,6 +1142,12 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
 
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         ASSERT_NE(pools[gid], nullptr);
+        // DSV4 SWA/state pools hold fixed per-request slots. Their small slot
+        // count limits concurrency, not the number of cached FULL-group tokens.
+        // This fixture has no paged LINEAR groups.
+        if (cache_config.group_types[gid] != CacheGroupType::FULL) {
+            continue;
+        }
         const size_t seq_size =
             (gid < cache_config.group_seq_size_per_block.size() && cache_config.group_seq_size_per_block[gid] > 0) ?
                 cache_config.group_seq_size_per_block[gid] :

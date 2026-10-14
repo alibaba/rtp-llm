@@ -242,7 +242,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             kv_cache_group_num_,
             kv_cache_layer_to_group_,
             [this]() { step_profiler_.startStep(); },
-            [this]() { step_profiler_.finishStep(); }));
+            [this]() { step_profiler_.finishStep(); },
+            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); }));
     }
 }
 
@@ -918,11 +919,6 @@ absl::Status NormalEngine::step() {
             if ((completed_steps_ & 63U) == 0) {
                 published_completed_steps_.store(completed_steps_, std::memory_order_relaxed);
             }
-        }
-        // MTP refreshes immediately after the target model has finished CPU dispatch, while its GPU
-        // work is still outstanding. The normal executor keeps the original post-process placement.
-        if (status.ok() && !propose_params_) {
-            maybeRefreshCacheStatusSnapshot(streams);
         }
     }
 

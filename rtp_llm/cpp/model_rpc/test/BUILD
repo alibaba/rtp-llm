@@ -144,6 +144,16 @@ cc_test(
 )
 
 cc_test(
+    name = "prefill_worker_status_l20a_test",
+    srcs = ["PrefillBatchRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    tags = ["manual", "L20A_DEV"],
+    env = {"TEST_USING_DEVICE": "CUDA", "GPU_COUNT": "4"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+)
+
+cc_test(
     name = "rpc_writer_cancellation_test",
     srcs = [
         "RpcWriterCancellationTest.cc",

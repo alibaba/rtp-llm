@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm::test {
 namespace {
@@ -674,6 +675,80 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         pro_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_EQ(pro_config.layer_num, 61u);
     EXPECT_TRUE(pro_connector->isDsv4TypedCacheLayout(pro_connector->layerRegionSlots()));
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, PrefixStagingPreservesBytesAcrossPayloadAndMetadataLimits) {
+    constexpr size_t kLargeTiles  = 1025;
+    constexpr size_t kLargeBytes  = 131075;
+    constexpr size_t kGap         = 17;
+    constexpr size_t kHostBytes   = kLargeTiles * kLargeBytes + 1;
+    constexpr size_t kDeviceBytes = kLargeTiles * (kLargeBytes + kGap) + 1;
+    auto             host         = torch::empty({static_cast<int64_t>(kHostBytes)},
+                             torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+    auto*            host_ptr     = static_cast<uint8_t*>(host.data_ptr());
+    for (int device : {0, 1}) {
+        ASSERT_EQ(cudaSetDevice(device), cudaSuccess);
+        auto          gpu     = torch::empty({static_cast<int64_t>(kDeviceBytes)},
+                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device));
+        auto*         gpu_ptr = static_cast<uint8_t*>(gpu.data_ptr());
+        auto          config  = makeTinyTypedHybridPoolConfig();
+        KVCacheConfig kv_config;
+        auto          connector = std::make_shared<KVCacheMemoryConnector>(
+            config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
+        // The first shape crosses 64 MiB; the second crosses the 1024-tile
+        // metadata bound. Odd lengths and one-byte offsets exercise scalar tails.
+        for (const auto& [count, bytes] : {std::pair<size_t, size_t>{kLargeTiles, kLargeBytes}, {2051, 31}}) {
+            SCOPED_TRACE(testing::Message() << device << " count=" << count << " bytes=" << bytes);
+            BatchedMemoryCopyParams params;
+            params.device_index = device;
+            for (size_t i = 0; i < count; ++i) {
+                params.tiles.push_back({gpu_ptr + 1 + i * (bytes + kGap), host_ptr + 1 + i * bytes, bytes});
+            }
+            for (uint8_t seed : {19, 71}) {
+                std::memset(host_ptr, 0xB3, kHostBytes);
+                for (size_t i = 0; i < count; ++i) {
+                    auto* data = host_ptr + 1 + i * bytes;
+                    std::memset(data, seed + i % 251, bytes);
+                    const uint64_t marker = i * 1009 + seed;
+                    std::memcpy(data, &marker, sizeof(marker));
+                    std::memcpy(data + bytes - sizeof(marker), &marker, sizeof(marker));
+                }
+                std::vector<uint8_t> before(host_ptr, host_ptr + kHostBytes);
+                ASSERT_EQ(cudaMemset(gpu_ptr, 0xA5, kDeviceBytes), cudaSuccess);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                ASSERT_TRUE(execBatchedMemoryCopy(params));
+                std::vector<uint8_t> expected(kDeviceBytes), actual(kDeviceBytes);
+                ASSERT_EQ(cudaMemcpy(expected.data(), gpu_ptr, kDeviceBytes, cudaMemcpyDeviceToHost), cudaSuccess);
+                ASSERT_EQ(cudaMemset(gpu_ptr, 0xA5, kDeviceBytes), cudaSuccess);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                ASSERT_TRUE(connector->tryCopyPrefixWithStagedH2D(params));
+                ASSERT_EQ(cudaMemcpy(actual.data(), gpu_ptr, kDeviceBytes, cudaMemcpyDeviceToHost), cudaSuccess);
+                ASSERT_EQ(std::memcmp(actual.data(), expected.data(), kDeviceBytes), 0);
+                ASSERT_EQ(std::memcmp(before.data(), host_ptr, kHostBytes), 0);
+                auto& scratch = connector->stagedCopyScratchForDevice(device);
+                ASSERT_GT(scratch.device_capacity, 0u);
+                EXPECT_LE(scratch.device_capacity, 64u << 20);
+                EXPECT_LE(scratch.meta_capacity, 1024u);
+                EXPECT_EQ(scratch.host_allocation_count, 0u);
+            }
+            auto invalid               = params;
+            invalid.tiles.back().bytes = (64u << 20) + 1;
+            EXPECT_FALSE(connector->tryCopyPrefixWithStagedH2D(invalid));
+            invalid                  = params;
+            invalid.tiles.back().src = nullptr;
+            EXPECT_FALSE(connector->tryCopyPrefixWithStagedH2D(invalid));
+            invalid = params;
+            invalid.tiles.resize(1);
+            EXPECT_FALSE(connector->tryCopyPrefixWithStagedH2D(invalid));
+            // No coalescing means no reason to add a staging copy.
+            invalid = params;
+            invalid.tiles.resize(32);
+            for (size_t i = 0; i < invalid.tiles.size(); ++i) {
+                invalid.tiles[i].src = host_ptr + 2 * i * bytes;
+            }
+            EXPECT_FALSE(connector->tryCopyPrefixWithStagedH2D(invalid));
+        }
+    }
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, LargeUntypedPinnedMemoryRoundTripUsesD2HBatchAndH2DStaging) {

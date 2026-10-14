@@ -131,4 +131,86 @@ TEST(SharedCacheArenaTest, ConcurrentOwnersReturnWholeCapacity) {
     EXPECT_EQ(arena.availableSlots(1), arena.totalSlots(1));
 }
 
+TEST(SharedCacheArenaTest, PublishedBytesMatchMixedAllocationLifetimes) {
+    SharedCacheArena arena(256 * 512, {256 * 3, 256 * 17, 256 * 5});
+    struct Live {
+        size_t  group;
+        int32_t id;
+        bool    reclaimable;
+    };
+    std::vector<Live> live;
+    std::mt19937      rng(20261013);
+    for (int step = 0; step < 5000; ++step) {
+        const auto operation = rng() % 4;
+        if (!live.empty() && operation < 2) {
+            const auto at   = rng() % live.size();
+            auto&      item = live[at];
+            if (operation == 0) {
+                arena.release(item.group, item.id);
+                live.erase(live.begin() + at);
+            } else {
+                item.reclaimable = rng() % 2;
+                arena.setReclaimable(item.group, item.id, item.reclaimable);
+                // Repeated publication of the same state must not double count.
+                arena.setReclaimable(item.group, item.id, item.reclaimable);
+            }
+        } else {
+            const auto group = rng() % 3;
+            // Include requests that partially allocate then roll back.
+            const auto count = operation == 3 ? 600 : rng() % 5 + 1;
+            for (auto id : arena.malloc(group, count)) {
+                live.push_back({group, id, false});
+            }
+        }
+        size_t occupied = 0;
+        for (const auto& item : live) {
+            if (!item.reclaimable) {
+                occupied += arena.stride(item.group);
+            }
+        }
+        EXPECT_EQ(arena.availableBytes(), arena.usableBytes() - occupied) << step;
+    }
+    for (const auto& item : live) {
+        arena.release(item.group, item.id);
+    }
+    EXPECT_EQ(arena.availableBytes(), arena.usableBytes());
+    EXPECT_THROW(arena.release(0, 12345), std::logic_error);
+    EXPECT_THROW(arena.setReclaimable(0, 12345, true), std::logic_error);
+    EXPECT_EQ(arena.availableBytes(), arena.usableBytes());
+}
+
+TEST(SharedCacheArenaTest, ConcurrentCapacityPollingStaysWithinBudget) {
+    SharedCacheArena         arena(256 * 4096, {256 * 3, 256 * 17});
+    std::atomic<bool>        stop{false};
+    std::atomic<bool>        invalid{false};
+    std::thread              poller([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            const auto bytes = arena.availableBytes();
+            if (bytes > arena.usableBytes() || bytes % 256 != 0) {
+                invalid.store(true, std::memory_order_relaxed);
+            }
+        }
+    });
+    std::vector<std::thread> workers;
+    for (size_t group = 0; group < 2; ++group) {
+        workers.emplace_back([&, group] {
+            for (int i = 0; i < 2000; ++i) {
+                auto ids = arena.malloc(group, 3);
+                for (auto id : ids) {
+                    arena.setReclaimable(group, id, true);
+                    arena.setReclaimable(group, id, false);
+                    arena.release(group, id);
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    poller.join();
+    EXPECT_FALSE(invalid.load());
+    EXPECT_EQ(arena.availableBytes(), arena.usableBytes());
+}
+
 }  // namespace rtp_llm

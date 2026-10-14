@@ -39,7 +39,7 @@ struct EngineScheduleInfo {
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;
-    int64_t               last_schedule_delta;
+    int64_t               last_schedule_delta     = 0;
     int64_t               latest_finished_version = 0;
 };
 

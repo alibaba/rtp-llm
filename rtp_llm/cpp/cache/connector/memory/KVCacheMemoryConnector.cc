@@ -2148,7 +2148,88 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
     std::vector<torch::Tensor>            dst_buffers;
     std::vector<torch::Tensor>            src_buffers;
     bool                                  batch_eligible = true;
-    auto                                  flush          = [&]() {
+    // Prefix copy plans own the backing blocks until this worker completes.
+    // Retain raw descriptors rather than constructing two non-owning tensors
+    // per tile just to recover their pointers in flush(). Tensor construction
+    // also asks CUDA to resolve the pointer device once for every GPU tile.
+    const char* raw_plan_env = std::getenv("RTP_LLM_PREFIX_COPY_RAW_PLAN");
+    const bool  raw_batch =
+        raw_plan_env && std::string(raw_plan_env) == "1" && memoryCacheCopyMode() != MemoryCacheCopyMode::LEGACY;
+    struct RawCopy {
+        BlockInfo host;
+        BlockInfo device;
+        size_t    offset;
+    };
+    std::vector<RawCopy> raw_copies;
+    auto                 append_copy = [&](const BlockInfo& host, const BlockInfo& device, size_t offset) {
+        if (!raw_batch) {
+            return appendCopyBytesToBuffers(host, device, offset, direction, dst_buffers, src_buffers);
+        }
+        if (!device.addr || device.size_bytes == 0) {
+            return true;
+        }
+        if (!host.addr || offset > host.size_bytes || device.size_bytes > host.size_bytes - offset) {
+            return false;
+        }
+        raw_copies.push_back({host, device, offset});
+        return true;
+    };
+    auto flush = [&]() {
+        bool raw_fallback = false;
+        if (raw_batch) {
+            BatchedMemoryCopyParams raw_params;
+            raw_params.device_index                         = checkpoint_device;
+            bool                               raw_eligible = batch_eligible;
+            std::vector<BatchedMemoryCopyTile> raw_host_tiles;
+            for (const auto& copy : raw_copies) {
+                auto*       host_addr = static_cast<char*>(copy.host.addr) + copy.offset;
+                void*       dst       = direction == CopyDirection::H2D ? copy.device.addr : host_addr;
+                const void* src       = direction == CopyDirection::H2D ? host_addr : copy.device.addr;
+                if (!copy.host.is_cuda && !copy.device.is_cuda) {
+                    appendHostMemoryCopyTile(dst, src, copy.device.size_bytes, raw_host_tiles);
+                    continue;
+                }
+                const int device = copy.device.is_cuda ? copy.device.device_index : copy.host.device_index;
+                if (copy.host.is_cuda == copy.device.is_cuda || device < 0
+                    || (raw_params.device_index >= 0 && raw_params.device_index != device)) {
+                    raw_eligible = false;
+                    break;
+                }
+                raw_params.device_index = device;
+                appendBatchedMemoryCopyTile(dst, src, copy.device.size_bytes, raw_params.tiles);
+            }
+            bool success = false;
+            if (!checkpoints.empty()) {
+                // Preserve the existing failure contract for quantized state.
+                if (!raw_eligible
+                    || !execLinearCheckpointCopy(raw_params, checkpoints, direction == CopyDirection::H2D)) {
+                    return false;
+                }
+                success = true;
+            } else if (raw_eligible) {
+                static const bool staged_h2d = [] {
+                    const char* value = std::getenv("RTP_LLM_PREFIX_H2D_STAGED");
+                    return value && std::string(value) == "1";
+                }();
+                success = staged_h2d && direction == CopyDirection::H2D && tryCopyPrefixWithStagedH2D(raw_params);
+                if (!success) {
+                    success = execBatchedMemoryCopy(raw_params);
+                }
+            }
+            if (success) {
+                execHostMemoryCopyTiles(raw_host_tiles);
+                return true;
+            }
+            // The batch helper drains partial submissions before returning
+            // failure. Rebuild the established fallback only when required.
+            for (const auto& copy : raw_copies) {
+                if (!appendCopyBytesToBuffers(
+                        copy.host, copy.device, copy.offset, direction, dst_buffers, src_buffers)) {
+                    return false;
+                }
+            }
+            raw_fallback = true;
+        }
         if (dst_buffers.empty() && checkpoints.empty()) {
             return true;
         }
@@ -2179,7 +2260,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             if (!eligible || !execLinearCheckpointCopy(params, checkpoints, direction == CopyDirection::H2D)) {
                 return false;
             }
-        } else if (memoryCacheCopyMode() == MemoryCacheCopyMode::LEGACY || !eligible
+        } else if (raw_fallback || memoryCacheCopyMode() == MemoryCacheCopyMode::LEGACY || !eligible
                    || !execBatchedMemoryCopy(params)) {
             execNoBlockCopy(MultiCopyParams{dst_buffers, src_buffers});
             return true;  // The fallback already includes host-to-host tiles.
@@ -2320,12 +2401,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                 BlockInfo conv  = gpu;
                 conv.addr       = static_cast<char*>(gpu.addr) + linear_spec->k_block_size_bytes();
                 conv.size_bytes = linear_spec->v_block_size_bytes();
-                if (!appendCopyBytesToBuffers(backing_buffer,
-                                              conv,
-                                              byte_off + slot.stride_bytes - conv.size_bytes,
-                                              direction,
-                                              dst_buffers,
-                                              src_buffers)) {
+                if (!append_copy(backing_buffer, conv, byte_off + slot.stride_bytes - conv.size_bytes)) {
                     return false;
                 }
                 byte_off += slot.stride_bytes;
@@ -2337,8 +2413,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > backing_buffer.size_bytes) {
                     return false;
                 }
-                if (!appendCopyBytesToBuffers(
-                        backing_buffer, gpu_buffer, byte_off + within_layer_off, direction, dst_buffers, src_buffers)) {
+                if (!append_copy(backing_buffer, gpu_buffer, byte_off + within_layer_off)) {
                     return false;
                 }
                 within_layer_off += gpu_buffer.size_bytes;
@@ -2638,6 +2713,60 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     }
     execHostMemoryCopyTiles(host_tiles);
     return true;
+}
+
+bool KVCacheMemoryConnector::tryCopyPrefixWithStagedH2D(const BatchedMemoryCopyParams& params) {
+    // The caller has already proved that all sources are pinned host blocks
+    // owned by this copy plan, and all destinations belong to one CUDA device.
+    // Small/uncoalescible copies retain the existing batch path.
+    constexpr size_t kMaxBytes = 64ULL << 20;
+    constexpr size_t kMaxTiles = 1024;
+    if (params.device_index < 0 || params.tiles.size() < 32) {
+        return false;
+    }
+    size_t      segments     = 0;
+    const char* previous_end = nullptr;
+    for (const auto& tile : params.tiles) {
+        if (!tile.src || !tile.dst || tile.bytes == 0 || tile.bytes > kMaxBytes) {
+            return false;
+        }
+        const auto* src = static_cast<const char*>(tile.src);
+        segments += previous_end != src;
+        previous_end = src + tile.bytes;
+    }
+    if (segments > params.tiles.size() / 2) {
+        return false;
+    }
+
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.prefix_h2d_staged");
+    std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
+    auto&                       scratch = stagedCopyScratchForDevice(params.device_index);
+    StagedMemoryCopyParams      part;
+    part.device_index                = params.device_index;
+    part.direction                   = StagedMemoryCopyDirection::H2D;
+    part.direct_pinned_host_segments = true;
+    part.tiles.reserve(kMaxTiles);
+    part.host_segments.reserve(kMaxTiles);
+    auto flush = [&]() {
+        const bool success = execStagedMemoryCopy(part, &scratch);
+        part.tiles.clear();
+        part.host_segments.clear();
+        part.host_bytes = 0;
+        return success;
+    };
+    for (const auto& tile : params.tiles) {
+        if ((tile.bytes > kMaxBytes - part.host_bytes || part.tiles.size() == kMaxTiles) && !flush()) {
+            return false;
+        }
+        auto* src = const_cast<void*>(tile.src);
+        appendStagedMemoryCopyHostSegment(src, part.host_bytes, tile.bytes, part.host_segments);
+        part.tiles.push_back({tile.dst, part.host_bytes, tile.bytes});
+        part.host_bytes += tile.bytes;
+    }
+    // The existing executor waits on its private copy stream and drains any
+    // failed submission. Sources stay owned by the plan until then; a caller
+    // may safely retry the original batch if any chunk failed.
+    return flush();
 }
 
 StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int device_index) {

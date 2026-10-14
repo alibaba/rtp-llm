@@ -816,6 +816,9 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
         recordCanRunTime();
     }
     generate_status_->reportEvent(event, error_code, error_msg);
+    if (event == StreamEvents::Error) {
+        cv_->notify_all();
+    }
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -826,11 +829,15 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
         recordCanRunTime();
     }
     generate_status_->reportEvent(event, error_code, error_msg);
+    if (event == StreamEvents::Error) {
+        cv_->notify_all();
+    }
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    cv_->notify_all();
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -860,9 +867,9 @@ StreamState GenerateStream::moveToNext() {
     std::lock_guard<std::mutex> lock(*mutex_);
     StreamState                 state = generate_status_->moveToNext();
 
-    // notify one thread waiting for stream completion
+    // Wake output and remote-generation waiters sharing this condition variable
     if (getStatus() == StreamState::FINISHED) {
-        cv_->notify_one();
+        cv_->notify_all();
     }
     return state;
 }

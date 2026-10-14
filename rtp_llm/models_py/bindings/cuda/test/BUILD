@@ -73,3 +73,35 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     exec_properties = {"gpu": "H20"},
 )
+
+cc_test(
+    name = "copy_stream_reuse_l20a_test",
+    srcs = ["CopyStreamIsolationTest.cc", "CopyStreamReuseTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    env = {"GPU_COUNT": "4", "RTP_LLM_CACHE_COPY_STREAM_REUSE": "1"},
+)
+
+cc_test(
+    name = "glm53_prefix_copy_benchmark_l20a_test",
+    srcs = ["Glm53PrefixCopyBenchmarkTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    env = {"GPU_COUNT": "4", "RTP_LLM_CACHE_COPY_STREAM_REUSE": "1"},
+)

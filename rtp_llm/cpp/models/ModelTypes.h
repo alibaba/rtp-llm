@@ -101,6 +101,8 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     hasKernelBlockHostSnapshot,
+    hasPrefillHostCuSeqlens,
+    hasPrefillHostPrefixLengths,
     gptModelInputLength,
 };
 

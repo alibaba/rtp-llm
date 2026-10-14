@@ -67,7 +67,7 @@ public:
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
-    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
+    WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version, bool include_schedule_delta = true);
 
     std::shared_ptr<EngineBase> getEngine() const {
         return engine_;

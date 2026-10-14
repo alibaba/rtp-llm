@@ -3,7 +3,6 @@ import sys
 import unittest
 
 import torch
-
 from rtp_llm.cpp.models.context_parallel.test import (
     libth_context_parallel_py_wrapper_test as cp_test,
 )
@@ -597,6 +596,81 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available(), "CUDA required for asynchronous CP output"
+)
+class TestAsyncZigzagOutput(unittest.TestCase):
+    def _metadata(self, lengths, cp_size):
+        chunk = torch.tensor(
+            [((n + 2 * cp_size - 1) // (2 * cp_size)) * 2 for n in lengths],
+            dtype=torch.int32,
+        )
+        padding = chunk * cp_size - torch.tensor(lengths, dtype=torch.int32)
+        restore = cp_test.generate_qkv_restore_indices(chunk, cp_size)
+        mask = cp_test.generate_qkv_padding_mask(chunk, padding, cp_size)
+        expected = restore[mask.bool()]
+        prepared = cp_test.prepare_valid_restore(
+            torch.arange(sum(lengths), dtype=torch.int32),
+            torch.tensor(lengths, dtype=torch.int32),
+            0,
+            cp_size,
+        )
+        self.assertTrue(torch.equal(prepared.cpu(), expected))
+        return prepared, expected.long(), int(chunk.sum())
+
+    def test_fixed_shape_gather_exact_and_async(self):
+        for cp_size in (1, 2, 4, 8):
+            prepared, reference, chunk_len = self._metadata([1, 3, 80, 131], cp_size)
+            indexes_cpu = torch.tensor([0, 3, 83, 214, 3], dtype=torch.int64)
+            indexes = indexes_cpu.cuda()
+            selected = reference[indexes_cpu]
+            for dtype in (torch.float32, torch.bfloat16):
+                for rank in range(cp_size):
+                    hidden = (
+                        torch.arange(chunk_len * 17, dtype=torch.float32)
+                        .reshape(chunk_len, 17)
+                        .to(dtype)
+                    )
+                    offsets = selected.remainder(chunk_len)
+                    mine = selected.div(chunk_len, rounding_mode="floor") == rank
+                    # Non-owned rows may contain non-finite values. They must
+                    # contribute exact zeros, not NaN * 0.
+                    if (~mine).any():
+                        hidden[offsets[~mine][0]] = float("nan")
+                    expected = hidden[offsets].clone()
+                    expected[~mine] = 0
+                    device_hidden = hidden.cuda()
+                    # Prime allocators and kernels before the asynchronous check.
+                    cp_test.compute_prepared_local_last_hidden(
+                        device_hidden, prepared, indexes, rank, cp_size
+                    )
+                    torch.cuda.synchronize()
+                    torch.cuda._sleep(300_000_000)
+                    pending = torch.cuda.Event()
+                    pending.record()
+                    actual = cp_test.compute_prepared_local_last_hidden(
+                        device_hidden, prepared, indexes, rank, cp_size
+                    )
+                    self.assertFalse(
+                        pending.query(), "CP output drained earlier GPU work"
+                    )
+                    torch.testing.assert_close(
+                        actual.cpu(), expected, rtol=0, atol=0, equal_nan=True
+                    )
+                    self.assertEqual(actual.shape, (indexes.numel(), 17))
+
+    def test_empty_selection(self):
+        prepared, _, chunk_len = self._metadata([1, 3], 4)
+        actual = cp_test.compute_prepared_local_last_hidden(
+            torch.empty((chunk_len, 17), device="cuda"),
+            prepared,
+            torch.empty(0, device="cuda", dtype=torch.int64),
+            3,
+            4,
+        )
+        self.assertEqual(actual.shape, (0, 17))
 
 
 if __name__ == "__main__":

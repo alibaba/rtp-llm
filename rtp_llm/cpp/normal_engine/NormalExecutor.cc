@@ -120,7 +120,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int32_t                                kv_cache_group_num,
                                const std::vector<int32_t>&            kv_cache_layer_to_group,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               CacheStatusSnapshotRefreshCallback     cache_status_snapshot_refresh):
     Executor(),
     cache_manager_(cache_manager),
     role_type_(params.pd_sep_config.role_type),
@@ -135,6 +136,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     propose_model_index_(propose_model_index),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
+    cache_status_snapshot_refresh_(std::move(cache_status_snapshot_refresh)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -347,6 +349,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    // Match MTP: build the host-only snapshot after enqueueing model kernels,
+    // before sampling/dispatch can wait for their results. No extra worker or
+    // unbounded refresh queue is needed; snapshots remain immutable to readers.
+    if (cache_status_snapshot_refresh_ && tp_rank_ == 0 && !warm_up_ && has_real_stream) {
+        RTP_LLM_PROFILE_SCOPE("executor.normal.refresh_cache_status_snapshot");
+        cache_status_snapshot_refresh_(streams);
+    }
+
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);

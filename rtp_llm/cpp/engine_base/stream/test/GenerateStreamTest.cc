@@ -1,6 +1,8 @@
 
 #include "gtest/gtest.h"
 #include <thread>
+#include <future>
+#include <chrono>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -92,6 +94,76 @@ private:
 class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
+
+// A pending nextOutput must wake on both a published frame and a terminal
+// transition. The latter has no queued frame and used to wait for the unrelated
+// SynchronizedQueue one-second timeout after the final frame was consumed.
+TEST_F(GenerateStreamTest, testOutputPredicateWaitPublishesAndCompletes) {
+    autil::EnvGuard output_wait("RTP_LLM_OUTPUT_PREDICATE_WAIT", "true");
+    auto            config = std::make_shared<GenerateConfig>();
+    config->ignore_eos     = true;
+    config->max_new_tokens = 1;
+    auto stream            = GenerateStreamBuilder().createContextStream({1, 2}, config);
+    stream->reportEvent(StreamEvents::CachePrepared);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    auto frame = std::async(std::launch::async, [&] { return stream->nextOutput(); });
+    EXPECT_EQ(frame.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    stream->update({torch::tensor({{3}}, torch::kInt32), 1});
+    EXPECT_EQ(frame.wait_for(std::chrono::milliseconds(250)), std::future_status::ready);
+    auto output = frame.get();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    ASSERT_FALSE(stream->hasOutput());
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+
+    auto terminal = std::async(std::launch::async, [&] { return stream->nextOutput(); });
+    EXPECT_EQ(terminal.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    ASSERT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_EQ(terminal.wait_for(std::chrono::milliseconds(250)), std::future_status::ready);
+    auto result = terminal.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, testOutputPredicateWaitCancellation) {
+    autil::EnvGuard output_wait("RTP_LLM_OUTPUT_PREDICATE_WAIT", "true");
+    auto            stream  = GenerateStreamBuilder().createContextStream({1, 2});
+    auto            pending = std::async(std::launch::async, [&] { return stream->nextOutput(); });
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    stream->reportError(ErrorCode::CANCELLED, "cancel output waiter");
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(250)), std::future_status::ready);
+    auto result = pending.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, testOutputPredicateWaitDoesNotLosePrepublishedFrames) {
+    autil::EnvGuard output_wait("RTP_LLM_OUTPUT_PREDICATE_WAIT", "true");
+    auto            config = std::make_shared<GenerateConfig>();
+    config->ignore_eos     = true;
+    config->is_streaming   = true;
+    config->max_new_tokens = 129;
+    auto stream            = GenerateStreamBuilder().createContextStream({1, 2}, config);
+    for (int i = 0; i < 128; ++i) {
+        auto next_token = torch::tensor({{3}}, torch::kInt32);
+        // Exercise output-before-wait as well as competing consumer/producer.
+        if (i % 2 == 0) {
+            stream->update({next_token, 1});
+        }
+        auto pending = std::async(std::launch::async, [&] { return stream->nextOutput(); });
+        if (i % 2 != 0) {
+            stream->update({next_token, 1});
+        }
+        EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(250)), std::future_status::ready);
+        auto output = pending.get();
+        ASSERT_TRUE(output.ok());
+        EXPECT_FALSE(output.value().generate_outputs[0].finished);
+        EXPECT_FALSE(stream->hasOutput());
+    }
+}
 
 TEST_F(GenerateStreamTest, testAsyncReleaseHandoffAfterWorkerDrains) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2});

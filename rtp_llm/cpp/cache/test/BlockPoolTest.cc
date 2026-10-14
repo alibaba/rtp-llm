@@ -5,6 +5,7 @@
 #include <torch/torch.h>
 #include <numeric>
 #include <optional>
+#include <random>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -848,6 +849,40 @@ TEST_F(BlockPoolTest, MixedAllocFreeOperations) {
     block_pool_->requestFree(allocated_blocks[1]);
     block_pool_->requestFree(allocated_blocks[2]);
     EXPECT_EQ(block_pool_->freeBlocksNum(), 9);
+}
+
+TEST_F(BlockPoolTest, DenseAndSparseReferenceCountersMatchDuplicateLifetimes) {
+    for (bool sparse : {false, true}) {
+        BlockRefCounter counter;
+        counter.init(129, sparse);
+        std::vector<int> expected(129, 0);
+        std::mt19937     rng(20261013);
+        for (int step = 0; step < 5000; ++step) {
+            const int id = 1 + rng() % 128;
+            if (expected[id] >= 3 && rng() % 2) {
+                counter.decrementRefCounter({id, id, id});
+                expected[id] -= 3;
+            } else {
+                counter.incrementRefCounter({id, id, id});
+                expected[id] += 3;
+            }
+            uint32_t busy = 0;
+            for (int i = 1; i < 129; ++i) {
+                ASSERT_EQ(counter.getRefCounter(i), expected[i]);
+                busy += expected[i] != 0;
+            }
+            ASSERT_EQ(counter.busyBlockNum(), busy);
+            ASSERT_EQ(counter.freeBlockNum(), 128 - busy);
+        }
+        for (int i = 1; i < 129; ++i) {
+            counter.decrementRefCounter(std::vector<int>(expected[i], i));
+        }
+        EXPECT_EQ(counter.busyBlockNum(), 0u);
+        EXPECT_EQ(counter.freeBlockNum(), 128u);
+        EXPECT_ANY_THROW(counter.decrementRefCounter({1}));
+        EXPECT_EQ(counter.getRefCounter(1), 0);
+        EXPECT_EQ(counter.busyBlockNum(), 0u);
+    }
 }
 
 }  // namespace test

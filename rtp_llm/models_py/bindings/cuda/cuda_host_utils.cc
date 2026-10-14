@@ -25,6 +25,8 @@
 #endif
 #include <mutex>
 #include <unordered_map>
+#include <vector>
+#include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/sysinfo.h>
@@ -32,6 +34,67 @@
 namespace rtp_llm {
 
 bool CaptureCheck::in_cuda_graph_capture = false;
+
+namespace {
+// Cache copies must not alias PyTorch's general-purpose stream pool: waiting
+// for a copy could otherwise wait for unrelated model work on a borrowed stream.
+// Retain only completed idle streams, with exclusive ownership by each thread.
+struct CacheCopyStreamPool {
+    std::mutex                                         mutex;
+    std::unordered_map<int, std::vector<cudaStream_t>> idle;
+
+    cudaStream_t acquire(int device) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto&                       streams = idle[device];
+            if (streams.capacity() == 0) {
+                streams.reserve(64);  // Returning a lease must not allocate in a thread destructor.
+            }
+            if (!streams.empty()) {
+                auto stream = streams.back();
+                streams.pop_back();
+                return stream;
+            }
+        }
+        cudaStream_t stream = nullptr;
+        check_cuda_value(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+        return stream;
+    }
+
+    void release(int device, cudaStream_t stream) {
+        if (stream == nullptr) {
+            return;  // Stream creation failed; never pool the CUDA default stream.
+        }
+        // Do not add a device/stream synchronization on thread exit, or pass
+        // another thread a stream whose old work can delay its next copy.
+        if (cudaStreamQuery(stream) == cudaSuccess) {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto&                       streams = idle[device];
+            if (streams.size() < 64) {
+                streams.push_back(stream);
+                return;
+            }
+        }
+        cudaStreamDestroy(stream);
+    }
+};
+
+CacheCopyStreamPool* cacheCopyStreamPool() {
+    // Like the CUDA runtime's stream pools, these bounded idle handles live
+    // until process exit. Avoid CUDA calls from static teardown and keep the
+    // pool valid for thread-local destructors on all copy worker threads.
+    static auto* pool = new CacheCopyStreamPool;
+    return pool;
+}
+
+bool reuseCacheCopyStreams() {
+    static const bool enabled = [] {
+        const auto* value = std::getenv("RTP_LLM_CACHE_COPY_STREAM_REUSE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+}  // namespace
 
 cudaStream_t getCacheCopyStream() {
     struct Streams {
@@ -43,7 +106,11 @@ cudaStream_t getCacheCopyStream() {
             }
             for (const auto& [device, stream] : devices) {
                 if (cudaSetDevice(device) == cudaSuccess) {
-                    cudaStreamDestroy(stream);
+                    if (reuseCacheCopyStreams()) {
+                        cacheCopyStreamPool()->release(device, stream);
+                    } else {
+                        cudaStreamDestroy(stream);
+                    }
                 }
             }
             cudaSetDevice(previous);
@@ -54,7 +121,11 @@ cudaStream_t getCacheCopyStream() {
     check_cuda_value(cudaGetDevice(&device));
     auto it = streams.devices.try_emplace(device, nullptr).first;
     if (it->second == nullptr) {
-        check_cuda_value(cudaStreamCreateWithFlags(&it->second, cudaStreamNonBlocking));
+        if (reuseCacheCopyStreams()) {
+            it->second = cacheCopyStreamPool()->acquire(device);
+        } else {
+            check_cuda_value(cudaStreamCreateWithFlags(&it->second, cudaStreamNonBlocking));
+        }
     }
     return it->second;
 }

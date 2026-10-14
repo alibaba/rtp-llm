@@ -42,7 +42,7 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
-    bool                       linear_replay = false;
+    bool                       linear_replay           = false;
     size_t                     dsa_mla_resident_tokens = 0;
     size_t                     dsa_mla_hbm_blocks      = 0;
     std::vector<torch::Tensor> mla_hbm_cache_by_layer;
@@ -218,8 +218,7 @@ struct KVCache {
         // granularity. CacheStore keys remain physical-block based, so the
         // writer must merge all kernel pages owned by one physical block.
         layer_cache.cache_store_tensor_is_kernel_block_view =
-            is_full_region && kernel_seq_size_per_block > 0
-            && seq_size_per_block > kernel_seq_size_per_block;
+            is_full_region && kernel_seq_size_per_block > 0 && seq_size_per_block > kernel_seq_size_per_block;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
@@ -321,6 +320,9 @@ struct PyContextParallelParams {
     torch::Tensor prefill_shuffle_indices;
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
+    // Restore map with padding already removed. Its shape is known on the
+    // host before forward, so output gathering never needs CUDA nonzero().
+    torch::Tensor prefill_valid_qkv_restore_indice;
     torch::Tensor prefill_actual_input_lengths_cpu;
 };
 
@@ -354,6 +356,7 @@ struct PyAttentionInputs {
     // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
     torch::Tensor cu_seqlens_host;
+    torch::Tensor prefix_lengths_host;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
     int           context_total_kv_length = 0;

@@ -1,12 +1,31 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <chrono>
 
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
-        checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+    if (output_predicate_wait_) {
+        std::unique_lock<std::mutex> lock(*mutex_);
+        const auto ready = [this] { return hasError() || isFinished() || !generate_outputs_queue_.isEmpty(); };
+        while (!ready()) {
+            // checkTimeout reports an event and acquires mutex_ itself.
+            lock.unlock();
+            checkTimeout();
+            lock.lock();
+            // Output publication and terminal state transitions use mutex_.
+            // Use their condition variable too: SynchronizedQueue::waitNotEmpty
+            // waits unconditionally and can miss a push between isEmpty/wait.
+            // Keep the timeout solely to recheck the request deadline.
+            RTP_LLM_PROFILE_SCOPE("stream.output_wait.predicate");
+            cv_->wait_for(lock, std::chrono::seconds(1), ready);
+        }
+    } else {
+        while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
+            checkTimeout();
+            RTP_LLM_PROFILE_SCOPE("stream.output_wait.legacy");
+            generate_outputs_queue_.waitNotEmpty();
+        }
     }
     if (hasError() && !hasPendingFrontendMetricOutput()) {
         setPendingFrontendMetricTerminalError(false);
@@ -248,6 +267,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
+        cv_->notify_all();
     }
 }
 
@@ -267,6 +287,7 @@ void NormalGenerateStream::enqueueLatestFrontendMetricOutput(GenerateOutputs&& g
     marker.frontend_metric_only = true;
     if (generate_outputs_queue_.tryPush(marker)) {
         frontend_metric_marker_pending_ = true;
+        cv_->notify_all();
     }
 }
 

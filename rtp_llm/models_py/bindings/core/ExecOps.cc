@@ -937,6 +937,15 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 #if USING_CUDA
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%zu", device_id);
         check_cuda_value(cudaSetDevice(device_id));
+        if (envFlagEnabledOnce("RTP_LLM_CUDA_BLOCKING_WAIT")) {
+            unsigned int flags = 0;
+            check_cuda_value(cudaGetDeviceFlags(&flags));
+            // Keep all non-scheduling flags and every synchronization point.
+            // Only the host waiting policy changes, once during runtime init.
+            const unsigned int updated = (flags & ~cudaDeviceScheduleMask) | cudaDeviceScheduleBlockingSync;
+            check_cuda_value(cudaSetDeviceFlags(updated));
+            RTP_LLM_LOG_INFO("CUDA blocking host wait enabled: device=%zu flags=%u->%u", device_id, flags, updated);
+        }
         at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
 
         if (resolved_mla_ops_type == MlaOpsType::AUTO) {

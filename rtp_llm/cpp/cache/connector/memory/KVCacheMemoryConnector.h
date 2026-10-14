@@ -30,6 +30,7 @@ class BroadcastManager;
 class KVCacheAllocator;
 class MemoryAsyncContext;
 struct StagedMemoryCopyScratch;
+struct BatchedMemoryCopyParams;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
@@ -135,6 +136,7 @@ private:
     bool                     tryCopyCacheWithStagedMemoryCopy(const MemoryOperationRequestPB&     request,
                                                               CopyDirection                       direction,
                                                               const std::vector<LayerRegionSlot>& slots);
+    bool                     tryCopyPrefixWithStagedH2D(const BatchedMemoryCopyParams& params);
     StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
     bool                     appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                                       const BlockInfo&            gpu_block,

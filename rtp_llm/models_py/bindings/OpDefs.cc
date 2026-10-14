@@ -149,6 +149,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices)
         .def_readwrite("prefill_qkv_restore_indice", &PyContextParallelParams::prefill_qkv_restore_indice)
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
+        .def_readwrite("prefill_valid_qkv_restore_indice", &PyContextParallelParams::prefill_valid_qkv_restore_indice)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
@@ -174,6 +175,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)
+        .def_readwrite("prefix_lengths_host", &PyAttentionInputs::prefix_lengths_host)
         .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)

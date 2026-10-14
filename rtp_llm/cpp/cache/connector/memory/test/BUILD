@@ -192,3 +192,61 @@ cc_test(
     env = {"GTEST_FILTER": "*SharedMemory*"},
     exec_properties = {"gpu": "L20A_DEV"},
 )
+
+
+cc_test(
+    name = "memory_connector_raw_prefix_copy_l20a_test",
+    srcs = [
+        "KVCacheBatchedMemoryCopyTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"RTP_LLM_PREFIX_COPY_RAW_PLAN": "1", "GPU_COUNT": "4"},
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+)
+
+
+cc_test(
+    name = "memory_connector_prefix_staging_l20a_test",
+    srcs = [
+        "KVCacheBatchedMemoryCopyTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"RTP_LLM_PREFIX_COPY_RAW_PLAN": "1", "GPU_COUNT": "4", "RTP_LLM_PREFIX_H2D_STAGED": "1"},
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+)

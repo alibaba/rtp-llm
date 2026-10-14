@@ -1109,9 +1109,15 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
 
-        auto&       model_input      = merge_input_status.value();
-        vector<int> combo_tokens     = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
-        vector<int> input_lengths    = {5, 3, 5};
+        auto&       model_input   = merge_input_status.value();
+        vector<int> combo_tokens  = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
+        vector<int> input_lengths = {5, 3, 5};
+        ASSERT_TRUE(model_input.hasPrefillHostCuSeqlens());
+        EXPECT_TRUE(model_input.prefill_cu_seqlens_host.is_pinned());
+        ASSERT_TRUE(model_input.hasPrefillHostPrefixLengths());
+        EXPECT_TRUE(model_input.prefill_prefix_lengths_host.is_pinned());
+        EXPECT_EQ(toVec<int>(model_input.prefix_lengths), toVec<int>(model_input.prefill_prefix_lengths_host));
+        EXPECT_EQ(std::vector<int>({0, 5, 8, 13}), toVec<int>(model_input.prefill_cu_seqlens_host));
         vector<int> text_tokens_mask = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
         vector<int> mm_features_locs = {1, 10};
 
@@ -1155,12 +1161,11 @@ TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalGatherUsesPa
         query->generate_config     = make_shared<GenerateConfig>();
         query->mm_locs             = torch::tensor({1}, torch::kInt32);
         query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 0, 1}, torch::kInt32);
-        query->multimodal_features = {
-            torch::tensor({{feature_base + 0, feature_base + 1},
-                           {feature_base + 2, feature_base + 3},
-                           {feature_base + 4, feature_base + 5},
-                           {feature_base + 6, feature_base + 7}},
-                          torch::kFloat16)};
+        query->multimodal_features = {torch::tensor({{feature_base + 0, feature_base + 1},
+                                                     {feature_base + 2, feature_base + 3},
+                                                     {feature_base + 4, feature_base + 5},
+                                                     {feature_base + 6, feature_base + 7}},
+                                                    torch::kFloat16)};
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         stream->setIsContextStream(true);
@@ -1170,8 +1175,8 @@ TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalGatherUsesPa
         return stream;
     };
 
-    auto vl_stream_0 = make_vl_stream(100);
-    auto vl_stream_1 = make_vl_stream(200);
+    auto                         vl_stream_0 = make_vl_stream(100);
+    auto                         vl_stream_1 = make_vl_stream(200);
     std::list<GenerateStreamPtr> streams{text_stream, vl_stream_0, vl_stream_1};
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;

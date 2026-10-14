@@ -146,11 +146,50 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     torch_ext::PyContextParallelParams cp_params;
     cp_params.prefill_qkv_restore_indice = restore_indice.contiguous().clone();
     cp_params.prefill_qkv_padding_mask   = padding_mask.contiguous().clone();
+    // This compatibility wrapper accepts CPU metadata, like handleInputs.
+    auto valid_rows = torch::nonzero(padding_mask.cpu()).squeeze(-1);
+    cp_params.prefill_valid_qkv_restore_indice =
+        restore_indice.cpu().index_select(0, valid_rows).to(hidden_chunk.device());
 
     return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
 }
 
+// Keep this wrapper entirely device-side: tests queue GPU work before calling
+// it and verify the call returns without waiting for that work to finish.
+torch::Tensor zigzagComputePreparedLocalLastHidden(const torch::Tensor& hidden_chunk,
+                                                   const torch::Tensor& valid_restore,
+                                                   const torch::Tensor& lm_output_indexes,
+                                                   int                  cp_rank,
+                                                   int                  cp_size) {
+    ParallelismConfig config;
+    config.tp_rank = cp_rank;
+    config.tp_size = cp_size;
+    ZigZagProcessorTestWrapper processor(config);
+    GptModelInputs             inputs;
+    inputs.lm_output_indexes = lm_output_indexes;
+    torch_ext::PyContextParallelParams cp_params;
+    cp_params.prefill_valid_qkv_restore_indice = valid_restore;
+    return processor.computeLocalLastHidden(hidden_chunk, inputs, cp_params);
+}
+
+torch::Tensor
+zigzagPrepareValidRestore(const torch::Tensor& tokens, const torch::Tensor& lengths, int cp_rank, int cp_size) {
+    ParallelismConfig config;
+    config.tp_rank = cp_rank;
+    config.tp_size = cp_size;
+    ZigZagProcessor processor(config);
+    GptModelInputs  inputs;
+    inputs.combo_tokens     = tokens.clone();
+    inputs.input_lengths    = lengths.clone();
+    inputs.sequence_lengths = torch::empty({0}, lengths.options());
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(inputs, cp_params);
+    return cp_params.prefill_valid_qkv_restore_indice;
+}
+
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
+    m.def("compute_prepared_local_last_hidden", &zigzagComputePreparedLocalLastHidden);
+    m.def("prepare_valid_restore", &zigzagPrepareValidRestore);
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
           py::arg("total_input_tokens"),

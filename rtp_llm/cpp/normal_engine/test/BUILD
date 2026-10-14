@@ -102,3 +102,28 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "batch_stream_processor_l20a_test",
+    srcs = glob([
+        "NormalBatchStreamProcessorTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "GPU_COUNT": "4",
+    },
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "4"},
+    tags = ["manual"],
+)

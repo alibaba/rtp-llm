@@ -137,13 +137,10 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
     execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
-    auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
-    torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
-    int64_t       num_valid_tokens           = valid_indices.size(0);
-    torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
-    hidden_states                            = all_hidden_t.index_select(0, combined_indices);
-    return num_valid_tokens;
+    const auto& combined_indices = cp_params.prefill_valid_qkv_restore_indice;
+    RTP_LLM_CHECK_WITH_INFO(combined_indices.defined(), "CP output restore map must be prepared before forward");
+    hidden_states = all_hidden_t.index_select(0, combined_indices);
+    return combined_indices.numel();
 #endif
 }
 
@@ -158,23 +155,24 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
 
     // Map each requested output row (in restored valid-seq order) to its
     // chunk-concat flat index, without ever materializing the full sequence.
-    torch::Tensor valid_indices = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
-    torch::Tensor combined      = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
-    torch::Tensor sel           = combined.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
+    const auto& combined = cp_params.prefill_valid_qkv_restore_indice;
+    RTP_LLM_CHECK_WITH_INFO(combined.defined(), "CP output restore map must be prepared before forward");
+    torch::Tensor sel = combined.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
 
     const int64_t num_lm = sel.size(0);
 
-    // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
+    if (num_lm == 0) {
+        return torch::empty({0, hidden}, hidden_states.options());
+    }
+    RTP_LLM_CHECK_WITH_INFO(chunk_len > 0, "CP last-hidden selection requires a nonempty local chunk");
+    // Every selected global row maps to a valid offset on every equal-sized CP
+    // chunk. Gather a fixed [num_lm, hidden] shape, then overwrite non-owned rows
+    // with zero. masked_fill (rather than multiplication) also removes NaN/Inf
+    // from unowned rows, preserving the old zero-contribution semantics.
     torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
     torch::Tensor local_off = sel - owner.mul(chunk_len);
-    torch::Tensor mine      = (owner == static_cast<int64_t>(parallelism_config_.tp_rank));
-    torch::Tensor mine_rows = torch::nonzero(mine).squeeze(-1);  // positions in [0, num_lm) this rank owns
-
-    torch::Tensor local_buf = torch::zeros({num_lm, hidden}, hidden_states.options());
-    if (mine_rows.size(0) > 0) {
-        torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
-        local_buf.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
-    }
+    torch::Tensor local_buf = hidden_states.index_select(0, local_off);
+    local_buf.masked_fill_(owner.ne(static_cast<int64_t>(parallelism_config_.tp_rank)).unsqueeze(1), 0);
     return local_buf;
 }
 

@@ -848,17 +848,18 @@ void BlockPool::blockCacheFree(const BlockIndicesType& block_ids) {
 void BlockPool::tryFreeBlocks(const BlockIndicesType& block_ids) {
     RTP_LLM_PROFILE_FUNCTION();
     for (const auto& block_id : block_ids) {
-        if (req_con_ref_counter_.getRefCounter(block_id) == 0
-            && block_cache_ref_counter_.getRefCounter(block_id) == 0) {
+        const int active_refs = req_con_ref_counter_.getRefCounter(block_id);
+        if (active_refs == 0 && block_cache_ref_counter_.getRefCounter(block_id) == 0) {
             if (shared_arena_) {
                 shared_arena_->release(arena_group_, block_id);
                 continue;
             }
             const bool inserted = free_block_ids_.insert(block_id).second;
             free_hbm_blocks_ += inserted && block_id < mla_hbm_blocks_;
+        } else if (shared_arena_) {
+            shared_arena_->setReclaimable(arena_group_, block_id, active_refs == 0);
         }
     }
-    updateSharedReferences(block_ids);
 }
 
 void BlockPool::updateSharedReferences(const BlockIndicesType& blocks) {
@@ -866,8 +867,9 @@ void BlockPool::updateSharedReferences(const BlockIndicesType& blocks) {
         return;
     }
     for (auto id : blocks) {
-        if (req_con_ref_counter_.getRefCounter(id) > 0 || block_cache_ref_counter_.getRefCounter(id) > 0) {
-            shared_arena_->setReclaimable(arena_group_, id, req_con_ref_counter_.getRefCounter(id) == 0);
+        const int active_refs = req_con_ref_counter_.getRefCounter(id);
+        if (active_refs > 0 || block_cache_ref_counter_.getRefCounter(id) > 0) {
+            shared_arena_->setReclaimable(arena_group_, id, active_refs == 0);
         }
     }
 }

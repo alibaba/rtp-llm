@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <iterator>
@@ -45,6 +46,7 @@ public:
         }
         free_.emplace(reserved_bytes_, bytes_);
         available_ = free_;
+        available_bytes_.store(usableBytes(), std::memory_order_relaxed);
     }
 
     size_t stride(size_t group) const {
@@ -61,8 +63,9 @@ public:
         return rangeBytes(free_);
     }
     size_t availableBytes() const {
-        std::lock_guard<std::mutex> lock(mu_);
-        return rangeBytes(available_);
+        // Publish at completed mutation boundaries. Status polling must not
+        // contend with allocation/admission or traverse fragmented ranges.
+        return available_bytes_.load(std::memory_order_relaxed);
     }
 
     size_t slotCount(size_t group) const {
@@ -85,12 +88,14 @@ public:
             eraseRange(available_, offset, offset + stride(group));
             allocations_.emplace(offset, Allocation{group, false});
         }
+        available_bytes_.fetch_sub(ids.size() * stride(group), std::memory_order_relaxed);
         return ids;
     }
 
     void release(size_t group, int32_t id) {
         std::lock_guard<std::mutex> lock(mu_);
-        releaseLocked(group, id);
+        const auto                  newly_available = releaseLocked(group, id);
+        available_bytes_.fetch_add(newly_available, std::memory_order_relaxed);
     }
 
     void setReclaimable(size_t group, int32_t id, bool reclaimable) {
@@ -107,6 +112,11 @@ public:
                 eraseRange(available_, offset, offset + stride(group));
             }
             it->second.reclaimable = reclaimable;
+            if (reclaimable) {
+                available_bytes_.fetch_add(stride(group), std::memory_order_relaxed);
+            } else {
+                available_bytes_.fetch_sub(stride(group), std::memory_order_relaxed);
+            }
         }
     }
 
@@ -227,17 +237,20 @@ private:
         }
     }
 
-    void releaseLocked(size_t group, int32_t id) {
+    size_t releaseLocked(size_t group, int32_t id) {
         const size_t offset = static_cast<size_t>(id) * stride(group);
         auto         it     = allocations_.find(offset);
         if (it == allocations_.end() || it->second.group != group) {
             throw std::logic_error("double free or wrong shared cache group");
         }
-        if (!it->second.reclaimable) {
+        const size_t newly_available = it->second.reclaimable ? 0 : stride(group);
+        if (newly_available) {
             insert(available_, offset, offset + stride(group));
         }
         allocations_.erase(it);
         insert(free_, offset, offset + stride(group));
+        // Failed malloc rolls back without publishing any capacity change.
+        return newly_available;
     }
 
     size_t                       bytes_;
@@ -245,6 +258,7 @@ private:
     std::vector<size_t>          strides_;
     Ranges                       free_;
     Ranges                       available_;
+    std::atomic<size_t>          available_bytes_{0};
     std::map<size_t, Allocation> allocations_;
     mutable std::mutex           mu_;
 };

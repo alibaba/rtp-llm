@@ -344,14 +344,31 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish core tensors on device and retain host metadata needed by eager MLA.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
-    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
+    const auto input_lengths_host = model_input.input_lengths;
+    model_input.combo_tokens      = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    model_input.input_lengths     = publishInt32ToCuda(model_input.input_lengths, host_holder);
+    if (model_input.sequence_lengths.numel() == 0 && input_lengths_host.device().is_cpu()
+        && input_lengths_host.numel() > 0) {
+        auto        cu      = torch::empty({input_lengths_host.numel() + 1},
+                               torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        const auto* lengths = input_lengths_host.data_ptr<int32_t>();
+        auto*       offsets = cu.data_ptr<int32_t>();
+        offsets[0]          = 0;
+        int64_t total       = 0;
+        for (int64_t i = 0; i < input_lengths_host.numel(); ++i) {
+            total += lengths[i];
+            RTP_LLM_CHECK_WITH_INFO(lengths[i] >= 0 && total <= INT32_MAX,
+                                    "prefill cumulative query length exceeds int32 metadata range");
+            offsets[i + 1] = static_cast<int32_t>(total);
+        }
+        model_input.setPrefillHostCuSeqlens(std::move(cu));
+    }
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
     // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
     // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
     model_input.kv_cache_kernel_block_id_host = model_input.kv_cache_kernel_block_id;
-    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    model_input.kv_cache_kernel_block_id      = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
 }
 
 }  // anonymous namespace
@@ -589,7 +606,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     std::vector<torch::Tensor> gathered_mm_extra_input;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
     // TODO(async): prefixLength() is still stream CPU state. Stage it explicitly
-    // on host here, then publish only a CUDA tensor in GptModelInputs.
+    // on host here, then publish CUDA data plus its validated host mirror.
     auto prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
@@ -682,6 +699,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.setPrefillHostPrefixLengths(prefix_lengths_host);
     if (ctx.has_mm_extra_input && gathered_mm_extra_input.size() > 0) {
         model_input.mm_extra_input = std::move(gathered_mm_extra_input);
     }
