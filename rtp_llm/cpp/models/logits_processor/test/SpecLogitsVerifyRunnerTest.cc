@@ -272,7 +272,7 @@ TEST(SpecLogitsVerifyRunnerTest, ApplyMaskToLogitsMasksOnlyActiveRows) {
     syncResult(result);
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32);
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     options = options.device(torch::kCUDA);
 #endif
     auto logits = torch::zeros({static_cast<int64_t>(kStreams) * (kStep + 1), static_cast<int64_t>(kVocab)}, options);
@@ -289,6 +289,31 @@ TEST(SpecLogitsVerifyRunnerTest, ApplyMaskToLogitsMasksOnlyActiveRows) {
         }
     }
 }
+
+#if USING_CUDA || USING_ROCM
+TEST(SpecLogitsVerifyRunnerTest, GpuDraftProducesMaskAndCapOnGpu) {
+    constexpr size_t kVocab = 40;
+    auto task = makeTask(/*total_streams=*/1, /*propose_step=*/1, kVocab);
+    task.draft_tokens = task.draft_tokens.to(torch::kCUDA);
+    task.active.push_back({std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/33), /*stream_idx=*/0});
+
+    SpecLogitsVerifyRunner runner;
+    auto                   result = runner.run(task);
+    syncResult(result);
+
+    ASSERT_TRUE(result.packed_allow_mask_gpu.defined());
+    ASSERT_TRUE(result.logits_row_indices_gpu.defined());
+    ASSERT_TRUE(result.spec_cap_gpu.defined());
+    EXPECT_EQ(result.packed_allow_mask_gpu.device(), task.draft_tokens.device());
+    EXPECT_EQ(result.logits_row_indices_gpu.device(), task.draft_tokens.device());
+    EXPECT_EQ(result.spec_cap_gpu.device(), task.draft_tokens.device());
+
+    auto logits = torch::zeros({2, static_cast<int64_t>(kVocab)}, task.draft_tokens.options().dtype(torch::kFloat32));
+    ASSERT_NO_THROW(SpecLogitsVerifyRunner::applyMaskToLogits(logits, result, kVocab));
+    EXPECT_EQ(logits.cpu()[0][33].item<float>(), -std::numeric_limits<float>::max());
+    EXPECT_EQ(logits.cpu()[1][33].item<float>(), -std::numeric_limits<float>::max());
+}
+#endif
 
 // Draft tensors may arrive as [B, P+1] with a leading verify anchor; the
 // runner must strip it and hand processors exactly the P proposed tokens.
