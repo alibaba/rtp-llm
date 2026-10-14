@@ -30,6 +30,14 @@ def can_use_mega_gate(x: torch.Tensor, gate) -> bool:
     if os.environ.get("DSV4_MEGA_GATE", "1") != "1":
         return False
     if (
+        x.ndim != 2
+        or not x.is_cuda
+        or x.dtype != torch.bfloat16
+        or not 0 < x.shape[0] <= (1 << 20)
+        or not x.is_contiguous()
+    ):
+        return False
+    if (
         os.environ.get("DSV4_GATE_FP32", "0") == "1"
         or os.environ.get("DSV4_GATE_FUSED", "1") == "0"
         or os.environ.get("MOEDBG", "0") != "0"
@@ -41,25 +49,21 @@ def can_use_mega_gate(x: torch.Tensor, gate) -> bool:
     ):
         return False
     weight, bias = gate.weight, gate.bias
-    if x.ndim != 2 or weight.ndim != 2 or bias is None:
+    if weight.ndim != 2 or bias is None:
         return False
     experts, hidden = weight.shape
-    # Keep DeepGEMM's shape contract; empty ranks use the original EP path.
+    # Keep DeepGEMM's shape contract for compatible inputs and routers.
     return (
-        0 < x.shape[0] <= (1 << 20)
-        and x.shape[1] == hidden
+        x.shape[1] == hidden
         and hidden > 0
         and hidden % 256 == 0
         and 0 < experts <= 512
         and experts % 4 == 0
         and 0 < gate.topk <= min(experts, 32)
-        and x.is_cuda
-        and x.dtype == torch.bfloat16
         and weight.dtype in (torch.bfloat16, torch.float32)
         and bias.dtype == torch.float32
         and bias.shape == (experts,)
         and x.device == weight.device == bias.device
-        and x.is_contiguous()
         and weight.is_contiguous()
         and bias.is_contiguous()
         and torch.cuda.get_device_capability(x.device)[0] == 10
