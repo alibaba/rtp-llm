@@ -48,6 +48,7 @@ _TESTS = [
     "test_v41_qkv_rope_cache",
     "test_v41_selection_oracle",
     "test_v41_sparse_prefill_indexer",
+    "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
     "test_v41_wo_a_quant",
