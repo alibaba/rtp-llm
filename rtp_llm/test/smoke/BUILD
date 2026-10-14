@@ -185,6 +185,18 @@ smoke_test(
     gpu_type = ["SM103_CU13"],
 )
 
+# T3 joint form: CUDA graph + MTP on the same eager-MTP task/golden. The
+# verify/draft prefill graph replay must reproduce the eager greedy output;
+# this case was re-added after the MlaFlashInferPrefillImpl absorb-branch
+# graph-contract fix (kv-length plan frozen at capture -> garbage verify
+# logits, acceptance ~0). It fails while the corruption is present.
+smoke_test(
+    name = "xing4_0_fp8_graph_mtp_sm103",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_mtp_sm103.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/nas1/hf/Xing4.0-29B-A4B-FP8 --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM103_CU13"],
+)
+
 custom_smoke_test(
     name = "xing4_0_fp8_h20_remote",
     main = "xing4_remote_smoke_test.py",

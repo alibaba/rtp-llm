@@ -204,6 +204,10 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
                 weights,
+                max_bs=attn_inputs.sequence_lengths.size(0),
+                max_context_len=max_seq_len,
+                num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
+                is_cuda_graph=is_cuda_graph,
             )
             self.absorb_fmha.plan(self.fmha_params)
 
@@ -214,6 +218,14 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         # once the plan is prepared without realloc, mirroring the decode
         # impl's graph entry.
         self.prepare(attn_inputs, forbid_realloc=True)
+        # The absorb short-sequence branch captured its own decode op into
+        # the graph; replay reads that op's persistent buffers, so its plan
+        # must be refreshed with the live metadata exactly like the decode
+        # impl does per step (plan writes contents into fixed-address
+        # buffers; without this the captured kernel replays the
+        # capture-time kv lengths and reads stale page tables).
+        if self.absorb_fmha is not None:
+            self.absorb_fmha.plan(self.fmha_params)
 
     @classmethod
     def support(
