@@ -43,6 +43,13 @@ public class WorkerStatus {
     /** Serializes address-scoped cache writes and final cleanup. Acquire before lock. */
     public final transient ReentrantLock cacheMutationLock = new ReentrantLock();
 
+    @JsonIgnore
+    public final transient org.flexlb.diagnostics.SyncObservation statusObservation = new org.flexlb.diagnostics.SyncObservation();
+    @JsonIgnore
+    public final transient org.flexlb.diagnostics.SyncObservation cacheObservation = new org.flexlb.diagnostics.SyncObservation();
+    @JsonIgnore
+    public volatile transient boolean observationBound;
+
     private final long generationId = NEXT_GENERATION_ID.incrementAndGet();
 
     /** Set under {@link #lock}; read lock-free by poll gates. */
@@ -666,6 +673,8 @@ public class WorkerStatus {
         cacheIndexSnapshot.set(new CacheIndexSnapshot(
                 current.cacheStatus(), true, version));
     }
+
+    public long lastSuccessfulCachePollUs() { return cacheLastUpdateTime.get(); }
 
     public long recordSuccessfulCachePoll() {
         long nowUs = System.nanoTime() / 1000;

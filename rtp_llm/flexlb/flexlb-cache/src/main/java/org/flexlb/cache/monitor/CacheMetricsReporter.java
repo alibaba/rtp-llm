@@ -56,6 +56,27 @@ import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE
 @Slf4j
 @Component
 public class CacheMetricsReporter {
+    private final java.util.concurrent.ConcurrentHashMap<String,DiffMetrics> detailedDiff = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final class DiffMetrics {
+        final java.util.function.DoubleConsumer scanned,added,removed,duration;
+        final java.util.concurrent.atomic.AtomicLong logUs=new java.util.concurrent.atomic.AtomicLong(),suppressed=new java.util.concurrent.atomic.AtomicLong();
+        DiffMetrics(FlexMonitor monitor,String address,String role){
+            FlexMetricTags tags=FlexMetricTags.of("engineIp",address,"role",role);
+            scanned=monitor.bind("app.cache.diff.scanned.keys",tags);added=monitor.bind("app.cache.diff.added.keys",tags);removed=monitor.bind("app.cache.diff.removed.keys",tags);duration=monitor.bind("app.cache.diff.compute.ms",tags);
+        }
+    }
+    public void reportDiffWork(String address,String role,long scanned,long added,long removed,long ns){
+        try{
+            DiffMetrics metrics=detailedDiff.get(address);
+            if(metrics==null){synchronized(detailedDiff){metrics=detailedDiff.get(address);if(metrics==null&&detailedDiff.size()<4096){metrics=new DiffMetrics(monitor,address,role);detailedDiff.put(address,metrics);}}}
+            if(metrics==null)return;
+            metrics.scanned.accept(scanned);metrics.added.accept(added);metrics.removed.accept(removed);metrics.duration.accept(ns/1e6);
+            if((added+removed>0||ns>=1_000_000_000L)&&org.flexlb.diagnostics.SyncObservation.logNow(metrics.logUs,metrics.suppressed,1_000_000L)){
+                log.info("event=cache_diff address={} role={} scanned_keys={} added_keys={} removed_keys={} compute_ms={} suppressed={}",address,role,scanned,added,removed,ns/1e6,metrics.suppressed.getAndSet(0));
+            }
+        }catch(RuntimeException ignored){ /* Scalar telemetry must not fail cache updates. */ }
+    }
+
 
     /**
      * Bytes occupied by Long type (header 12 + data 8 + padding 4)
@@ -67,6 +88,8 @@ public class CacheMetricsReporter {
 
     @PostConstruct
     public void init() {
+        for(String name:java.util.List.of("app.cache.diff.scanned.keys","app.cache.diff.added.keys","app.cache.diff.removed.keys"))monitor.register(name,FlexMetricType.COUNTER);
+        monitor.register("app.cache.diff.compute.ms",FlexMetricType.TIMER);
         registerCacheMetrics();
         log.info("CacheMetricsReporter initialized and metrics registered");
     }

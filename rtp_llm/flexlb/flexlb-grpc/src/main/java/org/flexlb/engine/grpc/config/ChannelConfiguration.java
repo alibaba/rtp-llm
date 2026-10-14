@@ -29,12 +29,13 @@ public class ChannelConfiguration {
 
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
-        return new ThreadPoolExecutor(
+        return new org.flexlb.diagnostics.ObservedExecutor(
                 config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 5, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor")
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                new ThreadPoolExecutor.AbortPolicy(), "gRpcExecutor"
         );
     }
 
@@ -49,13 +50,13 @@ public class ChannelConfiguration {
      */
     @Bean
     public ThreadPoolExecutor forwarderChannelExecutor() {
-        return new ThreadPoolExecutor(
+        return new org.flexlb.diagnostics.ObservedExecutor(
                 16,
                 16,
                 5, TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy()
+                new ThreadPoolExecutor.AbortPolicy(), "forwarderChannelExecutor"
         );
     }
 

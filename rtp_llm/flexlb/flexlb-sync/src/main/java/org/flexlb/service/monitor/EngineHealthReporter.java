@@ -77,6 +77,30 @@ public class EngineHealthReporter {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
+    @Autowired(required = false)
+    private SynchronizationMetrics synchronizationMetrics;
+
+    public void ensureSyncMetrics(WorkerStatus status) {
+        if (synchronizationMetrics == null || status.observationBound) return;
+        try {
+            synchronizationMetrics.ensure(status);
+        } catch (RuntimeException ignored) { /* Diagnostics must not prevent polling. */ }
+    }
+
+    public void logSlowSync(WorkerStatus status, String address, String service) {
+        org.flexlb.diagnostics.SyncObservation s = "status".equals(service)
+                ? status.statusObservation : status.cacheObservation;
+        long now=System.nanoTime()/1000;
+        long applyUs=s.applyStartUs>0?now-s.applyStartUs:0;
+        long queueUs=s.readyUs>0&&s.applyStartUs>0?s.applyStartUs-s.readyUs:0;
+        if(Math.max(s.conversionUs,Math.max(applyUs,queueUs))>=1_000_000L
+                && org.flexlb.diagnostics.SyncObservation.logNow(s.lastSlowLogUs,s.suppressedSlow,10_000_000L)) {
+            logger.warn("event=sync_slow address={} role={} generation={} service={} response_bytes={} queue_ms={} convert_ms={} apply_ms={} last_commit_age_ms={} suppressed={}",
+                    address,status.getRole(),status.getGenerationId(),service,s.payloadBytes,queueUs/1000.0,s.conversionUs/1000.0,applyUs/1000.0,
+                    (now-("status".equals(service)?status.pollHealth().lastSuccessfulPollUs():status.lastSuccessfulCachePollUs()))/1000.0,s.suppressedSlow.getAndSet(0));
+        }
+    }
+
     private final FlexMonitor monitor;
 
     private final CacheMetricsReporter cacheMetricsReporter;
@@ -86,6 +110,11 @@ public class EngineHealthReporter {
     private final WorkerDirectory workerDirectory;
 
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
+    private final java.util.IdentityHashMap<EventExecutor, LoopLag> loopLag = new java.util.IdentityHashMap<>();
+    private static final class LoopLag {
+        final java.util.concurrent.atomic.AtomicBoolean pending = new java.util.concurrent.atomic.AtomicBoolean();
+        volatile long scheduledNs, lagNs;
+    }
 
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
@@ -366,7 +395,15 @@ public class EngineHealthReporter {
     private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
         int totalActiveExecutorCount = 0;
         int totalPendingTask = 0;
+        long maximumLagNs = 0;
         for (EventExecutor executor : eventLoopGroup) {
+            LoopLag lag = loopLag.computeIfAbsent(executor, ignored -> new LoopLag());
+            if(lag.pending.get())maximumLagNs=Math.max(maximumLagNs,System.nanoTime()-lag.scheduledNs);
+            else maximumLagNs=Math.max(maximumLagNs,lag.lagNs);
+            if(!executor.isShuttingDown()&&!lag.pending.get()){
+                lag.scheduledNs=System.nanoTime();
+                if(lag.pending.compareAndSet(false,true))try{executor.execute(()->{lag.lagNs=System.nanoTime()-lag.scheduledNs;lag.pending.set(false);});}catch(java.util.concurrent.RejectedExecutionException ignored){lag.pending.set(false);}
+            }
             boolean isShutdown = executor.isShutdown();
             boolean isTerminated = executor.isTerminated();
             boolean isShuttingDown = executor.isShuttingDown();
@@ -385,6 +422,7 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalActiveExecutorCount);
         metricMap.put("type", "pending-task-total-count");
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
+        monitor.report("app.netty.event.loop.lag.ms", FlexMetricTags.of("name",eventLoopGroupName), maximumLagNs/1e6);
     }
 
     public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {

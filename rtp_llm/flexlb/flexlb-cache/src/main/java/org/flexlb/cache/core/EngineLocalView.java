@@ -59,6 +59,7 @@ public class EngineLocalView {
             return DiffResult.empty(engineIPort);
         }
 
+        long diffStartNs=System.nanoTime();
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
 
         // Efficiently calculate differences
@@ -82,6 +83,8 @@ public class EngineLocalView {
         removedTask.join();
 
         cacheMetricsReporter.reportCacheDiffMetrics(role, addedBlocks.size(), removedBlocks.size());
+        cacheMetricsReporter.reportDiffWork(engineIPort,role,(long)oldCacheBlocks.size()+newCacheBlocks.size(),
+                addedBlocks.size(),removedBlocks.size(),System.nanoTime()-diffStartNs);
 
         // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();

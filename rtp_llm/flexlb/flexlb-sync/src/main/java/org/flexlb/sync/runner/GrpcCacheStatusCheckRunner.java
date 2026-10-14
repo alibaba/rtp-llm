@@ -109,17 +109,23 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
             long startTime = System.nanoTime() / 1000;
             long currentCacheVersion = getCurrentCacheVersion();
+            engineHealthReporter.ensureSyncMetrics(workerStatus);
+            workerStatus.cacheObservation.started();
 
             engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
                             requestTimeoutMs, roleType)
                     .thenApply(cacheStatusPB -> {
+                        workerStatus.cacheObservation.received(cacheStatusPB.getSerializedSize(),cacheStatusPB.getCacheKeysMap().size(),0);
                         logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                                         + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                                 ipPort, roleType.name(), cacheStatusPB.getCacheKeysMap().size(), cacheStatusPB.getVersion(),
                                 cacheStatusPB.getAvailableKvCache(), cacheStatusPB.getTotalKvCache(), cacheStatusPB.getBlockSize());
                         return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
                     })
+                    .whenComplete((cacheStatus, failure) -> workerStatus.cacheObservation.ready(
+                            failure==null&&cacheStatus!=null&&cacheStatus.getMessage()==null))
                     .handleAsync((cacheStatus, failure) -> {
+                        workerStatus.cacheObservation.applying();
                         try {
                             Throwable cause = unwrapCompletionFailure(failure);
                             if (cause != null) {
@@ -140,10 +146,14 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         } catch (Throwable callbackFailure) {
                             logger.error("Cache status callback failed for {}",
                                     ipPort, callbackFailure);
+                        } finally {
+                            engineHealthReporter.logSlowSync(workerStatus,ipPort,"cache");
+                            workerStatus.cacheObservation.done();
                         }
                         return null;
                     }, callbackExecutor)
                     .whenComplete((ignored, callbackFailure) -> {
+                        workerStatus.cacheObservation.done();
                         pollLease.close();
                         if (callbackFailure != null) {
                             logger.error(
@@ -155,6 +165,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             asyncInitiated = true;
         } finally {
             if (!asyncInitiated) {
+                workerStatus.cacheObservation.done();
                 pollLease.close();
             }
         }
@@ -182,6 +193,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             workerStatus.cacheMutationLock.lock();
             try {
                 boolean updateRequired;
+                long oldVersion = -1;
+                long oldKeys = 0;
                 workerStatus.lock.lock();
                 try {
                     if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
@@ -190,6 +203,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     }
                     updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
                     if (updateRequired) {
+                        if(workerStatus.getCacheStatus()!=null){
+                            oldVersion=workerStatus.getCacheStatus().getVersion();
+                            oldKeys=workerStatus.getCacheStatus().getCacheKeySize();
+                        }
                         workerStatus.publishCacheStatus(newCacheStatus);
                     }
                 } finally {
@@ -215,6 +232,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     workerStatus.lock.unlock();
                 }
                 if (updateRequired) {
+                    if(org.flexlb.diagnostics.SyncObservation.logNow(workerStatus.cacheObservation.lastSnapshotLogUs,
+                            workerStatus.cacheObservation.suppressedSnapshots,1_000_000L)) {
+                        logger.info("event=snapshot_changed service=cache address={} role={} generation={} old_version={} new_version={} old_keys={} new_keys={} response_bytes={} indexed={} suppressed={}",
+                                ipPort,roleType,workerStatus.getGenerationId(),oldVersion,newCacheStatus.getVersion(),oldKeys,newCacheStatus.getCacheKeySize(),
+                                workerStatus.cacheObservation.payloadBytes,result!=null&&result.isSuccess(),workerStatus.cacheObservation.suppressedSnapshots.getAndSet(0));
+                    }
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 }
             } finally {
@@ -275,6 +298,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             WorkerCacheUpdateResult result =
                     cacheAwareService.updateEngineBlockCache(workerStatus);
             if (result == null) {
+                logCacheFailure("missing_update_result", null);
                 logger.debug(
                         "Cache service returned no update result for {}#{}",
                         ipPort, generationId);
@@ -283,6 +307,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 return null;
             }
             if (!result.isSuccess()) {
+                logCacheFailure("index_update_rejected", null);
                 logger.debug(
                         "Cache update rejected for {}#{}, error:{}",
                         ipPort,
@@ -295,11 +320,22 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
             return result;
         } catch (Exception e) {
+            logCacheFailure("index_update_exception", e);
             logger.debug("Exception to update worker cache for {}#{}: {}",
                     ipPort, generationId, e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
             return null;
+        }
+    }
+
+    private void logCacheFailure(String reason, Throwable failure) {
+        if(org.flexlb.diagnostics.SyncObservation.logNow(workerStatus.cacheObservation.lastSlowLogUs,
+                workerStatus.cacheObservation.suppressedSlow,10_000_000L)) {
+            logger.warn("event=cache_apply_failed address={} role={} generation={} reason={} cause={} response_bytes={} phase={} suppressed={}",
+                    ipPort,roleType,generationId,reason,failure==null?"none":failure.getClass().getSimpleName(),
+                    workerStatus.cacheObservation.payloadBytes,workerStatus.cacheObservation.phase,
+                    workerStatus.cacheObservation.suppressedSlow.getAndSet(0));
         }
     }
 

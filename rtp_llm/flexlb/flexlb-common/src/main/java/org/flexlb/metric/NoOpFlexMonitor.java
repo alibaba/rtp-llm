@@ -8,6 +8,9 @@ import org.flexlb.enums.FlexPriorityType;
  * All methods are no-ops and return safe default values.
  */
 public class NoOpFlexMonitor implements FlexMonitor {
+    private static final java.util.function.DoubleConsumer NOOP = value -> { };
+    @Override
+    public java.util.function.DoubleConsumer bind(String name, FlexMetricTags tags) { return NOOP; }
 
     private static final NoOpFlexMonitor INSTANCE = new NoOpFlexMonitor();
 

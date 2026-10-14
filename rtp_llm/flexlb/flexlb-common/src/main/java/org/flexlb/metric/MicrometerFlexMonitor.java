@@ -2,6 +2,7 @@ package org.flexlb.metric;
 
 import com.google.common.util.concurrent.AtomicDouble;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -58,6 +59,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, GaugeEntry> gaugeCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Counter> counterCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<MetricKey, DistributionSummary> distributionCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Timer> timerCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<FlexMetricTags, Tags> tagsCache = new ConcurrentHashMap<>();
 
@@ -120,6 +122,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                         timer.record((long) value, TimeUnit.MILLISECONDS);
                     }
                     break;
+                case DISTRIBUTION:
+                    distribution(key).record(value);
+                    break;
                 case GAUGE:
                 default:
                     reportGauge(key, value);
@@ -147,6 +152,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                 case TIMER:
                     timer(key);
                     break;
+                case DISTRIBUTION:
+                    distribution(key);
+                    break;
                 case GAUGE:
                 default:
                     gaugeEntry(key);
@@ -155,6 +163,36 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         } catch (Exception e) {
             log.debug("Failed to prepare metric {}: {}", metricName, e.getMessage());
         }
+    }
+
+    private static final java.util.function.DoubleConsumer NOOP = value -> { };
+
+    @Override
+    public java.util.function.DoubleConsumer bind(String name, FlexMetricTags tags) {
+        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(name)) { return NOOP; }
+        MetricKey key = new MetricKey(METRIC_PREFIX + name, tags);
+        return switch (metricTypes.getOrDefault(name, FlexMetricType.GAUGE)) {
+            case COUNTER, QPS -> { Counter c = counter(key); yield c::increment; }
+            case DISTRIBUTION -> { DistributionSummary d = distribution(key); yield d::record; }
+            case TIMER -> {
+                // Bound hot-path timers use finite SLO buckets, without per-series Hdr quantiles.
+                Timer t = timerCache.computeIfAbsent(key, ignored -> Timer.builder(key.name())
+                        .tags(resolveTags(key.metricsTags()))
+                        .serviceLevelObjectives(java.time.Duration.ofMillis(1), java.time.Duration.ofMillis(10),
+                                java.time.Duration.ofMillis(100), java.time.Duration.ofSeconds(1),
+                                java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(30), java.time.Duration.ofSeconds(120))
+                        .register(meterRegistry));
+                yield value -> t.record((long) (value * 1_000_000), TimeUnit.NANOSECONDS);
+            }
+            case GAUGE -> { GaugeEntry g = gaugeEntry(key); yield g.value::set; }
+        };
+    }
+
+    private DistributionSummary distribution(MetricKey key) {
+        return distributionCache.computeIfAbsent(key, ignored -> DistributionSummary.builder(key.name())
+                .tags(resolveTags(key.metricsTags()))
+                .serviceLevelObjectives(1024, 16384, 262144, 1048576, 4194304, 16777216, 67108864, 268435456)
+                .register(meterRegistry));
     }
 
     private Tags resolveTags(FlexMetricTags metricsTags) {

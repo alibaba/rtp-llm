@@ -64,6 +64,12 @@ public interface FlexMonitor extends AutoCloseable {
         // No-op by default.
     }
 
+    /** Bind once, then record without constructing tag maps on each observation. */
+    default java.util.function.DoubleConsumer bind(String metricName, FlexMetricTags tags) {
+        prepare(metricName, tags);
+        return value -> report(metricName, tags, value);
+    }
+
     @Override
     default void close() {
         // No-op by default.

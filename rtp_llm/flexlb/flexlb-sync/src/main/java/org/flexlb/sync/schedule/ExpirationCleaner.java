@@ -109,6 +109,10 @@ public class ExpirationCleaner {
                 long currentTime = System.nanoTime() / 1000;
                 if (currentTime > expirationTime
                         && !workerStatus.isStatusPollProtected(currentTime, statusCommitGraceUs)) {
+                    logger.warn("event=worker_retiring reason=status_commit_stale address={} role={} generation={} last_commit_age_ms={} last_alive_response_age_ms={} phase={} phase_age_ms={}",
+                            item.getKey(),role,workerStatus.getGenerationId(),(currentTime-health.lastSuccessfulPollUs())/1000.0,
+                            workerStatus.statusObservation.lastAliveResponseUs>0?(currentTime-workerStatus.statusObservation.lastAliveResponseUs)/1000.0:-1,
+                            workerStatus.statusObservation.phase,workerStatus.statusObservation.phaseAgeUs(currentTime)/1000.0);
                     endpointToRetire = workerDirectory.beginRetirement(
                             role, item.getKey(), workerStatus);
                     retirementStarted = true;

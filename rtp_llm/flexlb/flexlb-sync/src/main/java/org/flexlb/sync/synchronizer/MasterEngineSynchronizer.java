@@ -85,11 +85,11 @@ public final class MasterEngineSynchronizer {
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
         // Reject cache overload instead of running cache work on a health/discovery caller.
         int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
-        cacheStatusExecutor = new ThreadPoolExecutor(
+        cacheStatusExecutor = new org.flexlb.diagnostics.ObservedExecutor(
                 cacheThreads, cacheThreads, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15_000),
                 new NamedThreadFactory("cache-status-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new ThreadPoolExecutor.AbortPolicy(), "cacheStatusExecutor");
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(
@@ -102,11 +102,12 @@ public final class MasterEngineSynchronizer {
     }
 
     private static ThreadPoolExecutor executor(int threads, String name) {
-        return new ThreadPoolExecutor(
+        return new org.flexlb.diagnostics.ObservedExecutor(
                 threads, threads, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15_000),
                 new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                new ThreadPoolExecutor.CallerRunsPolicy(),
+                "engine-sync-executor".equals(name) ? "engineSyncExecutor" : "statusCheckExecutor");
     }
 
     private void reportExecutorMetrics() {

@@ -30,7 +30,8 @@ public enum FlexMetricType {
      * Records duration distributions (p50/p90/p95/p99) via Micrometer Timer.
      * Characteristics: Provides histogram data (count, sum, percentiles) instead of instantaneous value
      */
-    TIMER("TIMER", "Timer metric for recording duration distributions (p50/p90/p99)");
+    TIMER("TIMER", "Timer metric for recording duration distributions (p50/p90/p99)"),
+    DISTRIBUTION("DISTRIBUTION", "Non-duration distribution, retaining count and sum");
     private final String type;
     private final String description;
 

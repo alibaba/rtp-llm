@@ -406,6 +406,8 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
 
+            logger.warn("event=worker_retiring reason=discovery_missing_and_stale address={} generation={} last_commit_age_ms={} phase={}",
+                    workerIpPort,workerStatus.getGenerationId(),(System.nanoTime()/1000-health.lastSuccessfulPollUs())/1000.0,workerStatus.statusObservation.phase);
             generationRole = workerStatus.getRole();
             endpointToRetire = workerDirectory.beginRetirement(
                     generationRole, workerIpPort, workerStatus);

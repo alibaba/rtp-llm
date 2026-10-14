@@ -90,6 +90,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 retriesBrokenConnections(serviceType));
     }
 
+    public void registerPeerRole(String ip,int port,String role) { grpcReporter.registerRole(ip,port,role); }
+
     static boolean retriesBrokenConnections(ServiceType serviceType) {
         return serviceType != ServiceType.BATCH_ENQUEUE
                 && serviceType != ServiceType.ENGINE_CANCEL;
@@ -102,9 +104,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                                            boolean retryOnBrokenConnection) {
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
         long startTime = System.nanoTime();
+        String channelKey = createKey(ip, port, serviceType);
+        GrpcReporter.Call metrics = grpcReporter.start(channelKey, ip, port, serviceType.getOperationName(), startTime);
 
         try {
-            String channelKey = createKey(ip, port, serviceType);
             Invoker invoker = getInvoker(channelKey);
 
             if (invoker == null) {
@@ -129,14 +132,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    long endTime = System.nanoTime();
-                    int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
-                    long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-                    grpcReporter.reportCallMetrics(
-                            serviceType.getOperationName(), duration, responseSize, false);
+                    if (metrics != null) { metrics.complete(response, null); }
                     resultFuture.complete(response);
                 }
 
@@ -151,10 +147,12 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                 serviceType.getOperationName(), connectionDuration);
                         Logger.debug("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once async, msh:{}",
                                 ip, port, serviceType, connectionDuration, e.getMessage());
+                        if (metrics != null) { metrics.retryStarted(); }
                         retryWithNewChannelAsync(channelKey, finalInvoker, grpcCall, requestTimeoutMs,
-                                ip, port, serviceType, resultFuture, startTime);
+                                ip, port, serviceType, resultFuture, startTime, metrics);
                     } else {
                         Logger.debug("Exception during async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, t);
+                        if (metrics != null) { metrics.complete(null, t); }
                         resultFuture.completeExceptionally(t);
                     }
                 }
@@ -162,6 +160,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
         } catch (Exception e) {
             Logger.debug("Exception initiating async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
+            if (metrics != null) { metrics.complete(null, e); }
             resultFuture.completeExceptionally(e);
         }
 
@@ -175,7 +174,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                                String ip, int port,
                                                ServiceType serviceType,
                                                CompletableFuture<R> resultFuture,
-                                               long originalStartTime) {
+                                               long originalStartTime, GrpcReporter.Call metrics) {
         try {
             ManagedChannel newChannel = createChannel(channelKey);
             Invoker newInvoker = replaceInvoker(channelKey, staleInvoker, newChannel);
@@ -192,26 +191,21 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    long endTime = System.nanoTime();
-                    int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
-                    long duration = TimeUnit.NANOSECONDS.toMillis(endTime - originalStartTime);
-                    grpcReporter.reportCallMetrics(
-                            serviceType.getOperationName(), duration, responseSize, true);
+                    if (metrics != null) { metrics.complete(response, null); }
                     resultFuture.complete(response);
                 }
 
                 @Override
                 public void onFailure(Throwable t) {
                     Logger.debug("Async retry failed for {}:{} {}", ip, port, serviceType, t);
+                    if (metrics != null) { metrics.complete(null, t); }
                     resultFuture.completeExceptionally(t);
                 }
             }, Runnable::run);
 
         } catch (Exception e) {
             Logger.debug("Exception during async retry for {}:{} {}", ip, port, serviceType, e);
+            if (metrics != null) { metrics.complete(null, e); }
             resultFuture.completeExceptionally(e);
         }
     }

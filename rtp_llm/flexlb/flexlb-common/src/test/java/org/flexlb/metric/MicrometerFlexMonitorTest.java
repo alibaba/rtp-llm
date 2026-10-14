@@ -19,6 +19,22 @@ class MicrometerFlexMonitorTest {
     }
 
     @Test
+    void boundBytesDistributionAndFractionalTimerRetainTheirUnits() {
+        SimpleMeterRegistry registry=new SimpleMeterRegistry();
+        try {
+            MicrometerFlexMonitor monitor=new MicrometerFlexMonitor(registry);
+            monitor.register("test.bytes",FlexMetricType.DISTRIBUTION);
+            monitor.register("test.ms",FlexMetricType.TIMER);
+            var bytes=monitor.bind("test.bytes",FlexMetricTags.of("service","cache"));
+            bytes.accept(10);bytes.accept(20);
+            assertEquals(2,registry.find("flexlb.test.bytes").summary().count());
+            assertEquals(30,registry.find("flexlb.test.bytes").summary().totalAmount());
+            var time=monitor.bind("test.ms",FlexMetricTags.of());time.accept(0.25);
+            assertEquals(0.25,registry.find("flexlb.test.ms").timer().totalTime(TimeUnit.MILLISECONDS),0.0001);
+        } finally { registry.close(); }
+    }
+
+    @Test
     void prepareTimerRegistersWithoutRecordingAndReportReusesIt() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         MicrometerFlexMonitor monitor = new MicrometerFlexMonitor(registry);

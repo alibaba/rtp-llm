@@ -100,12 +100,12 @@ public class FlexlbGrpcServer {
 
         this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
         this.countingAbortHandler = new CountingAbortHandler();
-        this.grpcExecutor = new ThreadPoolExecutor(
+        this.grpcExecutor = new org.flexlb.diagnostics.ObservedExecutor(
                 executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
                 new DefaultThreadFactory("flexlb-grpc-executor"),
-                countingAbortHandler
+                countingAbortHandler, "grpcServerExecutor"
         );
 
         // Register monitoring metrics for the gRPC server executor
