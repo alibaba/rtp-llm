@@ -2,13 +2,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <unistd.h>
@@ -22,6 +25,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
@@ -83,6 +87,12 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
+        const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
+        if (!quarantine_abort_ratio.has_value()) {
+            RTP_LLM_LOG_ERROR("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO must be a finite number in [0, 1]");
+            return false;
+        }
+        quarantine_abort_ratio_ = *quarantine_abort_ratio;
         if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
                               parallelism_config_.tp_size);
@@ -158,6 +168,10 @@ public:
                          tp_rank,
                          parallelism_config_.tp_size,
                          group_policy_->debugString().c_str());
+        RTP_LLM_LOG_INFO("BlockTree KVCM quarantine guard, tp_rank=%ld abort_ratio=%.6f total_device_blocks=%zu",
+                         tp_rank,
+                         quarantine_abort_ratio_,
+                         total_device_block_count_);
         reportQuarantineMetrics(/*generation=*/0, /*lease_count=*/0, /*block_count=*/0);
         return true;
     }
@@ -361,6 +375,19 @@ public:
 
     void reportQuarantineState(uint64_t generation, size_t task_count, size_t block_count) noexcept {
         reportQuarantineMetrics(generation, task_count, block_count);
+        if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
+            const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
+            if (static_cast<long double>(block_count) > threshold) {
+                RTP_LLM_LOG_ERROR("KVCM quarantined block capacity exceeded on rank 0; aborting process: "
+                                  "quarantined_blocks=%zu total_device_blocks=%zu abort_ratio=%.6f "
+                                  "threshold_blocks=%.3Lf",
+                                  block_count,
+                                  total_device_block_count_,
+                                  quarantine_abort_ratio_,
+                                  threshold);
+                std::abort();
+            }
+        }
     }
 
 private:
@@ -459,6 +486,8 @@ private:
         std::vector<kvcm::ClientWrapper::PoolRegistration> registrations;
         std::vector<std::string>                             registration_tags;
         std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag;
+        std::unordered_set<const DeviceBlockPool*>           unique_pools;
+        size_t                                                total_device_block_count = 0;
         registrations.reserve(ordered_groups.size());
         registration_tags.reserve(ordered_groups.size());
         pools_by_tag.reserve(ordered_groups.size());
@@ -468,6 +497,14 @@ private:
             if (!pool->getBaseAddress() || pool->getTotalSizeBytes() == 0) {
                 RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
                 return {};
+            }
+            if (unique_pools.emplace(pool.get()).second) {
+                const size_t pool_block_count = pool->totalBlocksNum();
+                if (pool_block_count > std::numeric_limits<size_t>::max() - total_device_block_count) {
+                    RTP_LLM_LOG_ERROR("KVCM total device block capacity overflow");
+                    return {};
+                }
+                total_device_block_count += pool_block_count;
             }
             bool use_gdr = false;
 #if USING_CUDA
@@ -520,6 +557,7 @@ private:
         }
         pools_by_tag_      = std::move(pools_by_tag);
         registration_tags_ = std::move(registration_tags);
+        total_device_block_count_ = total_device_block_count;
         return registrations;
     }
 
@@ -614,6 +652,10 @@ private:
             RtpLLMRemoteCacheQuarantineMetricsCollector collector;
             collector.quarantined_lease_count = static_cast<int64_t>(lease_count);
             collector.quarantined_block_count = static_cast<int64_t>(block_count);
+            if (parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
+                collector.quarantined_block_ratio = static_cast<double>(block_count)
+                                                    / static_cast<double>(total_device_block_count_);
+            }
             metrics_reporter_->report<RtpLLMRemoteCacheQuarantineMetrics,
                                       RtpLLMRemoteCacheQuarantineMetricsCollector>(nullptr, &collector);
             quarantine_metrics_reported_        = true;
@@ -757,6 +799,8 @@ private:
     std::shared_ptr<kvcm::ClientWrapper>                 client_wrapper_;
     std::vector<std::string>                             registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
+    size_t                                               total_device_block_count_{0};
+    double                                               quarantine_abort_ratio_{0.0};
     mutable std::mutex                                   quarantine_metrics_mutex_;
     mutable bool                                         quarantine_metrics_reported_{false};
     mutable uint64_t                                     last_quarantine_metrics_generation_{0};
