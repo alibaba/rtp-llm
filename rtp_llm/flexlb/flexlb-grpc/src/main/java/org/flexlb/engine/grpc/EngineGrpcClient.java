@@ -122,13 +122,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 @Override
                 public void onSuccess(R response) {
                     long endTime = System.nanoTime();
-                    int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
                     long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
                     grpcReporter.reportCallMetrics(
-                            serviceType.getOperationName(), duration, responseSize, false);
+                            serviceType.getOperationName(), duration,
+                            () -> response instanceof MessageLite message ? message.getSerializedSize() : 0, false);
                     resultFuture.complete(response);
                 }
 
@@ -185,13 +182,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 @Override
                 public void onSuccess(R response) {
                     long endTime = System.nanoTime();
-                    int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
                     long duration = TimeUnit.NANOSECONDS.toMillis(endTime - originalStartTime);
                     grpcReporter.reportCallMetrics(
-                            serviceType.getOperationName(), duration, responseSize, true);
+                            serviceType.getOperationName(), duration,
+                            () -> response instanceof MessageLite message ? message.getSerializedSize() : 0, true);
                     resultFuture.complete(response);
                 }
 

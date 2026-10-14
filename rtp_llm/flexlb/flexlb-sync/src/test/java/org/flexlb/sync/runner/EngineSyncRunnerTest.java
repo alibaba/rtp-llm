@@ -108,6 +108,66 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void busyMissingGenerationDoesNotBlockSurvivorPolling() throws Exception {
+        WorkerStatus missing = RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
+        discover(workerDirectory, missing);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.2", 8080)));
+        var caller = java.util.concurrent.Executors.newSingleThreadExecutor();
+        missing.lock.lock();
+        try {
+            caller.submit(engineSyncRunner).get(1, java.util.concurrent.TimeUnit.SECONDS);
+            verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+            assertTrue(workerDirectory.isCurrentStatus(RoleType.PREFILL, missing.getIpPort(), missing));
+        } finally {
+            missing.lock.unlock();
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void overlappingDiscoveryPassPollsSurvivorsWhileCacheRetirementIsBlocked() throws Exception {
+        WorkerStatus missing = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
+        when(missing.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+                System.nanoTime() / 1_000 - STATUS_STALE_AFTER_US - 1_000_000,
+                20_000L, 0L, true));
+        discover(workerDirectory, missing);
+        WorkerStatus another = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.3", 8080, 8081, "test-site"));
+        when(another.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+                System.nanoTime() / 1_000 - STATUS_STALE_AFTER_US - 1_000_000,
+                20_000L, 0L, true));
+        discover(workerDirectory, another);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.2", 8080)));
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        Mockito.doAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            return null;
+        }).when(localKvCacheAwareManager).removeEngineBlockCache(Mockito.anyString());
+        var callers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var retiring = callers.submit(engineSyncRunner);
+            assertTrue(entered.await(1, java.util.concurrent.TimeUnit.SECONDS));
+            callers.submit(engineSyncRunner).get(1, java.util.concurrent.TimeUnit.SECONDS);
+            verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+            assertTrue(!missing.isActiveGeneration() || !another.isActiveGeneration());
+            release.countDown();
+            retiring.get(1, java.util.concurrent.TimeUnit.SECONDS);
+            assertFalse(workerDirectory.statusSnapshot(RoleType.PREFILL).containsKey(missing.getIpPort()));
+        } finally {
+            release.countDown();
+            callers.shutdownNow();
+            assertTrue(callers.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void should_handle_null_worker_status_gracefully() {
         EngineSyncRunner runnerWithEmptyDirectory = new EngineSyncRunner(
                 modelName,

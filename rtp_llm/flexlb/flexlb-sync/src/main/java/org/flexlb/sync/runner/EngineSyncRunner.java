@@ -122,12 +122,17 @@ public class EngineSyncRunner implements Runnable {
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
             logger.debug("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
-                WorkerStatus workerStatus = entry.getValue();
-                String ipPort = entry.getKey();
-                if (!latestValidIpPorts.contains(ipPort)) {
-                    retireMissingGenerationIfExpired(
-                            ipPort, workerStatus);
+            // Only one pass owns the potentially expensive retirement batch.
+            // Concurrent discovery passes must remain available for live polling.
+            try (var retirementPass = workerDirectory.tryBeginMissingRetirementPass()) {
+                if (retirementPass != null) {
+                    for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
+                        WorkerStatus workerStatus = entry.getValue();
+                        String ipPort = entry.getKey();
+                        if (!latestValidIpPorts.contains(ipPort)) {
+                            retireMissingGenerationIfExpired(ipPort, workerStatus);
+                        }
+                    }
                 }
             }
             if (latestEngineWorkerList.isEmpty()) {
@@ -379,7 +384,12 @@ public class EngineSyncRunner implements Runnable {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
-        workerStatus.lock.lock();
+        // Discovery polling must not queue behind a removed generation's
+        // cache-index cleanup. Another pass can retry this exact identity;
+        // surviving workers still need their status RPCs on this pass.
+        if (!workerStatus.lock.tryLock()) {
+            return;
+        }
         try {
             if (!workerDirectory.isCurrentStatus(
                     roleType, workerIpPort, workerStatus)) {

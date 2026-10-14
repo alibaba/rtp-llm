@@ -58,6 +58,11 @@ public class GrpcReporter {
      * @param isRetry Whether this is a retry call
      */
     public void reportCallMetrics(String serviceType, long duration, int responseSize, boolean isRetry) {
+        reportCallMetrics(serviceType, duration, () -> responseSize, isRetry);
+    }
+
+    public void reportCallMetrics(String serviceType, long duration,
+                                  java.util.function.DoubleSupplier responseSize, boolean isRetry) {
         FlexMetricTags tags = FlexMetricTags.of(
             "service", serviceType,
             "retry", String.valueOf(isRetry)
@@ -67,7 +72,7 @@ public class GrpcReporter {
         monitor.report(GRPC_CALL_DURATION, tags, duration);
 
         // Report response body size
-        monitor.report(GRPC_RESPONSE_SIZE, tags, responseSize);
+        monitor.reportLazy(GRPC_RESPONSE_SIZE, tags, responseSize);
 
         // Report call count
         monitor.report(GRPC_CALL_COUNT, tags, 1);
