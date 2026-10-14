@@ -991,3 +991,217 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+
+py_test(
+    name = "xing4_0_fp8_grid_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--batch_size", "1,8,16,32,64",
+        "--input_len", "1024,4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_prefill_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "2",
+        "--input_len", "1024,4096",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+
+py_test(
+    name = "xing4_0_fp8_grid_tp1_graph",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--batch_size", "1,8,16,32,64",
+        "--input_len", "4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+
+# Xing4.0 64K/128K gate matrix (skill step-6 §0): pure prefill, 90% prefix
+# cache, and TPOT<=20/15ms TPS concurrency search. Run after HC fusion lands.
+py_test(
+    name = "xing4_0_fp8_prefill_tp1_long",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "2",
+        "--input_len", "65536,131072",
+        "--decode_test_length", "1",
+        "--num_measures", "3",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_prefill_tp1_cache90",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+        ":xing4_cache90_grid.json",
+    ],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "2",
+        "--cache_grid_json", "$(location :xing4_cache90_grid.json)",
+        "--cache_commit_tail_tokens", "2048",
+        "--cache_measure_runs", "3",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_tps20_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "1",
+        "--target_tpot", "20",
+        "--input_len", "65536,131072",
+        "--concurrency_limit", "64",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_tps15_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "1",
+        "--target_tpot", "15",
+        "--input_len", "65536,131072",
+        "--concurrency_limit", "64",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

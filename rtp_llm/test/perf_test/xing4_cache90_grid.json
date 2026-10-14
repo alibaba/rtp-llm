@@ -1,0 +1,6 @@
+{
+  "cases": [
+    {"case_id": 0, "batch_size": 1, "input_len": 65536, "cache_len": 59392},
+    {"case_id": 1, "batch_size": 1, "input_len": 131072, "cache_len": 118784}
+  ]
+}
