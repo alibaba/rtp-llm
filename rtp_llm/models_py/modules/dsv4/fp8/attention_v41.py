@@ -615,6 +615,8 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         w = kwargs["layer_weights"]
+        # Retained only until resident Q-B initialization rebinds the owner.
+        self._qb_weight_owner = w if self.is_index_source else None
         if self.is_kv_source:
             self.global_wkv = w[W.v4_compressor_wkv]
             self.global_norm = w[W.v4_compressor_norm]
@@ -625,6 +627,8 @@ class AttentionV41FP8(AttentionFP8):
             self.index_wq = _v4_fp8_linear(
                 w[W.v4_indexer_wq_b_w], w[W.v4_indexer_wq_b_s]
             )
+            self.index_wq._sleep_raw_weight_source = w[W.v4_indexer_wq_b_w]
+            self.index_wq._sleep_raw_scale_source = w[W.v4_indexer_wq_b_s]
             self.index_weights = w[W.v4_indexer_weights_proj_w]
         self._pool_spec[CSA_STATE] = (torch.float32, 2 * self.head_dim)
         self._pool_spec[SWA_KV] = (torch.uint8, swa_codec.ENTRY_BYTES)
@@ -634,6 +638,7 @@ class AttentionV41FP8(AttentionFP8):
         self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
         self._mega_attention = None
+        self._merged_qb = None
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -667,6 +672,10 @@ class AttentionV41FP8(AttentionFP8):
         super().init_rope_cache(device=device)
         if self._mega_attention is None:
             self._mega_attention = MegaAttention.create(self)
+            from ._v41_merged_qb import MergedQB
+
+            self._merged_qb = MergedQB.create(self, self._qb_weight_owner)
+            self._qb_weight_owner = None
         else:
             self._mega_attention.refresh_rope(self)
 
@@ -674,6 +683,9 @@ class AttentionV41FP8(AttentionFP8):
         super().reload_sleep_computed_weights(seen_freqs, seen_cos_sin)
         if self._mega_attention is not None:
             self._mega_attention.reload(self)
+        if self._merged_qb is not None:
+            self._reload_linear_scale(self.index_wq)
+            self._merged_qb.reload(self.wq_b, self.index_wq)
 
     def _project_output(self, o: MegaAttentionOutput, out=None):
         return self._mega_attention.project(self, o, out=out)
@@ -2545,7 +2557,7 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
-    def _select_indices_decode(self, x, qr, positions, qr_quantized=None):
+    def _select_indices_decode(self, x, qr, positions, qr_quantized=None, index_q=None):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
         if not self.is_index_source:
@@ -2563,11 +2575,13 @@ class AttentionV41FP8(AttentionFP8):
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 
-        q = (
-            self.index_wq.forward_quantized(*qr_quantized)
-            if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
-            else self._lin(self.index_wq, qr.reshape(T, -1))
-        ).view(T, self.index_n_heads, self.index_head_dim)
+        if index_q is None:
+            index_q = (
+                self.index_wq.forward_quantized(*qr_quantized)
+                if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
+                else self._lin(self.index_wq, qr.reshape(T, -1))
+            )
+        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
         config = self.v41_config
@@ -2828,7 +2842,7 @@ class AttentionV41FP8(AttentionFP8):
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized
+                x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
             )
             slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
             o = mega.decode(

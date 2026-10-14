@@ -39,6 +39,8 @@ class DecodeQKV(NamedTuple):
     freqs_cis: torch.Tensor
     qr_quantized: tuple[torch.Tensor, torch.Tensor] | None = None
     swa_written: bool = False
+    # Optional precomputed Indexer Q; shares the merged GEMM output storage.
+    index_q: torch.Tensor | None = None
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -99,13 +101,20 @@ def decode_compute_qkv(
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
     else:
         qr = fused_qkv[0]
-    q = (
-        attn._lin(attn.wq_b, qr)
-        if qr_quantized is None
-        else attn.wq_b.forward_quantized(*qr_quantized)
-    ).unflatten(
-        -1, (attn.n_heads, attn.head_dim)
-    )  # [B, S, H, D]
+    merged = getattr(attn, "_merged_qb", None)
+    index_q = None
+    if merged is not None and qr_quantized is not None and not apply_q_rope:
+        from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+        with record_function_range("dsv41.decode.qb.merged"):
+            q, index_q = merged.forward_quantized(*qr_quantized)
+    else:
+        q = (
+            attn._lin(attn.wq_b, qr)
+            if qr_quantized is None
+            else attn.wq_b.forward_quantized(*qr_quantized)
+        )
+    q = q.unflatten(-1, (attn.n_heads, attn.head_dim))
     raw_kv = attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1]
     if (
         getattr(attn, "skip_post_q_norm", False)
@@ -130,7 +139,9 @@ def decode_compute_qkv(
             apply_q_rope=apply_q_rope,
         )
         if fused is not None:
-            return DecodeQKV(qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True)
+            return DecodeQKV(
+                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q
+            )
     if apply_q_rope:
         if getattr(attn, "skip_post_q_norm", False):
             _apply_v41_q_rope(q, freqs_cis, rd)
@@ -146,4 +157,7 @@ def decode_compute_qkv(
         eps=attn.eps,
     )
 
-    return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis, qr_quantized=qr_quantized)
+    return DecodeQKV(
+        qr=qr, q=q, kv=kv, freqs_cis=freqs_cis,
+        qr_quantized=qr_quantized, index_q=index_q,
+    )

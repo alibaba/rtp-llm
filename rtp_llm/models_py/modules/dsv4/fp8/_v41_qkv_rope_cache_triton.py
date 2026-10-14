@@ -126,7 +126,8 @@ def _fused_qkv_rope_cache_kernel(
 
 
 def is_supported(
-    q, kv, kv_norm, positions, freqs_table, pool_3d, slots, *, freqs_cis=None
+    q, kv, kv_norm, positions, freqs_table, pool_3d, slots, *, freqs_cis=None,
+    apply_q_rope=True,
 ) -> bool:
     if os.environ.get("DSV41_FUSED_QKV_ROPE_CACHE", "1") != "1":
         return False
@@ -139,7 +140,8 @@ def is_supported(
         or q.ndim != 4
         or q.shape[-1] != 512
         or q.shape[-2] <= 0
-        or not q.is_contiguous()
+        # When Mega Attention owns Q RoPE, this kernel never reads/writes Q.
+        or (apply_q_rope and not q.is_contiguous())
         or any(value.device != q.device for value in tensors[1:])
         or kv.dtype != torch.bfloat16
         or kv.shape != (*q.shape[:2], 512)
@@ -198,7 +200,8 @@ def try_fused_qkv_rope_cache(
         not isinstance(eps, (int, float))
         or eps < 0
         or not is_supported(
-            q, kv, kv_norm, positions, freqs_table, pool_3d, slots, freqs_cis=freqs_cis
+            q, kv, kv_norm, positions, freqs_table, pool_3d, slots,
+            freqs_cis=freqs_cis, apply_q_rope=apply_q_rope,
         )
     ):
         return None
