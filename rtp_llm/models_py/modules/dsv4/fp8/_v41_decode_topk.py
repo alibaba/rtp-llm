@@ -3,7 +3,8 @@
 """Batched V4.1 decode selection and fused candidate metadata.
 
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
-Block and token selection reuse RTP's exact radix-select kernel. Output order
+Supported block and token selections reuse RTP's exact radix-select kernel;
+other candidate counts retain torch.topk. Output order
 and cutoff-tie choices are unspecified; the newest block remains pinned.
 """
 
@@ -162,8 +163,6 @@ def select_candidates(
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
-    if topk_blocks not in (512, 1024, 2048):
-        raise ValueError("candidate TopK must be 512, 1024, or 2048")
     # Keep score rows aligned for topk_v3's vectorized loads, without widening
     # its logical selection domain or reading uninitialized padding.
     score_stride = triton.cdiv(nblocks, 256) * 256
@@ -185,14 +184,17 @@ def select_candidates(
     )
     candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
     if nblocks > count:
-        rtp_llm_ops.topk_v3(
-            scores,
-            block_lengths,
-            candidates,
-            _get_topk_workspace(logits.device),
-            count,
-            nblocks,
-        )
+        if count in (512, 1024, 2048):
+            rtp_llm_ops.topk_v3(
+                scores,
+                block_lengths,
+                candidates,
+                _get_topk_workspace(logits.device),
+                count,
+                nblocks,
+            )
+        else:
+            candidates.copy_(scores.topk(count, dim=-1, sorted=False).indices)
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
     _candidate_store_flags_kernel[(rows,)](
         scores, candidates, flags, count, nblocks, score_stride

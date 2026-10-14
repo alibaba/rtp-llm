@@ -666,8 +666,12 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         flags.scatter_(1, torch.where(candidates >= 0, candidates, nblocks).long(), 1)
         return candidates, flags[:, :nblocks]
 
-    def _assert_candidates(self, logits, lengths, candidates, flags, block_size=8):
-        expected, expected_flags = self._old_candidates(logits, lengths, block_size)
+    def _assert_candidates(
+        self, logits, lengths, candidates, flags, block_size=8, topk_blocks=2048
+    ):
+        expected, expected_flags = self._old_candidates(
+            logits, lengths, block_size, topk_blocks
+        )
         self.assertEqual(candidates.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.uint8)
         torch.testing.assert_close(
@@ -682,6 +686,80 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
             else:
                 self.assertEqual(ids.numel(), 0)
         return expected_flags
+
+    def test_candidate_counts_preserve_reference_and_dispatch(self):
+        # Cover the original K=8 regression, both sides of radix-supported K,
+        # and pools smaller than/equal to K, including a partial final block.
+        for topk_blocks in (
+            1, 8, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4096
+        ):
+            for nblocks in (max(1, topk_blocks - 1), topk_blocks, topk_blocks + 3):
+                with self.subTest(topk_blocks=topk_blocks, nblocks=nblocks):
+                    width = nblocks * 8 - 3
+                    columns = torch.arange(width, device="cuda")
+                    storage = torch.full((6, width + 13), 12345.0, device="cuda")
+                    logits = storage[:, :width]
+                    logits.copy_(columns.float()[None])
+                    lengths = torch.tensor(
+                        [0, 1, min(7, width), min(9, width), width - 1, width],
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                    logits[4].fill_(-torch.inf)
+                    # PyTorch ranks NaN above the pinned +inf; leave room for
+                    # both so the newest-block assertion remains applicable.
+                    if topk_blocks > 1:
+                        logits[5, 0] = torch.nan
+                    logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+                    with patch.object(
+                        self.impl.rtp_llm_ops,
+                        "topk_v3",
+                        wraps=self.impl.rtp_llm_ops.topk_v3,
+                    ) as radix:
+                        ids, flags = self.impl.select_candidates(
+                            logits, lengths, 8, topk_blocks
+                        )
+                    self.assertEqual(
+                        radix.call_count,
+                        int(
+                            nblocks > topk_blocks
+                            and topk_blocks in (512, 1024, 2048)
+                        ),
+                    )
+                    expected_flags = self._assert_candidates(
+                        logits, lengths, ids, flags, topk_blocks=topk_blocks
+                    )
+                    expected = logits.masked_fill(
+                        ~expected_flags[:, columns // 8].bool(), -torch.inf
+                    )
+                    self.impl.mask_candidates(logits, flags, 8)
+                    torch.testing.assert_close(
+                        logits, expected, rtol=0, atol=0, equal_nan=True
+                    )
+                    self.assertTrue(bool((storage[:, width:] == 12345.0).all()))
+
+    def test_candidate_torch_fallback_graph_replay(self):
+        width, topk_blocks = 768, 8
+        columns = torch.arange(width, device="cuda")
+        logits = columns.float()[None].repeat(6, 1)
+        lengths = torch.full((6,), width, dtype=torch.int32, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            ids, flags = self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        for visible in ([0, 1, 7, 8, 9, width], [width, 511, 65, 64, 63, 0]):
+            lengths.copy_(torch.tensor(visible, device="cuda", dtype=torch.int32))
+            logits.copy_(-columns.float()[None])
+            logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+            graph.replay()
+            self._assert_candidates(
+                logits, lengths, ids, flags, topk_blocks=topk_blocks
+            )
 
     def _assert_tokens(self, logits, lengths, result, topk=512):
         self.assertEqual(result.dtype, torch.int32)
