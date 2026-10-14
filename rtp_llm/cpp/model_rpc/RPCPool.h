@@ -71,22 +71,24 @@ public:
         return getReadyConnection(std::move(peer), std::chrono::system_clock::now() + timeout);
     }
 
-    absl::StatusOr<Connection<T>>
-    getReadyConnection(std::string                                peer,
-                       std::chrono::system_clock::time_point       deadline,
-                       const std::function<bool()>&                is_cancelled = nullptr) {
+    absl::StatusOr<Connection<T>> getReadyConnection(std::string                           peer,
+                                                     std::chrono::system_clock::time_point deadline,
+                                                     const std::function<bool()>&          is_cancelled = nullptr) {
         auto connection_status = getConnection(peer);
         if (!connection_status.ok()) {
             return connection_status.status();
         }
 
-        auto           connection = connection_status.value();
-        const auto     begin_time = std::chrono::steady_clock::now();
-        const auto     state      = connection.channel->GetState(false);
+        auto           connection                = connection_status.value();
+        const auto     begin_time                = std::chrono::steady_clock::now();
+        const auto     state                     = connection.channel->GetState(false);
         constexpr auto kCancellationPollInterval = std::chrono::milliseconds(10);
         while (true) {
             if (is_cancelled && is_cancelled()) {
                 return absl::CancelledError("grpc channel readiness wait for " + peer + " was cancelled");
+            }
+            if (connection.channel->GetState(false) == GRPC_CHANNEL_READY) {
+                return connection;
             }
             const auto now = std::chrono::system_clock::now();
             if (now >= deadline) {
