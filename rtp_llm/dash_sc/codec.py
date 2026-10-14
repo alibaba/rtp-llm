@@ -769,10 +769,12 @@ class SamplingParams:
 
         structural_tag = self.structural_tag
         if self.response_format is not None:
-            # Preserve Dash precedence at its protocol boundary: an explicit
-            # response_format wins over the direct structural_tag control.
             response_format = parse_response_format(self.response_format)
-            structural_tag = None
+            # Dash sends text as a default alongside forced tool-call constraints.
+            if response_format is not None and response_format.type == "text":
+                response_format = None
+            else:
+                structural_tag = None
         elif self.json_format and structural_tag is None:
             response_format = parse_response_format({"type": "json_object"})
         else:

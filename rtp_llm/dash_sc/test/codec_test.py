@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc import codec
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -551,17 +551,27 @@ class DashScGrpcRequestTest(TestCase):
 
     def test_parse_sampling_tool_call_structural_tag_parameter(self) -> None:
         tag = _tool_call_structural_tag()
-        req = predict_v2_pb2.ModelInferRequest()
-        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
-            tag, ensure_ascii=False
-        )
+        for response_format in (None, {"type": "text"}):
+            with self.subTest(response_format=response_format):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+                    tag, ensure_ascii=False
+                )
+                if response_format is not None:
+                    req.parameters["response_format"].string_param = json.dumps(
+                        response_format
+                    )
 
-        sp = parse_sampling_params(req)
-        config = sp.to_generate_config()
+                sp = parse_sampling_params(req)
+                config = sp.to_generate_config()
 
-        self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(config.structural_tag, tag)
-        self.assertIsNone(config.response_format)
+                self.assertEqual(json.loads(sp.structural_tag), tag)
+                self.assertEqual(config.structural_tag, tag)
+                self.assertIsNone(config.response_format)
+                config.finalize_response_format()
+                self.assertEqual(
+                    config.structural_tag, {"type": "structural_tag", **tag}
+                )
 
     def test_parse_sampling_normalizes_dashscope_sequence_structural_tag(self) -> None:
         tag = _dashscope_sequence_tool_call_structural_tag()
