@@ -97,6 +97,7 @@ public:
                                                   TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    void expandTargetVerifyPositionIdsFromDecode(GptModelInputs& model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,

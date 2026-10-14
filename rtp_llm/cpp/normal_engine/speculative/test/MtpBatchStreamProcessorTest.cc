@@ -722,6 +722,118 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputKeepsEmptyTpFollowerPositionPlaceholder) {
+    const StreamGroups empty_stream_groups({});
+    for (const bool device_input : {false, true}) {
+        autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
+        for (int position_mode = 0; position_mode < 4; ++position_mode) {
+            ModelConfig model_config;
+            model_config.num_layers                            = 1;
+            model_config.has_positional_encoding               = position_mode == 1;
+            model_config.requires_token_position_ids           = position_mode == 2;
+            model_config.mm_model_config.mm_position_ids_style = position_mode == 3 ? MROPE : DEFAULT;
+            model_config.attn_config.rope_config.index_factor  = position_mode == 3 ? 3 : 1;
+            for (const auto spec_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+                for (const int propose_step : {1, 3}) {
+                    SCOPED_TRACE(testing::Message()
+                                 << "device_input=" << device_input << " position_mode=" << position_mode
+                                 << " spec_type=" << spec_type << " propose_step=" << propose_step);
+                    SpeculativeExecutionConfig sp_config;
+                    sp_config.type              = spec_type;
+                    sp_config.gen_num_per_cycle = propose_step;
+                    MtpBatchStreamProcessor processor(model_config,
+                                                      PDSepConfig{},
+                                                      ProfilingDebugLoggingConfig{},
+                                                      makeProcessorCacheConfig(),
+                                                      sp_config,
+                                                      false);
+                    TensorHolder            holder;
+                    // TP followers gather no local streams before receiving
+                    // the driver's input. An empty allocated tensor is still
+                    // a valid broadcast placeholder, unlike an undefined one.
+                    auto result = processor.gatherDecodeModelInput(empty_stream_groups, holder);
+                    ASSERT_TRUE(result.ok()) << result.status();
+                    ASSERT_TRUE(result->combo_tokens.defined());
+                    EXPECT_EQ(result->combo_tokens.numel(), 0);
+                    ASSERT_TRUE(result->input_lengths.defined());
+                    EXPECT_EQ(result->input_lengths.numel(), 0);
+                    const auto& positions = result->combo_position_ids;
+                    ASSERT_EQ(positions.defined(), position_mode != 0);
+                    if (positions.defined()) {
+                        EXPECT_EQ(positions.dim(), 1);
+                        EXPECT_EQ(positions.numel(), 0);
+                        EXPECT_EQ(positions.scalar_type(), torch::kInt32);
+                        EXPECT_TRUE(positions.device().is_cpu());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputUsesDeviceAndFreshRequestPositionBases) {
+    for (const bool device_input : {false, true}) {
+        autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
+        for (const bool mrope : {false, true}) {
+            for (const auto spec_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+                for (const int propose_step : {1, 3}) {
+                    SCOPED_TRACE(testing::Message() << "device_input=" << device_input << " mrope=" << mrope
+                                                    << " spec_type=" << spec_type << " propose_step=" << propose_step);
+                    ModelConfig model_config;
+                    model_config.max_seq_len                           = 2048;
+                    model_config.vocab_size                            = 256;
+                    model_config.num_layers                            = 1;
+                    model_config.has_positional_encoding               = false;
+                    model_config.requires_token_position_ids           = !mrope;
+                    model_config.mm_model_config.mm_position_ids_style = mrope ? MROPE : DEFAULT;
+                    model_config.attn_config.rope_config.index_factor  = mrope ? 3 : 1;
+                    RuntimeConfig              runtime_config;
+                    ResourceContext            resource_context;
+                    SpeculativeExecutionConfig sp_config;
+                    sp_config.type              = spec_type;
+                    sp_config.gen_num_per_cycle = propose_step;
+                    auto steady = createContextStream(model_config, runtime_config, resource_context, {10, 11}, 1);
+                    auto fresh  = createContextStream(model_config, runtime_config, resource_context, {20, 21, 22}, 2);
+                    steady->setIsContextStream(false);
+                    fresh->setIsContextStream(false);
+                    steady->setContextPositionIds(
+                        torch::tensor(mrope ? vector<int>{1, 1, 1, 2, 2, 2} : vector<int>{0, 1}, torch::kInt32));
+                    fresh->setContextPositionIds(torch::tensor(
+                        mrope ? vector<int>{100, 101, 102, 110, 111, 112, 120, 121, 122} : vector<int>{0, 1, 2},
+                        torch::kInt32));
+                    steady->getSPOutputBuffer()->hidden_states = torch::tensor({{1.0f, 2.0f}});
+                    fresh->getSPOutputBuffer()->hidden_states  = torch::tensor({{3.0f, 4.0f}});
+                    // The published device position is newer than the host's
+                    // two-token history; a fresh request has only host state.
+                    GenerateStream::MtpAsyncDeviceState state;
+                    state.next_position_ids_gpu =
+                        torch::tensor(mrope ? vector<int>{30, 40, 50} : vector<int>{30}, torch::kInt32)
+                            .to(torch::kCUDA);
+                    steady->setMtpAsyncDeviceState(std::move(state));
+                    StreamGroups            stream_groups({steady, fresh});
+                    MtpBatchStreamProcessor processor(model_config,
+                                                      PDSepConfig{},
+                                                      ProfilingDebugLoggingConfig{},
+                                                      makeProcessorCacheConfig(),
+                                                      sp_config,
+                                                      false);
+                    TensorHolder            holder;
+                    auto                    result = processor.gatherDecodeModelInput(stream_groups, holder);
+                    ASSERT_TRUE(result.ok()) << result.status();
+                    ASSERT_TRUE(result->combo_position_ids.defined());
+                    EXPECT_TRUE(result->combo_position_ids.is_cuda());
+                    EXPECT_EQ(result->combo_position_ids.dim(), 1);
+                    EXPECT_EQ(result->combo_position_ids.scalar_type(), torch::kInt32);
+                    // Gather publishes one position row per request. Draft
+                    // and target-verify expansion happens after TP broadcast.
+                    EXPECT_EQ((mrope ? vector<int>{30, 40, 50, 122, 122, 122} : vector<int>{30, 2}),
+                              toVec<int>(result->combo_position_ids));
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

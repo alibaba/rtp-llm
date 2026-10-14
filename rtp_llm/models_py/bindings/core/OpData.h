@@ -106,6 +106,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
     bool is_mtp_draft_update = false;
+    // Local execution identity; assigned independently on each TP rank after
+    // input broadcast. Zero means no background attention preparation.
+    uint64_t attention_prepare_id = 0;
     int64_t sp_logical_requests = 0;
     int64_t sp_logical_tokens = 0;
 

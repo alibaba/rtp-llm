@@ -54,6 +54,7 @@ public:
                     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
+        device_only_attention_metadata_(graph_params.device_only_attention_metadata),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         role_(graph_params.role),
@@ -205,9 +206,17 @@ private:
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         // DSpARK propose/commit run as decode graphs. HC-shaped drafts and
-        // model-declared rectangular draft attention retain the full physical
-        // capacity across every MTP draft-prefill capture bucket.
+        // rectangular draft attention require a fixed B*Q shape per graph.
         return isMtpDraftPrefillCudaGraph() && (hc_mult_ > 1 || fixed_capacity_mtp_draft_prefill_);
+    }
+    int mtpDraftPrefillBatchCapacity(int tokens) const {
+        if (!usesFixedCapacityMtpDraftPrefillCudaGraph())
+            return static_cast<int>(max_bs_);
+        const int alignment = sequence_parallel_size_ / std::gcd(sequence_parallel_size_, num_tokens_per_bs_);
+        const int requests  = (tokens + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
+        const int rounded   = (requests + alignment - 1) / alignment * alignment;
+        RTP_LLM_CHECK_WITH_INFO(rounded <= static_cast<int>(max_bs_), "MTP bucket exceeds request capacity");
+        return rounded;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -239,6 +248,7 @@ private:
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
+    bool                    device_only_attention_metadata_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};

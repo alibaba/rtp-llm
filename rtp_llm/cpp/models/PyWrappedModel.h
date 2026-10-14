@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -88,7 +89,10 @@ public:
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void            prepareAttentionInputs(const GptModelInputs& inputs,
+                                           bool                  skip_forward_event_sync,
+                                           const GptModelInputs* publication_inputs = nullptr);
+    void            invalidatePreparedAttentionInputs() override;
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
 
@@ -99,7 +103,12 @@ private:
 
 private:
     bool sequence_parallel_padding_enabled_ = false;
-    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
+    bool           device_only_decode_attention_metadata_ = false;
+    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs,
+                                             bool                  reuse_prepared_metadata = false,
+                                             bool                  metadata_only           = false);
+    void           validatePreparedAttentionInputs(const GptModelInputs& inputs) const;
+    void           retirePreparedAttentionInputs();
 
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
@@ -187,6 +196,19 @@ private:
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
     std::atomic<bool>               prepared_attention_inputs_{false};
+    std::optional<GptModelInputs>   prepared_input_snapshot_;
+    std::optional<GptModelInputs>   prepared_padded_input_snapshot_;
+    int64_t                         prepared_physical_requests_{0};
+    int64_t                         prepared_physical_tokens_{0};
+    struct RetiredAttentionInputs {
+        torch::Event                    event;
+        GptModelInputs                  snapshot;
+        GptModelInputs                  padded_snapshot;
+        torch_ext::PyAttentionInputs    attention;
+        torch_ext::AttentionInputsByTag by_tag;
+        py::object                      implementation;
+    };
+    std::deque<RetiredAttentionInputs> retired_attention_inputs_;
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
     CudaGraphState                  graph_state_;
@@ -348,6 +370,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    device_only_decode_attention_metadata_ = py::hasattr(py_instance, "device_only_decode_attention_metadata")
+                                             && py_instance.attr("device_only_decode_attention_metadata").cast<bool>();
     RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_
                                 || device_props_.enable_layer_micro_batch == MicroBatchType::NONE,
                             "K3 SP requires ENABLE_LAYER_MICRO_BATCH=0");
@@ -405,6 +429,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
         graph_params.model_data_type            = dtype;
+        graph_params.device_only_attention_metadata = device_only_decode_attention_metadata_;
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;

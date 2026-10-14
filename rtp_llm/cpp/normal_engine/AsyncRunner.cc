@@ -15,6 +15,11 @@ AsyncRunner::AsyncRunner(torch::Stream stream): stream_(stream), event_(stream.d
 }
 
 AsyncRunner::~AsyncRunner() {
+    try {
+        drain();
+    } catch (...) {
+        // Destructors cannot propagate CUDA teardown errors.
+    }
     {
         std::lock_guard<std::mutex> lk(mutex_);
         shutdown_ = true;
@@ -47,6 +52,15 @@ void AsyncRunner::sync(const torch::Stream& wait_stream) {
     event_.block(wait_stream);
 }
 
+void AsyncRunner::drain() {
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_done_.wait(lk, [this] { return task_done_; });
+    pending_exception_ = nullptr;
+    // No worker can publish or release a capture while task_done_ is true.
+    stream_.synchronize();
+    completed_tasks_.clear();
+}
+
 void AsyncRunner::rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk) {
     if (!pending_exception_) {
         return;
@@ -70,6 +84,7 @@ void AsyncRunner::workerLoop() {
         }
 
         std::exception_ptr exception;
+        torch::Event       completion(stream_.device_type());
         {
             at::ThreadLocalStateGuard tls_guard(task.tls_state);
             // Do not propagate Torch profiler callbacks into this worker: Kineto
@@ -79,14 +94,37 @@ void AsyncRunner::workerLoop() {
             cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
-                event_.record(stream_);
             } catch (...) {
                 exception = std::current_exception();
+            }
+            // A failed task may already have submitted GPU copies. Record their
+            // completion too, and retain its snapshot until those copies finish.
+            try {
+                completion.record(stream_);
+                event_.record(stream_);
+            } catch (...) {
+                if (!exception) {
+                    exception = std::current_exception();
+                }
+                try {
+                    stream_.synchronize();
+                } catch (...) {
+                    exception = std::current_exception();
+                }
             }
         }
 
         {
             std::lock_guard<std::mutex> lk(mutex_);
+            try {
+                while (!completed_tasks_.empty() && completed_tasks_.front().event.query()) {
+                    completed_tasks_.pop_front();
+                }
+            } catch (...) {
+                if (!exception)
+                    exception = std::current_exception();
+            }
+            completed_tasks_.push_back({std::move(completion), std::move(task.fn)});
             pending_exception_ = exception;
             task_done_         = true;
         }

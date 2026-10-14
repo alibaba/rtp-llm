@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _prepare_decode_metadata(
     sequence_base,
@@ -12,6 +13,7 @@ def _prepare_decode_metadata(
     positions,
     slots,
     local_lengths,
+    query_tables,
     rows,
     table_width,
     table_stride,
@@ -23,40 +25,60 @@ def _prepare_decode_metadata(
     multi_query_update: tl.constexpr,
     graph_decode: tl.constexpr,
     block: tl.constexpr,
+    table_block: tl.constexpr,
 ):
     row = tl.program_id(0) * block + tl.arange(0, block)
     valid = row < rows
     batch = row // queries
-    base = tl.load(sequence_base + batch, valid, other=0)
-    if graph_decode:
-        # CudaGraphRunner's synthetic q1 capture leaves plus_1 at zero.
-        # Live replay (including padded requests) instead supplies >= 1.
-        capture_base = tl.load(capture_lengths + batch, valid, other=0) + 1
-        base = tl.where(base == 0, capture_base, base)
-    position = base + row % queries if multi_query_update else base - 1
-    tl.store(positions + row, position, valid)
-
-    # Count keys <= this query in the rank's physical-page stripes. Treating
-    # B*Q as q1 rows avoids imposing a false *local* multi-query causal mask.
-    end = tl.maximum(position + 1, 0)
-    interval = page_size * cp_size
-    length = end // interval * page_size + tl.minimum(
-        tl.maximum(end % interval - cp_rank * page_size, 0), page_size
+    column = tl.program_id(1) * table_block + tl.arange(0, table_block)
+    table_valid = valid[:, None] & (column[None, :] < table_width)
+    values = tl.load(
+        table + batch[:, None] * table_stride + column[None, :], table_valid, other=0
     )
-    tl.store(local_lengths + row, length, valid)
-
-    global_page = position // page_size
-    offset = position % page_size
-    local_page = global_page // cp_size * (page_size // kernel_page_size)
-    local_page += offset // kernel_page_size
-    owned = (
-        valid & (position >= 0) & (global_page % cp_size == cp_rank)
-        & (local_page >= 0) & (local_page < table_width)
+    width = tl.maximum(table_width, 1)
+    tl.store(
+        query_tables + row[:, None] * width + column[None, :],
+        values,
+        valid[:, None] & (column[None, :] < width),
     )
-    physical_page = tl.load(table + batch * table_stride + local_page, owned, other=-1)
-    slot = physical_page.to(tl.int64) * kernel_page_size + offset % kernel_page_size
-    # Main reserves physical page zero for padding; never write a live query to it.
-    tl.store(slots + row, tl.where(owned & (physical_page > 0), slot, -1), valid)
+    # Only the first column tile writes per-query metadata. Every tile writes
+    # a disjoint part of the expanded page table in the same launch.
+    if tl.program_id(1) == 0:
+        base = tl.load(sequence_base + batch, valid, other=0)
+        if graph_decode:
+            # CudaGraphRunner's synthetic q1 capture leaves plus_1 at zero.
+            # Live replay (including padded requests) instead supplies >= 1.
+            capture_base = tl.load(capture_lengths + batch, valid, other=0) + 1
+            base = tl.where(base == 0, capture_base, base)
+        position = base + row % queries if multi_query_update else base - 1
+        tl.store(positions + row, position, valid)
+
+        # Count keys <= this query in the rank's physical-page stripes. Treating
+        # B*Q as q1 rows avoids imposing a false *local* multi-query causal mask.
+        end = tl.maximum(position + 1, 0)
+        interval = page_size * cp_size
+        length = end // interval * page_size + tl.minimum(
+            tl.maximum(end % interval - cp_rank * page_size, 0), page_size
+        )
+        tl.store(local_lengths + row, length, valid)
+
+        global_page = position // page_size
+        offset = position % page_size
+        local_page = global_page // cp_size * (page_size // kernel_page_size)
+        local_page += offset // kernel_page_size
+        owned = (
+            valid
+            & (position >= 0)
+            & (global_page % cp_size == cp_rank)
+            & (local_page >= 0)
+            & (local_page < table_width)
+        )
+        physical_page = tl.load(
+            table + batch * table_stride + local_page, owned, other=-1
+        )
+        slot = physical_page.to(tl.int64) * kernel_page_size + offset % kernel_page_size
+        # Main reserves physical page zero for padding; never write a live query to it.
+        tl.store(slots + row, tl.where(owned & (physical_page > 0), slot, -1), valid)
 
 
 class PageRRMlaDecodeMetadata:
@@ -67,11 +89,17 @@ class PageRRMlaDecodeMetadata:
     """
 
     def __init__(
-        self, page_size: int, kernel_page_size: int, cp_size: int, cp_rank: int,
+        self,
+        page_size: int,
+        kernel_page_size: int,
+        cp_size: int,
+        cp_rank: int,
         cache_group_id: int = 0,
     ):
         if page_size <= 0 or kernel_page_size <= 0 or page_size % kernel_page_size:
-            raise ValueError("Page-RR ownership page must be a multiple of kernel page size")
+            raise ValueError(
+                "Page-RR ownership page must be a multiple of kernel page size"
+            )
         if cp_size <= 1 or not 0 <= cp_rank < cp_size:
             raise ValueError("Page-RR requires a valid rank in a multi-rank TP group")
         self.page_size = page_size
@@ -102,23 +130,41 @@ class PageRRMlaDecodeMetadata:
             raise ValueError("Ordinary Page-RR Decode requires one query per request")
         base = (
             inputs.prefix_lengths_device
-            if multi else inputs.sequence_lengths_plus_1_device
+            if multi
+            else inputs.sequence_lengths_plus_1_device
         )
         # Main passes one tagged, group-local attention view at a time.
         table = inputs.kv_cache_kernel_block_id_device
-        if base is None or not base.is_cuda or base.dtype != torch.int32 or base.ndim != 1:
+        if (
+            base is None
+            or not base.is_cuda
+            or base.dtype != torch.int32
+            or base.ndim != 1
+        ):
             raise ValueError("Page-RR Decode requires CUDA int32 per-request lengths")
         if (
-            table is None or table.device != base.device or table.dtype != torch.int32
-            or table.ndim != 2 or table.shape[0] != base.numel() or table.stride(1) != 1
+            table is None
+            or table.device != base.device
+            or table.dtype != torch.int32
+            or table.ndim != 2
+            or table.shape[0] != base.numel()
+            or table.stride(1) != 1
         ):
-            raise ValueError("Page-RR Decode requires a group-current CUDA int32 page table")
+            raise ValueError(
+                "Page-RR Decode requires a group-current CUDA int32 page table"
+            )
         shape = (base.numel(), queries)
         if self.local_causal_lens is None or self.local_causal_lens.shape != shape:
             if forbid_realloc:
-                raise ValueError("Page-RR Decode metadata shape cannot change during replay")
-            self.local_causal_lens = torch.empty(shape, dtype=torch.int32, device=base.device)
-            self.positions_d = torch.empty(base.numel() * queries, dtype=torch.int32, device=base.device)
+                raise ValueError(
+                    "Page-RR Decode metadata shape cannot change during replay"
+                )
+            self.local_causal_lens = torch.empty(
+                shape, dtype=torch.int32, device=base.device
+            )
+            self.positions_d = torch.empty(
+                base.numel() * queries, dtype=torch.int32, device=base.device
+            )
             self.slot_mapping = torch.empty_like(self.positions_d, dtype=torch.int64)
         self.block_tables = table
         rows = self.positions_d.numel()
@@ -126,21 +172,31 @@ class PageRRMlaDecodeMetadata:
         # Its zero lengths prevent KV reads; no dummy page becomes a real key.
         width = max(table.shape[1], 1)
         table_shape = (rows, width)
-        if self.query_block_tables is None or self.query_block_tables.shape != table_shape:
+        if (
+            self.query_block_tables is None
+            or self.query_block_tables.shape != table_shape
+        ):
             if forbid_realloc:
-                raise ValueError("Page-RR Decode query page table shape cannot change during replay")
-            self.query_block_tables = torch.zeros(table_shape, dtype=torch.int32, device=base.device)
-        if table.shape[1]:
-            self.query_block_tables.view(base.numel(), queries, width).copy_(table[:, None, :])
-        _prepare_decode_metadata[(triton.cdiv(rows, 128),)](
+                raise ValueError(
+                    "Page-RR Decode query page table shape cannot change during replay"
+                )
+            self.query_block_tables = torch.empty(
+                table_shape, dtype=torch.int32, device=base.device
+            )
+        _prepare_decode_metadata[(triton.cdiv(rows, 32), triton.cdiv(width, 128))](
             base,
             # Main's sequence_lengths is a CPU mirror. The device length is
             # the graph-stable source for ordinary Decode capture and replay.
-            inputs.sequence_lengths_plus_1_device if inputs.is_cuda_graph and not multi else base,
+            (
+                inputs.sequence_lengths_plus_1_device
+                if inputs.is_cuda_graph and not multi
+                else base
+            ),
             table,
             self.positions_d,
             self.slot_mapping,
             self.local_causal_lens,
+            self.query_block_tables,
             rows,
             table.shape[1],
             table.stride(0),
@@ -151,5 +207,6 @@ class PageRRMlaDecodeMetadata:
             cp_rank=self.cp_rank,
             multi_query_update=multi,
             graph_decode=inputs.is_cuda_graph and not multi,
-            block=128,
+            block=32,
+            table_block=128,
         )

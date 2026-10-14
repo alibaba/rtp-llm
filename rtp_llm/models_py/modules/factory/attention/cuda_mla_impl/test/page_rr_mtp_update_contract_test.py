@@ -15,6 +15,127 @@ from rtp_llm.models_py.modules.kimi_k3.native_mla_decode import NativeMlaDecode
     torch.cuda.is_available(), "requires CUDA and the K3 native runtime"
 )
 class MtpPageRRUpdateContractTest(unittest.TestCase):
+    def test_fused_metadata_expands_strided_tables_and_preserves_replay_addresses(self):
+        page, kernel_page, query = 4096, 128, 4
+        for tp in (4, 8, 16):
+            for rank in (0, tp - 1):
+                for batch, columns in ((14, 144), (16, 145), (3, 0)):
+                    with self.subTest(tp=tp, rank=rank, batch=batch, columns=columns):
+                        storage = torch.arange(
+                            1,
+                            batch * (columns + 7) + 1,
+                            dtype=torch.int32,
+                            device="cuda",
+                        ).reshape(batch, columns + 7)
+                        table = storage[:, :columns]
+                        table[-1].zero_()
+                        bases = [65533 + (i % 5) for i in range(batch - 1)] + [0]
+                        prefix = torch.tensor(bases, dtype=torch.int32, device="cuda")
+                        inputs = SimpleNamespace(
+                            input_lengths=torch.full(
+                                (batch,), query, dtype=torch.int32
+                            ),
+                            physical_token_count=batch * query,
+                            is_target_verify=True,
+                            is_mtp_draft_update=False,
+                            is_cuda_graph=True,
+                            prefix_lengths_device=prefix,
+                            sequence_lengths_plus_1_device=prefix,
+                            kv_cache_kernel_block_id_device=table,
+                        )
+                        metadata = PageRRMlaDecodeMetadata(page, kernel_page, tp, rank)
+                        metadata.prepare(inputs)
+                        addresses = tuple(
+                            x.data_ptr()
+                            for x in (
+                                metadata.positions_d,
+                                metadata.slot_mapping,
+                                metadata.local_causal_lens,
+                                metadata.query_block_tables,
+                            )
+                        )
+                        for round_index in (0, 1):
+                            prefix.copy_(
+                                torch.tensor(
+                                    [x + round_index for x in bases],
+                                    dtype=torch.int32,
+                                    device="cuda",
+                                )
+                            )
+                            metadata.prepare(inputs, forbid_realloc=True)
+                            expected_table = (
+                                table[:, None, :]
+                                .expand(batch, query, columns)
+                                .reshape(batch * query, columns)
+                            )
+                            if not columns:
+                                expected_table = torch.zeros(
+                                    (batch * query, 1), dtype=torch.int32, device="cuda"
+                                )
+                            torch.testing.assert_close(
+                                metadata.query_block_tables,
+                                expected_table,
+                                rtol=0,
+                                atol=0,
+                            )
+                            expected_positions, expected_lengths, expected_slots = (
+                                [],
+                                [],
+                                [],
+                            )
+                            host_table = table.cpu().tolist()
+                            for request, base in enumerate(bases):
+                                for offset in range(query):
+                                    position = base + round_index + offset
+                                    end = position + 1
+                                    expected_positions.append(position)
+                                    expected_lengths.append(
+                                        end // (page * tp) * page
+                                        + min(
+                                            max(end % (page * tp) - rank * page, 0),
+                                            page,
+                                        )
+                                    )
+                                    local_page = (
+                                        position // (page * tp) * (page // kernel_page)
+                                        + position % page // kernel_page
+                                    )
+                                    owned = (
+                                        position // page % tp == rank
+                                        and local_page < columns
+                                    )
+                                    physical_page = (
+                                        host_table[request][local_page] if owned else 0
+                                    )
+                                    expected_slots.append(
+                                        physical_page * kernel_page
+                                        + position % kernel_page
+                                        if physical_page > 0
+                                        else -1
+                                    )
+                            self.assertEqual(
+                                metadata.positions_d.cpu().tolist(), expected_positions
+                            )
+                            self.assertEqual(
+                                metadata.local_causal_lens.flatten().cpu().tolist(),
+                                expected_lengths,
+                            )
+                            self.assertEqual(
+                                metadata.slot_mapping.cpu().tolist(), expected_slots
+                            )
+                            self.assertEqual(
+                                addresses,
+                                tuple(
+                                    x.data_ptr()
+                                    for x in (
+                                        metadata.positions_d,
+                                        metadata.slot_mapping,
+                                        metadata.local_causal_lens,
+                                        metadata.query_block_tables,
+                                    )
+                                ),
+                            )
+
     def test_mixed_acceptance_rewrites_candidates_across_pages_in_graph_and_eager(self):
         torch.manual_seed(19)
         page, kernel_page, width, batch = 4096, 128, 4, 5

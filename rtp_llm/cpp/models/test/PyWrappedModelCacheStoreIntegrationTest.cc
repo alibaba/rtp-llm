@@ -29,6 +29,9 @@ namespace py = pybind11;
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static void validatePrepared(PyWrappedModel& model, const GptModelInputs& inputs) {
+        model.validatePreparedAttentionInputs(inputs);
+    }
     static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
         return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
     }
@@ -617,6 +620,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     MlaOpsType::AUTO);
     });
 
+    const bool inspect_prepare  = scenario_name == "attention_prepare_identity";
     const bool inspect_padding  = scenario_name.rfind("request_padding ", 0) == 0;
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
     const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
@@ -626,7 +630,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
         scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
     const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
                                                 (cacheless_warmup ? "multi_tag" : scenario_name);
-    auto       scenario       = makeScenario(inspect_padding ? "multi_tag" : input_scenario);
+    auto       scenario       = makeScenario((inspect_padding || inspect_prepare) ? "multi_tag" : input_scenario);
     if (inspect_padding) {
         std::istringstream parameters(scenario_name);
         std::string        name;
@@ -713,6 +717,64 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     {
         PyWrappedModel model(params, std::move(py_model));
+        if (inspect_prepare) {
+            auto inputs                 = scenario.inputs;
+            inputs.pd_separation        = false;
+            inputs.is_target_verify     = true;
+            inputs.attention_prepare_id = 41;
+            inputs.linear_replay        = LinearReplayInputs::allocate(1, 2);
+            for (auto* tensor : inputs.linear_replay->tensors())
+                tensor->zero_();
+            model.prepareAttentionInputs(inputs);
+            PyWrappedModelTestPeer::validatePrepared(model, inputs);
+            int        rejected       = 0;
+            const auto check_rejected = [&](GptModelInputs changed) {
+                try {
+                    model.forward(changed);
+                } catch (const std::exception& e) {
+                    const std::string message = e.what();
+                    TORCH_CHECK(message.find("attention prepare identity/layout mismatch") != std::string::npos
+                                    || message.find("attention prepare Replay binding mismatch") != std::string::npos
+                                    || message.find("LINEAR replay prepare page-table snapshot was replaced")
+                                           != std::string::npos,
+                                "unexpected forward failure: ",
+                                message);
+                    ++rejected;
+                    return;
+                }
+                TORCH_CHECK(false, "mismatched preparation was consumed");
+            };
+            auto changed = inputs;
+            changed.attention_prepare_id++;
+            check_rejected(changed);
+            changed                  = inputs;
+            changed.is_target_verify = false;
+            check_rejected(changed);
+            changed              = inputs;
+            changed.combo_tokens = torch::empty({2}, inputs.combo_tokens.options());
+            check_rejected(changed);
+            changed = inputs;
+            std::reverse(changed.kv_cache_group_tags.begin(), changed.kv_cache_group_tags.end());
+            check_rejected(changed);
+            changed = inputs;
+            changed.linear_replay.reset();
+            check_rejected(changed);
+            changed                          = inputs;
+            changed.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.clone();
+            check_rejected(changed);
+            for (size_t field = 0; field < 10; ++field) {
+                changed        = inputs;
+                auto fields    = changed.linear_replay->tensors();
+                *fields[field] = fields[field]->clone();
+                check_rejected(changed);
+            }
+            PyWrappedModelTestPeer::validatePrepared(model, inputs);
+            model.invalidatePreparedAttentionInputs();
+            cuda_graph::graphGetCurrentStream().synchronize();
+            py::dict result;
+            result["rejected"] = rejected;
+            return result;
+        }
         if (inspect_padding) {
             const auto padded = PyWrappedModelTestPeer::padInputs(model, scenario.inputs);
             py::dict   result;

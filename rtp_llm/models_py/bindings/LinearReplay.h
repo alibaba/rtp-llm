@@ -31,6 +31,19 @@ struct LinearReplayInputs {
                 &anchor_processed_lengths};
     }
 
+    std::array<const torch::Tensor*, 10> tensors() const {
+        return {&slot_ids,
+                &slot_generations,
+                &active_block_ids,
+                &prev_accept_lengths,
+                &history_valid_lengths,
+                &history_epochs,
+                &verify_epochs,
+                &init_kinds,
+                &state_read_block_ids,
+                &anchor_processed_lengths};
+    }
+
     LinearReplayInputs slice(int64_t start, int64_t count) const {
         auto result = *this;
         for (auto* tensor : result.tensors()) {

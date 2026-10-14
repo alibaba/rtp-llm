@@ -136,6 +136,14 @@ class CacheStoreForwardModel:
 
 
 class K3RequestPaddingTest(unittest.TestCase):
+    def test_prepared_identity_rejects_stale_phase_shape_layout_and_every_replay_binding(
+        self,
+    ):
+        result = _extension.run_scenario(
+            CacheStoreForwardModel(), "attention_prepare_identity"
+        )
+        self.assertEqual(result["rejected"], 16)
+
     def test_request_padding_keeps_complete_rows_and_null_cache(self):
         import math
 

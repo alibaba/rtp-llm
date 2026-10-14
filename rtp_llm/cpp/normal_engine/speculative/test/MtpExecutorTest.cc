@@ -990,7 +990,37 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
     ASSERT_TRUE(next_round.ok());
     ASSERT_NE(next_round->previous_window, nullptr);
     EXPECT_NE(next_round->previous_window->accept_len_gpu.data_ptr(), accepted.accept_len.data_ptr());
-    EXPECT_FALSE(executor->useAsyncPrepare());
+    const char* async_prepare = std::getenv("RTP_LLM_MTP_ASYNC_PREPARE");
+    EXPECT_EQ(executor->useAsyncPrepare(), async_prepare != nullptr && std::string(async_prepare) == "1");
+    if (executor->useAsyncPrepare()) {
+        auto prepare_input             = input;
+        prepare_input.combo_tokens     = torch::zeros({1}, cuda_i32);
+        prepare_input.input_lengths    = torch::ones({1}, cuda_i32);
+        prepare_input.prefix_lengths   = torch::full({1}, 2, cuda_i32);
+        prepare_input.sequence_lengths = torch::full({1}, 3, cuda_i32);
+        const auto expected_replay     = *input.linear_replay;
+        bool       saw_prepare         = false;
+        auto*      target_model        = components.fake_target_model.get();
+        components.fake_target_model->setInputObserver([&](const GptModelInputs& prepared) {
+            saw_prepare = true;
+            EXPECT_EQ(prepared.attention_prepare_id, 17u);
+            EXPECT_TRUE(prepared.is_target_verify);
+            EXPECT_FALSE(prepared.is_mtp_draft_update);
+            ASSERT_TRUE(prepared.linear_replay.has_value());
+            const auto expected = expected_replay.tensors();
+            const auto actual   = prepared.linear_replay->tensors();
+            for (size_t i = 0; i < expected.size(); ++i)
+                EXPECT_EQ(actual[i]->data_ptr(), expected[i]->data_ptr());
+            EXPECT_EQ(prepared.kv_cache_kernel_block_id.data_ptr(), table.data_ptr());
+            EXPECT_EQ(prepared.combo_tokens.numel(), 4);
+        });
+        executor->setTargetModel(std::move(components.fake_target_model));
+        ASSERT_TRUE(executor->launchTargetVerifyPrepareAsync(prepare_input, 1, input.linear_replay, 17));
+        prepare_input.linear_replay.reset();
+        executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        EXPECT_TRUE(saw_prepare);
+        target_model->setInputObserver({});
+    }
     executor->spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
     EXPECT_EQ(stream->seqLength(), 6);
 
@@ -1064,10 +1094,14 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     });
     components.fake_draft_prefill_model->setInputObserver([&](const GptModelInputs& inputs) {
         saw_draft_prepare = true;
+        EXPECT_FALSE(inputs.is_target_verify);
+        EXPECT_EQ(inputs.is_mtp_draft_update, !executor->is_dspark_);
+        EXPECT_FALSE(inputs.linear_replay.has_value());
         EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
         EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
     });
     executor->setTargetModel(std::move(components.fake_target_model));
+    auto* draft_prefill_model = components.fake_draft_prefill_model.get();
     executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
 
     const auto     cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1079,12 +1113,16 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     input.kv_block_stride_bytes = 999;
     input.kv_scale_stride_bytes = 777;
     if (executor->useAsyncPrepare()) {
-        executor->launchTargetVerifyPrepareAsync(input, 1);
-        executor->launchDraftPrefillPrepareAsync(input);
+        executor->launchTargetVerifyPrepareAsync(input, 1, std::nullopt, 1);
+        const bool draft_prepare_launched = executor->launchDraftPrefillPrepareAsync(input, 2);
+        const bool expected_draft_prepare = executor->is_dspark_
+                                            || executor->batch_stream_processor_->usesFixedMtpUpdateLayout()
+                                            || executor->useStreamAsync() || executor->useAsyncDeviceState();
+        EXPECT_EQ(draft_prepare_launched, expected_draft_prepare);
         executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
         executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
         EXPECT_TRUE(saw_target_prepare);
-        EXPECT_TRUE(saw_draft_prepare);
+        EXPECT_EQ(saw_draft_prepare, expected_draft_prepare);
         EXPECT_EQ(input.kv_block_stride_bytes, 999u);
         EXPECT_EQ(input.kv_scale_stride_bytes, 777u);
     }
@@ -1112,14 +1150,28 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     int64_t                                   forward_us = 0;
     executor->runDSparkProposal(input, streams, round, output, forward_us);
     EXPECT_TRUE(saw_proposal);
+
+    bool saw_update = false;
+    draft_prefill_model->setInputObserver([&](const GptModelInputs& forwarded) {
+        saw_update = true;
+        EXPECT_FALSE(forwarded.is_target_verify);
+        EXPECT_EQ(forwarded.is_mtp_draft_update,
+                  !executor->is_dspark_
+                      && (executor->batch_stream_processor_->usesFixedMtpUpdateLayout() || executor->useStreamAsync()
+                          || executor->useAsyncDeviceState()));
+    });
+    draft_prefill_model->setInputs({input});
+    draft_prefill_model->setOutputs({GptModelOutputs{}});
+    executor->runDraftPrefillForward(input);
+    EXPECT_TRUE(saw_update);
 }
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 TEST_F(MtpExecutorTest, testExplicitMtpHiddenDefaultRows) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto components                          = createMtpExecutorComponents(MtpExecutorTestConfig{});
     components.executor->uses_recurrent_mtp_ = true;
-    auto output = createRandomGptModelOutputs(3, 4, 8);
-    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat32);
+    auto output                              = createRandomGptModelOutputs(3, 4, 8);
+    output.mtp_target_hidden_states          = torch::ones({3, 8}, torch::kFloat32);
     components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_draft_model);
     EXPECT_TRUE(output.all_hidden_states.equal(output.mtp_target_hidden_states));
 }
@@ -1751,7 +1803,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     probe->release = release_prepare.get_future().share();
     stream1->logits_processor_list_.push_back(probe);
     const auto main_thread = std::this_thread::get_id();
-    fake_target_model->setInputObserver([&](const GptModelInputs&) {
+    fake_target_model->forward_hook = [&](GptModelInputs&) {
         // Hold host staging until target forward starts, proving overlap.
         const auto ready = started.wait_for(std::chrono::seconds(2));
         EXPECT_EQ(ready, std::future_status::ready);
@@ -1759,7 +1811,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
             EXPECT_NE(started.get(), main_thread);
         }
         release_prepare.set_value();
-    });
+    };
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -2410,6 +2462,21 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
+    // Async stream/state execution keeps complete request rows after rejection.
+    // The accepted rows and the published next-token state must remain identical
+    // to the compact path, including the request that accepts only one token.
+    if (components.executor->useStreamAsync() || components.executor->useAsyncDeviceState()
+        || components.executor->batch_stream_processor_->usesFixedMtpUpdateLayout()) {
+        next_draft_input.combo_tokens       = torch::tensor({3, 0, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5, 5}, torch::kInt32);
+        next_draft_input.lm_output_indexes  = torch::tensor({0, 9}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        auto compact_hidden                 = next_draft_output.all_hidden_states.to(torch::kCUDA);
+        next_draft_output.all_hidden_states = torch::zeros({10, 2}, compact_hidden.options());
+        next_draft_output.all_hidden_states.narrow(0, 0, 1).copy_(compact_hidden.narrow(0, 0, 1));
+        next_draft_output.all_hidden_states.narrow(0, 5, 5).copy_(compact_hidden.narrow(0, 1, 5));
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
@@ -2487,6 +2554,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1, stream2});
     ASSERT_TRUE(status.ok());
+    components.executor->spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
