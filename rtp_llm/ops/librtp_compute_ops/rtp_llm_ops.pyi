@@ -137,7 +137,7 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
 class GroupTopKOp:
     def __init__(self) -> None:
         ...
-    def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, scores: torch.Tensor, scores_with_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
+    def forward(self, topk_values: torch.Tensor, topk_indices: torch.Tensor, router_logits: torch.Tensor, correction_bias: torch.Tensor, n_group: int, topk_group: int, topk: int, renormalize: bool, routed_scaling_factor: float) -> None:
         ...
 class SelectTopkOp:
     def __init__(self, model_config: libth_transformer_config.ModelConfig) -> None:

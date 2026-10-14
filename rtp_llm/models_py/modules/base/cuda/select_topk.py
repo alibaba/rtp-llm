@@ -37,13 +37,15 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
-        scores = scores.float().sigmoid()
-        scores_with_bias = scores + correction_bias.unsqueeze(0)
+        # `scores` are raw router logits (bf16/fp16/fp32). The fp32 cast, fp32
+        # sigmoid and fp32 correction-bias add are fused into the GroupTopKOp
+        # CUDA kernels, replacing the previous
+        # `scores.float().sigmoid() + correction_bias` aten chain here.
         self.group_topk_op.forward(
             topk_weights,
             topk_ids,
             scores,
-            scores_with_bias,
+            correction_bias,
             n_group,
             topk_group,
             topk,

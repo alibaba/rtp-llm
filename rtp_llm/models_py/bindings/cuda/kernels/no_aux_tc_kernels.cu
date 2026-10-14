@@ -368,23 +368,60 @@ private:
 };  // end class WarpSelect
 }  // namespace warp_topk
 
-template<typename T>
-__device__ void topk_with_k2(T*                               output,
-                             T const*                         input,
+// ---------------------------------------------------------------------------
+// Fused sigmoid gating math (moved down from the python wrapper in
+// modules/base/cuda/select_topk.py: scores.float().sigmoid() and the fp32
+// correction-bias add). Numerical contract, identical rounding sequence to the
+// removed aten ops:
+//   1. widen the raw router logit (fp32/fp16/bf16) to fp32 (exact);
+//   2. sigmoid in fp32: 1/(1+expf(-x)) with the accurate expf (no fast math);
+//   3. widen the correction bias to fp32 (exact) and add it in fp32.
+// The kernels compile with ftz=true while torch defaults to ftz=false, which
+// only matters for subnormal sigmoid outputs (|logit| > 87.3, < 1.2e-38); a
+// probe of torch's CUDA fp32 sigmoid shows it also returns 0.0 in that region
+// (e.g. sigmoid(-90) == 0.0), so the two paths agree there as well.
+// ---------------------------------------------------------------------------
+__forceinline__ __device__ float widen_to_f32(float v) {
+    return v;
+}
+
+__forceinline__ __device__ float widen_to_f32(half v) {
+    return __half2float(v);
+}
+
+__forceinline__ __device__ float widen_to_f32(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+
+template<typename InT>
+__forceinline__ __device__ float sigmoid_in_f32(InT const logit) {
+    float const x = widen_to_f32(logit);
+    return 1.0f / (1.0f + expf(-x));
+}
+
+template<typename InT, typename BiasT>
+__forceinline__ __device__ float sigmoid_with_bias_in_f32(InT const logit, BiasT const bias) {
+    return sigmoid_in_f32<InT>(logit) + widen_to_f32(bias);
+}
+
+template<typename InT, typename BiasT>
+__device__ void topk_with_k2(float*                            output,
+                             InT const*                        input,
+                             BiasT const*                      input_bias,
                              cg::thread_block_tile<32> const& tile,
                              int32_t const                    lane_id,
                              int const                        num_experts_per_group) {
     // Get the top2 per thread
-    T largest        = -INFINITY;
-    T second_largest = -INFINITY;
+    float largest        = -INFINITY;
+    float second_largest = -INFINITY;
 
     if (num_experts_per_group > WARP_SIZE) {
         for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
             // Ignore invalid inputs so they cannot poison the group score reduction.
-            if (!isfinite(cuda_cast<float, T>(input[i]))) {
+            float const value = sigmoid_with_bias_in_f32<InT, BiasT>(input[i], input_bias[i]);
+            if (!isfinite(value)) {
                 continue;
             }
-            T value = input[i];
             if (value > largest) {
                 second_largest = largest;
                 largest        = value;
@@ -394,25 +431,26 @@ __device__ void topk_with_k2(T*                               output,
         }
     } else {
         for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-            if (!isfinite(cuda_cast<float, T>(input[i]))) {
+            float const value = sigmoid_with_bias_in_f32<InT, BiasT>(input[i], input_bias[i]);
+            if (!isfinite(value)) {
                 continue;
             }
-            largest = input[i];
+            largest = value;
         }
     }
 
     __syncwarp();  // Ensure all threads have valid data before reduction
     // Get the top2 warpwise
-    T max1 = cg::reduce(tile, largest, cg::greater<T>());
+    float max1 = cg::reduce(tile, largest, cg::greater<float>());
 
-    T    max2          = max1;
-    bool equal_to_max1 = (max1 == largest);
+    float max2        = max1;
+    bool  equal_to_max1 = (max1 == largest);
 
     int count_max1 = __popc(__ballot_sync(FULL_WARP_MASK, equal_to_max1));
 
     if (count_max1 == 1) {
         largest = (largest == max1) ? second_largest : largest;
-        max2    = cg::reduce(tile, largest, cg::greater<T>());
+        max2    = cg::reduce(tile, largest, cg::greater<float>());
     }
 
     if (lane_id == 0) {
@@ -420,9 +458,10 @@ __device__ void topk_with_k2(T*                               output,
     }
 }
 
-template<typename T>
-__global__ void topk_with_k2_kernel(T*            output,
-                                    T*            input,
+template<typename InT, typename BiasT>
+__global__ void topk_with_k2_kernel(float*        output,
+                                    InT const*   input,
+                                    BiasT const* input_bias,
                                     int64_t const num_tokens,
                                     int64_t const num_cases,
                                     int64_t const n_group,
@@ -433,8 +472,12 @@ __global__ void topk_with_k2_kernel(T*            output,
 
     int32_t case_id = blockIdx.x * NUM_WARPS_PER_BLOCK + warp_id;
     if (case_id < num_cases) {
-        input += case_id * num_experts_per_group;
-        output += case_id;
+        input      += case_id * num_experts_per_group;
+        // The case's slice starts at token*num_experts + group*experts_per_group in the
+        // flattened [num_tokens, num_experts] logits; the per-expert correction bias
+        // shares the expert axis, so its slice base is group*experts_per_group.
+        input_bias += (case_id % n_group) * num_experts_per_group;
+        output     += case_id;
 
         cg::thread_block          block = cg::this_thread_block();
         cg::thread_block_tile<32> tile  = cg::tiled_partition<32>(block);
@@ -442,19 +485,19 @@ __global__ void topk_with_k2_kernel(T*            output,
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
         asm volatile("griddepcontrol.wait;");
 #endif
-        topk_with_k2(output, input, tile, lane_id, num_experts_per_group);
+        topk_with_k2(output, input, input_bias, tile, lane_id, num_experts_per_group);
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     asm volatile("griddepcontrol.launch_dependents;");
 #endif
 }
 
-template<typename T, typename IdxT>
-__global__ void group_idx_and_topk_idx_kernel(T*            scores,
-                                              T const*      group_scores,
-                                              T*            topk_values,
+template<typename InT, typename BiasT, typename IdxT>
+__global__ void group_idx_and_topk_idx_kernel(InT const*    router_logits,
+                                              float const*  group_scores,
+                                              float*        topk_values,
                                               IdxT*         topk_indices,
-                                              T*            scores_with_bias,
+                                              BiasT const*  correction_bias,
                                               int64_t const num_tokens,
                                               int64_t const n_group,
                                               int64_t const topk_group,
@@ -468,11 +511,12 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
     int32_t warp_id = threadIdx.x / WARP_SIZE;
     int32_t lane_id = threadIdx.x % WARP_SIZE;
     int32_t case_id = blockIdx.x * NUM_WARPS_PER_BLOCK + warp_id;  // one per token
-    scores_with_bias += case_id * num_experts;
-    scores += case_id * num_experts;
+    router_logits += case_id * num_experts;
     group_scores += case_id * n_group;
     topk_values += case_id * topk;
     topk_indices += case_id * topk;
+    // correction_bias stays at the base: candidates below index it row-relative
+    // (i_group * num_experts_per_group + i), which is already < num_experts.
 
     int32_t align_num_experts_per_group = warp_topk::round_up_to_multiple_of<WARP_SIZE>(num_experts_per_group);
 
@@ -480,12 +524,13 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
     cg::thread_block_tile<32> tile  = cg::tiled_partition<32>(block);
 
     extern __shared__ char smem_buf[];  // NOTE: reuse the shared memory here to store the target topk idx
-    int32_t*               s_topk_idx = reinterpret_cast<int32_t*>(smem_buf);
-    T* s_topk_value                   = reinterpret_cast<T*>(s_topk_idx + NUM_WARPS_PER_BLOCK * topk) + warp_id * topk;
+    int32_t* s_topk_idx = reinterpret_cast<int32_t*>(smem_buf);
+    float*   s_topk_value =
+        reinterpret_cast<float*>(s_topk_idx + NUM_WARPS_PER_BLOCK * topk) + warp_id * topk;
     s_topk_idx += warp_id * topk;
 
-    T       value            = cuda::std::numeric_limits<T>::lowest();
-    T       topk_group_value = cuda::std::numeric_limits<T>::lowest();
+    float   value            = cuda::std::numeric_limits<float>::lowest();
+    float   topk_group_value = cuda::std::numeric_limits<float>::lowest();
     int32_t num_equalto_topkth_group;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -497,7 +542,7 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
         int32_t target_num_min = WARP_SIZE - n_group + topk_group;
         if (lane_id < n_group
             && (isfinite(
-                cuda_cast<float, T>(group_scores[lane_id]))))  // The check is necessary to avoid abnormal input
+                group_scores[lane_id])))  // The check is necessary to avoid abnormal input
         {
             value = group_scores[lane_id];
         }
@@ -507,23 +552,23 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
         // Use loop to find the largset top_group
         while (count_equal_to_top_value < target_num_min) {
             __syncwarp();  // Ensure all threads have valid data before reduction
-            topk_group_value = cg::reduce(tile, value, cg::greater<T>());
+            topk_group_value = cg::reduce(tile, value, cg::greater<float>());
             if (value == topk_group_value) {
-                value = cuda::std::numeric_limits<T>::lowest();
+                value = cuda::std::numeric_limits<float>::lowest();
             }
             pre_count_equal_to_top_value = count_equal_to_top_value;
             count_equal_to_top_value =
-                __popc(__ballot_sync(FULL_WARP_MASK, (value == cuda::std::numeric_limits<T>::lowest())));
+                __popc(__ballot_sync(FULL_WARP_MASK, (value == cuda::std::numeric_limits<float>::lowest())));
         }
         num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
     }
     __syncthreads();
 
-    warp_topk::WarpSelect</*capability*/ WARP_SIZE, /*greater*/ true, T, int32_t, /* is_stable */ true> queue(
+    warp_topk::WarpSelect</*capability*/ WARP_SIZE, /*greater*/ true, float, int32_t, /* is_stable */ true> queue(
         (int32_t)topk, -INFINITY);
 
     int  count_equalto_topkth_group = 0;
-    bool if_proceed_next_topk       = (topk_group_value != cuda::std::numeric_limits<T>::lowest());
+    bool if_proceed_next_topk       = (topk_group_value != cuda::std::numeric_limits<float>::lowest());
     if (case_id < num_tokens && if_proceed_next_topk) {
         for (int i_group = 0; i_group < n_group; i_group++) {
             if ((group_scores[i_group] > topk_group_value)
@@ -531,10 +576,16 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
                     && (count_equalto_topkth_group < num_equalto_topkth_group))) {
                 int32_t offset = i_group * num_experts_per_group;
                 for (int32_t i = lane_id; i < align_num_experts_per_group; i += WARP_SIZE) {
-                    T candidates =
-                        (i < num_experts_per_group) && isfinite(cuda_cast<float, T>(scores_with_bias[offset + i])) ?
-                            scores_with_bias[offset + i] :
-                            cuda::std::numeric_limits<T>::lowest();
+                    // Fused biased score: fp32 sigmoid of the widened logit plus the
+                    // widened correction bias (was the python scores_with_bias tensor).
+                    float candidates = cuda::std::numeric_limits<float>::lowest();
+                    if (i < num_experts_per_group) {
+                        float const biased = sigmoid_with_bias_in_f32<InT, BiasT>(router_logits[offset + i],
+                                                                                 correction_bias[offset + i]);
+                        if (isfinite(biased)) {
+                            candidates = biased;
+                        }
+                    }
                     queue.add(candidates, offset + i);
                 }
                 if (group_scores[i_group] == topk_group_value) {
@@ -555,17 +606,19 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
     bool  has_non_finite = false;
     if (case_id < num_tokens && if_proceed_next_topk) {
         for (int i = lane_id; i < warp_topk::round_up_to_multiple_of<WARP_SIZE>(topk); i += WARP_SIZE) {
-            T value = cuda_cast<T, float>(0.0f);
+            float value = 0.0f;
             if (i < topk) {
-                value = scores[s_topk_idx[i]];
-                if (!isfinite(cuda_cast<float, T>(value))) {
+                // Fused unbiased score: fp32 sigmoid of the widened logit (was the
+                // python `scores` tensor produced by scores.float().sigmoid()).
+                value = sigmoid_in_f32<InT>(router_logits[s_topk_idx[i]]);
+                if (!isfinite(value)) {
                     has_non_finite = true;
-                    value          = cuda_cast<T, float>(0.0f);
+                    value          = 0.0f;
                 }
                 s_topk_value[i] = value;
             }
             if (norm_node == 1) {
-                topk_sum += reduce(tile, cuda_cast<float, T>(value), cg::plus<float>());
+                topk_sum += reduce(tile, value, cg::plus<float>());
             }
         }
     }
@@ -575,14 +628,14 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
     if (case_id < num_tokens) {
         if (if_proceed_next_topk && !has_non_finite) {
             for (int i = lane_id; i < topk; i += WARP_SIZE) {
-                float value     = cuda_cast<float, T>(s_topk_value[i]) / topk_sum * routed_scaling_factor;
+                float value     = s_topk_value[i] / topk_sum * routed_scaling_factor;
                 topk_indices[i] = s_topk_idx[i];
-                topk_values[i]  = cuda_cast<T, float>(value);
+                topk_values[i]  = value;
             }
         } else {
             for (int i = lane_id; i < topk; i += WARP_SIZE) {
                 topk_indices[i] = i;
-                topk_values[i]  = cuda_cast<T, float>(1.0f / topk);
+                topk_values[i]  = 1.0f / topk;
             }
         }
         // Use the first `topk` experts as a safe result when routing cannot proceed.
@@ -593,12 +646,12 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
 #endif
 }
 
-template<typename T, typename IdxT>
-void invokeNoAuxTc(T*                 scores,
-                   T*                 group_scores,
-                   T*                 topk_values,
+template<typename InT, typename BiasT, typename IdxT>
+void invokeNoAuxTc(InT const*         router_logits,
+                   float*             group_scores,
+                   float*             topk_values,
                    IdxT*              topk_indices,
-                   T*                 scores_with_bias,
+                   BiasT const*       correction_bias,
                    int64_t const      num_tokens,
                    int64_t const      num_experts,
                    int64_t const      n_group,
@@ -609,13 +662,14 @@ void invokeNoAuxTc(T*                 scores,
                    cudaStream_t const stream) {
     int64_t num_cases               = num_tokens * n_group;
     int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
-    LAUNCH_KERNEL_WITH_PDL((topk_with_k2_kernel<T>),
+    LAUNCH_KERNEL_WITH_PDL((topk_with_k2_kernel<InT, BiasT>),
                            topk_with_k2_num_blocks,
                            BLOCK_SIZE,
                            0,
                            stream,
                            group_scores,
-                           scores_with_bias,
+                           router_logits,
+                           correction_bias,
                            num_tokens,
                            num_cases,
                            n_group,
@@ -623,17 +677,17 @@ void invokeNoAuxTc(T*                 scores,
     check_cuda_error();
 
     int64_t topk_with_k_group_num_blocks = (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
-    size_t  dynamic_smem_in_bytes = warp_topk::calc_smem_size_for_block_wide<T, int32_t>(NUM_WARPS_PER_BLOCK, topk);
-    LAUNCH_KERNEL_WITH_PDL((group_idx_and_topk_idx_kernel<T, IdxT>),
+    size_t  dynamic_smem_in_bytes = warp_topk::calc_smem_size_for_block_wide<float, int32_t>(NUM_WARPS_PER_BLOCK, topk);
+    LAUNCH_KERNEL_WITH_PDL((group_idx_and_topk_idx_kernel<InT, BiasT, IdxT>),
                            topk_with_k_group_num_blocks,
                            BLOCK_SIZE,
                            dynamic_smem_in_bytes,
                            stream,
-                           scores,
+                           router_logits,
                            group_scores,
                            topk_values,
                            topk_indices,
-                           scores_with_bias,
+                           correction_bias,
                            num_tokens,
                            n_group,
                            topk_group,
@@ -647,26 +701,34 @@ void invokeNoAuxTc(T*                 scores,
 #undef LAUNCH_KERNEL
 }
 
-#define INSTANTIATE_NOAUX_TC(T, IdxT)                                                                                  \
-    template void invokeNoAuxTc<T, IdxT>(T * scores,                                                                   \
-                                         T * group_scores,                                                             \
-                                         T * topk_values,                                                              \
-                                         IdxT * topk_indices,                                                          \
-                                         T * scores_with_bias,                                                         \
-                                         int64_t const      num_tokens,                                                \
-                                         int64_t const      num_experts,                                               \
-                                         int64_t const      n_group,                                                   \
-                                         int64_t const      topk_group,                                                \
-                                         int64_t const      topk,                                                      \
-                                         int                norm_node,                                                 \
-                                         double const       routed_scaling_factor,                                     \
-                                         cudaStream_t const stream);
+#define INSTANTIATE_NOAUX_TC(InT, BiasT, IdxT)                                                                         \
+    template void invokeNoAuxTc<InT, BiasT, IdxT>(InT const *   router_logits,                                         \
+                                                  float *       group_scores,                                         \
+                                                  float *       topk_values,                                          \
+                                                  IdxT *        topk_indices,                                         \
+                                                  BiasT const * correction_bias,                                      \
+                                                  int64_t const      num_tokens,                                      \
+                                                  int64_t const      num_experts,                                     \
+                                                  int64_t const      n_group,                                         \
+                                                  int64_t const      topk_group,                                      \
+                                                  int64_t const      topk,                                            \
+                                                  int                norm_node,                                       \
+                                                  double const       routed_scaling_factor,                           \
+                                                  cudaStream_t const stream);
 
-INSTANTIATE_NOAUX_TC(float, int32_t);
-INSTANTIATE_NOAUX_TC(float, int64_t);
-// INSTANTIATE_NOAUX_TC(half, int32_t);
-// #ifdef ENABLE_BF16
-// INSTANTIATE_NOAUX_TC(__nv_bfloat16, int32_t);
-// #endif
+// Bias dtype follows the checkpoint: DeepSeek-family checkpoints (incl. Xing4)
+// store e_score_correction_bias in fp32 while the gate emits bf16/fp16 logits,
+// so mixed (logit, bias) pairs are the real serving configuration; same-dtype
+// pairs cover checkpoints that store the bias in the model dtype.
+INSTANTIATE_NOAUX_TC(float, float, int32_t);
+INSTANTIATE_NOAUX_TC(float, float, int64_t);
+INSTANTIATE_NOAUX_TC(half, float, int32_t);
+INSTANTIATE_NOAUX_TC(half, float, int64_t);
+INSTANTIATE_NOAUX_TC(half, half, int32_t);
+INSTANTIATE_NOAUX_TC(half, half, int64_t);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, float, int32_t);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, float, int64_t);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int64_t);
 
 }  // namespace rtp_llm

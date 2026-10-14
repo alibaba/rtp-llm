@@ -19,12 +19,20 @@
 
 namespace rtp_llm {
 
-template<typename T, typename IdxT>
-void invokeNoAuxTc(T*                 scores,
-                   T*                 group_scores,
-                   T*                 topk_values,
+// Grouped biased top-k over raw router logits. The sigmoid gating math is fused
+// into the kernels: each logit is widened to fp32, run through
+// 1/(1+expf(-x)) in fp32, and the widened correction bias is added in fp32 —
+// the same rounding sequence as the previous python path
+// (scores.float().sigmoid() + correction_bias).
+// InT is the router logits dtype and BiasT the correction bias dtype
+// (fp32, fp16 or bf16 each); group scores and topk values are computed in
+// fp32 regardless.
+template<typename InT, typename BiasT, typename IdxT>
+void invokeNoAuxTc(InT const*         router_logits,
+                   float*             group_scores,
+                   float*             topk_values,
                    IdxT*              topk_indices,
-                   T*                 scores_with_bias,
+                   BiasT const*       correction_bias,
                    int64_t const      num_tokens,
                    int64_t const      num_experts,
                    int64_t const      n_group,
