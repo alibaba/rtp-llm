@@ -395,7 +395,9 @@ class FP4MoeExecutor(FP4Moe):
         }
 
         executor = TrtllmFp4Executor(config, FusedMoEQuantConfig(), weights)
-        forward_payload = executor.execute(payload, "silu", None, None, False, None)
+        forward_payload = executor.execute(
+            payload, "silu", None, None, False, None, expert_load=None
+        )
         output = forward_payload.fused_expert_output
         return output.to(torch.float)
 
@@ -1115,7 +1117,11 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
                                 0, 256, cols // 2, dtype=torch.uint8, device=device
                             ),
                             torch.empty(
-                                0, 256, cols // 16, dtype=torch.float8_e4m3fn, device=device
+                                0,
+                                256,
+                                cols // 16,
+                                dtype=torch.float8_e4m3fn,
+                                device=device,
                             ),
                             (0, 256, cols),
                             findices,

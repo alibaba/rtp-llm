@@ -174,6 +174,10 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::updateEplbConfig(const EPLBConfig& config) {
+    return expert_balancer_.updateEplbConfig(config);
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -1010,8 +1014,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 && has_context_request ?
             generation_prefill_cuda_graph_init_status_ :
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
-    const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
+    const auto finalize_outputs = [&](GptModelOutputs outputs) {
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
+        expert_balancer_.step(inputs.warmup);
         return outputs;
     };
 
@@ -1025,7 +1030,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool has_multimodal_features =
             inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
         if (int(device_props_.enable_layer_micro_batch) && supports_micro_batch_ && !has_multimodal_features) {
-            return with_generation_prefill_cuda_graph_status(forwardMicroBatched(inputs, capture_hidden_states));
+            return finalize_outputs(forwardMicroBatched(inputs, capture_hidden_states));
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
@@ -1089,6 +1094,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
+        py_model_inputs.expert_token_counts    = expert_balancer_.stable_expert_token_counts();
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
@@ -1163,7 +1169,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return with_generation_prefill_cuda_graph_status(
+                return finalize_outputs(
                     attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
             }
             // Commit only updates the draft KV cache and has no logits
@@ -1172,7 +1178,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(std::move(outputs)));
+            return finalize_outputs(attach_mtp_target_hidden_states(std::move(outputs)));
         }
         if (capture_hidden_states) {
             auto        capture_input_lengths  = inputs.input_lengths;
@@ -1202,7 +1208,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     hidden_state_capture_publisher_->rejectLayout(std::move(local_layout_error));
                     auto fallback_last_hidden = hidden_state_capture_publisher_->makeFallback(
                         hidden_states, capture_input_ids.numel(), token_ids.device());
-                    return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+                    return finalize_outputs(attach_mtp_target_hidden_states(
                         callForwardPostLayers(fallback_last_hidden, inputs, true, fallback_last_hidden.size(0))));
                 }
             }
@@ -1221,21 +1227,20 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                                                capture_expected_rows,
                                                                                capture_layout_context,
                                                                                token_ids.device());
-            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+            return finalize_outputs(attach_mtp_target_hidden_states(
                 callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0))));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return with_generation_prefill_cuda_graph_status(
+                return finalize_outputs(
                     attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return with_generation_prefill_cuda_graph_status(
+            return finalize_outputs(
                 attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
         }
-        return with_generation_prefill_cuda_graph_status(
-            attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+        return finalize_outputs(attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -34,6 +34,8 @@ from typing import ClassVar, Dict, Optional, Type
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
 
 @dataclass(frozen=True)
 class MoeCfg:
@@ -130,6 +132,7 @@ class RoutedExpertsStrategy(nn.Module):
         x: torch.Tensor,  # [N, D] BF16
         weights: torch.Tensor,  # [N, topk] FP32
         indices: torch.Tensor,  # [N, topk] int64 GLOBAL expert id
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:  # [N, D] FP32
         """Route + compute. Returns per-token routed-expert sum in fp32."""
         raise NotImplementedError
@@ -147,6 +150,7 @@ class RoutedExpertsStrategy(nn.Module):
         x: torch.Tensor,
         gate,
         input_ids: torch.Tensor | None,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         """Optional fast path that fuses router gate + MegaMoE input packing."""
         raise NotImplementedError(

@@ -14,6 +14,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 DEFAULT_MOE_CHUNK_TOKENS = 16384
 Observer = Callable[[str, torch.Tensor], None]
@@ -255,7 +256,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         self,
         x: torch.Tensor,
         input_ids: Optional[torch.Tensor],
-        *,
+        expert_load: Optional[ExpertLoadContext],
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -265,13 +266,14 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 input_ids,
                 observer=observer,
                 out=out,
+                expert_load=expert_load,
             )
 
     def forward(
         self,
         x: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
         input_ids: Optional[torch.Tensor] = None,
-        *,
         is_decode_forward: bool = False,
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -299,9 +301,15 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             synchronized_tokens, is_decode_forward=is_decode_forward
         ):
             if observer is None:
-                self._call_moe(flat_x, flat_ids, out=output)
+                self._call_moe(flat_x, flat_ids, out=output, expert_load=expert_load)
             else:
-                self._call_moe(flat_x, flat_ids, observer=observer, out=output)
+                self._call_moe(
+                    flat_x,
+                    flat_ids,
+                    observer=observer,
+                    out=output,
+                    expert_load=expert_load,
+                )
             return output.view(shape)
 
         if not _CHUNKED_MOE_LOGGED:
@@ -326,6 +334,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                     flat_x[local_start:end],
                     chunk_ids,
                     out=output[local_start:end],
+                    expert_load=expert_load,
                 )
             else:
                 self._call_moe(
@@ -333,5 +342,6 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                     chunk_ids,
                     observer=chunk_observer,
                     out=output[local_start:end],
+                    expert_load=expert_load,
                 )
         return output.view(shape)

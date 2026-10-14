@@ -105,7 +105,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 super().__init__()
                 self.is_decode_forward = None
 
-            def forward(self, x, _input_ids, *, is_decode_forward=False):
+            def forward(self, x, expert_load, input_ids=None, is_decode_forward=False):
                 self.is_decode_forward = is_decode_forward
                 return x
 
@@ -126,6 +126,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             x,
             SimpleNamespace(),
             torch.arange(2).view(2, 1),
+            expert_load=None,
         )
 
         self.assertTrue(block.ffn.is_decode_forward)

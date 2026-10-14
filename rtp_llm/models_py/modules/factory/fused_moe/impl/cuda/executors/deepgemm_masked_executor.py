@@ -29,6 +29,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_mul_masked_fp8_post_quant_fwd,
 )
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
 
@@ -481,6 +482,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         if self._use_fp8:
             return self._execute_fp8(

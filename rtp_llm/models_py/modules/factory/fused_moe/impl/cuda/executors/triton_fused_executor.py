@@ -24,6 +24,7 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     invoke_fused_moe_kernel,
     moe_align_block_size_torch,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -74,6 +75,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x  # [M, K]
         topk_ids = payload.expert_topk_ids  # [M, top_k]
@@ -82,6 +84,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_ids is not None
         assert topk_weights is not None
 
+        load_topk_ids = topk_ids.reshape(-1)
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
@@ -121,6 +124,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
         intermediate1 = torch.empty(M * top_k, self.N, device=device, dtype=dtype)
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         invoke_fused_moe_kernel(
             hidden_states,
             self.w1,
@@ -134,6 +138,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=top_k,
             config=config1,
             compute_type=compute_type,
+            expert_token_counts=counts,
+            load_topk_ids=load_topk_ids,
+            load_expert_offset=(
+                0 if payload.expert_ids_are_local else self.start_expert_id
+            ),
         )
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
@@ -157,6 +166,9 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             top_k=1,
             config=config2,
             compute_type=compute_type,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
 
         # Sum reduce over top_k: out is [M*top_k, K], reshape and sum

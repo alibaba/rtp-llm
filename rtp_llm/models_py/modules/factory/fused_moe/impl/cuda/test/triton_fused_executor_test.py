@@ -147,6 +147,7 @@ class TritonFusedMoeExecutorTest(TestCase):
             a2_scale=None,
             apply_router_weight_on_input=False,
             extra_expert_args=None,
+            expert_load=None,
         )
         output = result.fused_expert_output
 

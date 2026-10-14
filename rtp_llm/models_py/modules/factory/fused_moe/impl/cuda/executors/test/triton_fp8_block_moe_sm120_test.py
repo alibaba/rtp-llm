@@ -236,6 +236,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             payload,
             activation="SiGLU",
             apply_router_weight_on_input=False,
+            expert_load=None,
         ).fused_expert_output
 
     def _deepgemm(self, payload: ExpertForwardPayload) -> torch.Tensor:
@@ -246,6 +247,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             a2_scale=None,
             apply_router_weight_on_input=False,
             extra_expert_args=None,
+            expert_load=None,
         ).fused_expert_output
 
     def _assert_matches_deepgemm(
@@ -442,7 +444,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             ) as triton, patch.object(
                 self.executor, "execute_contiguous", return_value=deepgemm_result
             ) as deepgemm:
-                result = self.executor.execute(payload, **call_args)
+                result = self.executor.execute(payload, **call_args, expert_load=None)
                 self.assertIs(result, triton_result if use_triton else deepgemm_result)
                 self.assertEqual(triton.call_count, int(use_triton))
                 self.assertEqual(deepgemm.call_count, int(not use_triton))
@@ -473,6 +475,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             )
         self.assertIs(result, fast_result)
         triton.assert_called_once()
@@ -522,7 +525,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 "execute_contiguous",
                 return_value=fallback_result,
             ) as deepgemm:
-                result = self.executor.execute(payload, **call_args)
+                result = self.executor.execute(payload, **call_args, expert_load=None)
                 self.assertIs(result, fallback_result)
                 triton.assert_not_called()
                 deepgemm.assert_called_once()
@@ -606,7 +609,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             ) as triton, patch.object(
                 executor, "execute_contiguous", return_value=deepgemm_result
             ) as deepgemm:
-                result = executor.execute(payload, **call_args)
+                result = executor.execute(payload, **call_args, expert_load=None)
                 self.assertIs(result, triton_result if use_triton else deepgemm_result)
                 self.assertEqual(triton.call_count, int(use_triton))
                 self.assertEqual(deepgemm.call_count, int(not use_triton))
@@ -695,11 +698,13 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             ).fused_expert_output
             actual = executor.execute_triton_fp8(
                 payload,
                 activation="SiGLU",
                 apply_router_weight_on_input=False,
+                expert_load=None,
             ).fused_expert_output
             self._assert_matches_deepgemm(actual, expected)
 
@@ -716,6 +721,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                     a2_scale=None,
                     apply_router_weight_on_input=False,
                     extra_expert_args=None,
+                    expert_load=None,
                 ).fused_expert_output
 
             replay = self._make_payload(
@@ -743,6 +749,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             ).fused_expert_output
             self._assert_matches_deepgemm(captured, expected)
 
@@ -808,6 +815,9 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 "num_stages": 2,
             },
             tl.bfloat16,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
 
         reference = torch.empty_like(output)
@@ -836,6 +846,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             ).fused_expert_output
 
         replay = self._make_payload(offset=2)

@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hy
     DeepGemmHybridExecutor,
 )
 from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 
 class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
@@ -56,6 +57,7 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         return self.execute_masked(
             payload,
@@ -64,4 +66,5 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
             a2_scale,
             apply_router_weight_on_input,
             extra_expert_args,
+            expert_load=expert_load,
         )

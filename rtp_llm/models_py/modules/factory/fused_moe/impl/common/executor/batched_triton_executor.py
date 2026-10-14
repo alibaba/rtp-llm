@@ -19,6 +19,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
 from rtp_llm.models_py.triton_kernels.moe.grouped_gemm import (
     invoke_moe_batched_triton_kernel,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -67,6 +68,7 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         if expert_map is not None:
             raise ValueError("BatchedTritonExperts does not support expert_map")

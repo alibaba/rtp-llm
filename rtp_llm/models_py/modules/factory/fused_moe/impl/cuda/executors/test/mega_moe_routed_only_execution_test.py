@@ -305,9 +305,13 @@ def _worker(
                     # avoiding meaningless error amplification when tiny FP4
                     # differences select a different next-layer expert.
                     layer_input = actual
-                    expected = reference_layer(layer_input, input_ids).clone()
+                    expected = reference_layer(
+                        layer_input, input_ids, expert_load=None
+                    ).clone()
                     _sync_ranks_for_mega(device)
-                    actual = mega_layer(layer_input, input_ids).clone()
+                    actual = mega_layer(
+                        layer_input, input_ids, expert_load=None
+                    ).clone()
         torch.cuda.synchronize(device)
         dist.barrier()
 
@@ -465,10 +469,10 @@ def _se_worker(
         x = torch.randn(tokens, _DIM, dtype=torch.bfloat16, device=device)
         input_ids = torch.arange(tokens, dtype=torch.long, device=device)
         with torch.inference_mode():
-            expected = reference(x, input_ids).clone()
+            expected = reference(x, input_ids=input_ids, expert_load=None).clone()
         _sync_ranks_for_mega(device)
         with torch.inference_mode():
-            actual = mega_se(x, input_ids)
+            actual = mega_se(x, input_ids=input_ids, expert_load=None)
         torch.cuda.synchronize(device)
         dist.barrier()
 

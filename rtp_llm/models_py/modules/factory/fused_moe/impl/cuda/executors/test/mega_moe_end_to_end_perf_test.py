@@ -172,10 +172,10 @@ def _perf_worker(rank: int, world_size: int, rendezvous_path: str) -> None:
                 input_ids = torch.arange(tokens, dtype=torch.long, device=device)
 
                 def fused():
-                    return fused_layer(x, input_ids)
+                    return fused_layer(x, input_ids, expert_load=None)
 
                 def separated():
-                    return separated_layer(x, input_ids)
+                    return separated_layer(x, input_ids, expert_load=None)
 
                 with torch.inference_mode():
                     fused_output = fused().clone()

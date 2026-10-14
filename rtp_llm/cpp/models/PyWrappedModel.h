@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -93,6 +94,7 @@ public:
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    bool                       updateEplbConfig(const EPLBConfig& config) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
@@ -160,6 +162,7 @@ private:
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
 
+    ExpertBalancer             expert_balancer_;
     std::unique_ptr<GraphBase> graph_runner_;
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
@@ -221,6 +224,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
+    expert_balancer_(description_.ffn_conf.moe_configs, params, weights_, overall_expert_stats_),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
                                                                                allow_cuda_graph,
                                                                                is_prefill_cuda_graph_mode,
@@ -381,6 +385,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;
+        graph_params.expert_token_counts          = expert_balancer_.stable_expert_token_counts();
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
@@ -594,7 +599,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
-
     cache_store_async_writer_ =
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                 cache_manager_,
@@ -673,6 +677,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
     }
 
+    // Graph initialization calls Python directly and may leave warmup counts.
+    expert_balancer_.step(true);
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
     (void)construction_guard.release();
 }

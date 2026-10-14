@@ -350,6 +350,7 @@ class RocmExpertsMXFp4Test(_MXFp4MoeBaseTest):
             a2_scale=None,
             apply_router_weight_on_input=apply_router_weight_on_input,
             extra_expert_args=None,
+            expert_load=None,
         ).fused_expert_output
 
         self.assertEqual(out.shape, (self.M, self.K))

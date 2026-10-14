@@ -361,7 +361,9 @@ class CutedslFp4ExecutorTestBase:
             ),
             weights,
         )
-        forward_payload = executor.execute(payload, "silu", None, None, False, None)
+        forward_payload = executor.execute(
+            payload, "silu", None, None, False, None, expert_load=None
+        )
         output = forward_payload.fused_expert_output
         
         input_global_scale = weights[W.moe_w1_i_s]

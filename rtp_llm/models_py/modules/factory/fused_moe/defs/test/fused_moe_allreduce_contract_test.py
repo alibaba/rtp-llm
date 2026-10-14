@@ -1,5 +1,6 @@
 """Platform-neutral FusedMoe TP all-reduce contract tests."""
 
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import Mock
 
@@ -9,6 +10,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     SKIP_TP_ALLREDUCE_ARG,
     CombineForwardPayload,
     ExpertForwardPayload,
+    ExpertTokensMetadata,
     FusedMoe,
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
@@ -51,6 +53,69 @@ class FusedMoeSkipAllreduceTest(TestCase):
             topk_ids,
         )
 
+    def test_monitor_context_reaches_executor_without_router_double_record(self):
+        fused_moe, router, experts, hidden_states, weights, ids = self._make_fused_moe(
+            False
+        )
+        context = SimpleNamespace(expert_token_counts=torch.zeros(4, dtype=torch.int32))
+        fused_moe(hidden_states, weights, ids, expert_load=context)
+        self.assertIs(experts.execute.call_args.kwargs["expert_load"], context)
+        fused_moe(hidden_states, weights, ids, expert_load=None)
+        self.assertIsNone(experts.execute.call_args.kwargs["expert_load"])
+
+    def test_backend_without_recording_keeps_zero_counts(self):
+        from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+        fused_moe, router, experts, hidden_states, weights, ids = self._make_fused_moe(
+            False
+        )
+        context = ExpertLoadContext(torch.zeros(4, dtype=torch.int32))
+        result = fused_moe(hidden_states, weights, ids, expert_load=context)
+        torch.testing.assert_close(result, hidden_states)
+        self.assertEqual(context.expert_token_counts.tolist(), [0] * 4)
+        router.prepare.assert_called_once()
+        experts.execute.assert_called_once()
+
+    def test_dispatch_counts_are_not_recorded_again_by_executor(self):
+        from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+        fused_moe, router, experts, hidden_states, weights, ids = self._make_fused_moe(
+            False
+        )
+        router.prepare.return_value.expert_tokens_meta = ExpertTokensMetadata(
+            expert_num_tokens=torch.tensor([2, 0, 3, 1], dtype=torch.int32),
+        )
+        context = ExpertLoadContext(torch.zeros(4, dtype=torch.int32))
+        fused_moe(hidden_states, weights, ids, expert_load=context)
+        self.assertEqual(context.expert_token_counts.tolist(), [2, 0, 3, 1])
+        self.assertIsNone(experts.execute.call_args.kwargs["expert_load"])
+
+    def test_padded_dispatch_counts_are_recorded_by_executor(self):
+        fused_moe, router, experts, hidden_states, weights, ids = self._make_fused_moe(
+            False
+        )
+        router.prepare.return_value.expert_tokens_meta = ExpertTokensMetadata(
+            expert_num_tokens=torch.full((4,), 128, dtype=torch.int32),
+            counts_are_padded=True,
+        )
+        context = SimpleNamespace(expert_token_counts=torch.zeros(4, dtype=torch.int32))
+        fused_moe(hidden_states, weights, ids, expert_load=context)
+        self.assertIs(experts.execute.call_args.kwargs["expert_load"], context)
+
+    def test_empty_executor_input_preserves_prior_counts(self):
+        from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+        fused_moe, router, experts, hidden_states, weights, ids = self._make_fused_moe(
+            False
+        )
+        experts.execute_empty_inputs = False
+        router.prepare.return_value.expert_x = hidden_states[:0]
+        router.finalize.return_value = hidden_states[:0]
+        context = ExpertLoadContext(torch.full((4,), 9, dtype=torch.int32))
+        fused_moe(hidden_states[:0], weights[:0], ids[:0], expert_load=context)
+        self.assertEqual(context.expert_token_counts.tolist(), [9] * 4)
+        experts.execute.assert_not_called()
+
     def test_forward_passes_skip_tp_allreduce_to_supported_router(self):
         fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
             self._make_fused_moe(True)
@@ -60,6 +125,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             skip_tp_allreduce=True,
+            expert_load=None,
         )
 
         extra_finalize_args = _extract_extra_finalize_args(router.finalize)
@@ -75,6 +141,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
                     hidden_states=hidden_states,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
+                    expert_load=None,
                 )
 
                 extra_finalize_args = _extract_extra_finalize_args(router.finalize)
@@ -91,6 +158,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
             topk_ids=topk_ids,
             extra_finalize_args=extra_finalize_args,
             skip_tp_allreduce=False,
+            expert_load=None,
         )
 
         self.assertTrue(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
@@ -109,6 +177,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
             topk_ids=topk_ids,
             extra_finalize_args=extra_finalize_args,
             skip_tp_allreduce=False,
+            expert_load=None,
         )
 
         self.assertTrue(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
@@ -129,6 +198,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            expert_load=None,
         )
 
         self.assertIs(router.finalize.call_args.args[0].router_context, router_context)
@@ -143,6 +213,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 skip_tp_allreduce=True,
+                expert_load=None,
             )
 
         router.prepare.assert_not_called()
@@ -154,7 +225,9 @@ class FusedMoeSkipAllreduceTest(TestCase):
         router.supports_gate_pack = True
         experts.supports_gate_pack = True
         with self.assertRaisesRegex(ValueError, "supports_skip_tp_allreduce"):
-            fused_moe.forward_gate_pack(hidden_states, Mock(), skip_tp_allreduce=True)
+            fused_moe.forward_gate_pack(
+                hidden_states, Mock(), skip_tp_allreduce=True, expert_load=None
+            )
 
         router.prepare_gate_pack.assert_not_called()
         experts.execute.assert_not_called()
@@ -165,7 +238,9 @@ class FusedMoeSkipAllreduceTest(TestCase):
         router.supports_gate_pack = True
         experts.supports_gate_pack = True
         router.prepare_gate_pack.return_value = router.prepare.return_value
-        fused_moe.forward_gate_pack(hidden_states, Mock(), skip_tp_allreduce=True)
+        fused_moe.forward_gate_pack(
+            hidden_states, Mock(), skip_tp_allreduce=True, expert_load=None
+        )
 
         router.prepare_gate_pack.assert_called_once()
         experts.execute.assert_called_once()

@@ -143,7 +143,11 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         torch.cuda.empty_cache()
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load,
     ) -> torch.Tensor:
         """4-opt prefill path; returns ``[N, D] fp32``.
 
@@ -156,6 +160,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
           y: ``[N, D]`` float32 sum over (token, top-k) of
              ``weight * expert[idx](x)``.
         """
+        if expert_load is not None:
+            expert_load.record_ids(indices)
         cfg = self.cfg
         N, D = x.shape
         E = cfg.n_routed_experts
@@ -203,6 +209,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             scatter_out_scale,
             m_indices,
             output_index,
+            expert_token_counts=None,
             scale_ue8m0=True,
         )
         m_indices.clamp_(min=0, max=E - 1)

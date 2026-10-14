@@ -257,15 +257,19 @@ class DeepGemmHybridExecutorTestBase:
         enable_cuda_graph: bool,
     ):
         if not enable_cuda_graph:
-            return executor.execute(payload, "silu", None, None, False, None)
+            return executor.execute(
+                payload, "silu", None, None, False, None, expert_load=None
+            )
 
         # Warm every JIT path before capture, then validate the exact executor
         # path used by CUDA Graph serving can be captured and replayed.
-        executor.execute(payload, "silu", None, None, False, None)
+        executor.execute(payload, "silu", None, None, False, None, expert_load=None)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            combine_payload = executor.execute(payload, "silu", None, None, False, None)
+            combine_payload = executor.execute(
+                payload, "silu", None, None, False, None, expert_load=None
+            )
         graph.replay()
         torch.cuda.synchronize()
         return combine_payload

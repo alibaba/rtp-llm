@@ -102,7 +102,16 @@ The following legacy options and environment variables were removed and must no 
 | `--eplb_stats_window_size` | EPLB statistics window size. | 10 |
 | `--eplb_control_step` | (DEBUG) EPLB synchronization control parameter cycle. | 100 |
 | `--eplb_test_mode` | (DEBUG) Enables ExpertBalancer test mode | False |
+| `--eplb_metrics_report_interval` | Report `moe_lb` every N forwards. `0` disables collection; `-1` selects 100 for PREFILL and 1000 for DECODE or PDFUSION. Other values must be positive. | 0 |
+| `--eplb_metrics_snapshot_max_files` | Snapshots retained per model instance in circular slots under `LOG_PATH/eplb_snapshot` (`LOG_PATH` defaults to `logs`). `0` disables snapshots. | 0 |
 | `--fake_balance_expert` | (DEBUG) Enables expert pseudo-balancing mechanism. | False |
+
+`moe_lb` follows DeepInfer: sum the maximum EP-rank load for each step and layer,
+then divide by the sum of their mean EP-rank loads. `1.0` means balanced; larger
+values indicate more imbalance. A window with no routed tokens reports `1.0`.
+The model-level `rtp_llm_moe_lb` gauge and `[EPLB]` log use this same ratio.
+Completed windows use a blocking GPU-to-CPU copy and synchronous gathering;
+snapshot schema 4 stores per-step layer sums for independent recomputation.
 
 ## Sampling Configuration
 

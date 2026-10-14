@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -307,6 +308,7 @@ def forward_layers(
     kv_cache: Optional[Any],
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
+    expert_token_counts: Optional[torch.Tensor],
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
@@ -346,7 +348,14 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
+            h = layer.forward_decode(
+                h,
+                attn_metadata,
+                input_ids,
+                kv_cache=kv_cache,
+                expert_load=expert_load,
+            )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
             if _rt_on:
@@ -487,6 +496,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        expert_token_counts=inputs.expert_token_counts,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():

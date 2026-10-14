@@ -131,6 +131,7 @@ class FusedMoeTest(TestCase):
             a2_scale=None,
             apply_router_weight_on_input=False,
             extra_expert_args=None,
+            expert_load=None,
         )
 
         # 数值比对

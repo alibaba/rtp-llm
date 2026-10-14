@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -100,6 +101,7 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
         assert payload.expert_x.size(-1) == self.w1.size(
@@ -214,6 +216,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
         assert payload.expert_x.size(-1) == self.w1.size(
@@ -332,6 +335,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
         assert payload.expert_x.size(-1) == self.w1.size(
@@ -462,6 +466,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
         # assert hidden_size in (self.hidden_size_raw, self.hidden_size_padded), (
@@ -595,6 +600,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "expert_x is None"
         # assert hidden_size in (self.hidden_size_raw, self.hidden_size_padded), (

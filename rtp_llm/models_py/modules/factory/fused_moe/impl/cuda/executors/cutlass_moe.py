@@ -33,6 +33,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     get_cutlass_moe_mm_without_permute_info,
     post_reorder_triton_kernel,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -106,6 +107,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_topk_ids is not None
         assert payload.expert_topk_weights is not None
@@ -219,6 +221,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             num_tokens=M,
             hidden_size=K,
         )
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         get_cutlass_moe_mm_without_permute_info(
             topk_ids,
             expert_offsets,
@@ -229,6 +232,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             K,
             swap_ab_gemm1,
             swap_ab_gemm2,
+            expert_token_counts=counts,
         )
         if not per_act_token and expert_map is not None:
             c1.fill_(0)
@@ -363,6 +367,7 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_tokens_meta is not None
         assert payload.expert_topk_ids is not None

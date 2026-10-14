@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -99,9 +100,12 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
+        if expert_load is not None:
+            expert_load.record_ids(topk_ids)
 
         topk = topk_ids.size(-1)
 

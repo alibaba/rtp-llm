@@ -181,6 +181,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=expert_num_tokens,
                 expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
+                counts_are_padded=self.expert_alignment > 1,
             ),
         )
 

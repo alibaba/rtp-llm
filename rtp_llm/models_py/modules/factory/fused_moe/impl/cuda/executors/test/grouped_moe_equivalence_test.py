@@ -193,8 +193,8 @@ class GroupedMoEExecutionTest(unittest.TestCase):
         x = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
         input_ids = torch.arange(8, dtype=torch.long, device="cuda")
         with torch.inference_mode():
-            grouped_out = grouped(x, input_ids).clone()
-            local_out = local(x, input_ids)
+            grouped_out = grouped(x, input_ids=input_ids, expert_load=None).clone()
+            local_out = local(x, input_ids=input_ids, expert_load=None)
 
         self.assertNotEqual(grouped_out.data_ptr(), local_out.data_ptr())
         self.assertEqual(grouped_out.shape, x.shape)
@@ -212,8 +212,14 @@ class GroupedMoEExecutionTest(unittest.TestCase):
         empty_x = torch.empty(0, 512, dtype=torch.bfloat16, device="cuda")
         empty_ids = torch.empty(0, dtype=torch.long, device="cuda")
         with torch.inference_mode():
-            self.assertEqual(grouped(empty_x, empty_ids).shape, empty_x.shape)
-            self.assertEqual(local(empty_x, empty_ids).shape, empty_x.shape)
+            self.assertEqual(
+                grouped(empty_x, input_ids=empty_ids, expert_load=None).shape,
+                empty_x.shape,
+            )
+            self.assertEqual(
+                local(empty_x, input_ids=empty_ids, expert_load=None).shape,
+                empty_x.shape,
+            )
 
     def test_routed_only_grouped_matches_local_loop(self):
         torch.manual_seed(20260902)
@@ -231,8 +237,8 @@ class GroupedMoEExecutionTest(unittest.TestCase):
         x = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
         input_ids = torch.arange(8, dtype=torch.long, device="cuda")
         with torch.inference_mode():
-            grouped_out = grouped(x, input_ids).clone()
-            local_out = local(x, input_ids)
+            grouped_out = grouped(x, input_ids=input_ids, expert_load=None).clone()
+            local_out = local(x, input_ids=input_ids, expert_load=None)
 
         diff = (grouped_out.float() - local_out.float()).abs()
         scale = local_out.float().abs().mean().item() + 1e-6
@@ -291,8 +297,8 @@ class GroupedMoEExecutionTest(unittest.TestCase):
                 # unbounded synthetic-MLP magnitude growth.
                 grouped_in = F.rms_norm(grouped_out.float(), (512,)).to(torch.bfloat16)
                 local_in = F.rms_norm(local_out.float(), (512,)).to(torch.bfloat16)
-                grouped_delta = grouped(grouped_in, input_ids).clone()
-                local_delta = local(local_in, input_ids).clone()
+                grouped_delta = grouped(grouped_in, input_ids, expert_load=None).clone()
+                local_delta = local(local_in, input_ids, expert_load=None).clone()
                 self.assertNotEqual(grouped_delta.data_ptr(), local_delta.data_ptr())
                 grouped_out = (grouped_out + grouped_delta).to(torch.bfloat16).clone()
                 self.assertGreater(grouped_delta.float().abs().mean().item(), 1.0e-3)

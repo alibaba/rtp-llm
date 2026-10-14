@@ -163,7 +163,9 @@ class DeepGemmMaskedExecutorTestBase:
             weights,
         )
         # execute
-        combine_payload = executor.execute(payload, "silu", None, None, False, None)
+        combine_payload = executor.execute(
+            payload, "silu", None, None, False, None, expert_load=None
+        )
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
         for i, num_token in enumerate(expert_num_tokens):
             diff = calc_diff(
