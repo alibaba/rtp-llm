@@ -270,9 +270,15 @@ def bootstrap_remote_jit_dir():
 
 
 def _flashinfer_op_is_stale(op_dir: Path) -> bool:
-    rules_path = op_dir / "build.ninja"
+    # The compile inputs / depfiles may live in an included ninja fragment
+    # rather than the top-level build.ninja, so scan every ninja file in the
+    # op directory -- the runfiles-anchor rule applies to whichever file the
+    # generator wrote the paths into.
     try:
-        rules = rules_path.read_text(errors="ignore")
+        rules = "".join(
+            p.read_text(errors="ignore")
+            for p in sorted(op_dir.glob("*.ninja"))
+        )
     except OSError:
         return False
     # FlashInfer embeds the absolute paths of the package instance that
