@@ -91,11 +91,23 @@ class GptOssBf16MoeTest(unittest.TestCase):
         self.assertTrue(torch.equal(got.float(), w_ref))
 
     def _bf16_layer_weights(self, E, D, inter):
+        # int8 packed tensors + real-magnitude, half-distinguishable biases:
+        # mirrors the loader's declaration (P0-1) and makes a gate/up bias
+        # half swap visible (P0-2) — layer-0 statistics of the real 20b
+        # checkpoint: gate-half mean ~-0.5/std ~0.3, up-half ~-0.85/~0.2.
         w1_packed, s1, w_gu = _random_mxfp4(E, 2 * inter, D, seed=21)
         w2_packed, s2, w_d = _random_mxfp4(E, D, inter, seed=22)
+        w1_packed = w1_packed.view(torch.int8)
+        w2_packed = w2_packed.view(torch.int8)
         gate_w = (torch.randn(E, D) * 0.05).bfloat16()
         gate_b = (torch.randn(E) * 0.05).bfloat16()
-        b_gu = (torch.randn(E, 2 * inter) * 0.05).bfloat16()
+        b_gu = torch.cat(
+            [
+                torch.randn(E, inter) * 0.3 - 0.5,
+                torch.randn(E, inter) * 0.2 - 0.85,
+            ],
+            dim=1,
+        ).bfloat16()
         b_d = (torch.randn(E, D) * 0.05).bfloat16()
         lw = {
             W.moe_w1: w1_packed,
@@ -151,8 +163,73 @@ class GptOssBf16MoeTest(unittest.TestCase):
         ref = _hf_oracle(x.float().cpu(), w_gu, w_d, b_gu, b_d, gate_w, gate_b)
         rel = (out.cpu() - ref).norm() / ref.norm()
         print(f"[bf16] rel-l2={rel:.4f}", flush=True)
-        self.assertLess(rel, 0.05)
+        # No quantization on this lane: BF16 round-trips of the decoded
+        # weights only — sub-1e-2 envelope.
+        self.assertLess(rel, 0.02)
         self.assertTrue(torch.isfinite(out).all())
+
+    def test_bf16_gate_up_bias_half_alignment(self):
+        """Directed P0-2 probe: gate bias +3 on the gate half only.
+
+        If _dequant_expert_weights swapped w1 halves without swapping the
+        bias halves, the +3 lands on the up input: activation becomes
+        ~gate*sigmoid(1.702*gate)*(up+4) instead of (gate+3)*sigmoid...*(up+1)
+        — an order-of-magnitude output change.
+        """
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        E, D, inter = 4, 128, 64
+        torch.manual_seed(9)
+        w1_packed, s1, w_gu = _random_mxfp4(E, 2 * inter, D, seed=31)
+        w2_packed, s2, w_d = _random_mxfp4(E, D, inter, seed=32)
+        gate_w = (torch.randn(E, D) * 0.05).bfloat16()
+        gate_b = (torch.randn(E) * 0.05).bfloat16()
+        b_gu = torch.zeros(E, 2 * inter, dtype=torch.bfloat16)
+        b_gu[:, :inter] = 3.0  # gate half (loader layout: gate rows first)
+        b_d = torch.zeros(E, D, dtype=torch.bfloat16)
+        lw = {
+            W.moe_w1: w1_packed.view(torch.int8),
+            W.moe_s1: s1,
+            W.moe_w2: w2_packed.view(torch.int8),
+            W.moe_s2: s2,
+            W.moe_b1: b_gu,
+            W.moe_b2: b_d,
+            W.moe_gate: gate_w,
+            W.moe_gate_bias: gate_b,
+        }
+        lw = _dequant_expert_weights(lw)
+        lw = {k: v.cuda() for k, v in lw.items()}
+        moe = Fp8Fp4MoeLayer(
+            layer_id=0,
+            dim=D,
+            moe_inter_dim=inter,
+            n_routed_experts=E,
+            n_activated_experts=4,
+            n_shared_experts=0,
+            score_func="topk_softmax",
+            route_scale=1.0,
+            swiglu_limit=7.0,
+            n_hash_layers=0,
+            vocab_size=201088,
+            layer_weights=lw,
+            ep_size=1,
+            ep_rank=0,
+            max_tokens_per_rank=512,
+            strategy="no_quant_cpp",
+            model_type="gpt_oss",
+            moe_w1_layout="up_gate",
+            swiglu_alpha=1.702,
+            swiglu_up_shift=1.0,
+            moe_quant_method=None,
+        )
+        x = (torch.randn(8, D) * 0.5).bfloat16().cuda()
+        got = moe(x, None).float().cpu()
+        ref = _hf_oracle(
+            x.float().cpu(), w_gu, w_d, b_gu, b_d, gate_w.float(), gate_b.float()
+        )
+        rel = (got - ref).norm() / ref.norm()
+        print(f"[bias-align] rel-l2={rel:.4f}", flush=True)
+        self.assertLess(rel, 0.02)
 
     def test_legacy_silu_lane_unchanged(self):
         """No-bias lane keeps legacy SiLU*up math (Qwen-style weights)."""

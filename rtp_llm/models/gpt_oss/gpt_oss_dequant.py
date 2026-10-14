@@ -27,9 +27,16 @@ def dequant_mxfp4_stacked(packed: torch.Tensor, scales: torch.Tensor) -> torch.T
     Returns:
         ``[..., K]`` BF16 tensor on ``packed.device``.
     """
+    # The loader declares the packed nibbles/scales as int8/uint8 storage;
+    # they are raw bit patterns — bit-view int8 to uint8, never cast values.
+    if packed.dtype == torch.int8:
+        packed = packed.view(torch.uint8)
+    if scales.dtype == torch.int8:
+        scales = scales.view(torch.uint8)
     if packed.dtype != torch.uint8 or scales.dtype != torch.uint8:
         raise ValueError(
-            f"mxfp4 dequant expects uint8 tensors, got {packed.dtype}/{scales.dtype}"
+            f"mxfp4 dequant expects uint8/int8 bit patterns, got "
+            f"{packed.dtype}/{scales.dtype}"
         )
     k2 = packed.shape[-1]
     if k2 * 2 != scales.shape[-1] * 32:

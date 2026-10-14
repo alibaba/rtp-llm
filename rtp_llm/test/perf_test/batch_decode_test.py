@@ -472,6 +472,7 @@ def _run_decode(
                 **kwargs,
             ).run()
         else:
+            log_flush_state: Dict[str, int] = {"offset": 0}
             for input_len in config.input_len_list:
                 filtered_bs = filter_bs_by_kvcache(
                     config.batch_size_list, input_len, max_kv
@@ -481,15 +482,18 @@ def _run_decode(
                         f"No BS fits KV cache for input_len={input_len}, skipping"
                     )
                     continue
-                GridRunner(
+                runner = GridRunner(
                     port,
                     dp_size,
                     filtered_bs,
                     [input_len],
                     input_query_dict,
                     is_decode=True,
+                    log_flush_offset=log_flush_state.get("offset", 0),
                     **kwargs,
-                ).run()
+                )
+                runner.run()
+                log_flush_state["offset"] = runner.log_flush_offset
 
 
 # ---------------------------------------------------------------------------

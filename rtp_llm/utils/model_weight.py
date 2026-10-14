@@ -1666,6 +1666,9 @@ class W:
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
         moe_gate: sp_id,
+        # gpt-oss: router bias and per-head sinks replicate (not split) under TP.
+        moe_gate_bias: sp_id,
+        attn_sink: sp_id,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,

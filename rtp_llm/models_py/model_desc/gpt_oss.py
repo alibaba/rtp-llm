@@ -66,6 +66,13 @@ def _dequant_expert_weights(weights: Dict[str, torch.Tensor]) -> Dict[str, torch
     weights[W.moe_w1] = torch.cat(
         [w13[:, inter:], w13[:, :inter]], dim=1
     )  # [up; gate]
+    # gate_up bias follows its weight rows: swap its halves too, so the
+    # triton executor's [up; gate] GEMM1 output gets the matching bias halves.
+    b13 = weights.get(W.moe_b1)
+    if b13 is not None:
+        weights[W.moe_b1] = torch.cat(
+            [b13[:, inter:], b13[:, :inter]], dim=1
+        )
     weights[W.moe_w2] = dequant_mxfp4_stacked(w2_packed, s2)  # [E, K, I]
     return weights
 
@@ -108,6 +115,12 @@ class GptOssDecoderLayer(nn.Module):
             moe_weights = weights
             expert_quant = "FP8_FP4"
             w1_layout = "gate_up"
+            # The gpt-oss expert contract (per-expert biases + gated
+            # activation alpha/shift) is only implemented by grouped_fp4;
+            # an "auto" request must not silently land on another
+            # FP8_FP4 executor that drops the contract.
+            if moe_strategy == "auto":
+                moe_strategy = "grouped_fp4"
         else:
             moe_weights = _dequant_expert_weights(weights)
             expert_quant = None

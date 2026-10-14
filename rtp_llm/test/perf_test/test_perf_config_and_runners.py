@@ -66,8 +66,31 @@ class TestPrepareConfig(unittest.TestCase):
         self.assertEqual(config.all_seq_lens, [128, 256])
         # max(input_len) + decode_test_length
         self.assertEqual(config.max_seq_len, 256 + 10)
-        self.assertEqual(config.max_concurrency, 8)
+        # Admission headroom: the server-side concurrency floor is
+        # max(batch_size_list, concurrency_limit) — the default limit (64)
+        # outranks max(BS)=8 so later grid cells survive session drain.
+        self.assertEqual(config.max_concurrency, 64)
         self.assertIsNone(config.test_config)
+
+    def test_grid_mode_explicit_bs_low_limit(self):
+        with patch.object(
+            sys, "argv", ["prog", "--batch_size", "1,4,8", "--concurrency_limit", "8"]
+        ):
+            args = _make_args(
+                batch_size="1,4,8", input_len="128,256", concurrency_limit=8
+            )
+            config = _prepare_config(args, [])
+        self.assertEqual(config.max_concurrency, 8)
+
+    def test_grid_mode_explicit_bs_over_limit(self):
+        with patch.object(
+            sys, "argv", ["prog", "--batch_size", "1,4,128", "--concurrency_limit", "8"]
+        ):
+            args = _make_args(
+                batch_size="1,4,128", input_len="128,256", concurrency_limit=8
+            )
+            config = _prepare_config(args, [])
+        self.assertEqual(config.max_concurrency, 128)
 
     def test_grid_mode_auto_bs(self):
         with patch.object(sys, "argv", ["prog"]):
