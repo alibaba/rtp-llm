@@ -64,31 +64,43 @@ void validateInactivePayloadsAreEmpty(const TensorPB& tensor_pb) {
 
 }  // namespace
 
-at::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
-    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+void TensorPbConvert::validate(const TensorPB& tensor_pb) {
     validateInactivePayloadsAreEmpty(tensor_pb);
-    void* data_ptr = nullptr;
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            return validateTensorPayload(tensor_pb, tensor_pb.fp32_data(), sizeof(float));
+        case TensorPB::INT32:
+            return validateTensorPayload(tensor_pb, tensor_pb.int32_data(), sizeof(int32_t));
+        case TensorPB::FP16:
+            return validateTensorPayload(tensor_pb, tensor_pb.fp16_data(), sizeof(c10::Half));
+        case TensorPB::BF16:
+            return validateTensorPayload(tensor_pb, tensor_pb.bf16_data(), sizeof(c10::BFloat16));
+        default:
+            throw std::runtime_error("Unsupported data type.");
+    }
+}
+
+at::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
+    validate(tensor_pb);
+    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+    void*                data_ptr = nullptr;
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
-            validateTensorPayload(tensor_pb, tensor_pb.fp32_data(), sizeof(float));
             data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
             auto options = at::TensorOptions().dtype(at::kFloat);
             return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::INT32: {
-            validateTensorPayload(tensor_pb, tensor_pb.int32_data(), sizeof(int32_t));
             data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
             auto options = at::TensorOptions().dtype(at::kInt);
             return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::FP16: {
-            validateTensorPayload(tensor_pb, tensor_pb.fp16_data(), sizeof(c10::Half));
             data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
             auto options = at::TensorOptions().dtype(at::kHalf);
             return at::from_blob(data_ptr, shape, options).clone();
         }
         case TensorPB::BF16: {
-            validateTensorPayload(tensor_pb, tensor_pb.bf16_data(), sizeof(c10::BFloat16));
             data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
             auto options = at::TensorOptions().dtype(at::kBFloat16);
             return at::from_blob(data_ptr, shape, options).clone();
