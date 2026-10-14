@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <unistd.h>
 
@@ -149,6 +150,16 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
+}
+
+TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
+    autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "invalid");
+    auto            environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_quarantine_ratio");
+    auto            client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(0);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    EXPECT_FALSE(initSingleRank(*backend.backend, environment));
 }
 
 TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
@@ -459,6 +470,7 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
+    autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.125");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
     auto metrics_reporter =
@@ -466,12 +478,18 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper, nullptr, metrics_reporter);
+    auto backend = makeBackend(environment,
+                               singleRankConfig(),
+                               client_wrapper,
+                               nullptr,
+                               metrics_reporter,
+                               /*gdr_enabled=*/false);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
     ASSERT_NE(quarantine_metrics, nullptr);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 
     kv_cache_manager::Locations locations{
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
@@ -489,6 +507,7 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
 
     ScopedReferencedBlocks healthy_blocks(environment.device_pool, 1);
     auto                   healthy_request =
@@ -515,11 +534,47 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
 
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+}
+
+TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
+    ASSERT_EXIT(
+        ([]() {
+            autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.1");
+            auto environment    = makeBackendEnvironment("kvcm_storage_backend_quarantine_abort");
+            auto client_wrapper = std::make_shared<MockClientWrapper>();
+
+            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+            auto backend = makeBackend(environment,
+                                       singleRankConfig(),
+                                       client_wrapper,
+                                       nullptr,
+                                       nullptr,
+                                       /*gdr_enabled=*/false);
+            if (!initSingleRank(*backend.backend, environment)) {
+                _exit(2);
+            }
+
+            kv_cache_manager::Locations locations{
+                kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
+            EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+            auto observation = match(*backend.backend, makeStorageRequest(environment));
+            if (!observation.success || observation.match_meta == nullptr) {
+                _exit(3);
+            }
+
+            client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+            (void)readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
+            _exit(4);
+        }()),
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
 }  // namespace

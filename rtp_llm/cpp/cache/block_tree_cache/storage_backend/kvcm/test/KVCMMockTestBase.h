@@ -379,12 +379,12 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     return result;
 }
 
-[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
-                                           const ParallelismConfig&                  parallelism_config,
-                                           const std::shared_ptr<MockClientWrapper>& client_wrapper,
+[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                  environment,
+                                           const ParallelismConfig&                   parallelism_config,
+                                           const std::shared_ptr<MockClientWrapper>&  client_wrapper,
                                            std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
-                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr,
-                                           bool                                      gdr_enabled = false) {
+                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
+                                           bool                                       gdr_enabled       = false) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.kvcm_server_address = "unused-test-address";
     RuntimeConfig runtime_config;

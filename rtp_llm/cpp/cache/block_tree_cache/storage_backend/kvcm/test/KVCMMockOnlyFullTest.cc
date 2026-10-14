@@ -254,6 +254,7 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPi
     ASSERT_NE(quarantine_metrics, nullptr);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -289,6 +290,7 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPi
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
@@ -298,6 +300,7 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPi
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 }
 
 TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {

@@ -882,6 +882,8 @@ bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* man
                                   "rtp_llm_remote_cache_quarantined_lease_count");
     REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_count_metric,
                                   "rtp_llm_remote_cache_quarantined_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric,
+                                  "rtp_llm_remote_cache_quarantined_block_ratio");
     return true;
 }
 
@@ -889,6 +891,7 @@ void RtpLLMRemoteCacheQuarantineMetrics::report(
     const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(quarantined_lease_count_metric, collector->quarantined_lease_count);
     REPORT_MUTABLE_METRIC(quarantined_block_count_metric, collector->quarantined_block_count);
+    REPORT_MUTABLE_METRIC(quarantined_block_ratio_metric, collector->quarantined_block_ratio);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
