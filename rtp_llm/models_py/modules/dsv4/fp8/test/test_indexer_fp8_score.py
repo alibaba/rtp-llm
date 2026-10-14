@@ -134,6 +134,7 @@ def test_indexer_consumer_provider_chunking(provider_name, next_n):
         patch.object(indexer, "indexer_q_rope_fp8_quant_fold", side_effect=quantize),
         patch.object(indexer, "_run_decode_topk", return_value=False),
         patch.object(score_module, "_HAS_DEEP_GEMM", True),
+        patch.object(score_module, "_sm100_needs_triton_fallback", return_value=False),
         patch.object(score_module, "_deep_gemm", backend),
         patch.object(score_module, "_get_num_sms", return_value=1),
     ):
