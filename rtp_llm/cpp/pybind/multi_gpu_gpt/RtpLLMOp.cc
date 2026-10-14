@@ -217,16 +217,49 @@ void RtpLLMOp::init(py::object model,
     }
 
     pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
-                                      this,
-                                      std::move(params),
-                                      std::move(propose_params),
-                                      std::move(token_processor),
-                                      std::move(mm_process_engine),
-                                      std::move(telemetry_config));
+    grpc_server_thread_ = std::thread([this,
+                                       init_params   = std::move(params),
+                                       propose       = std::move(propose_params),
+                                       tokens        = std::move(token_processor),
+                                       mm_engine     = std::move(mm_process_engine),
+                                       trace_config_ = std::move(telemetry_config)]() mutable {
+        try {
+            initRPCServer(std::move(init_params),
+                          std::move(propose),
+                          std::move(tokens),
+                          std::move(mm_engine),
+                          std::move(trace_config_));
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("engine init thread terminated by exception: %s", e.what());
+            {
+                std::lock_guard<std::mutex> lock(init_exception_mutex_);
+                init_exception_ = std::current_exception();
+            }
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("engine init thread terminated by unknown exception");
+            {
+                std::lock_guard<std::mutex> lock(init_exception_mutex_);
+                init_exception_ = std::current_exception();
+            }
+        }
+        init_thread_exited_.store(true, std::memory_order_release);
+    });
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
+        if (init_thread_exited_.load(std::memory_order_acquire)) {
+            std::exception_ptr captured;
+            {
+                std::lock_guard<std::mutex> lock(init_exception_mutex_);
+                captured = init_exception_;
+            }
+            if (captured) {
+                // Rethrow in the caller (e.g. c10::OutOfMemoryError with its full message) so pybind
+                // surfaces a real error instead of an uncaught-exception SIGABRT in the init thread.
+                std::rethrow_exception(captured);
+            }
+            RTP_LLM_FAIL("engine init thread exited before rpc server became ready");
+        }
     }
 }
 

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <exception>
+#include <mutex>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -54,6 +57,11 @@ private:
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
+    // initRPCServer runs on a detached thread; capture its fatal exception so the init caller can
+    // rethrow it instead of letting an uncaught exception std::terminate the whole process silently.
+    std::mutex                      init_exception_mutex_;
+    std::exception_ptr              init_exception_;
+    std::atomic<bool>               init_thread_exited_{false};
     size_t                          model_id_ = 0;
 };
 
