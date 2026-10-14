@@ -8,7 +8,8 @@ import pytest
 from reporting.view_config import view
 from reporting.view_model import SubtitleTemplate
 from document_io import DocumentError as ScenarioError
-from traffic.playback.configuration import PlaybackConfigurationCodec, normalize
+from traffic.playback.configuration import PlaybackConfigurationCodec
+from adapters.load_client import client_environment
 from traffic.synthetic.configuration import IndependentShape, SyntheticWorkload, resolve
 from traffic.synthetic.generator import iter_requests
 
@@ -20,7 +21,7 @@ from traffic.synthetic.generator import iter_requests
 ])
 def test_raw_environment_has_the_same_scalar_admission(raw):
     with pytest.raises(ValueError):
-        normalize(raw)
+        PlaybackConfigurationCodec.from_environment(raw)
 
 
 @pytest.mark.parametrize('raw', [
@@ -34,14 +35,14 @@ def test_unknown_playback_fields_are_rejected_at_client_admission(raw):
 
 
 def test_playback_value_object_and_complete_projection():
-    authored = dict(mode='uniform', qps=13, identity='structural-relabel', max_laps=3, ramp_up_seconds=2)
+    authored = dict(mode='uniform', duration_s=10, qps=13, identity='structural-relabel', max_laps=3, ramp_up_seconds=2)
     config = PlaybackConfigurationCodec.decode(authored)
-    env, projection = normalize({'playback': authored})
+    env, projection = client_environment({'playback': authored})
     decoded = PlaybackConfigurationCodec.from_environment(env)
     assert config == decoded
     assert projection == decoded.to_dict()
     with pytest.raises(ValueError):
-        normalize({'playback': None})
+        client_environment({'playback': None})
 
 
 def test_synthetic_domain_is_immutable_and_not_a_mapping():

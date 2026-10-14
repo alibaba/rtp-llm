@@ -67,9 +67,12 @@ def test_source_priority_is_the_client_priority_authority(name):
     stage = next(s for s in plan['variants'][0]['stages'] if s['action'] in ('java_flow_start', 'master_client_start'))
     assert stage['params']['source']['parameters']['priority'] == 60
     if name != 'master_ha_failover':
-        assert stage['params']['client']['PRIORITY'] == '60'
+        from adapters.load_client import client_environment
+        from traffic.contracts import source_priority
+        environment, _ = client_environment(stage['params']['client'], priority=source_priority(stage['params']['source']))
+        assert environment['PRIORITY'] == '60'
         traffic['client']['PRIORITY'] = '50'
-        with pytest.raises(ValueError, match='conflicts'):
+        with pytest.raises(ValueError, match='unknown client fields'):
             configure_program(data, 'case.yaml')
 
 

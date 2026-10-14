@@ -59,11 +59,11 @@ class JavaFlowGroup:
         self.trace_manifest = None
         self._drain_result = None
 
-    def start(self, trace, environment, deadline, *, target):
+    def start(self, trace, environment, deadline, *, target, priority=50):
         if self.proc is not None or self.directory.exists():
             raise ValueError("flow output directory must be fresh")
         deadline.check()
-        env, playback = client_environment(environment)
+        env, playback = client_environment(environment, priority=priority)
         trace = Path(trace).resolve()
         self.trace_manifest = dict(path=str(trace), sha256=sha256_file(trace))
         self.directory.mkdir(parents=True)

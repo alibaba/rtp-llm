@@ -10,7 +10,7 @@ from adapters.client_journal import MAX_EVIDENCE_EVENTS
 from adapters.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
 from adapters.load_client import client_environment
 from traffic.traffic_source import materialize, SourceSpecification
-from traffic.contracts import java_client_priority
+from traffic.contracts import source_priority
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
@@ -39,7 +39,7 @@ def _start_validate(params, plan):
     if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
         raise ValueError("max_requests must be a positive bounded request count")
     SourceSpecification.read(p["source"])
-    client_environment(java_client_priority(p["source"], p["client"]))
+    client_environment(p["client"], priority=source_priority(p["source"]))
     return p
 
 
@@ -62,7 +62,7 @@ def _start(ctx, p, deadline):
             Path(ctx.instance["source_path"]).parent,
             max_requests=p.get("max_requests"),
         )
-    environment = java_client_priority(p["source"], p["client"])
+    environment = p["client"]
     client = ctx.services.environment.client_operations(p["jvm_xms"], p["jvm_xmx"])
     # This is a retained-evidence ceiling, not a prediction of Java scheduling.
     # The journal grows on demand and fails explicitly when the ceiling is exceeded.
@@ -87,7 +87,8 @@ def _start(ctx, p, deadline):
     from adapters.resource_evidence import flow_evidence
     handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
     flow.start(trace, environment, deadline,
-               target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
+               target=f"127.0.0.1:{ctx.env.master_http_port + 2}",
+               priority=source_priority(p["source"]))
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 

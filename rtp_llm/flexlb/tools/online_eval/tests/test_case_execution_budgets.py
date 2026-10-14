@@ -30,7 +30,8 @@ def test_analysis_budget_is_not_derived_from_request_timeout():
     p = parameters()
     before = build(p)
     changed = copy.deepcopy(p)
-    changed['traffic']['client']['TIMEOUT_MS'] = '10000'
+    changed['traffic']['client']['limits']['request_timeout_s'] = 10
+    changed['traffic']['client']['limits']['drain_timeout_s'] = 90
     after = build(changed)
     assert before['gate']['timeout_s'] == after['gate']['timeout_s'] == 165
     assert before['drain']['timeout_s'] != after['drain']['timeout_s']

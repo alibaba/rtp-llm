@@ -77,25 +77,23 @@ class HaReplayClient:
         self.flow_identity = dict(run_id=uuid.uuid4().hex, group_id=name, phase_id="ha")
         self.stop_command = None
         from adapters.load_client import client_environment, collection_environment, bind_environment
-        settings = {
-            "DURATION_S": str(int(duration_s)),
-            "MAX_CONCURRENCY": str(max_concurrency),
-            "TIMEOUT_MS": str(int(timeout_ms)),
-            "REPLAY_UNIQUE_PREFIX": "false", "FETCH_OUTPUT_STREAM": "true",
-            "N_CHANNELS": "8",
-            "EVENT_LOOP_THREADS": "8",
-            "PRIORITY": str(source_priority(source)),
-            "ENABLE_FALLBACK": str(enable_fallback).lower(),
-            "playback": dict(mode="true-ts", speed=replay_speed,
-                             max_laps=0 if loop else 1, identity="structural-relabel"),
-        }
-        settings, playback = client_environment(settings)
+        if int(timeout_ms) % 1000:
+            raise ValueError("HA timeout_ms must be whole seconds")
+        settings = dict(
+            playback=dict(mode="true-ts", duration_s=int(duration_s), speed=replay_speed,
+                          max_laps=0 if loop else 1, identity="structural-relabel"),
+            limits=dict(max_concurrency=max_concurrency, request_timeout_s=int(timeout_ms)//1000,
+                        drain_timeout_s=max(150, (int(timeout_ms)+999)//1000+30)),
+            transport=dict(channels=8, event_loop_threads=8),
+        )
+        settings, playback = client_environment(settings, priority=source_priority(source))
         runtime = dict(
             FLOW_CONTROL_DIR=str(self.control), FLOW_RUN_ID=self.flow_identity["run_id"],
             FLOW_GROUP_ID=name, FLOW_PHASE_ID="ha", TRACE_FILE=str(trace),
             GRPC_TARGETS=",".join(self.targets), MASTER_DISCOVERY_FILE=str(discovery_file),
             **collection_environment(collection_profile, live_events=live_events),
         )
+        runtime["ENABLE_FALLBACK"] = str(enable_fallback).lower()
         if enable_fallback:
             runtime["ENDPOINTS_FILE"] = str(env.endpoint_file)
         overrides = bind_environment(settings, runtime)

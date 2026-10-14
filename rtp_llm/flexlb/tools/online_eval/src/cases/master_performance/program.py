@@ -7,7 +7,7 @@ from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
 from cases.master_performance.inputs import INPUTS
-from traffic.playback.configuration import normalize
+from adapters.client_configuration import ClientConfiguration
 from cases.master_performance.inputs import OBSERVATION_FIELDS, compile_checks, observation_contract
 from traffic.contracts import driver, uniform_gate_flow
 from case_api.metric_inputs import bind_mock_engine_metrics
@@ -23,21 +23,21 @@ def default(case):
     if not isinstance(inputs, dict) or set(inputs) != {"engine_tps"}:
         raise ValueError("performance gate requires engine_tps input")
     flow = driver(data.traffic, "java_flow")
-    client, _ = normalize(flow["client"])
+    client = ClientConfiguration.read(flow["client"])
     from case_api.inputs import fields
     slo = fields(data.analysis["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.analysis.slo")
     c = dict({k: data.observation[k] for k in OBSERVATION_FIELDS},
                       **observation_contract(data.observation),
                       **compile_checks(case, data.checks, inputs["engine_tps"]),
                       **{"slo_"+key: value for key, value in slo.items()},
-                      qps=float(client["SEND_MODE_QPS"]))
+                      qps=client.playback.qps)
     allowed = c["qps"] * (1 + c["qps_tolerance"])
     if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
         raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")
     bind_mock_engine_metrics(case, inputs["engine_tps"],
         {field: "tokens/s" for field in inputs["engine_tps"]["fields"]})
     budget = c["warmup_s"] + c["measure_s"]
-    uniform_gate_flow(flow, duration_s=budget + 10, trace_duration_s=int(client["DURATION_S"]))
+    uniform_gate_flow(flow, duration_s=budget + 10, trace_duration_s=client.playback.duration_s)
     case.step("setup", "setup", timeout_s=180)
     case.step("traffic", "java_flow_start", params=flow, timeout_s=120)
     case.step(
@@ -49,7 +49,7 @@ def default(case):
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
     case.step("drain", "java_flow_drain", params={"flow": output("traffic", "flow")},
-              timeout_s=int(client["TIMEOUT_MS"]) / 1000 + 30)
+              timeout_s=client.limits.drain_timeout_s + 30)
     case.observe(
         "gate",
         "performance_finish",

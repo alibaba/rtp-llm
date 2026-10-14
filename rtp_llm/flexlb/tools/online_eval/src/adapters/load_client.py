@@ -90,16 +90,15 @@ def validate_flow_environment(environment):
     return env
 
 
-def client_environment(client):
-    """Normalize authored settings; framework-owned fields cannot be supplied."""
-    from traffic.playback.configuration import normalize
+def client_environment(client, *, priority=50):
+    """Resolve typed scenario settings into a complete Java environment."""
+    from adapters.client_configuration import ClientConfiguration
+    from traffic.request_rules import PRIORITY
 
-    if not isinstance(client, dict):
-        raise ValueError('Java client configuration must be a mapping')
-    if set(client) & FRAMEWORK_CLIENT_ENV_VARS:
-        raise ValueError('client endpoint, runtime identities and collection policy are resolved by framework')
-    env, playback = normalize(client)
-    return validate_flow_environment(env), playback
+    configuration = ClientConfiguration.read(client)
+    env = configuration.environment()
+    env['PRIORITY'] = str(PRIORITY.validate(priority, 'source.priority'))
+    return validate_flow_environment(env), configuration.playback.to_dict()
 
 
 def collection_environment(profile, *, monitoring=False, live_events=None):

@@ -475,7 +475,7 @@ class CacheGateTest(unittest.TestCase):
         gate.update(intermediate_p=72, intermediate_hold_s=60)
         flow = case["parameters"]["traffic"]
         flow["source"]["parameters"]["count"] = 170000
-        flow["client"]["DURATION_S"] = "700"
+        flow["client"]["playback"]["duration_s"] = 700
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "staircase.yaml"
 

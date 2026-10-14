@@ -7,7 +7,7 @@ from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
 from cases.cache_scale_in.inputs import INPUTS
-from traffic.playback.configuration import normalize
+from adapters.client_configuration import ClientConfiguration
 from cases.cache_scale_in.inputs import (
     engine_counters, ENGINE_FIELDS, OBSERVATION_FIELDS, compile_checks, observation_contract,
 )
@@ -27,8 +27,8 @@ def default(case):
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
     bind_mock_engine_metrics(case, inputs["engine_counters"], ENGINE_FIELDS)
-    client, _ = normalize(flow["client"])
-    gate["qps"] = float(client["SEND_MODE_QPS"])
+    client = ClientConfiguration.read(flow["client"])
+    gate["qps"] = client.playback.qps
     budget = (
         gate["warmup_timeout_s"] + gate["topology_timeout_s"] + gate["observe_s"] + 10
     )
@@ -49,7 +49,7 @@ def default(case):
         "drain",
         "java_flow_drain",
         params={"flow": output("traffic", "flow")},
-        timeout_s=max(120, int(client.get("TIMEOUT_MS", "10000")) // 1000 + 30),
+        timeout_s=client.limits.drain_timeout_s + 30,
     )
     case.observe(
         "gate",

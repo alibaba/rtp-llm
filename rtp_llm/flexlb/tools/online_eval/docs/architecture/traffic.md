@@ -99,15 +99,15 @@ python3 scripts/pipeline/derive_synthetic_profile.py --model lineage-model.xz \
 
 - `uniform` 按 QPS 发送，可选 `ramp_up_seconds` 线性升压后保持恒速。
 - `true-ts` 保留真实时间间隔，并用 `speed` 缩放；Java env 对应 `SEND_MODE=replay`。
-- `max_laps` 默认 1；正整数限定圈数，0 表示循环到明确的 `DURATION_S`。uniform 不隐式循环。
+- `max_laps` 默认 1；正整数限定圈数，0 表示循环到明确的 `playback.duration_s`。uniform 不隐式循环。
 - `identity: structural-relabel` 是默认值；lap 0 保持输入，后续圈对所有 token 加同一圈偏移，再重算块 key。圈内前缀共享不变，各圈 token 区间不相交。
 - `identity: none` 显式保持各圈 token，用于有意测量热缓存。编号空间耗尽时失败，不回绕。
 
 分片按源请求序号固定分配，每圈重复同一子集。uniform 的全局到达序号为 `sent_count × num_shards + shard_index`，各 shard 不把首条请求提前到同一零点。不能整除的分片在多轮下保持各自固定速率；合并后不声明等价于重新全局分片的单客户端序列。LIMIT 保持 Java 发送器的既有条数语义，框架 case 优先在物化时用 `max_requests` 选定输入，不重复设置 LIMIT。
 
-`DURATION_S` 是墙钟截止，先缩放真实时间再判断。stop/drain 负责停止发行并等待已经发出的请求完成。每条请求证据保留 iteration，不把多轮累计命中率解释为一轮的自然演化。
+`playback.duration_s` 是墙钟截止，先缩放真实时间再判断。stop/drain 负责停止发行并等待已经发出的请求完成。每条请求证据保留 iteration，不把多轮累计命中率解释为一轮的自然演化。
 
-YAML playback 与裸 pacing env 不能混用；不支持随机到达、任意速率曲线、burst/diurnal 和 partial 身份。无效字段在启动前失败。端点、flow 标识、制品目录及采集策略由框架注入，不能在 `traffic.client` 重复声明。
+场景客户端按 playback、limits、transport 分层，禁止直接填写 Java 环境变量；不支持随机到达、任意速率曲线、burst/diurnal 和 partial 身份。无效字段在启动前失败。端点、flow 标识、制品目录及采集策略由框架注入，不能在 `traffic.client` 重复声明。
 
 请求计划 manifest 记录内容变换与 SHA；Java `playback.json` 记录实际发送配置、`PLAYBACK_V1` 和 token stride。框架核对输入 SHA 和启动参数，并将快照嵌入 `flow-input.json` 的 `java_playback`。`PlaybackPlan` 用同一身份映射和发送公式离线重建各圈计划；Python 不实现调度算法。
 

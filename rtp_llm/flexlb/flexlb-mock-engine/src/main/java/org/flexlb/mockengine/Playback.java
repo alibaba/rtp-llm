@@ -10,17 +10,15 @@ final class Playback {
     final String identity;
 
     Playback(Map<String, String> env, boolean loop, long duration) {
-        maxLaps = Integer.parseInt(text(env, "MAX_LAPS", loop ? "0" : "1"));
+        ClientEnvironment input = new ClientEnvironment(env);
+        String explicit = env.get("MAX_LAPS");
+        maxLaps = explicit == null || explicit.isBlank()
+                ? (loop ? 0 : input.integer("MAX_LAPS")) : Integer.parseInt(explicit);
         if (maxLaps < 0 || (maxLaps == 0 && duration <= 0))
             throw new IllegalArgumentException("loop playback requires max_laps or bounded duration");
-        identity = text(env, "LAP_IDENTITY", "structural-relabel");
+        identity = input.text("LAP_IDENTITY");
         if (!List.of("none", "structural-relabel").contains(identity))
             throw new IllegalArgumentException("invalid lap identity");
-    }
-
-    private static String text(Map<String, String> env, String key, String fallback) {
-        String value = env.get(key);
-        return value == null || value.isBlank() ? fallback : value;
     }
 
     boolean more(int completedLap) { return maxLaps == 0 || completedLap + 1 < maxLaps; }

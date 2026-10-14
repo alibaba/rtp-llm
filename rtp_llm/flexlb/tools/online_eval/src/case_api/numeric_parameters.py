@@ -27,6 +27,10 @@ OUTPUT_DISTRIBUTION_NUMBERS = number_fields(COUNT,
 JAVA_FLOW_NUMBERS = {
     **number_fields(NONNEGATIVE, 'traffic.client.playback.qps', 'traffic.poll_s'),
     'traffic.client.playback.max_laps': COUNT,
+    **number_fields(POSITIVE_COUNT, 'traffic.client.playback.duration_s',
+        'traffic.client.limits.max_concurrency', 'traffic.client.limits.request_timeout_s',
+        'traffic.client.limits.drain_timeout_s', 'traffic.client.transport.channels',
+        'traffic.client.transport.event_loop_threads'),
 }
 CAPTURE_NUMBERS = number_fields(POSITIVE_COUNT,
     'observation.capture.max_samples', 'observation.capture.max_bytes')

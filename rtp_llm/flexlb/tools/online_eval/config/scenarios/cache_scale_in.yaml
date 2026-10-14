@@ -48,17 +48,17 @@ parameters:
         priority: 50
     client:
       playback:
+        duration_s: 1350
         mode: uniform
         qps: 240.0
         max_laps: 1
-      DURATION_S: '1350'
-      MAX_CONCURRENCY: '32768'
-      TIMEOUT_MS: '600000'
-      RESPONSE_TIMEOUT: '660'
-      REPLAY_UNIQUE_PREFIX: 'false'
-      FETCH_OUTPUT_STREAM: 'true'
-      N_CHANNELS: '16'
-      EVENT_LOOP_THREADS: '16'
+      limits:
+        max_concurrency: 32768
+        request_timeout_s: 600
+        drain_timeout_s: 660
+      transport:
+        channels: 16
+        event_loop_threads: 16
     max_requests: 324001
     poll_s: 0.1
     jvm_xms: 1g

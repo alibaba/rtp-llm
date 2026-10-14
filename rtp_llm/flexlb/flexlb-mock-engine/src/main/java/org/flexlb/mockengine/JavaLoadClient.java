@@ -2185,15 +2185,18 @@ public final class JavaLoadClient implements AutoCloseable {
             return out;
         }
 
-        static Config fromEnv() {
-            String targetAddr = env("TARGET_ADDR", "127.0.0.1:7001");
-            String grpcTarget = env("GRPC_TARGET", "");
+        static Config fromEnv() { return fromEnvironment(System.getenv()); }
+
+        static Config fromEnvironment(Map<String, String> values) {
+            ClientEnvironment input = new ClientEnvironment(values);
+            String targetAddr = input.text("TARGET_ADDR", "127.0.0.1:7001");
+            String grpcTarget = input.text("GRPC_TARGET", "");
             // GRPC_TARGETS (HA case-test mode): comma-separated flexlb gRPC
             // addresses, e.g. "127.0.0.1:18082,127.0.0.1:18085". Takes
             // precedence over GRPC_TARGET when both are set (logged). >= 2
             // addresses activate the sticky+failover router; exactly 1
             // degenerates to the legacy single-target mode on that address.
-            String grpcTargetsRaw = env("GRPC_TARGETS", "");
+            String grpcTargetsRaw = input.text("GRPC_TARGETS", "");
             List<String> grpcTargets = grpcTargetsRaw.isEmpty()
                     ? List.of() : parseGrpcTargets(grpcTargetsRaw);
             if (!grpcTargets.isEmpty()) {
@@ -2216,51 +2219,62 @@ public final class JavaLoadClient implements AutoCloseable {
                 int httpPort = Integer.parseInt(targetAddr.substring(colon + 1));
                 grpcTarget = host + ":" + (httpPort + 2);
             }
-            boolean fetchOutputStream = envBool("FETCH_OUTPUT_STREAM", true);
+            boolean fetchOutputStream = input.flag("FETCH_OUTPUT_STREAM");
+            for (String key : List.of("MAX_CONCURRENCY", "TIMEOUT_MS", "RESPONSE_TIMEOUT",
+                    "N_CHANNELS", "EVENT_LOOP_THREADS")) {
+                if (input.longValue(key) <= 0) throw new IllegalArgumentException(key + " must be positive");
+            }
+            if (input.integer("DURATION_S") < 0 || !Double.isFinite(input.number("REPLAY_SPEED"))
+                    || input.number("REPLAY_SPEED") <= 0
+                    || !Double.isFinite(input.number("SEND_MODE_QPS"))
+                    || !Double.isFinite(input.number("RAMP_UP_SECONDS")))
+                throw new IllegalArgumentException("invalid playback limits or pacing");
+            if (input.integer("RESPONSE_TIMEOUT") * 1000L < input.longValue("TIMEOUT_MS"))
+                throw new IllegalArgumentException("response timeout must cover request timeout");
             return new Config(
-                    env("TRACE_FILE", ""),
+                    input.text("TRACE_FILE", ""),
                     targetAddr,
                     grpcTarget,
-                    envInt("DURATION_S", 0),
-                    envInt("MAX_CONCURRENCY", 999_999_999),
-                    envDouble("REPLAY_SPEED", 10.0),
-                    envInt("LOAD_CLIENT_WORKERS", 1),
-                    env("OUTPUT_DIR", "load_client_output"),
-                    envInt("NUM_SHARDS", 1),
-                    envInt("SHARD_INDEX", 0),
-                    envInt("LIMIT", 0),
-                    envLong("TIMEOUT_MS", 3_600_000L),
-                    envDouble("SLA_TTFT_MS", 500.0),
+                    input.integer("DURATION_S"),
+                    input.integer("MAX_CONCURRENCY"),
+                    input.number("REPLAY_SPEED"),
+                    input.integer("LOAD_CLIENT_WORKERS", 1),
+                    input.text("OUTPUT_DIR", "load_client_output"),
+                    input.integer("NUM_SHARDS", 1),
+                    input.integer("SHARD_INDEX", 0),
+                    input.integer("LIMIT", 0),
+                    input.longValue("TIMEOUT_MS"),
+                    input.number("SLA_TTFT_MS", 500.0),
                     fetchOutputStream,
-                    envBool("LOOP", false),
-                    envInt("N_CHANNELS", 8),
-                    envInt("EVENT_LOOP_THREADS", 32),
-                    envLong("START_AT_EPOCH_MS", 0L),
-                    envInt("RESPONSE_TIMEOUT", 120),
-                    envBool("SKIP_SERVER_LATENCY", false),
-                    env("MODEL", "engine_service"),
-                    env("API_KEY", ""),
-                    envInt("MAX_INPUT_LEN", 0),
-                    envInt("MAX_OUTPUT_LEN", 0),
-                    env("PUSHGATEWAY_URL", ""),
+                    input.flag("LOOP"),
+                    input.integer("N_CHANNELS"),
+                    input.integer("EVENT_LOOP_THREADS"),
+                    input.longValue("START_AT_EPOCH_MS", 0L),
+                    input.integer("RESPONSE_TIMEOUT"),
+                    input.flag("SKIP_SERVER_LATENCY", false),
+                    input.text("MODEL", "engine_service"),
+                    input.text("API_KEY", ""),
+                    input.integer("MAX_INPUT_LEN", 0),
+                    input.integer("MAX_OUTPUT_LEN", 0),
+                    input.text("PUSHGATEWAY_URL", ""),
                     // Fallback default OFF (load-test accuracy): fallback
                     // traffic bypasses the master and pollutes calibers;
                     // case-test direct-connect scenarios opt in explicitly
                     // via ENABLE_FALLBACK=1 + ENDPOINTS_FILE. See the
                     // enableFallback field javadoc.
-                    envBool("ENABLE_FALLBACK", false),
-                    env("ENDPOINTS_FILE", ""),
-                    envBool("DRY_RUN", false),
+                    input.flag("ENABLE_FALLBACK", false),
+                    input.text("ENDPOINTS_FILE", ""),
+                    input.flag("DRY_RUN", false),
                     // Default 50, not 0: priority 0 is rejected by master
                     // admission (all-p0 load-test traffic never enters the
                     // scheduling pool), and 50 is the scheduler's neutral
                     // defaultPriority — see docs/priority-scheduler-delivery-modes.md.
-                    sanitizePriority(envInt("PRIORITY", 50)),
-                    sanitizeForcePriority(envInt("FORCE_PRIORITY", 0)),
-                    env("SEND_MODE", "replay"),
-                    envDouble("SEND_MODE_QPS", 0.0),
-                    envDouble("RAMP_UP_SECONDS", 0.0),
-                    envBool("REPLAY_UNIQUE_PREFIX", true),
+                    sanitizePriority(input.integer("PRIORITY", 50)),
+                    sanitizeForcePriority(input.integer("FORCE_PRIORITY", 0)),
+                    input.text("SEND_MODE"),
+                    input.number("SEND_MODE_QPS"),
+                    input.number("RAMP_UP_SECONDS"),
+                    input.flag("REPLAY_UNIQUE_PREFIX"),
                     grpcTargets
             );
         }
@@ -2304,34 +2318,6 @@ public final class JavaLoadClient implements AutoCloseable {
             System.out.println("  RAMP_UP_SECONDS=" + rampUpSeconds);
             System.out.println("  REPLAY_UNIQUE_PREFIX=" + replayUniquePrefix);
             System.out.println("=====================================");
-        }
-
-        private static String env(String key, String def) {
-            String val = System.getenv(key);
-            return val != null && !val.isEmpty() ? val : def;
-        }
-
-        private static int envInt(String key, int def) {
-            String val = System.getenv(key);
-            return val != null && !val.isEmpty() ? Integer.parseInt(val) : def;
-        }
-
-        private static long envLong(String key, long def) {
-            String val = System.getenv(key);
-            return val != null && !val.isEmpty() ? Long.parseLong(val) : def;
-        }
-
-        private static double envDouble(String key, double def) {
-            String val = System.getenv(key);
-            return val != null && !val.isEmpty() ? Double.parseDouble(val) : def;
-        }
-
-        private static boolean envBool(String key, boolean def) {
-            String val = System.getenv(key);
-            if (val == null || val.isEmpty()) {
-                return def;
-            }
-            return val.equals("1") || val.equalsIgnoreCase("true") || val.equalsIgnoreCase("yes");
         }
 
         /**

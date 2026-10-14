@@ -67,7 +67,7 @@ class SharedRuntimeTests(unittest.TestCase):
         ).read_text()
         names = set(
             re.findall(
-                r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?)\("([A-Z_]+)"', source
+                r'(?:System\.getenv|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"', source
             )
         )
         self.assertTrue(names)

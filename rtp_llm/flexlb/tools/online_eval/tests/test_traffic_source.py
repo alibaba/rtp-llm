@@ -6,7 +6,8 @@ from traffic.traffic_source import materialize,validate_plan,SourceSpecification
 from traffic.synthetic.generator import materialize as generate
 from traffic.prefix_lineage import encode,decode
 from traffic.lineage_model import LineageModel, LineageExpander
-from traffic.playback.configuration import normalize
+from adapters.load_client import client_environment
+from traffic.playback.configuration import PlaybackConfigurationCodec
 
 
 class TrafficSourceTest(unittest.TestCase):
@@ -71,8 +72,8 @@ class TrafficSourceTest(unittest.TestCase):
             self.assertEqual([r['input_token_blocks'] for r in rows],[r['input_token_blocks'] for r in second])
 
     def test_playback_explicit_laps_and_no_duplicate_controls(self):
-        env,p=normalize(dict(DURATION_S='60',playback=dict(mode='uniform',qps=20,ramp_up_seconds=2,max_laps=0)))
+        env,p=client_environment(dict(playback=dict(mode='uniform',duration_s=60,qps=20,ramp_up_seconds=2,max_laps=0)))
         self.assertEqual(env['LOOP'],'true');self.assertEqual(p['identity'],'structural-relabel')
-        with self.assertRaises(ValueError):normalize(dict(playback=dict(mode='uniform',qps=1,max_laps=0)))
-        with self.assertRaises(ValueError):normalize(dict(SEND_MODE='uniform',playback=dict(mode='uniform',qps=1)))
-        with self.assertRaises(ValueError):normalize(dict(playback=dict(mode='true-ts',qps=1)))
+        with self.assertRaises(ValueError):client_environment(dict(playback=dict(mode='uniform',qps=1,max_laps=0)))
+        with self.assertRaises(ValueError):client_environment(dict(SEND_MODE='uniform',playback=dict(mode='uniform',qps=1)))
+        with self.assertRaises(ValueError):client_environment(dict(playback=dict(mode='true-ts',qps=1)))

@@ -15,13 +15,12 @@ from scenario.runtime import Deadline
 
 
 def settings():
-    return dict(DURATION_S='10', MAX_CONCURRENCY='8', REPLAY_UNIQUE_PREFIX='false',
-                FETCH_OUTPUT_STREAM='true', playback=dict(mode='uniform', qps=5))
+    return dict(playback=dict(mode='uniform', qps=5, duration_s=10), limits=dict(max_concurrency=8))
 
 
 @pytest.mark.parametrize('field', sorted(FRAMEWORK_CLIENT_ENV_VARS))
 def test_authored_framework_settings_are_rejected_even_if_they_match(field):
-    with pytest.raises(ValueError, match='resolved by framework'):
+    with pytest.raises(ValueError, match='unknown client fields'):
         client_environment(dict(settings(), **{field: 'true'}))
 
 
@@ -88,11 +87,11 @@ def test_runtime_collision_is_an_error():
 
 @pytest.mark.parametrize('field', ['MAX_INPUT_LEN', 'MAX_OUTPUT_LEN', 'FORCE_PRIORITY'])
 def test_content_overrides_are_rejected_before_start(field):
-    with pytest.raises(ValueError, match='content'):
+    with pytest.raises(ValueError, match='unknown client fields'):
         client_environment(dict(settings(), **{field: '1'}))
 
 
 @pytest.mark.parametrize("field", ["UNKNOWN_SETTING", "RATE_CURVE", "PLAYBACK_SEED"])
 def test_unknown_client_settings_use_standard_validation(field):
-    with pytest.raises(ValueError, match="unknown Java client configuration names"):
+    with pytest.raises(ValueError, match="unknown client fields"):
         client_environment(dict(settings(), **{field: "1"}))

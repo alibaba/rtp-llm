@@ -5,34 +5,35 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic.playback.configuration import normalize
+from adapters.load_client import client_environment
+from traffic.playback.configuration import PlaybackConfigurationCodec
 from traffic.output_sampling import output_sampler
 from traffic import prefix_lineage, prefix_lineage_v3
 
 
 class PlaybackControlsTest(unittest.TestCase):
     def test_bounded_multi_lap_environment_roundtrip(self):
-        p = dict(mode='uniform', qps=100, max_laps=3, identity='structural-relabel', ramp_up_seconds=2)
-        env, a = normalize(dict(playback=p))
-        _, b = normalize(env)
+        p = dict(mode='uniform', duration_s=10, qps=100, max_laps=3, identity='structural-relabel', ramp_up_seconds=2)
+        env, a = client_environment(dict(playback=p))
+        b = PlaybackConfigurationCodec.from_environment(env).to_dict()
         self.assertEqual(a, b)
         self.assertEqual(env['MAX_LAPS'], '3')
         self.assertEqual(env['LOOP'], 'true')
         with self.assertRaises(ValueError):
-            normalize(dict(playback=dict(mode='uniform', qps=10, max_laps=0)))
+            client_environment(dict(playback=dict(mode='uniform', qps=10, max_laps=0)))
 
     def test_unknown_fields_and_invalid_values_are_rejected(self):
         for key in ('arrival', 'rate_curve', 'retain_schedule', 'retain_probability',
                     'seed', 'burst_factor', 'diurnal_amplitude'):
             with self.subTest(key=key), self.assertRaises(ValueError):
-                normalize(dict(playback=dict(mode='uniform', qps=10, **{key: 1})))
+                client_environment(dict(playback=dict(mode='uniform', qps=10, **{key: 1})))
         for mode in ('burst', 'gradient'):
             with self.assertRaises(ValueError):
-                normalize(dict(playback=dict(mode=mode, qps=10)))
+                client_environment(dict(playback=dict(mode=mode, qps=10)))
         with self.assertRaises(ValueError):
-            normalize(dict(playback=dict(mode='uniform', qps=10, identity='partial')))
+            client_environment(dict(playback=dict(mode='uniform', qps=10, identity='partial')))
         with self.assertRaises(ValueError):
-            normalize(dict(SEND_MODE='uniform', SEND_MODE_QPS='10', MAX_LAPS='3', LOOP='false'))
+            client_environment(dict(SEND_MODE='uniform', SEND_MODE_QPS='10', MAX_LAPS='3', LOOP='false'))
 
     def test_discrete_lineage_preserves_snapshot_filter_and_original_index(self):
         for version, module in [(2,prefix_lineage),(3,prefix_lineage_v3)]:
