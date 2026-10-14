@@ -367,6 +367,36 @@ class TestTpsBsCandidates(unittest.TestCase):
         candidates = TpsBinarySearchRunner._make_bs_candidates(4)
         self.assertEqual(candidates, [1, 4])
 
+    def test_binary_search_refines_adjacent_bs(self):
+        """The post-bracket refinement must walk past the step-4 grid.
+
+        With a TPOT threshold that breaks at BS=7, the coarse grid
+        (1,4,8,...) reports best_bs=4; the refinement tests 5, 6, 7 and
+        must return 6 as the highest passing concurrency.
+        """
+        runner = TpsBinarySearchRunner(
+            port=1,
+            dp_size=1,
+            target_tpot=10.0,
+            max_bs=16,
+            decode_test_length=1,
+            num_measures=1,
+            generate_config={},
+        )
+
+        def fake_test_bs(bs, queries, label):
+            ok = bs <= 6
+            tpot = 5.0 if ok else 12.0
+            return ok, tpot, 1.0
+
+        runner._test_bs = fake_test_bs
+        result = runner._binary_search(lambda bs: None, "ut")
+        self.assertEqual(result.best_bs, 6)
+        tested = [st.batch_size for st in result.search_steps]
+        self.assertIn(5, tested)
+        self.assertIn(6, tested)
+        self.assertIn(7, tested)
+
 
 class TestOfflineBenchConfig(unittest.TestCase):
     """Lightweight tests for OfflineBenchConfig.validate."""

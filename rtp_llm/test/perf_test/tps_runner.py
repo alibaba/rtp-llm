@@ -124,6 +124,28 @@ class TpsBinarySearchRunner:
 
         if best_bs == 0:
             logging.warning(f"  [{label}] No BS satisfies target TPOT!")
+        else:
+            # Post-bracket refinement (skill perf §0.2: refine between
+            # adjacent concurrencies near the threshold): the coarse step-4
+            # grid leaves BS2/3, 5-7, 9-15... untested, so the reported
+            # best_bs is a lower bound. Walk upward from the best passing
+            # point one BS at a time until the target breaks.
+            refine_bs = best_bs + 1
+            while refine_bs <= (max_bs or self._max_bs) and refine_bs not in [
+                st.batch_size for st in steps
+            ]:
+                queries = queries_fn(refine_bs)
+                ok, tpot, sr = self._test_bs(refine_bs, queries, label)
+                steps.append(TpsSearchStep(refine_bs, tpot, sr, ok))
+                logging.debug(
+                    f"  [{label}] refine BS={refine_bs}: TPOT={tpot:.2f}ms "
+                    f"-> {'PASS' if ok else 'FAIL'}"
+                )
+                if ok:
+                    best_bs, best_tpot = refine_bs, tpot
+                    refine_bs += 1
+                else:
+                    break
 
         tps = best_bs / (best_tpot / 1000) if best_tpot > 0 else 0.0
         return TpsResult(
