@@ -8,6 +8,7 @@ math is validated on whichever GPU runs the test.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -24,6 +25,41 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_te
 )
 from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
+
+
+class TestSm120KernelGuard(unittest.TestCase):
+    """The shared version guard gates this impl's support() (round-6 fix).
+
+    Covers both branches: reject pre-2.8.4 builds (2.8.3.post1 imported
+    cleanly but has no sm_120 cubins) and accept 2.8.4+ local builds.
+    """
+
+    def test_guard_rejects_283_and_accepts_284(self):
+        fake = mock.MagicMock()
+        for version, expected in (
+            ("2.8.3.post1+cu13torch2.11cxx11abitrue.r1", False),
+            ("2.8.4+b27cdc3.cu132", True),
+        ):
+            fake.__version__ = version
+            with mock.patch.dict("sys.modules", {"flash_attn": fake}):
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl import (
+                    flash_attn_2,
+                )
+                from rtp_llm.utils.flash_attn_utils import (
+                    _flash_attn_has_sm120_kernels,
+                )
+
+                self.assertEqual(
+                    _flash_attn_has_sm120_kernels(),
+                    expected,
+                    msg=version,
+                )
+                # the impl-level guard additionally requires the import to
+                # have succeeded; emulate the loaded state
+                with mock.patch.object(flash_attn_2, "_HAS_FLASH_ATTN_2", True):
+                    self.assertEqual(
+                        flash_attn_2._has_sm120_kernels(), expected, msg=version
+                    )
 
 
 @unittest.skipUnless(_HAS_FLASH_ATTN_2, "flash_attn 2 not available")

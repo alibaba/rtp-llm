@@ -18,7 +18,6 @@ impl is eager-only: support() rejects is_cuda_graph and the class exposes
 no prepare_cuda_graph.
 """
 
-import re
 from typing import Optional
 
 import torch
@@ -36,38 +35,26 @@ from rtp_llm.ops.compute_ops import (
 try:
     # The wheel is optional per platform lock; an unavailable binary stays a
     # clean factory miss instead of an import error.
-    import flash_attn as _flash_attn_module
     from flash_attn import flash_attn_varlen_func
 
     _HAS_FLASH_ATTN_2 = True
 except (ImportError, OSError, RuntimeError):
-    _flash_attn_module = None
     flash_attn_varlen_func = None
     _HAS_FLASH_ATTN_2 = False
 
 
 def _has_sm120_kernels() -> bool:
-    """flash-attn builds before 2.8.4 carry no sm_120 cubins.
+    """Delegate to the shared flash-attn version guard.
 
-    Importability only proves the extension loads, not that kernels exist
-    for this arch: the 2.8.3.post1 r1 wheel imports cleanly on sm_120 and
-    then raises cudaErrorNoKernelImageForDevice at the first launch.
-    Guard on the version so old wheels keep their original (fmha_v2)
-    routing instead of newly crashing through this impl.
+    flash-attn builds before 2.8.4 carry no sm_120 cubins: importability
+    only proves the extension loads, not that kernels exist for this arch
+    (2.8.3.post1 r1 imports cleanly on sm_120, then raises
+    cudaErrorNoKernelImageForDevice at the first launch). Old wheels keep
+    their original fmha_v2 routing instead of newly crashing here.
     """
-    if not _HAS_FLASH_ATTN_2:
-        return False
-    try:
-        parts = []
-        for component in str(_flash_attn_module.__version__).split(".")[:3]:
-            match = re.match(r"^(\d+)", component)
-            parts.append(int(match.group(1)) if match else 0)
-        return tuple(parts) >= (2, 8, 4)
-    except (AttributeError, ValueError):
-        return False
+    from rtp_llm.utils.flash_attn_utils import _flash_attn_has_sm120_kernels
 
-# Head dims with tuned FA2 kernels across Ampere..Blackwell consumer.
-_SUPPORTED_HEAD_DIMS = (64, 96, 128, 192, 256)
+    return _HAS_FLASH_ATTN_2 and _flash_attn_has_sm120_kernels()
 
 
 class FlashAttn2PrefillImpl(FMHAImplBase):
