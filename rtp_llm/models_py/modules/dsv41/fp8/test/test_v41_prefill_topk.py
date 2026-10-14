@@ -89,11 +89,39 @@ class V41PrefillTopKCPU(unittest.TestCase):
         with patch.object(topk, "_TOPK_V3_OK", False):
             self.assertIsNone(topk.try_select_tokens(logits, visible))
 
+    def test_bf16_requires_new_native_capability_without_changing_fp32_fallback(self):
+        logits, visible = self.fixture()
+        result = object()
+        for bf16_ready in (False, True):
+            ops = SimpleNamespace(topk_v3=Mock())
+            if bf16_ready:
+                ops.dsv41_topk_v3_finite = Mock()
+            with self.subTest(bf16_ready=bf16_ready), patch.object(
+                topk, "rtp_llm_ops", ops
+            ), patch.object(topk, "_TOPK_V3_OK", True), patch.object(
+                topk, "_select_tokens", return_value=result
+            ) as select:
+                self.assertIs(topk.supports_bf16(), bf16_ready)
+                logits.dtype = torch.float32
+                self.assertTrue(topk.is_supported(logits, visible))
+                logits.dtype = torch.bfloat16
+                self.assertIs(topk.is_supported(logits, visible), bf16_ready)
+                actual = topk.try_select_tokens(logits, visible)
+                if bf16_ready:
+                    self.assertIs(actual, result)
+                    select.assert_called_once()
+                else:
+                    self.assertIsNone(actual)
+                    select.assert_not_called()
+                with patch.object(topk, "_TOPK_V3_OK", False):
+                    self.assertFalse(topk.supports_bf16())
+                    self.assertFalse(topk.is_supported(logits, visible))
+
     def test_support_fallbacks(self):
         with patch.object(topk, "_TOPK_V3_OK", True):
             for change in (
                 {"is_cuda": False},
-                {"dtype": torch.bfloat16},
+                {"dtype": torch.float16},
                 {"shape": (0, 1024)},
                 {"shape": (7, 511)},
                 {"stride": lambda axis: (2048, 2)[axis]},

@@ -19,4 +19,13 @@ bool deepselect_bf16_available();
 // and short-row NaN in its fused remapping kernel.
 void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output);
 
+// Dense token K512 with the same storage/bounds contract as above. NaN ranks
+// like +inf instead of invalidating the whole row. When filter_finite is true,
+// selected NaN/+inf/-inf become -1, including short rows. When false, callers
+// must filter selected nonfinite scores before publishing token indices.
+void deepselect_bf16_dense(const torch::Tensor& logits,
+                           const torch::Tensor& ends,
+                           torch::Tensor&       output,
+                           bool                 filter_finite);
+
 }  // namespace torch_ext

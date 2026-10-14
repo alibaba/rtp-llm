@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 #if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
 #include <ATen/MemoryOverlap.h>
@@ -31,7 +32,13 @@ bool deepselect_bf16_available() {
 #endif
 }
 
-void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output) {
+namespace {
+
+template<bool DENSE>
+void deepselect_bf16_impl(const torch::Tensor& logits,
+                          const torch::Tensor& ends,
+                          torch::Tensor&       output,
+                          bool                 filter_finite) {
 #if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
     TORCH_CHECK(logits.is_cuda() && ends.is_cuda() && output.is_cuda(), "DeepSelect requires CUDA tensors");
     TORCH_CHECK(logits.device() == ends.device() && logits.device() == output.device(),
@@ -80,17 +87,70 @@ void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, tor
 
     // Match the upstream BF16 normal dispatcher, but instantiate only K512,
     // int32 indices and no sorting/value output. No FP32 logits or workspace.
-    if (rows <= properties->multiProcessorCount) {
-        using Config = TopkSelectConfig<nv_bfloat16, int32_t, false, false, false, 512, 512, 1, 8192, 4096, 5>;
-        topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+    const auto launch = [&](auto finite) {
+        constexpr bool FILTER_FINITE = decltype(finite)::value;
+        if (rows <= properties->multiProcessorCount) {
+            using Config = TopkSelectConfig<nv_bfloat16,
+                                            int32_t,
+                                            false,
+                                            false,
+                                            false,
+                                            512,
+                                            512,
+                                            1,
+                                            8192,
+                                            4096,
+                                            5,
+                                            512,
+                                            1,
+                                            DENSE,
+                                            FILTER_FINITE>;
+            topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+        } else {
+            using Config = TopkSelectConfig<nv_bfloat16,
+                                            int32_t,
+                                            false,
+                                            false,
+                                            false,
+                                            512,
+                                            256,
+                                            2,
+                                            4096,
+                                            4096,
+                                            4,
+                                            512,
+                                            1,
+                                            DENSE,
+                                            FILTER_FINITE>;
+            topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+        }
+    };
+    if constexpr (DENSE) {
+        if (filter_finite) {
+            launch(std::true_type{});
+        } else {
+            launch(std::false_type{});
+        }
     } else {
-        using Config = TopkSelectConfig<nv_bfloat16, int32_t, false, false, false, 512, 256, 2, 4096, 4096, 4>;
-        topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+        launch(std::false_type{});
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 #else
     TORCH_CHECK(false, "DeepSelect BF16 requires a CUDA >= 12.9 Blackwell build");
 #endif
+}
+
+}  // namespace
+
+void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output) {
+    deepselect_bf16_impl<false>(logits, ends, output, false);
+}
+
+void deepselect_bf16_dense(const torch::Tensor& logits,
+                           const torch::Tensor& ends,
+                           torch::Tensor&       output,
+                           bool                 filter_finite) {
+    deepselect_bf16_impl<true>(logits, ends, output, filter_finite);
 }
 
 }  // namespace torch_ext

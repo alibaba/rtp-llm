@@ -1,6 +1,7 @@
 """Layout, allocation, and FP4 numeric contracts for grouped prefill scoring."""
 
 import importlib.util
+import itertools
 import os
 import random
 import sys
@@ -150,8 +151,8 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
         )
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
-        for batch in (2, 32, 64):
-            with self.subTest(batch=batch):
+        for batch, bf16_ready in itertools.product((2, 32, 64), (False, True)):
+            with self.subTest(batch=batch, bf16_ready=bf16_ready):
                 counts = [
                     2 * ((min(n, 128) + 7) // 8)
                     for n in ([7, 31, 128, 257] * 16)[:batch]
@@ -176,13 +177,14 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                 )
                 weights, positions, ids = object(), object(), object()
                 output = torch.full((rows, 512), -777, dtype=torch.int32)
-                logits, visible = torch.empty(rows, 512), torch.full(
-                    (rows,), 512, dtype=torch.int32
-                )
+                logits, visible = torch.empty(
+                    rows, 512, dtype=torch.bfloat16 if bf16_ready else torch.float32
+                ), torch.full((rows,), 512, dtype=torch.int32)
                 bounds = (torch.zeros_like(visible), visible)
 
-                def groups(*, mask_tail):
+                def groups(*, mask_tail, return_bf16):
                     self.assertFalse(mask_tail)
+                    self.assertIs(return_bf16, bf16_ready)
                     yield slice(0, rows), logits, visible, bounds
 
                 def publish(shared_arg, score, ends, span, bound, target, block, count):
@@ -195,6 +197,8 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     return True, target
 
                 with patch.object(
+                    topk, "supports_bf16", return_value=bf16_ready
+                ), patch.object(
                     grouped,
                     "try_grouped_scores",
                     return_value=SimpleNamespace(
@@ -245,11 +249,15 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
         )
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
-        for lengths, width in (((7,), 512), ((2, 3, 2), 512), ((2, 3, 2), 37)):
-            with self.subTest(lengths=lengths, width=width):
+        for (lengths, width), bf16_ready in itertools.product(
+            (((7,), 512), ((2, 3, 2), 512), ((2, 3, 2), 37)), (False, True)
+        ):
+            with self.subTest(lengths=lengths, width=width, bf16_ready=bf16_ready):
                 rows = sum(lengths)
                 output = torch.full((rows, 512), -777, dtype=torch.int32)
-                scores = torch.arange(width, dtype=torch.float32).expand(rows, -1)
+                scores = torch.arange(
+                    width, dtype=torch.bfloat16 if bf16_ready else torch.float32
+                ).expand(rows, -1)
                 visible = torch.full((rows,), width, dtype=torch.int32)
                 shared = {}
                 owner = SimpleNamespace(
@@ -267,8 +275,9 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     spans.append(slice(start, start + count))
                     start += count
 
-                def groups(*, mask_tail):
+                def groups(*, mask_tail, return_bf16):
                     self.assertFalse(mask_tail)
+                    self.assertIs(return_bf16, bf16_ready)
                     for span in spans:
                         ends = visible[span]
                         yield span, scores[span], ends, (torch.zeros_like(ends), ends)
@@ -293,6 +302,8 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     return out
 
                 with patch.object(
+                    topk, "supports_bf16", return_value=bf16_ready
+                ), patch.object(
                     grouped,
                     "try_grouped_scores",
                     return_value=SimpleNamespace(
@@ -303,7 +314,9 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                             else tuple(tensor[span] for span in spans)
                         ),
                     ),
-                ), patch.object(grouped, "_mask_tail_kernel"), patch.object(
+                ), patch.object(
+                    grouped, "_mask_tail_kernel"
+                ), patch.object(
                     topk, "try_select_tokens", side_effect=select
                 ):
                     self.assertTrue(
@@ -676,8 +689,10 @@ class GroupedScoreLayoutTest(unittest.TestCase):
     def test_groups_preserve_row_views_offsets_and_writes(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as scorer
 
-        for lengths in ((11,), (3, 5, 3)):
-            with self.subTest(lengths=lengths):
+        for lengths, dtype, raw in itertools.product(
+            ((11,), (3, 5, 3)), (torch.float32, torch.bfloat16), (False, True)
+        ):
+            with self.subTest(lengths=lengths, dtype=dtype, raw=raw):
                 rows = sum(lengths)
                 q = torch.arange((rows + 4) * 32 * 64, dtype=torch.int64).view(
                     rows + 4, 32, 64
@@ -685,9 +700,9 @@ class GroupedScoreLayoutTest(unittest.TestCase):
                 sf = torch.arange((rows + 4) * 32, dtype=torch.int32).view(
                     rows + 4, 32
                 )[2 : rows + 2]
-                weights = torch.arange((rows + 4) * 32, dtype=torch.float32).view(
-                    rows + 4, 32
-                )[2 : rows + 2]
+                weights = torch.arange((rows + 4) * 32, dtype=dtype).view(rows + 4, 32)[
+                    2 : rows + 2
+                ]
                 layout, bounds, start = [], [], 0
                 for count in lengths:
                     span = slice(start, start + count)
@@ -704,6 +719,7 @@ class GroupedScoreLayoutTest(unittest.TestCase):
                 def score(
                     q_view, sf_view, payload, scale, weight_view, *args, **kwargs
                 ):
+                    self.assertIs(kwargs["return_bf16"], raw)
                     span = layout[len(calls)].rows
                     for actual, original in (
                         (q_view, q),
@@ -722,15 +738,22 @@ class GroupedScoreLayoutTest(unittest.TestCase):
                     weight_view.fill_(len(calls) + 17)
                     self.assertTrue(torch.all(weights[span] == len(calls) + 17))
                     calls.append(span)
-                    return torch.empty(q_view.shape[0], 257)
+                    return torch.empty(
+                        q_view.shape[0],
+                        257,
+                        dtype=torch.bfloat16 if raw else torch.float32,
+                    )
 
                 with patch.object(
                     plan, "_bounds", return_value=tuple(bounds)
                 ), patch.object(scorer, "fp8_fp4_mqa_indexer_score", side_effect=score):
                     for span, logits, visible, selection_bounds in plan.groups(
-                        mask_tail=False
+                        mask_tail=False, return_bf16=raw
                     ):
                         self.assertEqual(logits.shape[0], span.stop - span.start)
+                        self.assertEqual(
+                            logits.dtype, torch.bfloat16 if raw else torch.float32
+                        )
                         self.assertIs(visible, selection_bounds[1])
                 self.assertEqual(calls, [group.rows for group in layout])
                 self.assertEqual(shared, {})
@@ -1363,6 +1386,101 @@ class GroupedScoreCudaTest(unittest.TestCase):
                 )
                 del plan, other, qp, sf, weights, positions, keys, shared
 
+    def test_raw_bf16_nonzero_request_starts_and_poisoned_tails(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mqa_layout as mqa_layout
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_indexer as indexer
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
+
+        torch.manual_seed(731)
+        widths = (1033, 1049, 1061)
+        rows = 4 * len(widths)
+        q, sf = indexer.quantize_indexer_q(
+            torch.randn(rows, 32, 128, device="cuda", dtype=torch.bfloat16)
+        )
+        weights = torch.randn(rows, 32, device="cuda", dtype=torch.bfloat16) / 64
+        padded = [(width + 255) // 256 * 256 for width in widths]
+        k, ks = indexer.quantize_indexer_q(
+            torch.randn(sum(padded), 128, device="cuda", dtype=torch.bfloat16)
+        )
+        keys = [
+            (None, indexer.PrefillIndexerKeys(payload[:width], scale[:width]))
+            for payload, scale, width in zip(k.split(padded), ks.split(padded), widths)
+        ]
+        positions = torch.tensor(
+            [position for width in widths for position in (-1, 0, 510, width - 2)],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        plan = grouped.try_grouped_scores(
+            q,
+            sf,
+            weights,
+            keys,
+            [slice(4 * i, 4 * (i + 1)) for i in range(len(widths))],
+            positions,
+            1,
+            {},
+            req_ids=torch.arange(len(widths), device="cuda").repeat_interleave(4),
+            key_counts=torch.tensor(widths, device="cuda", dtype=torch.int32),
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(len(plan.layout), 1)
+        starts = plan._bounds()[0][1]
+        self.assertTrue((starts[4:] > 0).all().item())
+        # The public default still supplies masked FP32 compatibility scores.
+        reference = list(plan.groups())
+        with patch.object(
+            mqa_layout,
+            "normalize_mqa_logits",
+            side_effect=AssertionError("raw BF16 must not normalize the score slab"),
+        ):
+            direct = list(plan.groups(mask_tail=False, return_bf16=True))
+        self.assertTrue(topk.supports_bf16())
+        for old, new in zip(reference, direct):
+            span, expected, visible, bounds = old
+            raw_span, logits, raw_visible, raw_bounds = new
+            self.assertEqual(raw_span, span)
+            self.assertEqual(expected.dtype, torch.float32)
+            self.assertEqual(logits.dtype, torch.bfloat16)
+            self.assertEqual(logits.stride(1), 1)
+            self.assertGreaterEqual(logits.stride(0), logits.shape[1])
+            self.assertTrue(torch.equal(raw_visible, visible))
+            self.assertTrue(torch.equal(raw_bounds[0], torch.zeros_like(visible)))
+            columns = torch.arange(logits.shape[1], device="cuda")[None]
+            valid = columns < visible[:, None]
+            self.assertTrue(torch.equal(logits.float()[valid], expected[valid]))
+            poison = torch.where(columns % 2 == 0, torch.nan, torch.inf).bfloat16()
+            logits.copy_(torch.where(valid, logits, poison))
+            before = logits.contiguous().view(torch.uint8).clone()
+            with patch.dict(os.environ, {"DSV41_PREFILL_DEEPSELECT": "0"}):
+                actual_ids = topk.try_select_tokens(
+                    logits, raw_visible, bounds=raw_bounds
+                )
+                expected_ids = topk.try_select_tokens(expected, visible, bounds=bounds)
+            self.assertIsNotNone(actual_ids)
+            self.assertIsNotNone(expected_ids)
+            self.assertTrue(
+                (
+                    (actual_ids == -1)
+                    | ((actual_ids >= 0) & (actual_ids < visible[:, None]))
+                )
+                .all()
+                .item()
+            )
+            actual_values = expected.gather(
+                1, actual_ids.clamp_min(0).long()
+            ).masked_fill(actual_ids < 0, -torch.inf)
+            expected_values = expected.gather(
+                1, expected_ids.clamp_min(0).long()
+            ).masked_fill(expected_ids < 0, -torch.inf)
+            torch.testing.assert_close(
+                actual_values.sort(-1).values,
+                expected_values.sort(-1).values,
+                rtol=0,
+                atol=0,
+            )
+            self.assertTrue(torch.equal(logits.contiguous().view(torch.uint8), before))
+
     def test_mask_overwrites_poison_and_slab_join_has_no_device_work(self):
         logits = torch.full((8, 1024), float("nan"), device="cuda")
         ends = torch.tensor(
@@ -1476,8 +1594,9 @@ class GroupedTailSelectionTest(unittest.TestCase):
         if fallback == "bounds":
             bounds = tuple(t.long() for t in bounds)
 
-        def groups(*, mask_tail=True):
+        def groups(*, mask_tail=True, return_bf16=False):
             self.assertFalse(mask_tail)
+            self.assertEqual(return_bf16, topk.supports_bf16())
             yield slice(0, rows), logits, ends, bounds
 
         original_apply = attention._apply_prefill_candidates

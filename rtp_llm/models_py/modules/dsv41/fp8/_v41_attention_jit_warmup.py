@@ -814,79 +814,93 @@ def _warm_indexer_layout(
     visible = _indexer_warmup_vector(
         rows, torch.int32, device, vector_stride, vector_offset, fill=width
     )
-    logits = indexer.score_indexer_chunk(
-        q_fp4, q_sf, keys.quant, keys.scale, weights, visible, bounds=bounds
-    )
-    if heads == 32 and torch.cuda.get_device_capability(device)[0] == 10:
-        from ._indexer_score import fp8_fp4_mqa_indexer_score
-        from ._v41_grouped_prefill_score import (
-            _grouped_score_bounds_kernel,
-            _mask_tail_kernel,
-        )
-
-        grouped_positions = _indexer_warmup_vector(
-            rows, torch.int64, device, 1, vector_offset, fill=width - 1
-        )
-        grouped_requests = _indexer_warmup_vector(
-            rows, torch.int64, device, 1, vector_offset, fill=1
-        )
-        grouped_counts = torch.full((2,), width, dtype=torch.int32, device=device)
-        grouped_bounds = torch.empty((4, rows), dtype=torch.int32, device=device)
-        _grouped_score_bounds_kernel[(1,)](
-            grouped_positions,
-            grouped_requests,
-            grouped_counts,
-            grouped_bounds,
-            rows,
-            2,
-            1,
-            2,
-            width,
-            width,
-            attn.compress_ratio,
-            num_warps=4,
-        )
-
-        grouped_logits = fp8_fp4_mqa_indexer_score(
+    # Preserve the public FP32 compatibility path and prime direct BF16
+    # consumers with the native padded score strides, including finite cleanup.
+    score_modes = (False, True) if topk.supports_bf16() else (False,)
+    for return_bf16 in score_modes:
+        logits = indexer.score_indexer_chunk(
             q_fp4,
             q_sf,
             keys.quant,
             keys.scale,
-            weights,
-            *bounds,
-            clean_logits=False,
-            max_seqlen_k=width,
+            sparse_weights,
+            visible,
+            bounds=bounds,
+            return_bf16=return_bf16,
         )
-        _mask_tail_kernel[(rows,)](
-            grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
-        )
-        del grouped_logits
-    if attn.index_topk == 512:
-        for dtype in (torch.int32, torch.int64):
-            typed_visible = _indexer_warmup_vector(
-                rows, dtype, device, vector_stride, vector_offset, fill=width
+        if heads == 32 and torch.cuda.get_device_capability(device)[0] == 10:
+            from ._indexer_score import fp8_fp4_mqa_indexer_score
+            from ._v41_grouped_prefill_score import (
+                _grouped_score_bounds_kernel,
+                _mask_tail_kernel,
             )
-            for cached in (bounds, None):
-                selected = topk.try_select_tokens(logits, typed_visible, bounds=cached)
-                _require_launch(
-                    selected,
-                    "dense token TopK",
-                    enabled=topk.is_supported(logits, typed_visible),
+
+            grouped_positions = _indexer_warmup_vector(
+                rows, torch.int64, device, 1, vector_offset, fill=width - 1
+            )
+            grouped_requests = _indexer_warmup_vector(
+                rows, torch.int64, device, 1, vector_offset, fill=1
+            )
+            grouped_counts = torch.full((2,), width, dtype=torch.int32, device=device)
+            grouped_bounds = torch.empty((4, rows), dtype=torch.int32, device=device)
+            _grouped_score_bounds_kernel[(1,)](
+                grouped_positions,
+                grouped_requests,
+                grouped_counts,
+                grouped_bounds,
+                rows,
+                2,
+                1,
+                2,
+                width,
+                width,
+                attn.compress_ratio,
+                num_warps=4,
+            )
+
+            grouped_logits = fp8_fp4_mqa_indexer_score(
+                q_fp4,
+                q_sf,
+                keys.quant,
+                keys.scale,
+                sparse_weights,
+                *bounds,
+                clean_logits=False,
+                max_seqlen_k=width,
+                return_bf16=return_bf16,
+            )
+            _mask_tail_kernel[(rows,)](
+                grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
+            )
+            del grouped_logits
+        if attn.index_topk == 512:
+            for dtype in (torch.int32, torch.int64):
+                typed_visible = _indexer_warmup_vector(
+                    rows, dtype, device, vector_stride, vector_offset, fill=width
                 )
-                if cached is not None and selected is not None:
-                    # Candidate publication defers finite filtering to its
-                    # epilogue. Exercise the same adapter with a caller-owned
-                    # output; shapes/strides remain runtime kernel parameters.
-                    raw_output = torch.empty_like(selected)
-                    raw_selected = topk.try_select_tokens(
-                        logits,
-                        typed_visible,
-                        bounds=cached,
-                        out=raw_output,
-                        filter_finite=False,
+                for cached in (bounds, None):
+                    selected = topk.try_select_tokens(
+                        logits, typed_visible, bounds=cached
                     )
-                    _require_launch(raw_selected, "deferred-filter token TopK")
-                    topk.finish_tokens(logits, cached[1], raw_selected)
+                    _require_launch(
+                        selected,
+                        "dense token TopK",
+                        enabled=topk.is_supported(logits, typed_visible),
+                    )
+                    if cached is not None and selected is not None:
+                        # Candidate publication defers finite filtering to its
+                        # epilogue. Exercise the same adapter with a caller-owned
+                        # output; shapes/strides remain runtime kernel parameters.
+                        raw_output = torch.empty_like(selected)
+                        raw_selected = topk.try_select_tokens(
+                            logits,
+                            typed_visible,
+                            bounds=cached,
+                            out=raw_output,
+                            filter_finite=False,
+                        )
+                        _require_launch(raw_selected, "deferred-filter token TopK")
+                        topk.finish_tokens(logits, cached[1], raw_selected)
     config = attn.v41_config
     count = int(config.get("candidate_topk_blocks", 0))
     block = int(config.get("candidate_block_size", 0))
@@ -899,65 +913,92 @@ def _warm_indexer_layout(
         # Also cover the indices-only path where every candidate block fits.
         widths = tuple(sorted({*widths, min(max_seq_len, block * count)}))
     for width in widths:
-        # Two rows bound the largest 512K-score startup buffer to 4 MiB.
-        logits = torch.zeros((2, width + 256), dtype=torch.float32, device=device)[
-            :, :width
-        ]
-        for dtype in (torch.int32, torch.int64):
-            visible = _indexer_warmup_vector(
-                2, dtype, device, vector_stride, vector_offset, fill=width
-            )
-            selected = candidates.select_candidates(
-                logits, visible, block, count, build_bitmap=False
-            )
-            _require_launch(
-                selected,
-                "candidate selection",
-                enabled=candidates.is_supported(logits, visible, block, count),
-            )
-            if dtype == torch.int32 and vector_stride == 1 and attn.index_topk == 512:
-                token_indices = torch.zeros((2, 512), dtype=torch.int32, device=device)
-                for build_bitmap in (False, True):
-                    published = candidates.select_candidates(
-                        logits,
-                        visible,
-                        block,
-                        count,
-                        build_bitmap=build_bitmap,
-                        mask_tail=True,
-                        token_indices=token_indices,
-                        token_ends=visible,
-                    )
-                    _require_launch(
-                        published,
-                        "candidate publication and token filtering",
-                        enabled=not build_bitmap
-                        or candidates.bitmap_is_bounded(2, width, block),
-                    )
-            if selected is not None:
-                ids = selected[0]
-                dense = candidates.select_candidates(logits, visible, block, count)
-                _require_launch(
-                    dense,
-                    "candidate bitmap",
-                    enabled=candidates.bitmap_is_bounded(2, width, block),
+        # BF16 input pointers require their own pool/mask JIT variants; the
+        # smaller pooled scores deliberately retain the FP32 TopK policy.
+        for score_dtype in (torch.float32, torch.bfloat16):
+            # Two rows bound each 512K-score startup buffer to at most 4 MiB.
+            logits = torch.zeros((2, width + 256), dtype=score_dtype, device=device)[
+                :, :width
+            ]
+            for dtype in (torch.int32, torch.int64):
+                visible = _indexer_warmup_vector(
+                    2, dtype, device, vector_stride, vector_offset, fill=width
                 )
-                if dense is not None:
-                    _require_launch(
-                        candidates.mask_candidates(logits, dense[1], block),
-                        "candidate mask",
-                    )
-                flags = candidates.build_flags(ids, width, block)
-                _require_launch(
-                    flags,
-                    "candidate bitmap rebuild",
-                    enabled=candidates.bitmap_is_bounded(2, width, block),
+                selected = candidates.select_candidates(
+                    logits, visible, block, count, build_bitmap=False
                 )
-                if flags is not None:
-                    _require_launch(
-                        candidates.mask_candidates(logits, flags, block),
-                        "rebuilt candidate mask",
+                _require_launch(
+                    selected,
+                    "candidate selection",
+                    enabled=candidates.is_supported(logits, visible, block, count),
+                )
+                if score_dtype == torch.bfloat16:
+                    # Single-request publication masks raw logits without the
+                    # grouped token-filter epilogue: a separate constexpr path.
+                    for build_bitmap in (False, True):
+                        masked = candidates.select_candidates(
+                            logits,
+                            visible,
+                            block,
+                            count,
+                            build_bitmap=build_bitmap,
+                            mask_tail=True,
+                        )
+                        _require_launch(
+                            masked,
+                            "masked candidate publication",
+                            enabled=not build_bitmap
+                            or candidates.bitmap_is_bounded(2, width, block),
+                        )
+                if (
+                    dtype == torch.int32
+                    and vector_stride == 1
+                    and attn.index_topk == 512
+                ):
+                    token_indices = torch.zeros(
+                        (2, 512), dtype=torch.int32, device=device
                     )
+                    for build_bitmap in (False, True):
+                        published = candidates.select_candidates(
+                            logits,
+                            visible,
+                            block,
+                            count,
+                            build_bitmap=build_bitmap,
+                            mask_tail=True,
+                            token_indices=token_indices,
+                            token_ends=visible,
+                        )
+                        _require_launch(
+                            published,
+                            "candidate publication and token filtering",
+                            enabled=not build_bitmap
+                            or candidates.bitmap_is_bounded(2, width, block),
+                        )
+                if selected is not None:
+                    ids = selected[0]
+                    dense = candidates.select_candidates(logits, visible, block, count)
+                    _require_launch(
+                        dense,
+                        "candidate bitmap",
+                        enabled=candidates.bitmap_is_bounded(2, width, block),
+                    )
+                    if dense is not None:
+                        _require_launch(
+                            candidates.mask_candidates(logits, dense[1], block),
+                            "candidate mask",
+                        )
+                    flags = candidates.build_flags(ids, width, block)
+                    _require_launch(
+                        flags,
+                        "candidate bitmap rebuild",
+                        enabled=candidates.bitmap_is_bounded(2, width, block),
+                    )
+                    if flags is not None:
+                        _require_launch(
+                            candidates.mask_candidates(logits, flags, block),
+                            "rebuilt candidate mask",
+                        )
     if (
         max_seq_len <= count * block
         or heads != 32

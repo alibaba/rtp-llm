@@ -70,6 +70,49 @@ def _metadata():
 
 
 class V41IndexerQFusionCPU(unittest.TestCase):
+    def test_direct_bf16_logits_preserve_native_stride_and_request_local_columns(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mqa_layout as layout
+
+        q = torch.zeros(3, 32, 64, dtype=torch.int8)
+        sf = torch.zeros(3, 32, dtype=torch.int32)
+        keys = torch.zeros(1024, 64, dtype=torch.int8)
+        key_sf = torch.zeros(1024, dtype=torch.int32)
+        weights = torch.randn(3, 32).bfloat16()
+        starts = torch.tensor([0, 128, 512], dtype=torch.int32)
+        ends = starts + torch.tensor([0, 81, 199], dtype=torch.int32)
+        # Native padding is intentionally poisoned and must remain unconsumed.
+        result = torch.full((3, 1024), float("nan"), dtype=torch.bfloat16)[:, :256]
+        for extended in (False, True):
+            with self.subTest(extended=extended):
+                operation = Mock(return_value=result)
+                operation.__doc__ = "logits_dtype: torch.dtype" if extended else ""
+                with patch.object(
+                    score, "_deep_gemm", SimpleNamespace(fp8_fp4_mqa_logits=operation)
+                ), patch.object(
+                    layout, "normalize_mqa_logits", side_effect=AssertionError
+                ):
+                    actual = score.fp8_fp4_mqa_indexer_score(
+                        q,
+                        sf,
+                        keys,
+                        key_sf,
+                        weights,
+                        starts,
+                        ends,
+                        max_seqlen_k=256,
+                        return_bf16=True,
+                    )
+                self.assertIs(actual, result)
+                self.assertEqual(actual.stride(), (1024, 1))
+                self.assertIs(operation.call_args.args[2], weights)
+                self.assertIs(operation.call_args.args[3], starts)
+                self.assertEqual(operation.call_args.kwargs["max_seqlen_k"], 256)
+        with self.assertRaisesRegex(ValueError, "request-local width"):
+            score.fp8_fp4_mqa_indexer_score(
+                q, sf, keys, key_sf, weights, starts, ends, return_bf16=True
+            )
+
     def test_dense_prefill_and_paged_keep_main_bf16_math_across_backend_apis(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mqa_layout as layout

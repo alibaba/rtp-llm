@@ -4,7 +4,7 @@ Adapted from the exact SGLang radix-select TopK in
 ``e7b190c165b2edaa92bbc`` for the DeepSeek V4 indexer decode hot path.
 
 Op contract (mirrors vLLM):
-  logits   : [N, T]  float32 row-contiguous; stride(0) may exceed T
+  logits   : [N, T]  float32/bfloat16 row-contiguous; stride(0) may exceed T
   lengths  : [N]     int32     — per-row valid count, device-clamped to
                                   ``[0, max_seq_len]``; positions past the
                                   clamped length are written as -1
@@ -855,6 +855,172 @@ def test_lengths_2d_accepted():
 
 
 # ---------------------------------------------------------------------------
+def _finite_reference(logits, raw_indices):
+    values = logits.gather(1, raw_indices.long().clamp(min=0))
+    return raw_indices.masked_fill((raw_indices < 0) | ~values.isfinite(), -1)
+
+
+def _assert_bf16_matches_fp32_cast(logits, lengths, k, max_seq_len, *, tag):
+    """Check exact indices, including tie order, against the previous consumer."""
+    assert logits.dtype == torch.bfloat16
+    reference = _run(logits.float(), lengths, k, max_seq_len)
+    raw = _run(logits, lengths, k, max_seq_len)
+    assert torch.equal(raw, reference), f"{tag}: BF16 differs from explicit FP32 cast"
+    # Guard both sides of the output to catch writes past the requested K.
+    sentinel = -1234567
+    storage = torch.full(
+        (raw.numel() + 16,), sentinel, dtype=torch.int32, device=logits.device
+    )
+    finite = storage[8:-8].view_as(raw)
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+    rtp_llm_ops.dsv41_topk_v3_finite(logits, lengths, finite, workspace, k, max_seq_len)
+    expected = _finite_reference(logits.float(), reference)
+    assert torch.equal(finite, expected), f"{tag}: finite epilogue differs"
+    assert (storage[:8] == sentinel).all() and (storage[-8:] == sentinel).all()
+    for row, requested in enumerate(lengths.cpu().flatten().tolist()):
+        valid = max(0, min(requested, max_seq_len))
+        keep = min(k, valid)
+        assert (raw[row, keep:] == -1).all(), f"{tag}: short-row padding"
+        assert ((raw[row, :keep] >= 0) & (raw[row, :keep] < valid)).all()
+        assert torch.unique(raw[row, :keep]).numel() == keep
+
+
+def test_bf16_dispatch_boundaries_match_fp32_cast():
+    """Cover register, streaming, direct-cluster and persistent-cluster paths."""
+    cases = [
+        (1, 4095),
+        (1, 4096),
+        (1, 4097),
+        (1, 8192),
+        (1, 8193),
+        (1, 16384),
+        (1, 16385),
+        (9, 32769),
+        (17, 65536),
+        (73, 65537),
+        (145, 131073),
+        (128, 393217),
+    ]
+    for batch, width in cases:
+        generator = torch.Generator(device="cuda").manual_seed(width + batch)
+        # Direct BF16 generation makes ties common; exact equality additionally
+        # checks that changing the load width did not change traversal order.
+        logits = torch.randn(
+            (batch, width), dtype=torch.bfloat16, device="cuda", generator=generator
+        )
+        lengths = torch.full((batch,), width, dtype=torch.int32, device="cuda")
+        for k in (512, 1024, 2048):
+            _assert_bf16_matches_fp32_cast(
+                logits, lengths, k, width, tag=f"BF16 B{batch}/T{width}/K{k}"
+            )
+
+
+def test_bf16_ragged_padded_stride_and_short_rows():
+    for width in (4097, 8193, 32769):
+        for offset, pad in ((0, (-width) % 4 + 4), (1, 3)):
+            batch = 10
+            storage = torch.randn(
+                (batch, width + pad), dtype=torch.bfloat16, device="cuda"
+            )
+            logits = storage[:, offset : offset + width]
+            # Poison storage outside the view and the declared maximum prefix.
+            storage[:, :offset] = float("inf")
+            storage[:, offset + width :] = float("nan")
+            logits[:, -3:] = float("inf")
+            max_seq_len = width - 3
+            for k in (512, 1024, 2048):
+                lengths = torch.tensor(
+                    [-17, 0, 1, k - 1, k, k + 1, 4095, width // 2, width, 2**31 - 1],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                _assert_bf16_matches_fp32_cast(
+                    logits, lengths, k, max_seq_len, tag=f"BF16 stride {width}/{offset}"
+                )
+
+
+def test_bf16_special_values_ties_and_finite_epilogue():
+    width = 8193
+    logits = torch.ones((9, width), dtype=torch.bfloat16, device="cuda")
+    logits[0].fill_(float("nan"))
+    logits[1].fill_(float("inf"))
+    logits[2].fill_(-float("inf"))
+    # More than the shared candidate limit of 2048 exact ties triggers the
+    # fallback scan, including negative values, signed zero and BF16 subnormals.
+    logits[3].fill_(-1.625)
+    logits[4, ::2] = -0.0
+    logits[4, 1::2] = 0.0
+    logits[5].fill_(torch.finfo(torch.bfloat16).tiny / 128)
+    logits[5, ::2] *= -1
+    logits[6, :2500] = float("nan")
+    logits[6, 2500:5000] = float("inf")
+    logits[6, 5000:7500] = -float("inf")
+    logits[7, ::4] = torch.finfo(torch.bfloat16).max
+    logits[7, 1::4] = -torch.finfo(torch.bfloat16).max
+    logits[8, :4] = torch.tensor(
+        [float("nan"), float("inf"), -float("inf"), 1],
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    lengths = torch.full((9,), width, dtype=torch.int32, device="cuda")
+    lengths[-1] = 4
+    for k in (512, 1024, 2048):
+        _assert_bf16_matches_fp32_cast(logits, lengths, k, width, tag="BF16 specials")
+        # The new finite entry also preserves FP32 select-then-filter semantics.
+        fp32 = logits.float()
+        raw = _run(fp32, lengths, k, width)
+        result = torch.empty_like(raw)
+        workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+        rtp_llm_ops.dsv41_topk_v3_finite(fp32, lengths, result, workspace, k, width)
+        assert torch.equal(result, _finite_reference(fp32, raw))
+        assert (result[:3] == -1).all(), "Nonfinite slots must not be refilled"
+        assert torch.equal(result[-1, :4], torch.tensor([-1, -1, -1, 3], device="cuda"))
+
+
+def test_bf16_cuda_graph_replay_updates_scores_and_lengths():
+    batch, width, k = 17, 32769, 512
+    storage = torch.randn((batch, width + 3), dtype=torch.bfloat16, device="cuda")
+    logits = storage[:, 1 : width + 1]
+    lengths = torch.full((batch,), width, dtype=torch.int32, device="cuda")
+    raw = torch.empty((batch, k), dtype=torch.int32, device="cuda")
+    finite = torch.empty_like(raw)
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(2):
+            rtp_llm_ops.topk_v3(logits, lengths, raw, workspace, k, width)
+            rtp_llm_ops.dsv41_topk_v3_finite(
+                logits, lengths, finite, workspace, k, width
+            )
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        rtp_llm_ops.topk_v3(logits, lengths, raw, workspace, k, width)
+        rtp_llm_ops.dsv41_topk_v3_finite(logits, lengths, finite, workspace, k, width)
+    for iteration in range(6):
+        logits.normal_()
+        logits[:, iteration::257] = float("nan")
+        lengths.copy_(
+            torch.tensor(
+                [
+                    (-3, 0, 1, 511, 512, 513, width, width + 99)[(r + iteration) % 8]
+                    for r in range(batch)
+                ],
+                device="cuda",
+                dtype=torch.int32,
+            )
+        )
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            graph.replay()
+        torch.cuda.current_stream().wait_stream(stream)
+        reference = _run(logits.float(), lengths, k, width)
+        assert torch.equal(raw, reference), f"BF16 graph stale data at {iteration}"
+        assert torch.equal(finite, _finite_reference(logits.float(), reference))
+
+
+# ---------------------------------------------------------------------------
 # Bench — compare against the framework reference implementation.
 # ---------------------------------------------------------------------------
 def _bench(fn, *args, warmup: int = 50, iters: int = 500) -> float:
@@ -948,6 +1114,10 @@ if __name__ == "__main__":
     test_cuda_device_guard_and_mismatch_rejection()
     test_cuda_graph_replay_is_stable()
     test_lengths_2d_accepted()
+    test_bf16_dispatch_boundaries_match_fp32_cast()
+    test_bf16_ragged_padded_stride_and_short_rows()
+    test_bf16_special_values_ties_and_finite_epilogue()
+    test_bf16_cuda_graph_replay_updates_scores_and_lengths()
     print("\n== Benchmark ==")
     bench_decode_sweep()
     print("\nOK")

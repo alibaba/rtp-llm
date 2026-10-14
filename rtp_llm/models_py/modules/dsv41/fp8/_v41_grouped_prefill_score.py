@@ -454,10 +454,10 @@ class _GroupedScores:
         cache[key] = (self.positions, self.req_ids, self.key_counts, tuple(bounds))
         return cache[key][3]
 
-    def groups(self, *, mask_tail=True):
+    def groups(self, *, mask_tail=True, return_bf16=False):
         """Yield (packed row slice, logits, visible, (zeros, visible)).
 
-        Each FP32 output respects the configured budget (default 256 MiB).
+        The conservative FP32 budget (default 256 MiB) also bounds BF16 output.
         Invalid suffixes are -inf by default;
         callers disabling masking must use visible bounds or mask before use.
         Columns are request-local; candidate/TopK output needs no offset change.
@@ -485,6 +485,7 @@ class _GroupedScores:
                 ends,
                 clean_logits=False,
                 max_seqlen_k=group.width,
+                return_bf16=return_bf16,
             )
             if mask_tail:
                 _mask_tail_kernel[(logits.shape[0],)](
@@ -509,7 +510,7 @@ def try_grouped_scores(
 ):
     """Return a lazy plan or None before GPU work for unsupported layouts.
 
-    Accept already-prepared FP32 weights from the original full-M BF16 head
+    Accept already-prepared weights from the original full-M BF16 head
     projection; never reproject or fold FP4 scales into them. Candidate tables
     and CED projection in shared are intentionally allowed: callers consume
     scores after this boundary. Forward-local positions must remain immutable.
@@ -529,7 +530,7 @@ def try_grouped_scores(
         or sf.dtype != torch.int32
         or not sf.is_contiguous()
         or weights.shape != q.shape[:2]
-        or weights.dtype != torch.float32
+        or weights.dtype not in (torch.float32, torch.bfloat16)
         or not weights.is_contiguous()
         or sf.device != q.device
         or weights.device != q.device
