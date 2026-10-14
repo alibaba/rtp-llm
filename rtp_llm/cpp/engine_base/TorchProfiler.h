@@ -21,7 +21,8 @@ using DisableProfilerFn = std::unique_ptr<torch::autograd::profiler::ProfilerRes
 
 // PyTorch profiler finalization can reject malformed backend traces. Profiling
 // is diagnostic-only, so a bad trace must not terminate the inference engine.
-std::unique_ptr<torch::autograd::profiler::ProfilerResult> tryDisableProfiler(DisableProfilerFn disable_profiler);
+std::unique_ptr<torch::autograd::profiler::ProfilerResult>
+tryDisableProfiler(DisableProfilerFn disable_profiler, const std::function<void()>& drain_device = {});
 
 }  // namespace detail
 
@@ -44,12 +45,15 @@ public:
     TorchProfile& operator=(const TorchProfile&) = delete;
 
 private:
+    friend struct TorchProfileTestPeer;
+
     std::string                 prefix_;
     std::string                 output_dir_;
     static std::atomic<size_t>  count_;
     tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
     std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
-    bool                        stopped_ = true;
+    bool                        stopped_        = true;
+    int                         profile_device_ = -1;
 };
 
 // Background thread that serializes profiler results to disk without blocking the engine loop.
