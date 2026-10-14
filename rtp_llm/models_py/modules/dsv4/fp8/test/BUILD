@@ -104,9 +104,21 @@ _DSV4_FP8_CPU_TESTS = [
         "test_v41_grouped_gemm",
         "test_v41_fp4_transport",
         "test_v41_qkv_rope_cache",
-        "test_v41_mega_attention",
     ]
 ]
+
+py_test(
+    name = "test_v41_mega_attention",
+    srcs = [
+        "test_v41_mega_attention.py",
+        "test_v41_decode_attention_fusion.py",
+    ],
+    main = "test_v41_mega_attention.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
 
 py_test(
     name = "test_v41_candidate_topk",

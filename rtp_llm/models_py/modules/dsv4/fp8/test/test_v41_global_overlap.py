@@ -138,6 +138,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
 
                 attn = SimpleNamespace(
                     _begin_forward=lambda: None,
+                    _mega_attention=Mock(),
                     _shared_attention={},
                     freqs_cis=torch.zeros(1, 32, dtype=torch.complex64),
                     compress_ratio=1,

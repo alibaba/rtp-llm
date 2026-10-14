@@ -25,18 +25,26 @@ class MegaAttention:
             and attn.wq_b.weight.is_cuda
             and attn.head_dim == 512
             and attn.rope_head_dim == 64
-            and attn.n_heads in (64, 128)
+            and attn.n_heads in (8, 16, 32, 64, 128)
             and attn.n_heads == attn.n_groups * 8
             and torch.cuda.get_device_capability(attn.wq_b.weight.device)[0] == 10
         )
         if not supported:
             raise RuntimeError(
                 "V4.1 mega attention requires SM10x, MXFP8 Q weights, "
-                "64/128 local heads, head_dim=512, rope_dim=64 "
+                "8/16/32/64/128 local heads, head_dim=512, rope_dim=64 "
                 "and 8 heads per group"
             )
-        import flash_mla.cuda as native
-        from flash_mla import fused_norm_rope_attn_rope_cast
+        dependency_error = (
+            "FlashMLA was built without mega attention. With the service's "
+            "Python/PyTorch and CUDA >=12.9, run "
+            "bash 3rdparty/flashmla/install_mega_attention.sh from the RTP source root."
+        )
+        try:
+            import flash_mla.cuda as native
+            from flash_mla import fused_norm_rope_attn_rope_cast
+        except ImportError as error:
+            raise ImportError(dependency_error) from error
 
         if not all(
             hasattr(native, name)
@@ -47,7 +55,7 @@ class MegaAttention:
                 "permute_wv_proj",
             )
         ):
-            raise ImportError("FlashMLA was built without mega attention")
+            raise ImportError(dependency_error)
 
         result = cls(attn, fused_norm_rope_attn_rope_cast)
         logging.info(
@@ -71,6 +79,7 @@ class MegaAttention:
                 (attn._wo_a_stk_w, attn._wo_a_stk_s), 8, 512
             )
         self.groups = attn.n_groups
+        self.kernel_heads = max(64, attn.n_heads)
         self.rank = attn.o_lora_rank
         self.refresh_rope(attn)
 
@@ -102,6 +111,20 @@ class MegaAttention:
         )
 
     def _arguments(self, attn, q, positions):
+        q = q.reshape(-1, attn.n_heads, 512)
+        sink = attn.attn_sink
+        if attn.n_heads < self.kernel_heads:
+            # Q projection interleaves 16-channel chunks across heads. Pad the
+            # head axis inside each chunk, not the nominal [heads, 512] view.
+            q = torch.nn.functional.pad(
+                q.reshape(-1, 32, attn.n_heads, 16),
+                (0, 0, 0, self.kernel_heads - attn.n_heads),
+            ).reshape(-1, self.kernel_heads, 512)
+            # A +inf sink makes every dummy head contribute exactly zero.
+            # Read the current tensor on each call, including after reload.
+            sink = torch.nn.functional.pad(
+                sink, (0, self.kernel_heads - attn.n_heads), value=float("inf")
+            )
         return dict(
             enable_q_norm=False,
             rms_norm_eps=0.0,
@@ -109,15 +132,22 @@ class MegaAttention:
             is_rope_neox_style=False,
             rope_dim=64,
             cos_sin_cache=self.cos_sin_cache,
-            n_wv_group=self.groups,
+            n_wv_group=self.kernel_heads // 8,
             num_per_channels=32,
             use_tma_aligned_col_major_sf=True,
             round_sf=True,
             use_packed_ue8m0=True,
-            q=q.reshape(-1, attn.n_heads, 512),
+            q=q,
             sm_scale=attn.softmax_scale,
-            attn_sink=attn.attn_sink,
+            attn_sink=sink,
         )
+
+    def _output(self, data, scales):
+        if data.shape[1] == self.groups:
+            return MegaAttentionOutput(data, scales)
+        # Keep the packed, column-major scale layout; only local groups feed
+        # the existing output projection and TP reduction.
+        return MegaAttentionOutput(data[:, : self.groups], scales[:, : self.groups])
 
     def prefill(self, attn, q, positions, kv, indices, lengths):
         with record_function_range("dsv41.attn.mega.prefill"):
@@ -127,7 +157,7 @@ class MegaAttention:
                 indices=indices,
                 topk_length=lengths,
             )
-        return MegaAttentionOutput(data, scales)
+        return self._output(data, scales)
 
     def decode(
         self,
@@ -147,7 +177,7 @@ class MegaAttention:
                 extra_k_cache=None if global_pool is None else global_pool.unsqueeze(2),
                 extra_indices_in_kvcache=global_indices,
             )
-        return MegaAttentionOutput(data, scales)
+        return self._output(data, scales)
 
     def project(self, attn, pair, out=None):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant

@@ -82,6 +82,99 @@ class V41MegaAttentionRequirementsCPU(unittest.TestCase):
         ):
             MegaAttention.create(attn)
 
+    def test_tp_heads_reach_native_backend(self):
+        native = SimpleNamespace(
+            **{
+                name: Mock()
+                for name in (
+                    "fused_norm_rope_attn_rope_cast_fwd",
+                    "fused_norm_rope_attn_rope_cast_decode",
+                    "permute_q_b_proj",
+                    "permute_wv_proj",
+                )
+            }
+        )
+        kernels = object()
+        package = SimpleNamespace(fused_norm_rope_attn_rope_cast=kernels, cuda=native)
+        for heads in (8, 16, 32, 64, 128):
+            with self.subTest(heads=heads):
+                attn = self._attention(
+                    SimpleNamespace(is_cuda=True, device=torch.device("cuda"))
+                )
+                attn.n_heads, attn.n_groups, attn.layer_id = heads, heads // 8, 0
+                with patch.object(
+                    torch.cuda, "get_device_capability", return_value=(10, 3)
+                ), patch.dict(
+                    "sys.modules", {"flash_mla": package, "flash_mla.cuda": native}
+                ), patch.object(MegaAttention, "__init__", return_value=None) as init:
+                    self.assertIsInstance(MegaAttention.create(attn), MegaAttention)
+                    init.assert_called_once_with(attn, kernels)
+
+    def test_old_flashmla_wrapper_has_actionable_error(self):
+        attn = self._attention(
+            SimpleNamespace(is_cuda=True, device=torch.device("cuda"))
+        )
+        package = SimpleNamespace(cuda=SimpleNamespace())
+        with patch.object(
+            torch.cuda, "get_device_capability", return_value=(10, 3)
+        ), patch.dict(
+            "sys.modules", {"flash_mla": package, "flash_mla.cuda": package.cuda}
+        ), self.assertRaisesRegex(ImportError, "install_mega_attention.sh"):
+            MegaAttention.create(attn)
+
+    def test_tp_padding_preserves_chunk_layout_and_current_sink(self):
+        for heads in (8, 16, 32, 64, 128):
+            with self.subTest(heads=heads):
+                mega = MegaAttention.__new__(MegaAttention)
+                mega.kernel_heads = max(64, heads)
+                mega.groups = heads // 8
+                mega.cos_sin_cache = object()
+                # Independent, head-major oracle: the Q linear outputs
+                # channel chunks interleaved across heads, not head-major Q.
+                q = torch.arange(2 * heads * 512).reshape(2, heads, 512)
+                interleaved = q.reshape(2, heads, 32, 16).permute(0, 2, 1, 3)
+                interleaved = interleaved.contiguous().view(1, 2, heads, 512)
+                sink = torch.arange(heads, dtype=torch.float32)
+                attn = SimpleNamespace(
+                    n_heads=heads, attn_sink=sink, softmax_scale=512**-0.5
+                )
+                positions = torch.tensor([3, 41], dtype=torch.int64)
+                args = mega._arguments(attn, interleaved, positions)
+                recovered = args["q"].view(2, 32, mega.kernel_heads, 16)
+                recovered = recovered.permute(0, 2, 1, 3).reshape(
+                    2, mega.kernel_heads, 512
+                )
+                torch.testing.assert_close(recovered[:, :heads], q)
+                self.assertEqual(torch.count_nonzero(recovered[:, heads:]).item(), 0)
+                torch.testing.assert_close(args["attn_sink"][:heads], sink)
+                self.assertTrue(torch.isposinf(args["attn_sink"][heads:]).all())
+                self.assertEqual(args["n_wv_group"], mega.kernel_heads // 8)
+                self.assertEqual(args["token_positions"].dtype, torch.int32)
+                torch.testing.assert_close(args["token_positions"], positions.int())
+                attn.attn_sink = sink + 7
+                torch.testing.assert_close(
+                    mega._arguments(attn, interleaved, positions)["attn_sink"][:heads],
+                    attn.attn_sink,
+                )
+
+    def test_tp_output_crops_groups_without_repacking_scales(self):
+        for heads in (8, 16, 32, 64, 128):
+            with self.subTest(heads=heads):
+                mega = MegaAttention.__new__(MegaAttention)
+                mega.groups = heads // 8
+                groups = max(8, mega.groups)
+                data = torch.arange(3 * groups * 4096).view(3, groups, 4096)
+                # Native packed UE8M0 scales: token dimension has stride 1,
+                # rounded to a multiple of four for TMA.
+                scales = torch.arange(groups * 32 * 4, dtype=torch.int32)
+                scales = scales.view(groups, 32, 4).permute(2, 0, 1)[:3]
+                pair = mega._output(data, scales)
+                self.assertEqual(pair.data.shape, (3, mega.groups, 4096))
+                torch.testing.assert_close(pair.data, data[:, : mega.groups])
+                torch.testing.assert_close(pair.scales, scales[:, : mega.groups])
+                self.assertEqual(pair.scales.stride(), scales.stride())
+                self.assertEqual(pair.scales.data_ptr(), scales.data_ptr())
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class V41MegaAttentionCUDA(unittest.TestCase):
@@ -94,8 +187,8 @@ class V41MegaAttentionCUDA(unittest.TestCase):
         self.addCleanup(self.context.__exit__, None, None, None)
 
     @staticmethod
-    def _attention(rank=64):
-        heads, groups, dimension, q_rank = 64, 8, 512, 128
+    def _attention(rank=64, heads=64):
+        groups, dimension, q_rank = heads // 8, 512, 128
         q_weight = torch.randn(heads * dimension, q_rank, device="cuda").to(
             torch.float8_e4m3fn
         )
@@ -143,6 +236,126 @@ class V41MegaAttentionCUDA(unittest.TestCase):
         )
         self.assertLess(relative_l2.item(), 0.05)
         self.assertGreater(cosine.item(), 0.999)
+
+    def test_tp_prefill_and_decode_match_unfused_attention(self):
+        from flash_mla import flash_mla_sparse_fwd, get_mla_metadata
+
+        for heads in (8, 16, 32):
+            with self.subTest(heads=heads):
+                attn = self._attention(heads=heads)
+                original_q = attn.wq_b
+                mega = MegaAttention.create(attn)
+                qr = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
+                positions = torch.tensor([127, 233], device="cuda", dtype=torch.int32)
+                freqs = attn.freqs_cis[positions.long()]
+                q = original_q(qr).view(2, heads, 512)
+                rope_only(q, freqs, 64)
+                # The reference sparse kernel also requires >=64 heads.
+                # Its Q is head-major, unlike Mega's chunk-interleaved Q.
+                reference_q = torch.nn.functional.pad(q, (0, 0, 0, 64 - heads))
+                sink = torch.nn.functional.pad(
+                    attn.attn_sink, (0, 64 - heads), value=float("inf")
+                )
+                kv = torch.randn(257, 1, 512, device="cuda", dtype=torch.bfloat16) * 0.3
+                indices = torch.randint(
+                    0, 257, (2, 1, 128), device="cuda", dtype=torch.int32
+                )
+                indices[:, :, ::17] = -1
+                lengths = torch.tensor([37, 128], device="cuda", dtype=torch.int32)
+                output, _, _ = flash_mla_sparse_fwd(
+                    q=reference_q,
+                    kv=kv,
+                    indices=indices,
+                    sm_scale=attn.softmax_scale,
+                    attn_sink=sink,
+                    topk_length=lengths,
+                )
+                expected = grouped_output_projection(
+                    output[:, :heads].contiguous(),
+                    freqs,
+                    attn._wo_a_stk_w,
+                    attn._wo_a_stk_s,
+                )
+                pair = mega.prefill(
+                    attn,
+                    attn.wq_b(qr).view(2, heads, 512),
+                    positions,
+                    kv,
+                    indices,
+                    lengths,
+                )
+                self._check_output(mega.project(attn, pair), expected)
+
+                case = V41Fp4DualDecodeAttentionCUDA._case(2, 1, 128)
+                reference = case.op.forward(
+                    reference_q.view(2, 1, 64, 512),
+                    case.swa_pool,
+                    sink,
+                    case.swa_topk,
+                    get_mla_metadata()[0],
+                    extra_k_cache=case.global_pool,
+                    extra_topk_idxs=case.global_topk,
+                )
+                expected = grouped_output_projection(
+                    reference[..., :heads, :].contiguous(),
+                    freqs,
+                    attn._wo_a_stk_w,
+                    attn._wo_a_stk_s,
+                )
+
+                def run():
+                    pair = mega.decode(
+                        attn,
+                        attn.wq_b(qr).view(2, 1, heads, 512),
+                        positions,
+                        case.swa_pool,
+                        case.swa_topk,
+                        case.global_pool,
+                        case.global_topk.view(2, -1),
+                    )
+                    return mega.project(attn, pair)
+
+                self._check_output(run(), expected)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        run()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = run()
+                # Padding must be replayed from live queries, positions,
+                # sink weights and slots, rather than capture-time values.
+                qr.copy_(torch.randn_like(qr))
+                positions.add_(17)
+                attn.attn_sink.add_(1)
+                V41Fp4DualDecodeAttentionCUDA._set_slots(case, 1)
+                graph.replay()
+                torch.testing.assert_close(captured, run(), rtol=0, atol=0)
+                def resident_addresses():
+                    return tuple(
+                        t.data_ptr()
+                        for t in (
+                            attn.wq_b.weight,
+                            attn.wq_b.weight_scales,
+                            mega.weight,
+                            mega.weight_scales,
+                            mega.cos_sin_cache,
+                        )
+                    )
+
+                addresses = resident_addresses()
+                before_reload = run().clone()
+                # Simulate parent reload restoring checkpoint-layout Q into
+                # resident storage, then replay the already captured graph.
+                attn.wq_b.weight.copy_(original_q.weight)
+                attn.wq_b.weight_scales.copy_(original_q.weight_scales)
+                mega.reload(attn)
+                self.assertEqual(resident_addresses(), addresses)
+                torch.testing.assert_close(run(), before_reload, rtol=0, atol=0)
+                graph.replay()
+                torch.testing.assert_close(captured, run(), rtol=0, atol=0)
 
     def test_mega_pair_fused_projection_matches_unfused_and_replays(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
