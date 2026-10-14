@@ -37,11 +37,11 @@ public:
     };
 
     struct LaunchResult {
-        torch::Tensor                         packed_allow_mask_gpu;   // CUDA-only [active_rows, ceil(V/32)] int32
-        torch::Tensor                         logits_row_indices_gpu;  // CUDA-only [active_rows] int32
+        torch::Tensor                         packed_allow_mask_gpu;   // GPU [active_rows, ceil(V/32)] int32
+        torch::Tensor                         logits_row_indices_gpu;  // GPU [active_rows] int32
         bool                                  has_active_processor = false;
         std::vector<std::optional<ErrorInfo>> processor_errors;
-        // Non-CUDA fallback consumes these directly.
+        // CPU fallback consumes these directly.
         torch::Tensor packed_allow_mask_cpu_lifetime;
         torch::Tensor logits_row_indices_cpu_lifetime;
         torch::Tensor spec_cap_cpu;
@@ -99,7 +99,7 @@ private:
     torch::Tensor logits_row_indices_cpu_;  // [active_rows] pinned int32
     torch::Tensor logits_row_indices_gpu_;  // [active_rows] device int32
     torch::Tensor spec_cap_cpu_;
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     torch::Tensor                 spec_cap_gpu_;
     std::shared_ptr<torch::Event> last_consumed_event_;
 #endif
