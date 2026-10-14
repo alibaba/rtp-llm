@@ -16,8 +16,10 @@ namespace rtp_llm {
 
 TransferExecutor::TransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                                    size_t                                         max_descriptors_per_batch,
-                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                   BlockTreeTaskPool*                             load_task_pool):
     transfer_task_pool_(transfer_task_pool),
+    load_task_pool_(load_task_pool == nullptr ? &transfer_task_pool : load_task_pool),
     max_descriptors_per_batch_(max_descriptors_per_batch),
     metrics_reporter_(std::move(metrics_reporter)) {
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
@@ -41,7 +43,8 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                          CacheCopyError::NOT_EXECUTED));
     };
     const auto task_class = target == Tier::DEVICE ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
-    const bool accepted   = transfer_task_pool_.submit(
+    auto&      task_pool  = task_class == BlockTreeTaskClass::LOAD ? *load_task_pool_ : transfer_task_pool_;
+    const bool accepted   = task_pool.submit(
         task_class,
         [this,
          task       = std::move(task),

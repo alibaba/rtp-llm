@@ -40,15 +40,22 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     if (std::any_of(
             group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group) { return group->crcEnabled(); })) {
         crc_service = std::make_shared<CrcTransferService>(
-            group_sets_, max_descriptors_per_batch, transfer_worker_count, world_rank);
+            group_sets_, max_descriptors_per_batch, 2 * transfer_worker_count, world_rank);
     }
+    load_transfer_task_pool_ =
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferLoad");
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferBackground");
+    RTP_LLM_CHECK(load_transfer_task_pool_->start());
     RTP_LLM_CHECK(transfer_task_pool_->start());
-    device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter, crc_service);
-    host_disk_executor_ =
-        std::make_unique<HostDiskTransferExecutor>(*transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
+    device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(*transfer_task_pool_,
+                                                                         max_descriptors_per_batch,
+                                                                         std::move(device_host_options),
+                                                                         metrics_reporter,
+                                                                         std::move(crc_service),
+                                                                         load_transfer_task_pool_.get());
+    host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get());
     if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
@@ -56,14 +63,18 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                              device_disk_staging_block_count,
                                                                              *transfer_task_pool_,
                                                                              max_descriptors_per_batch,
-                                                                             std::move(metrics_reporter));
+                                                                             std::move(metrics_reporter),
+                                                                             load_transfer_task_pool_.get());
     }
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {
+    load_transfer_task_pool_->stopAdmission();
     transfer_task_pool_->stopAdmission();
     cancelPendingStagingTransfers();
+    load_transfer_task_pool_->waitForIdle();
     transfer_task_pool_->waitForIdle();
+    load_transfer_task_pool_.reset();
     transfer_task_pool_.reset();
 }
 
@@ -74,7 +85,11 @@ void PerRankBlockTransferEngine::cancelPendingStagingTransfers() {
 }
 
 BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
-    return transfer_task_pool_->queueSizes();
+    auto load_sizes       = load_transfer_task_pool_->queueSizes();
+    auto background_sizes = transfer_task_pool_->queueSizes();
+    return {load_sizes.load + background_sizes.load,
+            load_sizes.background + background_sizes.background,
+            load_sizes.completion + background_sizes.completion};
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {

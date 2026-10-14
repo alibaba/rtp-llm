@@ -20,7 +20,8 @@ public:
                                size_t                                         max_descriptors_per_batch,
                                DeviceHostCopyOptions                          options          = {},
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                               std::shared_ptr<CrcTransferService>            crc_service      = nullptr);
+                               std::shared_ptr<CrcTransferService>            crc_service      = nullptr,
+                               BlockTreeTaskPool*                             load_task_pool   = nullptr);
     ~DeviceHostTransferExecutor() = default;
 
 private:

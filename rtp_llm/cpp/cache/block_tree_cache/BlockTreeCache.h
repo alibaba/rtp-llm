@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
-    // ---- Shared per-rank TransferEngine task pool ----
+    // ---- Per-rank TransferEngine task pools, one per direction ----
     size_t transfer_worker_count{4};
     size_t transfer_queue_max_size{10000};
 

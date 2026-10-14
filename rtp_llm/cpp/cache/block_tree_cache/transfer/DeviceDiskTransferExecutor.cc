@@ -59,10 +59,12 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
                                                        size_t                          staging_block_count,
                                                        BlockTreeTaskPool&              transfer_task_pool,
                                                        size_t                          max_descriptors_per_batch,
-                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                       BlockTreeTaskPool*                             load_task_pool):
     device_host_executor_(device_host_executor),
     host_disk_executor_(host_disk_executor),
     transfer_task_pool_(transfer_task_pool),
+    load_task_pool_(load_task_pool == nullptr ? &transfer_task_pool : load_task_pool),
     max_descriptors_per_batch_(max_descriptors_per_batch),
     metrics_reporter_(std::move(metrics_reporter)) {
     RTP_LLM_CHECK(staging_block_count >= 2 && staging_block_count % 2 == 0);
@@ -174,7 +176,7 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
                                        CacheCopyError::NOT_EXECUTED),
                         indices);
                 };
-                const bool accepted = transfer_task_pool_.submit(
+                const bool accepted = load_task_pool_->submit(
                     BlockTreeTaskClass::LOAD,
                     [this,
                      stage_state,
