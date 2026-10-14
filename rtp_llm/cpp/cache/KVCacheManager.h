@@ -61,6 +61,7 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
 
