@@ -18,6 +18,13 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_sm120_precision_contract",
+    srcs = ["test_sm120_precision_contract.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

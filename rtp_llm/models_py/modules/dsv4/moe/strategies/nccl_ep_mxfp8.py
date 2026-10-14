@@ -1,6 +1,6 @@
-"""Stage-local MXFP8 dispatch/return with ordered FP32 peer accumulation.
+"""Stage-local MXFP8 dispatch with ordered FP32 peer accumulation.
 
-Partials round through BF16 and MXFP8; this is not BF16-backend bit equivalence."""
+Returns use MXFP8 by default or opt-in lossless FP32 partials."""
 
 from __future__ import annotations
 
@@ -100,6 +100,9 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
 
     def __init__(self, cfg: MoeCfg):
         super().__init__(cfg)
+        self._return_dtype = os.environ.get("DSV4_MOE_RETURN_DTYPE", "mxfp8")
+        if self._return_dtype not in ("mxfp8", "fp32"):
+            raise ValueError("DSV4_MOE_RETURN_DTYPE must be mxfp8 or fp32")
         if cfg.ep_size <= 1:
             raise RuntimeError(
                 "%s requires ep_size > 1 (got %d)" % (BACKEND_NAME, cfg.ep_size)
@@ -272,13 +275,7 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
                 ret_payload, counts, [n_local] * world, ret_payload.size(1), group
             )
             del ret_payload
-            summed = mxfp8_dequant_peer_sum(
-                ret_recv,
-                n_rows=n_local,
-                hidden_size=hidden,
-                world_size=world,
-                out_dtype=torch.float32,
-            )
+            summed = self._combine_return(ret_recv, n_local, hidden, world)
         return summed.to(x.dtype)
 
     # ---- steps ------------------------------------------------------------
@@ -724,6 +721,12 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
     def _pack_return(
         self, local_out: torch.Tensor, hidden: int, scale_cols: int, n_total: int
     ) -> torch.Tensor:
+        if self._return_dtype == "fp32":
+            if local_out.dtype != torch.float32 or local_out.shape != (n_total, hidden):
+                raise ValueError(
+                    "FP32 MoE return requires float32 [rows, hidden] partials"
+                )
+            return local_out.contiguous().view(torch.uint8)
         from flashinfer import mxfp8_quantize
 
         ret_cols = hidden + scale_cols
@@ -742,6 +745,29 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         buf[:, :hidden].copy_(q)
         buf[:, hidden:].copy_(s)
         return buf
+
+    def _combine_return(self, received, n_rows, hidden, world):
+        if self._return_dtype == "fp32":
+            from .._nccl_ep_combine_triton import fp32_peer_sum
+
+            if received.dtype != torch.uint8 or received.shape != (
+                world * n_rows,
+                hidden * 4,
+            ):
+                raise ValueError(
+                    "FP32 MoE return requires byte rows with four bytes per element"
+                )
+            output = torch.empty(
+                (n_rows, hidden), dtype=torch.float32, device=received.device
+            )
+            return fp32_peer_sum(received.view(torch.float32), world, output)
+        return mxfp8_dequant_peer_sum(
+            received,
+            n_rows=n_rows,
+            hidden_size=hidden,
+            world_size=world,
+            out_dtype=torch.float32,
+        )
 
     @staticmethod
     def _all_to_all(

@@ -202,7 +202,12 @@ class Gate(nn.Module):
             scores = F.linear(x.float(), self.weight.float())
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-            scores = F.linear(x_bf16, self._weight_bf16()).float()
+            if os.environ.get("DSV4_GATE_OUTPUT_FP32", "0") == "1":
+                scores = torch.mm(
+                    x_bf16, self._weight_bf16().t(), out_dtype=torch.float32
+                )
+            else:
+                scores = F.linear(x_bf16, self._weight_bf16()).float()
         scores = scores[:rows]
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
