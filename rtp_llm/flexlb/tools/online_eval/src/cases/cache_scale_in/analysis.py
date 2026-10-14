@@ -377,8 +377,6 @@ def analyze(evidence):
     )
     return dict(
         cache_scale_in_analysis_schema_version=2,
-        gate_references=gate_references(evidence, threshold, status_windows),
-        baseline_windows=halves,
         gate_metrics=gate_metrics,
         status_reporting=status_windows,
         measurement_scope=scope_contract(evidence) if scoped else {
@@ -402,54 +400,3 @@ def analyze(evidence):
         criteria=p,
         events=evidence.get("events", []),
     )
-
-
-from analysis.gate_references import definition, freeze_reference, window as reference_window
-
-GATE_REFERENCES = [
-    definition('baseline_hit', 'threshold', 'derived/baseline_hit_ratio', 'ratio',
-               description='全体初始 Prefill 两个半窗命中率下界'),
-    definition('collapse', 'hit_floor', 'derived/survivor_hit_ratio', 'ratio',
-               description='仅 survivors；低于此线持续达到 sustain_s 才检测到 collapse'),
-    definition('status_qps', 'threshold', 'cache_gate/status_min_qps', 'requests/s',
-               description='baseline 全体 P，transition/post 仅 survivors；跨阶段所有引擎样本的上报 QPS 最小值下界'),
-    definition('status_latency', 'threshold', 'cache_gate/status_max_rt_us', 'us',
-               description='baseline 全体 P，transition/post 仅 survivors；跨阶段状态读取耗时 Gauge 最大采样值上界，不是 p99'),
-]
-
-
-def gate_references(evidence, threshold, status_windows=None):
-    from artifacts.gate_inputs import evidence_origin
-    try:
-        origin = evidence_origin(evidence)
-    except (KeyError, ValueError, TypeError):
-        origin = None
-    criteria = evidence['criteria']
-    values = [criteria['baseline_min_hit'], threshold]
-    bounds = [(evidence['baseline_start'], evidence['baseline_end']),
-              (evidence['post_start'], evidence['post_end'])]
-    result = []
-    for spec, value, (lo, hi), name in zip(GATE_REFERENCES[:2], values, bounds, ('baseline', 'post')):
-        spans = [reference_window(name, origin + lo, origin + hi)] if origin is not None and lo < hi else []
-        description = dict(spec)
-        if name == 'post':
-            description['description'] += '；sustain_s=' + str(criteria['sustain_s'])
-        result.append(freeze_reference(description, value, spans, op='ge' if name == 'baseline' else 'lt',
-            status='AVAILABLE' if spans else 'UNAVAILABLE', reason='' if spans else '门禁窗口未建立'))
-    spans, instant = [], []
-    for phase, data in (status_windows or {}).items():
-        lo, hi = data['start'], data['end']
-        if origin is not None and lo < hi:
-            spans.append(reference_window(phase, origin + lo, origin + hi))
-        elif lo == hi:
-            instant.append(phase)
-    spans.sort(key=lambda span: span['start_epoch_s'])
-    for spec, key, op in zip(GATE_REFERENCES[2:], ('status_min_qps', 'status_max_rt_us'), ('ge', 'le')):
-        value = criteria.get(key)
-        selected = spans if value is not None else []
-        description = dict(spec)
-        if instant:
-            description['description'] += '；零时长阶段仅判定瞬时样本，不绘制水平段：' + ','.join(instant)
-        result.append(freeze_reference(description, value, selected, op=op,
-            status='AVAILABLE' if selected else 'UNAVAILABLE', reason='' if selected else '状态上报门禁窗口或阈值未建立'))
-    return result
