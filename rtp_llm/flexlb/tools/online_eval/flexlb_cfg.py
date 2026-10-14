@@ -580,8 +580,9 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     cap = overrides.max_inflight_per_prefill_worker
     if cap is None:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
+    kind = overrides.dispatcher or doc["dispatcher"]["type"]
     doc["dispatcher"] = DispatcherPolicy(
-        overrides.dispatcher or doc["dispatcher"]["type"].lower(), cap,
+        kind.lower() if type(kind) is str else kind, cap,
     ).to_json()
 
 

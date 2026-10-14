@@ -68,6 +68,7 @@ Python 回归不执行 Node 测试。修改报告浏览器交互时，需在安�
 ```bash
 node tests/js/test_multi_curve.js
 node tests/js/test_legend_interaction.js
+node tests/js/test_report_controller.js
 ```
 
 这些测试覆盖选区统计、缺失样本、刷选和图例交互，不需要启动服务或运行 workload。
