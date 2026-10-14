@@ -62,6 +62,76 @@ class TestSm120KernelGuard(unittest.TestCase):
                     )
 
 
+class TestSupportWiring(unittest.TestCase):
+    """support() wiring on the sm120 path (round-6 must-fix 3).
+
+    Reaches past the arch/version guards with mocks so the rest of the
+    predicate (dtype/head-dim/GQA/prefix checks - and the module-level
+    constants they reference) is exercised on any host GPU. CI run
+    79765748 caught a NameError here that the impl-construction tests
+    cannot see: a free name in support() only fails on the factory path.
+    """
+
+    def _make_inputs(self, batch, lengths, prefix=None):
+        # minimal prefill inputs; only the fields support() reads matter
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32)
+        if prefix is None:
+            inputs.prefix_lengths = torch.zeros(batch, dtype=torch.int32)
+        else:
+            inputs.prefix_lengths = torch.tensor(
+                prefix, dtype=torch.int32
+            )
+        return inputs
+
+    def _support(self, configs, inputs):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl import (
+            flash_attn_2,
+        )
+
+        with mock.patch.object(
+            flash_attn_2, "is_sm12x", return_value=True
+        ), mock.patch.object(
+            flash_attn_2, "_has_sm120_kernels", return_value=True
+        ):
+            return flash_attn_2.FlashAttn2PrefillImpl.support(configs, inputs)
+
+    def test_support_accepts_gate_config(self):
+        configs = self._configs(head_dim=64, dtype=torch.bfloat16)
+        inputs = self._make_inputs(1, [128])
+        self.assertTrue(self._support(configs, inputs))
+
+    def test_support_rejects_unsupported_head_dim_and_dtype(self):
+        inputs = self._make_inputs(1, [128])
+        configs = self._configs(head_dim=63, dtype=torch.bfloat16)
+        self.assertFalse(self._support(configs, inputs))
+        configs = self._configs(head_dim=64, dtype=torch.float32)
+        self.assertFalse(self._support(configs, inputs))
+
+    def test_support_rejects_prefix(self):
+        configs = self._configs(head_dim=64, dtype=torch.bfloat16)
+        inputs = self._make_inputs(
+            1, [128], prefix=[64]
+        )
+        self.assertFalse(self._support(configs, inputs))
+
+    def _configs(self, head_dim, dtype):
+        from rtp_llm.ops import AttentionConfigs, KvCacheDataType
+
+        configs = AttentionConfigs()
+        configs.head_num = 32
+        configs.kv_head_num = 8
+        configs.size_per_head = head_dim
+        configs.dtype = dtype
+        configs.kv_cache_dtype = KvCacheDataType.BASE
+        configs.use_mla = False
+        configs.is_sparse = False
+        return configs
+
+
 @unittest.skipUnless(_HAS_FLASH_ATTN_2, "flash_attn 2 not available")
 class TestFlashAttn2PrefillImpl(TRTLLMFMHAv2TestBase):
     def _run_impl_rope_correctness(

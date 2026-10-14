@@ -57,6 +57,13 @@ def _has_sm120_kernels() -> bool:
     return _HAS_FLASH_ATTN_2 and _flash_attn_has_sm120_kernels()
 
 
+# Head dims with tuned FA2 kernels across Ampere..Blackwell consumer.
+# (Restored after the guard-dedup edit accidentally swallowed this
+# constant - NameError surfaced only through support() on the factory
+# path, CI run 79765748.)
+_SUPPORTED_HEAD_DIMS = (64, 96, 128, 192, 256)
+
+
 class FlashAttn2PrefillImpl(FMHAImplBase):
     """FA2 varlen prefill (no prefix) for sm120 eager path.
 
