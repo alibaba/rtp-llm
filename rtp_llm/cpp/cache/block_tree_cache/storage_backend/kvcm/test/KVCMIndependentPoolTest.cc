@@ -254,6 +254,12 @@ protected:
         }
     }
 
+    void seedStoredPayload(size_t group, const std::string& uri) {
+        const auto& tag       = config_.groupTags().at(group);
+        const auto  byte_size = config_.blockSizeBytesForGroup(tag);
+        state_->stored[uri]   = std::vector<uint8_t>(byte_size, 0);
+    }
+
     CacheConfig                                          config_;
     std::shared_ptr<CoordinatorCacheManager>             allocator_;
     std::vector<DeviceBlockPoolPtr>                      pools_;
@@ -399,6 +405,9 @@ TEST_F(KVCMIndependentPoolTest, TimeoutQuarantinesUpperRequestPinsUntilShutdown)
         {{"tp0_Ffull0", "full0"}, {"tp0_Ffull1", "full1"}, {"tp0_Llinear0", "linear"}}};
     EXPECT_CALL(*meta_, MatchLocation(_, _, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, locations)));
+    seedStoredPayload(/*group=*/0, "full0");
+    seedStoredPayload(/*group=*/1, "full1");
+    seedStoredPayload(/*group=*/2, "linear");
 
     std::vector<uint32_t> ref_counts;
     for (size_t group = 0; group < pools_.size(); ++group) {
@@ -423,9 +432,12 @@ TEST_F(KVCMIndependentPoolTest, WorkerReportsTimeoutWithoutCreatingLocalPins) {
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_READ);
     for (size_t group = 0; group < pools_.size(); ++group) {
-        operation.add_group_tags(config_.groupTags().at(group));
+        const auto& tag = config_.groupTags().at(group);
+        operation.add_group_tags(tag);
         operation.add_block_ids(blocks_[group]);
-        operation.add_uris("group_" + std::to_string(group));
+        const auto uri = "group_" + std::to_string(group);
+        operation.add_uris(uri);
+        seedStoredPayload(group, uri);
     }
     std::vector<uint32_t> ref_counts;
     for (size_t group = 0; group < pools_.size(); ++group) {

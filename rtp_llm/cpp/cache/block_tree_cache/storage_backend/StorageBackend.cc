@@ -386,9 +386,18 @@ bool StorageBackend::write(StorageWriteTask task) {
         if (outcome == Lifecycle::ACCEPTING) {
             try {
                 writeImpl(state->request);
-            } catch (const StorageOperationCompletionUnknown&) {
+            } catch (const StorageOperationTimeout& error) {
                 quarantine = true;
-            } catch (...) {}
+                RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
+            } catch (const StorageOperationCompletionUnknown& error) {
+                quarantine = true;
+                RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
+                                    error.what());
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("StorageBackend write failed with an unknown exception");
+            }
         }
         if (quarantine) {
             quarantineTask(state);
