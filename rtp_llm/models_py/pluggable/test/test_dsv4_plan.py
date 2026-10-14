@@ -233,8 +233,10 @@ class Dsv4PlanTest(unittest.TestCase):
             (False, 2, 1, 1),
             (False, 8, 1, 1),
             (False, 4, 1, 4),
+            (False, 8, 1, 8),
             (True, 1, 2, 2),
             (True, 2, 2, 4),
+            (True, 8, 1, 8),
             (True, 1, 16, 16),
         ):
             world = tp * dp
@@ -247,6 +249,8 @@ class Dsv4PlanTest(unittest.TestCase):
                 for rank in range(world):
                     if decode:
                         ctx = self.decode_context(rank, **topology)
+                    elif ep > 1:
+                        ctx = self.prefill_deepep_context(rank, **topology)
                     else:
                         ctx = ModuleBuildContext(
                             get_module_registry(),
@@ -257,6 +261,137 @@ class Dsv4PlanTest(unittest.TestCase):
                     digests.add(ctx.prepare([request_for("model", ctx.selection)]))
                     self.assertEqual(len(ctx.bindings), 130)
                 self.assertEqual(len(digests), 1)
+
+    def prefill_deepep_context(self, rank=0, **changed):
+        comm = dict(
+            enabled=True,
+            low_latency=False,
+            all_gather=False,
+            ffn_disaggregate=False,
+            internode=False,
+        )
+        values = dict(
+            role="PREFILL",
+            tp_size=8,
+            dp_size=1,
+            ep_size=8,
+            world_size=8,
+            moe_communication=comm,
+        )
+        values.update(changed)
+        config = ModuleDispatchConfig(
+            mode="auto",
+            platform="ppu",
+            impl_overrides=tuple(
+                (
+                    "rtp.dsv4." + kind,
+                    "ppu.dsv4.moe.fp4_prefill_deepep.v1"
+                    if kind == "moe"
+                    else f"ppu.dsv4.{kind}.fp4_indexer.v1",
+                )
+                for kind in CONTRACTS
+            ),
+        )
+        return ModuleBuildContext(
+            get_module_registry(),
+            selection(rank, **values),
+            config,
+            world_size=values["world_size"],
+        )
+
+    def test_prefill_ep_world_plan_binds_the_deepep_normal_moe(self):
+        for tp, ep in ((8, 8), (4, 4), (2, 2)):
+            with self.subTest(tp=tp, ep=ep):
+                digests = set()
+                for rank in range(ep):
+                    ctx = self.prefill_deepep_context(
+                        rank, tp_size=ep, dp_size=1, ep_size=ep, world_size=ep
+                    )
+                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                    self.assertEqual(len(ctx.bindings), 130)
+                    self.assertEqual(
+                        {
+                            b.implementation.impl_id
+                            for b in ctx.bindings
+                            if b.request.module_id == "rtp.dsv4.moe"
+                        },
+                        {"ppu.dsv4.moe.fp4_prefill_deepep.v1"},
+                    )
+                self.assertEqual(len(digests), 1)
+
+    def test_prefill_ep_rejects_the_all_experts_tp_moe_and_ep1_deepep(self):
+        comm = dict(
+            enabled=True,
+            low_latency=False,
+            all_gather=False,
+            ffn_disaggregate=False,
+            internode=False,
+        )
+        tp_moe = self.context(
+            selection(
+                role="PREFILL",
+                tp_size=8,
+                dp_size=1,
+                ep_size=8,
+                world_size=8,
+                moe_communication=comm,
+            ),
+            explicit_config(),
+        )
+        with self.assertRaisesRegex(ValueError, "requires EP1"):
+            tp_moe.prepare([request_for("model", tp_moe.selection)])
+
+        deepep_ep1 = self.prefill_deepep_context(
+            0, tp_size=4, dp_size=1, ep_size=1, world_size=4
+        )
+        with self.assertRaisesRegex(ValueError, "requires EP>1"):
+            deepep_ep1.prepare([request_for("model", deepep_ep1.selection)])
+
+        low_latency = self.prefill_deepep_context(
+            0, moe_communication=dict(comm, low_latency=True)
+        )
+        with self.assertRaisesRegex(ValueError, "DeepEP normal dispatch"):
+            low_latency.prepare([request_for("model", low_latency.selection)])
+
+    def test_decode_tp8_dp1_plan_binds_the_low_latency_moe(self):
+        digests = set()
+        for rank in range(8):
+            ctx = self.decode_context(
+                rank, tp_size=8, dp_size=1, ep_size=8, world_size=8
+            )
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+            self.assertEqual(
+                {
+                    b.implementation.impl_id
+                    for b in ctx.bindings
+                    if b.request.module_id == "rtp.dsv4.moe"
+                },
+                {"ppu.dsv4.moe.fp4_decode.v1"},
+            )
+        self.assertEqual(len(digests), 1)
+
+    def test_collective_protocol_names_track_supported_topology(self):
+        registry = get_module_registry()
+        decode = registry.implementation(
+            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_decode.v1"
+        )
+        self.assertEqual(
+            decode.collective_protocol_id, "ppu.dsv4.decode.dpep-mxfp4-ll.v2"
+        )
+        prefill_ep = registry.implementation(
+            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_prefill_deepep.v1"
+        )
+        self.assertEqual(
+            prefill_ep.collective_protocol_id, "ppu.dsv4.moe.dpep-normal-mxfp4.v1"
+        )
+        prefill_tp = registry.implementation(
+            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_indexer.v1"
+        )
+        self.assertEqual(
+            prefill_tp.collective_protocol_id,
+            "ppu.dsv4.moe.tp4-shared-sharded-bf16-reduce.v2",
+        )
 
     def test_parallel_groups_still_require_consistent_engine_geometry(self):
         from rtp_llm.models.dsv4.adapter import validate_parallelism

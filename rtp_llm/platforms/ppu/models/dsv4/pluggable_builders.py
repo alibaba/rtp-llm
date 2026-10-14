@@ -56,6 +56,19 @@ def build_moe_tp(*, build_ctx, request, tp_rank, **kwargs):
     return PpuTPMoE(tp_rank=tp_rank, **kwargs)
 
 
+def build_prefill_deepep_moe(*, build_ctx, request, platform_provider, **kwargs):
+    from .ppu_ep_moe import PpuEPMoE
+    from .ppu_legacy_deepep import PpuLegacyDeepEPStrategy
+
+    baseline.validate_arguments(build_ctx, request, kwargs)
+    return PpuEPMoE(
+        platform_provider=platform_provider,
+        strategy_type=PpuLegacyDeepEPStrategy,
+        strategy_kwargs={"options": platform_provider.execution_options},
+        **kwargs,
+    )
+
+
 def build_attention_fp4(*, build_ctx, request, platform_provider, **kwargs):
     from .ppu_fp4_indexer import PpuFP4Attention
 

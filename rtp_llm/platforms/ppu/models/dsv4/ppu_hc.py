@@ -31,15 +31,18 @@ class PpuHCUnit(TileLangHCUnit):
             raise ValueError(
                 "PPU module HC requires an explicitly supported prenorm backend"
             )
-        if allow_graph and (tp_size != 1 or self._backend != "deepgemm_deterministic"):
-            raise ValueError("PPU HC Graph requires TP1 and deterministic prenorm")
+        # The fused kernels contract replicated full-width inputs: the block
+        # keeps the residual hidden dimension replicated at any TP size, the
+        # loader keeps fn/base/scale and the RMSNorm weight replicated, and
+        # the deterministic prenorm GEMM reduces one complete K=hc*dim plane
+        # per rank. Every rank therefore computes bit-identical HC outputs
+        # from identical inputs, so TP>1 needs no extra collective here.
+        # pre_norm still fails closed on non-replicated activations/weights.
+        if allow_graph and self._backend != "deepgemm_deterministic":
+            raise ValueError("PPU HC Graph requires deterministic prenorm")
         if fuse_prenorm:
-            if (
-                not allow_graph
-                or tp_size != 1
-                or self._backend != "deepgemm_deterministic"
-            ):
-                raise ValueError("Fused HC reduction requires TP1 deterministic Decode")
+            if not allow_graph or self._backend != "deepgemm_deterministic":
+                raise ValueError("Fused HC reduction requires deterministic Decode")
             from .ppu_hc_prenorm import tf32_hc_prenorm_partials
 
             self._prenorm_partials = tf32_hc_prenorm_partials

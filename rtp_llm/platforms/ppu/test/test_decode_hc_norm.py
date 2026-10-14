@@ -51,7 +51,7 @@ class HCNormDefaultTest(unittest.TestCase):
     "requires a PPU M890P",
 )
 class HCNormGraphTest(unittest.TestCase):
-    def unit(self, *, reduction="fused", norm="fused", zero=False):
+    def unit(self, *, reduction="fused", norm="fused", zero=False, tp_size=1, tp_rank=0):
         torch.manual_seed(890409)
         fn = torch.randn((24, 16384), device="cuda", dtype=torch.float32) / 128
         if zero:
@@ -79,8 +79,8 @@ class HCNormGraphTest(unittest.TestCase):
             hc_sinkhorn_iters=20,
             norm_eps=1e-6,
             hc_eps=0.0 if zero else 1e-6,
-            tp_size=1,
-            tp_rank=0,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
         )
 
     def norm(self):
@@ -125,6 +125,16 @@ class HCNormGraphTest(unittest.TestCase):
             for tp_rank in range(tp_size):
                 with self.subTest(tp_size=tp_size, tp_rank=tp_rank):
                     actual = unit.pre_norm(x, norm, tp_size=tp_size, tp_rank=tp_rank)
+                    for value, reference in zip(actual, (y, post, comb)):
+                        torch.testing.assert_close(value, reference, rtol=0, atol=0)
+        # Construction itself is TP-agnostic: the decode provider builds the
+        # fused unit at TP>1 and reproduces the TP1 outputs bit for bit from
+        # the same replicated inputs.
+        for tp_size in (2, 8):
+            for tp_rank in range(tp_size):
+                with self.subTest(constructed_tp_size=tp_size, tp_rank=tp_rank):
+                    wide = self.unit(tp_size=tp_size, tp_rank=tp_rank)
+                    actual = wide.pre_norm(x, norm, tp_size=tp_size, tp_rank=tp_rank)
                     for value, reference in zip(actual, (y, post, comb)):
                         torch.testing.assert_close(value, reference, rtol=0, atol=0)
         for tp_size, tp_rank in ((0, 0), (4, -1), (4, 4)):

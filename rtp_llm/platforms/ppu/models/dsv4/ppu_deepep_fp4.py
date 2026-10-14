@@ -89,10 +89,15 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
                 "PPU DeepEP MXFP4 requires compatible EP-local experts"
             )
         self._wrapper = None
+        # At TP>1 the wrapper slices the replicated batch before dispatch, so
+        # the per-rank MoE budget is this rank's slice of the global capacity.
+        dispatch_budget = (cfg.max_tokens_per_rank + max(cfg.tp_size, 1) - 1) // max(
+            cfg.tp_size, 1
+        )
         self._expected_m = max(
             1,
             (
-                cfg.max_tokens_per_rank * cfg.ep_size * cfg.n_activated_experts
+                dispatch_budget * cfg.ep_size * cfg.n_activated_experts
                 + cfg.n_routed_experts
                 - 1
             )
@@ -140,7 +145,8 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
             )
             != (cfg.tp_size, cfg.ep_size, cfg.ep_rank, cfg.dim, cfg.n_routed_experts)
             or comm.moe_k != cfg.n_activated_experts
-            or wrapper.ll_num_max_token_per_rank < cfg.max_tokens_per_rank
+            or wrapper.ll_num_max_token_per_rank * max(cfg.tp_size, 1)
+            < cfg.max_tokens_per_rank
         ):
             raise RuntimeError(
                 "PPU MoE configuration differs from the engine-owned DeepEP group"

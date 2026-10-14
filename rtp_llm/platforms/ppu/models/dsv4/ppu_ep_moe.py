@@ -3,6 +3,11 @@
 The engine owns DeepEP communication. This module binds the selected PPU
 routed implementation and preserves BF16 routed/shared outputs through the
 FP32 add epilogue. It does not participate in CUDA's FP8/FP4 strategy registry.
+
+At TP>1 the hidden tokens entering MoE are replicated across the TP group.
+Each rank dispatches only its contiguous token slice and all-gathers the
+combined result, so every (token, expert) pair is computed exactly once and
+the shared expert runs on one slice instead of every rank.
 """
 
 from contextlib import nullcontext
@@ -18,6 +23,39 @@ from rtp_llm.utils.model_weight import W
 
 from .ppu_gate import PpuGate
 from .ppu_moe_config import PpuMoeConfig
+
+
+def _gather_tp_slices(out: torch.Tensor, original_tokens: int, tp_size: int):
+    """All-gather per-rank token slices back into the replicated layout."""
+
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+    tp_tokens = (original_tokens + tp_size - 1) // tp_size
+    if out.size(0) < tp_tokens:
+        padding = torch.zeros(
+            (tp_tokens - out.size(0), out.size(1)),
+            dtype=out.dtype,
+            device=out.device,
+        )
+        out = torch.cat((out, padding), dim=0)
+    gathered = all_gather(out, group=Group.TP)
+    return gathered.reshape(tp_size * tp_tokens, out.size(1))[:original_tokens]
+
+
+def _slice_tokens_for_tp(flat, ids, positions, active_token_mask, tp_size, tp_rank):
+    """Narrow the replicated token batch to this rank's dispatch slice."""
+
+    original_tokens = flat.size(0)
+    tp_tokens = (original_tokens + tp_size - 1) // tp_size
+    slice_begin = min(tp_tokens * tp_rank, original_tokens)
+    slice_size = min(original_tokens - slice_begin, tp_tokens)
+    flat = flat.narrow(0, slice_begin, slice_size)
+    ids = ids.narrow(0, slice_begin, slice_size)
+    if positions is not None:
+        positions = positions.narrow(0, slice_begin, slice_size)
+    if active_token_mask is not None:
+        active_token_mask = active_token_mask.narrow(0, slice_begin, slice_size)
+    return flat, ids, positions, active_token_mask, original_tokens
 
 
 class PpuEPMoE(nn.Module):
@@ -68,6 +106,8 @@ class PpuEPMoE(nn.Module):
             raise ValueError("Invalid PPU EP capacity or expert ownership")
         self.layer_id, self.dim = int(layer_id), int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
+        self._tp_size = int(tp_size)
+        self._tp_rank = int(tp_rank)
         self._is_decode_role = bool(is_decode_role)
         self.chunking_enabled = chunked_moe_enabled(platform_provider.execution_options)
         self._observer_factory = observer_factory
@@ -182,6 +222,17 @@ class PpuEPMoE(nn.Module):
             raise ValueError("Decode or graph MoE input exceeds max_tokens_per_rank")
         if flat.size(0) > capacity and not self.chunking_enabled:
             raise ValueError("PPU EP MoE input exceeds capacity with chunking disabled")
+        original_tokens = flat.size(0)
+        if self._tp_size > 1:
+            # DeepEP dispatch consumes one rank's token slice, not the
+            # TP-replicated batch. Slices are deterministic and identical on
+            # every rank, so chunk counts and collective order stay in sync.
+            flat, ids, positions, active_token_mask, original_tokens = (
+                _slice_tokens_for_tp(
+                    flat, ids, positions, active_token_mask,
+                    self._tp_size, self._tp_rank,
+                )
+            )
         # Each call owns its output, including graph-pool allocations. Retaining
         # a result from one model/layer cannot alias another model's workspace.
         out = torch.empty_like(flat)
@@ -202,4 +253,6 @@ class PpuEPMoE(nn.Module):
                         if active_token_mask is not None else None
                     ),
                 )
+        if self._tp_size > 1:
+            out = _gather_tp_slices(out, original_tokens, self._tp_size)
         return out.view(shape)

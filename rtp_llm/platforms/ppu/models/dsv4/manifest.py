@@ -130,7 +130,12 @@ def _supports_ppu_tp_moe(selection, request, cache_mode):
     base = supports_ppu_fp4_prefill(selection, request)
     if not base.supported:
         return base
-    options = selection.model_metadata.get("execution_options", {})
+    metadata = selection.model_metadata
+    if metadata.get("ep_size", 1) != 1:
+        return SupportResult(
+            False, "TP MoE v2 binds every routed expert and requires EP1"
+        )
+    options = metadata.get("execution_options", {})
     if options.get("DSV4_PPU_SGLANG_MOE", "0") != "1":
         return SupportResult(
             False, "TP MoE v2 requires the SG fused activation boundary"
@@ -149,6 +154,33 @@ def _supports_ppu_tp_moe(selection, request, cache_mode):
 
 def supports_ppu_fp4_tp_moe(selection, request):
     return _supports_ppu_tp_moe(selection, request, "fp4")
+
+
+def supports_ppu_fp4_prefill_deepep(selection, request):
+    """EP prefill: engine-owned DeepEP normal dispatch over EP-local experts."""
+
+    result = _supports_ppu_prefill(selection, request, "fp4")
+    if not result.supported:
+        return result
+    metadata = selection.model_metadata
+    comm = metadata.get("moe_communication", {})
+    checks = (
+        (metadata.get("ep_size", 1) > 1, "requires EP>1 routed experts"),
+        (
+            comm.get("enabled") is True
+            and comm.get("low_latency") is False
+            and comm.get("all_gather") is False
+            and comm.get("ffn_disaggregate") is False,
+            "requires engine-owned DeepEP normal dispatch without FFN disaggregation",
+        ),
+        (not comm.get("internode", False), "requires single-node DeepEP"),
+    )
+    for supported, reason in checks:
+        if not supported:
+            return SupportResult(False, reason)
+    return _check_execution_options(
+        metadata.get("execution_options", {}), PREFILL_EXECUTION_OPTIONS
+    )
 
 
 def supports_ppu_fp4_decode(selection, request):
@@ -226,7 +258,7 @@ def register_modules(registry):
                     if kind == "model"
                     else None
                 ),
-                collective_protocol_id="ppu.dsv4.decode.tp1-dpep-mxfp4-ll.v1",
+                collective_protocol_id="ppu.dsv4.decode.dpep-mxfp4-ll.v2",
                 capabilities={"decode", "target_verify"},
                 auto_selectable=False,
                 describe_build_requests=(
@@ -284,3 +316,26 @@ def register_modules(registry):
                 ),
             )
         )
+    # EP prefill MoE: true expert parallelism over the engine's DeepEP normal
+    # group. Each rank binds only its EP-local routed experts; tokens are
+    # sliced across the TP group before dispatch and all-gathered after
+    # combine. EP1 keeps the all-experts TP-MoE registration above.
+    registry.register_implementation(
+        ModuleImplSpec(
+            module_id="rtp.dsv4.moe",
+            impl_id="ppu.dsv4.moe.fp4_prefill_deepep.v1",
+            api_version=1,
+            builder="rtp_llm.platforms.ppu.models.dsv4.pluggable_builders:"
+            "build_prefill_deepep_moe",
+            supported_devices={DeviceType.Ppu},
+            predicate="rtp_llm.platforms.ppu.models.dsv4.manifest:"
+            "supports_ppu_fp4_prefill_deepep",
+            priority=110,
+            contract_id=CONTRACTS["moe"],
+            weight_format_id=WEIGHT_FORMAT,
+            state_format_id=STATE_FORMAT_FP4,
+            collective_protocol_id="ppu.dsv4.moe.dpep-normal-mxfp4.v1",
+            capabilities={"prefill"},
+            auto_selectable=False,
+        )
+    )
