@@ -1,3 +1,7 @@
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <stdexcept>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
@@ -6,6 +10,10 @@
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include "autil/EnvUtil.h"
+
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#endif
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -171,6 +179,233 @@ public:
     using MtpBatchStreamProcessor::MtpBatchStreamProcessor;
     using MtpBatchStreamProcessor::overlayMtpCacheSnapshots;
 };
+
+#if USING_CUDA
+namespace {
+
+// A bounded host callback holds one stream without launching an SM-consuming
+// spin kernel. The timeout only prevents a broken dependency from hanging the
+// test; correctness is checked with tensor values, never elapsed-time limits.
+class ScopedSamplerStreamGate {
+public:
+    explicit ScopedSamplerStreamGate(cuda_graph::GraphStream stream): state_(std::make_shared<State>()) {
+        auto*      callback_state = new std::shared_ptr<State>(state_);
+        const auto status         = cudaLaunchHostFunc(
+            stream.stream(),
+            [](void* opaque) {
+                std::unique_ptr<std::shared_ptr<State>> owner(static_cast<std::shared_ptr<State>*>(opaque));
+                auto&                                   state = **owner;
+                std::unique_lock<std::mutex>            lock(state.mutex);
+                if (!state.cv.wait_for(lock, std::chrono::seconds(30), [&] { return state.released; })) {
+                    state.timed_out.store(true);
+                }
+            },
+            callback_state);
+        if (status != cudaSuccess) {
+            delete callback_state;
+            throw std::runtime_error(cudaGetErrorString(status));
+        }
+    }
+
+    ~ScopedSamplerStreamGate() {
+        release();
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->released = true;
+        }
+        state_->cv.notify_all();
+    }
+
+    bool timedOut() const {
+        return state_->timed_out.load();
+    }
+
+private:
+    struct State {
+        std::mutex              mutex;
+        std::condition_variable cv;
+        bool                    released = false;
+        std::atomic<bool>       timed_out{false};
+    };
+    std::shared_ptr<State> state_;
+};
+
+struct AsyncSamplerInputCase {
+    std::unique_ptr<MtpBatchStreamProcessor> processor;
+    std::list<GenerateStreamPtr>             streams;
+    GptModelOutputs                          model_output;
+    torch::Tensor                            draft_tokens;
+};
+
+AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fixture,
+                                                cuda_graph::GraphStream      copy_stream) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    ResourceContext             resource_context;
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 64;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    AsyncSamplerInputCase data;
+    data.processor = std::make_unique<MtpBatchStreamProcessor>(
+        model_config, pd_sep_config, profiling_config, fixture.makeProcessorCacheConfig(), sp_config, false);
+    data.processor->sampler_input_copy_stream_ = copy_stream;
+    data.streams.push_back(fixture.createContextStream(model_config, runtime_config, resource_context, {5, 6, 7}, 1));
+    data.streams.push_back(
+        fixture.createContextStream(model_config, runtime_config, resource_context, {8, 9, 10, 11, 12}, 2));
+    for (auto& stream : data.streams) {
+        stream->setScoreLen(4);
+    }
+    data.model_output.logits = torch::zeros({8, 64}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    data.draft_tokens        = torch::full({2, 3}, 21, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    return data;
+}
+
+SamplerInputs gatherAsyncSamplerInput(AsyncSamplerInputCase& data) {
+    auto result =
+        data.processor->gatherSpecSamplerInput(StreamGroups(data.streams), data.model_output, {}, data.draft_tokens);
+    RTP_LLM_CHECK_WITH_INFO(result.ok(), "sampler input gather failed: %s", result.status().ToString().c_str());
+    return std::move(result.value());
+}
+
+// Reserve the exact shapes on both participating streams before introducing a
+// gate. This prevents cudaMalloc/cudaHostAlloc growth from serializing the test.
+void warmAsyncSamplerInput(AsyncSamplerInputCase& data, cuda_graph::GraphStream copy_stream) {
+    std::vector<SamplerInputs> inputs;
+    std::vector<torch::Tensor> clones;
+    for (int i = 0; i < 8; ++i) {
+        inputs.push_back(gatherAsyncSamplerInput(data));
+        clones.push_back(inputs.back().token_ids.clone());
+    }
+    const auto                 sizes = inputs.front().token_ids.sizes().vec();
+    std::vector<torch::Tensor> device_reserve;
+    std::vector<torch::Tensor> host_reserve;
+    {
+        cuda_graph::GraphStreamGuard guard(copy_stream);
+        for (int i = 0; i < 32; ++i) {
+            device_reserve.push_back(torch::empty(sizes, inputs.front().token_ids.options()));
+            host_reserve.push_back(
+                torch::empty(sizes, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true)));
+        }
+    }
+    copy_stream.synchronize();
+    cuda_graph::graphGetCurrentStream().synchronize();
+}
+
+void expectAsyncSamplerHistory(const torch::Tensor&                 history,
+                               const std::vector<std::vector<int>>& expected_prefixes,
+                               int                                  proposal_token) {
+    auto cpu = history.cpu();
+    ASSERT_EQ(cpu.size(0), 8);
+    ASSERT_EQ(cpu.size(1), 9);
+    const auto* values = cpu.data_ptr<int32_t>();
+    for (int batch = 0; batch < 2; ++batch) {
+        const auto& prefix = expected_prefixes[batch];
+        for (int position = 0; position < 4; ++position) {
+            const auto* row = values + (batch * 4 + position) * cpu.size(1);
+            for (size_t token = 0; token < prefix.size(); ++token) {
+                EXPECT_EQ(row[token], prefix[token]);
+            }
+            for (int proposal = 0; proposal < 3; ++proposal) {
+                EXPECT_EQ(row[prefix.size() + proposal], proposal_token);
+            }
+        }
+    }
+    // Columns beyond the populated history/proposals intentionally remain
+    // uninitialized and are excluded from numerical comparisons.
+}
+
+}  // namespace
+
+TEST_F(MtpBatchStreamProcessorTest, AsyncSamplerUploadOwnsPinnedHistorySnapshot) {
+    auto consumer_stream = cuda_graph::graphGetStreamFromPool(false);
+    auto copy_stream     = cuda_graph::graphGetStreamFromPool(false);
+    ASSERT_NE(consumer_stream, copy_stream);
+    cuda_graph::GraphStreamGuard consumer_guard(consumer_stream);
+    auto                         data = makeAsyncSamplerInputCase(*this, copy_stream);
+    warmAsyncSamplerInput(data, copy_stream);
+
+    ScopedSamplerStreamGate copy_gate(copy_stream);
+    auto                    inputs = gatherAsyncSamplerInput(data);
+    EXPECT_EQ(cuda_graph::graphGetCurrentStream(), consumer_stream);
+    EXPECT_EQ(cuda_graph::toGraphStream(*data.processor->sampler_input_copy_stream_), copy_stream);
+    ASSERT_TRUE(inputs.token_ids.is_cuda());
+
+    // Mutating the stream history must not change the upload's own snapshot.
+    // Refill cached pinned allocations while the original H2D is still queued
+    // to exercise the source allocation's DMA-aware lifetime, too.
+    for (auto& stream : data.streams) {
+        stream->completeTokenIds().fill_(-99);
+    }
+    std::vector<torch::Tensor> host_pressure;
+    for (int i = 0; i < 32; ++i) {
+        auto tensor = torch::empty(inputs.token_ids.sizes(),
+                                   torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        tensor.fill_(-777);
+        host_pressure.push_back(std::move(tensor));
+    }
+    copy_gate.release();
+    expectAsyncSamplerHistory(inputs.token_ids, {{5, 6, 7}, {8, 9, 10, 11, 12}}, 21);
+    EXPECT_FALSE(copy_gate.timedOut());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, AsyncSamplerUploadRetainsConsumerStorageAcrossRounds) {
+    auto consumer_stream = cuda_graph::graphGetStreamFromPool(false);
+    auto copy_stream     = cuda_graph::graphGetStreamFromPool(false);
+    ASSERT_NE(consumer_stream, copy_stream);
+    cuda_graph::GraphStreamGuard consumer_guard(consumer_stream);
+    auto                         data = makeAsyncSamplerInputCase(*this, copy_stream);
+    warmAsyncSamplerInput(data, copy_stream);
+
+    std::vector<SamplerInputs> inputs;
+    for (int round = 0; round < 4; ++round) {
+        for (auto& stream : data.streams) {
+            stream->completeTokenIds().fill_(5 + round);
+        }
+        // Proposal production and scatter must preserve their order on this
+        // non-default consumer stream; the CPU-history upload is independent.
+        data.draft_tokens.fill_(21 + round);
+        inputs.push_back(gatherAsyncSamplerInput(data));
+        EXPECT_EQ(cuda_graph::graphGetCurrentStream(), consumer_stream);
+    }
+
+    // Gate only after gather has enqueued its existing small pageable metadata
+    // copies. Their driver staging is not part of the async-history regression.
+    ScopedSamplerStreamGate    consumer_gate(consumer_stream);
+    std::vector<torch::Tensor> observed_histories;
+    for (const auto& input : inputs) {
+        observed_histories.push_back(input.token_ids.clone());
+    }
+    inputs.clear();
+    // SamplerInputs is gone while its main-stream clones are still pending.
+    // Without record_stream, the copy-stream allocator can recycle and poison
+    // the source storage before those consumers read it.
+    std::vector<torch::Tensor> device_pressure;
+    {
+        cuda_graph::GraphStreamGuard copy_guard(copy_stream);
+        for (int i = 0; i < 32; ++i) {
+            auto tensor = torch::empty({8, 9}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+            tensor.fill_(-777);
+            device_pressure.push_back(std::move(tensor));
+        }
+    }
+    copy_stream.synchronize();
+    consumer_gate.release();
+    for (int round = 0; round < 4; ++round) {
+        expectAsyncSamplerHistory(
+            observed_histories[round], {std::vector<int>(3, 5 + round), std::vector<int>(5, 5 + round)}, 21 + round);
+    }
+    EXPECT_FALSE(consumer_gate.timedOut());
+}
+#endif
 
 TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy) {
     constexpr int64_t stream_count = 64;

@@ -105,7 +105,11 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
                          torch::Tensor(),
                          generators};
 
-    auto output = sampler_->forward(inputs).token_ids.cpu().contiguous();
+    auto device_history_inputs          = inputs;
+    device_history_inputs.token_ids     = token_ids.to(torch::kCUDA);
+    device_history_inputs.logits        = inputs.logits.clone();
+    device_history_inputs.cum_log_probs = inputs.cum_log_probs.clone();
+    auto output                         = sampler_->forward(inputs).token_ids.cpu().contiguous();
 
     ASSERT_EQ(output.size(0), (int64_t)batch_size_out);
     // The 2->1 group must read its original first parent, not the preceding 1->2 output row.
@@ -115,6 +119,11 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
     EXPECT_EQ(output[3][0].item<int32_t>(), 4);
     EXPECT_EQ(output[3][1].item<int32_t>(), 4);
     EXPECT_EQ(output[3][step].item<int32_t>(), 8);
+
+    // MTP supplies history already on the consumer stream. Skipping its
+    // redundant upload must preserve mixed-beam independent-output semantics.
+    auto device_history_output = sampler_->forward(device_history_inputs).token_ids.cpu().contiguous();
+    EXPECT_TRUE(torch::equal(output, device_history_output));
 }
 
 TEST_F(SamplerTest, testGeneralSampling) {

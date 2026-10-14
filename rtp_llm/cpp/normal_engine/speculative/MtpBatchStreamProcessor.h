@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
@@ -193,6 +195,10 @@ protected:
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;
     bool    dspark_sample_from_anchor_ = true;
+
+    // gatherSpecSamplerInput runs serially on the executor thread. Keep its
+    // history uploads on one stream so allocator reuse stays stream-ordered.
+    mutable std::optional<torch::Stream> sampler_input_copy_stream_;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
