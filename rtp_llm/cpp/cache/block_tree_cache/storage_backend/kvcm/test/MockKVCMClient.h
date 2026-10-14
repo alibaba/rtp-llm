@@ -27,7 +27,8 @@ public:
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
-                 int64_t),
+                 int64_t,
+                 int32_t),
                 (override));
     MOCK_METHOD(ClientErrorCode,
                 FinishWrite,
@@ -41,6 +42,20 @@ public:
     MOCK_METHOD((std::pair<ClientErrorCode, int64_t>),
                 MatchLocationLen,
                 (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t),
+                (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<std::vector<BackendLocation>>>),
+                GetCacheLocationsByBackend,
+                (const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const BlockMask&,
+                 const std::vector<std::string>&,
+                 StorageType,
+                 BackendSelectStrategy),
+                (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
+                GetHostCacheState,
+                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
                 (override));
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
