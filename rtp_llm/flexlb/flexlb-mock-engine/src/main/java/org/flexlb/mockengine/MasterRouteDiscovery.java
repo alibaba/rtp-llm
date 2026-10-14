@@ -115,9 +115,9 @@ final class MasterRouteDiscovery implements AutoCloseable {
                 Info info = probe.read(host);
                 state.healthy = true;
                 state.failures = 0;
-                if (info.realMasterHost() != null && !info.realMasterHost().isBlank()) {
-                    state.master = host.http().equals(info.realMasterHost());
-                }
+                state.master = info.realMasterHost() != null
+                        && !info.realMasterHost().isBlank()
+                        && host.http().equals(info.realMasterHost());
             } catch (Exception e) {
                 state.failures++;
                 if (state.failures >= 2) {

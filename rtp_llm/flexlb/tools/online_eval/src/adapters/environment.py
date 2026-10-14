@@ -79,7 +79,7 @@ def _write_master_config(env: "FlexEnv", spec=None) -> Path:
 
     Single render, two projections: this file feeds the mock / victim
     ``--master-config`` argument, while the master env's FLEXLB_CONFIG
-    (see MasterLifecycle._master_env) comes from the same flexlb_cfg render —
+    (see MasterLifecycle.master_environment) comes from the same flexlb_cfg render —
     both projections use the selected profile and the same overrides.
     """
     path = env.run_dir / "master_config.json"

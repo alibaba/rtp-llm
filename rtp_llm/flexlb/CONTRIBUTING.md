@@ -42,9 +42,15 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Java 8 or higher
+- Java 21 or higher
 - Maven 3.6+
 - Git
+
+Run the full test suite from an RTP-LLM checkout that includes both
+`rtp_llm/cpp/metrics/RtpLLMMetrics.cc` and
+`rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.cc`. Mock metric alignment
+tests validate their names against these production sources. An isolated
+copy of the Java directory does not provide that contract evidence.
 
 ### Setup
 

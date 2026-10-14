@@ -174,7 +174,7 @@ def master_mode_for_profile(profile: str) -> str:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Resolve the shared mock runtime/master tables")
-    parser.add_argument("--runtime", required=True)
+    parser.add_argument("--runtime")
     parser.add_argument("--master")
     parser.add_argument("--profile-to-master")
     parser.add_argument("--pod-ip")
@@ -186,6 +186,8 @@ def main(argv=None):
         if args.profile_to_master:
             print(master_mode_for_profile(args.profile_to_master))
             return
+        if not args.runtime:
+            parser.error("--runtime is required unless --profile-to-master is used")
         if args.render_shell:
             print(render_shell_defaults(args.runtime), end="")
             return

@@ -374,6 +374,11 @@ def _compile_profile(context, p):
     stage_caps = caps
     for stage in compiled:
         descriptor = handlers.get(stage["action"])
+        if descriptor:
+            try:
+                descriptor.execution_requirements.validate(variant_execution)
+            except ValueError as exc:
+                fail(source + f"::{vid}.{stage['id']}.execution", str(exc))
         stage_requires = set(variant_requires) | (
             set(descriptor.requires) if descriptor else set()
         )

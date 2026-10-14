@@ -26,7 +26,7 @@ final class StatusDeliveryFaults {
     void configure(long rid, int missingRounds, long delayMs) {
         if (rid <= 0 || missingRounds < -1 || missingRounds > 1000
                 || delayMs < -1 || delayMs > 60_000) {
-            throw new IllegalArgumentException("require positive rid, rounds 0..1000, delay_ms 0..60000");
+            throw new IllegalArgumentException("require positive rid, rounds -1..1000, delay_ms -1..60000 (-1 preserves current setting)");
         }
         Rule rule = rules.computeIfAbsent(rid, ignored -> new Rule());
         if (missingRounds >= 0) rule.missingRounds = missingRounds;

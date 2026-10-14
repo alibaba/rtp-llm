@@ -186,6 +186,8 @@ final class DynamicEngineManager {
      */
     RemovedEngine removeEngine(JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
             throws EngineOperationException, IOException {
+        if (config.whale && !config.whaleBundle)
+            throw new EngineOperationException(409, "Whale scales Pods, not engines inside a Pod");
         long started = System.nanoTime();
         int port = service.getGrpcPort();
         CompletableFuture<RemovedEngine> drain;

@@ -74,7 +74,10 @@ from case_api.registry import MetricProducer
 from case_api.registry import ProducerPhase
 from cases.master_performance.metrics import metric_contract
 
+from case_api.execution_contract import ExecutionRequirements
+
 CASE = CaseDefinition(
+    execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": default},
     input_contract=INPUTS,
     gates={'performance': GATE},

@@ -37,6 +37,20 @@ public final class PlaybackPlan {
         if (output.toAbsolutePath().normalize().equals(trace.toAbsolutePath().normalize())
                 || output.toAbsolutePath().normalize().equals(snapshotPath.toAbsolutePath().normalize()))
             throw new IllegalArgumentException("plan output must not overwrite source evidence");
+        Path temporary = Files.createTempFile(output.toAbsolutePath().getParent(), "playback-plan-", ".tmp");
+        try {
+            writeBody(snapshotPath, trace, temporary);
+            Files.move(temporary, output, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static void writeBody(Path snapshotPath,Path trace,Path output) throws Exception {
+        if (output.toAbsolutePath().normalize().equals(trace.toAbsolutePath().normalize())
+                || output.toAbsolutePath().normalize().equals(snapshotPath.toAbsolutePath().normalize()))
+            throw new IllegalArgumentException("plan output must not overwrite source evidence");
         JsonNode snapshot=JSON.readTree(snapshotPath.toFile());
         if(!snapshot.path("offline_plan_supported").asBoolean(false))
             throw new IllegalArgumentException("snapshot uses unsupported runtime overrides");
@@ -46,13 +60,29 @@ public final class PlaybackPlan {
         int shard=snapshot.path("shard_index").asInt(), limit=snapshot.path("limit").asInt();
         if(shards<1 || shard<0 || shard>=shards) throw new IllegalArgumentException("invalid snapshot shard");
         Playback policy=new Playback(environment(snapshot),false,duration);
+        if (policy.maxLaps == 0 && snapshot.path("mode").asText().equals("replay")
+                && snapshot.path("speed").asDouble() <= 0 && limit <= 0)
+            throw new IllegalArgumentException("unpaced offline playback requires bounded laps or limit");
         List<JsonNode> rows=new ArrayList<>();
         List<List<Integer>> tokens=new ArrayList<>();
         long stride=snapshot.path("token_stride").asLong();
         if(stride<1) throw new IllegalArgumentException("missing token stride");
         try(var reader=Files.newBufferedReader(trace)) {
             String line;
-            while((line=reader.readLine())!=null) if(!line.isBlank()) rows.add(JSON.readTree(line));
+            while((line=reader.readLine())!=null) if(!line.isBlank()) {
+                JsonNode raw = JSON.readTree(line);
+                int il = raw.path("il").asInt(raw.path("input_token_len").asInt(raw.path("backend_input_token_len").asInt(0)));
+                int ol = raw.path("ol").asInt(raw.path("output_token_len").asInt(0));
+                if (il <= 0 || ol <= 0) continue;
+                ObjectNode row = raw.deepCopy();
+                row.put("il", il); row.put("ol", ol);
+                row.put("ts", raw.path("ts").asLong(raw.path("request_enter_ts_epoch_ms").asLong(raw.path("ts_epoch_ms").asLong(0))));
+                row.put("rid", raw.has("request_id") ? raw.get("request_id").asText()
+                        : raw.has("rid") ? raw.get("rid").asText()
+                        : Long.toString(JavaLoadClient.stableRequestId(raw.toString())));
+                if (!row.has("cache_key_block_size")) row.put("cache_key_block_size", 1024);
+                rows.add(row);
+            }
         }
         rows.sort(Comparator.comparingLong(row->row.path("ts").asLong()));
         if(rows.isEmpty()) throw new IllegalArgumentException("empty trace");
@@ -86,7 +116,9 @@ public final class PlaybackPlan {
                     plan.put("global_index",index); plan.put("due_seconds",due); plan.put("iteration",lap);
                     plan.put("rid",row.path("rid").asText()+(lap==0?"":"_S"+shard+"_L"+lap));
                     plan.put("il",row.path("il").asInt()); plan.put("ol",row.path("ol").asInt());
-                    plan.set("block_keys",JSON.valueToTree(JavaLoadClient.computeBlockKeys(ids,row.path("cache_key_block_size").asInt())));
+                    JsonNode fixedKeys = row.has("bh") ? row.get("bh") : row.get("block_cache_keys");
+                    plan.set("block_keys", fixedKeys != null && (lap == 0 || policy.identity.equals("none"))
+                            ? fixedKeys : JSON.valueToTree(JavaLoadClient.computeBlockKeys(ids,row.path("cache_key_block_size").asInt())));
                     writer.write(plan.toString()); writer.newLine(); sent++;
                 }
                 if(!policy.more(lap)) return;

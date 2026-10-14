@@ -102,6 +102,9 @@ def describe_calculation(spec, *, windows):
         fields = ('ttft_ms', 'total_ms', 'tpot_ms') if calculator.percentile else ('input_len', 'observed_output_tokens')
         if spec['field'] not in fields:
             raise ValueError('unknown request calculation field')
+    if ({spec.get('field'), spec.get('token_field')} & {'observed_output_tokens', 'tpot_ms', 'ttft_ms'}
+            and selection['status'] != 'ok'):
+        raise ValueError('successful-stream fields require status=ok')
     if calculator.percentile and (not finite_number(spec['percentile']) or not 0 < spec['percentile'] <= 1):
         raise ValueError('calculation.percentile must be in (0,1]')
     return dict(source_type='client_journal', implementation=implementation_identity(calculator.evaluate), unit=calculator.unit, value_kind='gauge', labels=[],

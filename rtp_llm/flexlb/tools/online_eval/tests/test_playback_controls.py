@@ -7,11 +7,29 @@ from pathlib import Path
 
 from adapters.load_client import client_environment
 from traffic.playback.configuration import PlaybackConfigurationCodec
+from adapters.playback_evidence import PlaybackEvidence
 from traffic.output_sampling import output_sampler
 from traffic import prefix_lineage, prefix_lineage_v3
 
 
 class PlaybackControlsTest(unittest.TestCase):
+    def test_raw_environment_defaults_match_java_playback_evidence(self):
+        env = {}
+        config = PlaybackConfigurationCodec.from_environment(env).to_dict()
+        self.assertEqual(config['speed'], 10)
+        self.assertEqual(PlaybackConfigurationCodec.decode(dict(mode='true-ts')).speed, 10)
+        evidence = dict(trace_sha256='sha', offline_plan_supported=True,
+                        planner_version='PLAYBACK_V1', token_stride=1,
+                        mode='replay', identity='structural-relabel', max_laps=1,
+                        num_shards=1, shard_index=0, duration_seconds=0, limit=0,
+                        qps=0, speed=10, ramp_up_seconds=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'playback.json'
+            path.write_text(json.dumps(evidence))
+            PlaybackEvidence.read(path, 'sha', env)
+            with self.assertRaisesRegex(ValueError, 'speed'):
+                PlaybackEvidence.read(path, 'sha', dict(env, REPLAY_SPEED='1'))
+
     def test_bounded_multi_lap_environment_roundtrip(self):
         p = dict(mode='uniform', duration_s=10, qps=100, max_laps=3, identity='structural-relabel', ramp_up_seconds=2)
         env, a = client_environment(dict(playback=p))

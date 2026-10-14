@@ -228,6 +228,18 @@ class CompiledInstance:
             dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")),
             kind=metadata["kind"],
         )
+        from case_api.registry import registry
+        from scenario.catalog import handlers
+        registered = registry().cases.get(value.get("implementation", {}).get("program"))
+        try:
+            if registered is not None:
+                registered.definition.execution_requirements.validate(policy)
+            descriptors = handlers()
+            for stage in stages:
+                if stage.action in descriptors:
+                    descriptors[stage.action].execution_requirements.validate(policy)
+        except ValueError as exc:
+            raise ScenarioError("frozen execution prerequisites: " + str(exc)) from exc
         projections = dict(test_kind=metadata["kind"], collection_profile=policy["collection"],
                            workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {})
         for key, expected in projections.items():

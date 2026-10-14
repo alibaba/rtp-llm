@@ -6,6 +6,9 @@ import math
 from traffic.playback.defaults import DEFAULTS
 
 
+JAVA_REPLAY_SPEED = float(DEFAULTS['REPLAY_SPEED'])
+
+
 class PacingMode(str, Enum):
     UNIFORM = 'uniform'
     TIMESTAMPS = 'true-ts'

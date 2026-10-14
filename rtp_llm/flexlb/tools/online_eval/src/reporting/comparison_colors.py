@@ -6,11 +6,12 @@ import math
 import json
 import colorsys
 from reporting.catalog import series_color
+from reporting.css_colors import normalize_color
 from reporting.report_model import MeasurementIdentity
 
 
 def to_oklab(color):
-    value = color.lstrip('#')
+    value = normalize_color(color).lstrip('#')
     if len(value) not in (6, 8):
         raise ValueError('comparison colors must be six or eight digit hex')
     rgb = [int(value[k:k+2], 16)/255 for k in (0, 2, 4)]
@@ -66,7 +67,7 @@ def metric_colors(panels):
             if identity == 'null':
                 identity = (panel['id'], n)
             color = registry.get(identity) or curve.get('color') or series_color(curve.get('tone'), n)
-            value = color.lstrip('#')
+            value = normalize_color(color).lstrip('#')
             hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k:k+2], 16)/255 for k in (0, 2, 4)))
             distance = lambda h: min((min(abs(h-u), 1-abs(h-u)) for u in used), default=1)
             if identity not in registry and saturation >= .10 and distance(hue) < .07:

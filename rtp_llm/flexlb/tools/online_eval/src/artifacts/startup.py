@@ -20,6 +20,6 @@ def startup_phase(directory, phase, deadline):
         raise
     finally:
         import json
-        rows = json.loads(path.read_text()) if path.exists() else []
+        rows = json.loads(path.read_text(encoding='utf-8')) if path.exists() else []
         rows.append(dict(phase=phase, status=status, duration_s=deadline.clock()-started, error=error))
         write_json(path, rows)

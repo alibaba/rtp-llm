@@ -75,14 +75,15 @@ class ChildProcesses:
         finally:
             with self.lock:
                 self.processes.pop(child, None)
-            if settled and not self.stopping:
+            if not self.stopping:
                 try:
                     os.killpg(child.pid, 0)
                 except ProcessLookupError:
                     pass
                 else:
                     self._signal(child, signal.SIGKILL)
-                    raise RuntimeError("runner exited with live descendant processes")
+                    if settled:
+                        raise RuntimeError("runner exited with live descendant processes")
 
     @staticmethod
     def _signal(child, sig):
@@ -127,6 +128,7 @@ def _catalog(args):
             "--grade",
             args.grade,
             *selection_arguments(args),
+            *(["--instances", args.instances] if getattr(args, "instances", None) else []),
             *(["--experiment-params", args.experiment_params] if getattr(args, "experiment_params", None) else []),
             "--list-json",
         ],

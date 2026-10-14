@@ -120,18 +120,9 @@ class ObservationTest(unittest.TestCase):
                 ["ERROR"] if required else ["PASS"], [c.status for c in result.checks]
             )
 
-    def test_partial_master_never_complete(self):
-        p = validate_snapshot({"sources": ["master_debug"]}, Plan())
-        with patch(
-            "adapters.observation_sources.DebugClient"
-        ) as client:
-            client.return_value.snapshot.return_value.payload = {
-                "instanceId": "a",
-                "status": "partial",
-                "components": {"queues": {"status": "busy"}},
-            }
-            result = execute_snapshot(self.ctx, p, deadline())
-        self.assertEqual("ERROR", result.checks[0].status)
+    def test_missing_master_source_is_rejected_before_execution(self):
+        with self.assertRaisesRegex(ValueError, 'case-owned snapshot source'):
+            validate_snapshot({"sources": ["master_debug"]}, Plan())
 
     def test_epoch_change_performs_no_new_environment_io(self):
         source = Sources(

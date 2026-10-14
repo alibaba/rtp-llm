@@ -97,7 +97,7 @@ def apply(spec, analysis):
         return spec
     spec['reportTimeline'] = copy.deepcopy(timeline)
     if timeline['status'] == 'UNAVAILABLE':
-        if analysis['status'] not in {'FAIL', 'ERROR', 'TIMEOUT', 'BLOCKED', 'SKIP'}:
+        if analysis['status'] not in {'FAIL', 'ERROR', 'TIMEOUT', 'BLOCKED', 'SKIP', 'FINDING-CONFIRMED', 'FINDING-RESOLVED'}:
             raise ValueError('configured report time boundary did not occur: ' + str(timeline['missing']))
         spec.pop('timeOriginEpochS', None)
         spec.pop('timeAxis', None)

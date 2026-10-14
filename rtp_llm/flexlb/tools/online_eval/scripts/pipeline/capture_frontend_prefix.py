@@ -53,7 +53,7 @@ def capture(a, *, clock=time.monotonic):
     out = lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1)
     try:
         paths = [path for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
-                 if os.path.isfile(path) and not path.endswith(".gz")]
+                 if os.path.isfile(path) and not path.endswith((".gz", ".bz2", ".xz", ".zst", ".zip", ".lz4"))]
         if not paths:
             errors.append("no supported log files matched")
             failure = ValueError("no supported log files matched")

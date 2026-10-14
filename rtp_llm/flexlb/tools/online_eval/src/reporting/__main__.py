@@ -10,7 +10,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("spec", type=Path)
 p.add_argument("--out", type=Path, required=True)
 a = p.parse_args()
-spec = json.loads(a.spec.read_text())
+spec = json.loads(a.spec.read_text(encoding='utf-8'))
 try:
     validate(spec, versioned=True)
 except ValueError as exc:

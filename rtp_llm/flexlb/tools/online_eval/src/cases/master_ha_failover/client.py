@@ -16,6 +16,11 @@ from traffic.contracts import source_priority
 class HaReplayClient:
     """Own HA replay and observation resources across start, finish and cleanup."""
 
+    @property
+    def max_concurrency(self):
+        """Configured upper bound for outstanding client requests."""
+        return int(self._overrides["MAX_CONCURRENCY"])
+
     def __init__(
         self,
         manager,
@@ -83,7 +88,7 @@ class HaReplayClient:
             playback=dict(mode="true-ts", duration_s=int(duration_s), speed=replay_speed,
                           max_laps=0 if loop else 1, identity="structural-relabel"),
             limits=dict(max_concurrency=max_concurrency, request_timeout_s=int(timeout_ms)//1000,
-                        drain_timeout_s=max(150, (int(timeout_ms)+999)//1000+30)),
+                        drain_timeout_s=max(150, ((len(self.targets)+1)*int(timeout_ms)+999)//1000+30)),
             transport=dict(channels=8, event_loop_threads=8),
         )
         settings, playback = client_environment(settings, priority=source_priority(source))

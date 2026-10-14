@@ -6,6 +6,7 @@ modules do not mutate a registry at import time.
 """
 
 from dataclasses import dataclass, field
+from case_api.execution_contract import ExecutionRequirements
 from case_api.extension_contracts import StageValidator, StageExecutor
 from analysis.checks import CheckResult
 
@@ -30,7 +31,12 @@ class StageHandler:
     # Callable receives normalized params and the selected profile.
     max_environment_workers: object = 0
     next_environment: object = None  # normalized params -> next raw environment
+    execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
     owners: frozenset[str] = frozenset()  # empty means foundational
+
+    def __post_init__(self):
+        if not isinstance(self.execution_requirements, ExecutionRequirements):
+            raise ValueError('stage execution_requirements must be an ExecutionRequirements')
 
 
 @dataclass

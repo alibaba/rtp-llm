@@ -109,7 +109,7 @@ class RepositoryLayoutTest(unittest.TestCase):
             "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
             "workload", "analysis", "reporting", "artifacts", "case_api", "diagnostics",
         }
-        self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})
+        self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir() and p.name != "__pycache__"})
         for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):
             self.assertFalse((ROOT / "src" / old_package).exists(), old_package)
         self.assertFalse((ROOT / "scenarios").exists())

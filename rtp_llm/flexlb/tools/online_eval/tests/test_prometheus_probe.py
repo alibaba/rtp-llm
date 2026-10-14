@@ -5,6 +5,46 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+
+def test_real_prometheus_retries_an_occupied_port_within_the_same_budget(tmp_path, monkeypatch):
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import monitoring.session as implementation
+    from runtime.deadline import Deadline
+    import time
+
+    class Occupant(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+        def log_message(self, *args):
+            pass
+    occupied = ThreadingHTTPServer(('127.0.0.1', 0), Occupant)
+    thread = threading.Thread(target=occupied.serve_forever, daemon=True)
+    thread.start()
+    available_port = implementation._available_port
+    allocations = []
+    def choose():
+        port = occupied.server_port if not allocations else available_port()
+        allocations.append(port)
+        return port
+    monkeypatch.setattr(implementation, '_available_port', choose)
+    plan = select_plan(load_plan('master_ha_failover.yaml'), {'ha/http_up': {}}, [])
+    session = PrometheusSession(tmp_path / 'telemetry/1', {}, interval_s=.1,
+        metric_plan=plan, target_kinds={})
+    try:
+        session.start(deadline=Deadline(time.monotonic() + 10))
+        assert len(allocations) == 2
+        assert urllib.parse.urlparse(session.client.url).port != occupied.server_port
+        assert 'address already in use' in (session.directory / 'prometheus.log').read_text().lower()
+        assert session.process.poll() is None
+    finally:
+        session.stop(export=False)
+        occupied.shutdown()
+        occupied.server_close()
+        thread.join(timeout=2)
+
 from monitoring.collection_plan import select_plan
 from monitoring.query_plan import load_plan
 from monitoring.session import PrometheusSession

@@ -112,7 +112,10 @@ def produce_evidence(directory, context: FinalizationContext):
     return produce(directory, context.run)
 from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 
+from case_api.execution_contract import ExecutionRequirements
+
 CASE = CaseDefinition(
+    execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": rolling, "non_rolling": non_rolling},
     input_contract=INPUTS,
     actions=tuple(ACTION_HANDLERS),

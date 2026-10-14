@@ -15,7 +15,7 @@ Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求�
 | `MockControlServer`、`DynamicEngineManager` | HTTP 控制、故障和动态引擎管理 |
 | `JavaLoadClient` | 播放、Schedule、Fetch / Generate、请求终态证据 |
 
-性能配置由 `--performance-config` 指向的 JSON 提供。Prefill 可以使用固定耗时或公式，Decode 使用声明的 step 曲线或校准参数；角色 `scale` 与全局 `sleep_scale` 调整模拟时间。噪声参数必须有明确的标准差和绝对上限，不能与 `jitter_pct` 同时启用。配置字段与校验以 `MockPerformanceModel` 为准，采集档案和模型偏离规则见[数据规则](../tools/online_eval/data/README.md)。
+性能配置由 `--performance` 指向的 JSON 提供。Prefill 可以使用固定耗时或公式，Decode 使用声明的 step 曲线或校准参数；角色 `scale` 与全局 `sleep_scale` 调整模拟时间。噪声参数必须有明确的标准差和绝对上限，不能与 `jitter_pct` 同时启用。配置字段与校验以 `MockPerformanceModel` 为准，采集档案和模型偏离规则见[数据规则](../tools/online_eval/data/README.md)。
 
 ## FIFO 与 Master 派发
 

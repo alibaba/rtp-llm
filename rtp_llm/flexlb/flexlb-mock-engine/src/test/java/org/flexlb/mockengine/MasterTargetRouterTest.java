@@ -313,7 +313,7 @@ class MasterTargetRouterTest {
     }
 
     @Test
-    void discoveredRouteRetriesNonDeadlineGrpcFailureButNotBusinessResponse() {
+    void discoveredRouteRetriesUnavailableButNotBusinessResponse() {
         MasterRouteDiscovery.Host a = new MasterRouteDiscovery.Host("127.0.0.1:18080", TARGET_A);
         MasterRouteDiscovery.Host b = new MasterRouteDiscovery.Host("127.0.0.1:18083", TARGET_B);
         MasterRouteDiscovery discovery = new MasterRouteDiscovery(() -> List.of(a, b),
@@ -321,7 +321,7 @@ class MasterTargetRouterTest {
         discovery.refresh();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.INTERNAL))
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE))
                 .thenReturn(response(8431));
         when(stubB.schedule(any())).thenReturn(response(200));
         MasterTargetRouter router = new MasterTargetRouter(discovery,
@@ -332,7 +332,7 @@ class MasterTargetRouterTest {
         assertEquals(TARGET_B, retry.lastTarget);
         assertTrue(retry.failover);
         assertEquals(200, retry.response.getCode());
-        assertEquals("INTERNAL", retry.attempts.get(0).status);
+        assertEquals("UNAVAILABLE", retry.attempts.get(0).status);
 
         MasterTargetRouter.ScheduleOutcome business = router.schedule(request(), 1000L);
         assertEquals(TARGET_A, business.lastTarget);

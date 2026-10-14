@@ -36,7 +36,7 @@ class MasterLifecycle:
     def __init__(self, log):
         self._log = log
 
-    def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
+    def master_environment(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
         """Build master configuration documents and the existing HA deployment identity."""
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
@@ -226,7 +226,7 @@ class MasterLifecycle:
             env.pv_log_offset = pv_log.stat().st_size
         except OSError:
             env.pv_log_offset = 0
-        master_env = configure_master(env, self._master_env(env), API_JAR)
+        master_env = configure_master(env, self.master_environment(env), API_JAR)
         proc = ProcessOps.start(argv, master_env, env.run_dir / log_name)
         env.master = proc
         env.master_incarnations.append(
@@ -331,7 +331,7 @@ class MasterLifecycle:
         instance's own bind ip/port, plus the per-instance argv/env keys:
         --server.address, --management.server.address, --flexlb.log.path
         (per-instance log dir), FLEXLB_ADVERTISED_IP and
-        FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
+        FLEXLB_SYNC_CONSISTENCY_CONFIG via master_environment(env, mspec).
         """
         deadline = startup_deadline(deadline, 240)
         deadline.check()
@@ -380,7 +380,7 @@ class MasterLifecycle:
         argv.extend(spec.master_extra_args)
         argv.extend(mspec.extra_args)
         proc = ProcessOps.start(
-            argv, configure_master(env, self._master_env(env, mspec), API_JAR), env.run_dir / log_name
+            argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name
         )
         env.masters[mspec.name] = proc
         env.master_specs[mspec.name] = mspec

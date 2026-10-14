@@ -17,7 +17,7 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify, preselect_documents
+from scenario.suites import classify, preselect_documents, exact_documents
 from scenario.selection_cli import add_selection_arguments, resolve_selection
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
@@ -135,7 +135,7 @@ def main(argv=None):
             plans = select(
                 classify(
                     compile_scenarios(
-                        preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind),
+                        exact_documents(preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind), args.instances),
                         args.profile,
                         registry,
                         grade=args.grade,

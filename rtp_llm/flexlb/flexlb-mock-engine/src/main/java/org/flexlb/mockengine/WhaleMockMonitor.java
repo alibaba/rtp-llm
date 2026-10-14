@@ -12,6 +12,7 @@ import java.util.HashMap;
 /** Optional internal adapter; no private class is linked by the open-source runtime. */
 final class WhaleMockMonitor implements AutoCloseable {
     private final FlexMonitor monitor;
+    private boolean closed;
     private static final class EngineSample {
         final Map<String, Long> previous = new HashMap<>();
         boolean schedulerReported;
@@ -61,20 +62,30 @@ final class WhaleMockMonitor implements AutoCloseable {
 
     WhaleMockMonitor(FlexMonitor monitor) { this.monitor = monitor; }
 
-    synchronized void sample(JavaMockEngineCluster.FastRpcService service) {
-        long now = System.nanoTime();
+    void sample(JavaMockEngineCluster.FastRpcService service) {
+        // Engine snapshots acquire cache, decode and completion locks. Never
+        // hold the monitor lock while reading them: engine callbacks report
+        // metrics while holding those same locks.
         Map<String, String> labels = service.whaleMetricTags();
         Map<String, Number> values = new HashMap<>(service.whaleMetrics());
-        if ("ROLE_TYPE_DECODE".equals(labels.get("role"))) {
-            var reader = state(labels).decodeTps;
-            values.put("mock_decode_wall_tps", reader.sample(service.decodeTpsSnapshot(), now));
-            values.put("rtp_llm_generate_tps", reader.lastTokens());
+        var decode = "ROLE_TYPE_DECODE".equals(labels.get("role"))
+                ? service.decodeTpsSnapshot() : null;
+        var prefill = "ROLE_TYPE_PREFILL".equals(labels.get("role"))
+                ? service.prefillTpsSnapshot() : null;
+        var cacheHits = service.cacheHitSnapshot();
+        long now = System.nanoTime();
+        synchronized (this) {
+            if (closed) return;
+            if (decode != null) {
+                var reader = state(labels).decodeTps;
+                values.put("mock_decode_wall_tps", reader.sample(decode, now));
+                values.put("rtp_llm_generate_tps", reader.lastTokens());
+            }
+            state(labels).cacheHits.sample(cacheHits, now)
+                    .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
+            sample(values, labels, now);
+            if (prefill != null) samplePrefillTps(prefill, labels, now);
         }
-        state(labels).cacheHits.sample(service.cacheHitSnapshot(), now)
-                .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
-        sample(values, labels, now);
-        if ("ROLE_TYPE_PREFILL".equals(labels.get("role")))
-            samplePrefillTps(service.prefillTpsSnapshot(), labels, System.nanoTime());
     }
 
     synchronized void samplePrefillTps(PrefillTpsMetrics.Snapshot snapshot,
@@ -94,21 +105,29 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
+        if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         metrics.forEach((name, value) -> {
             if (!belongsToRole(name, labels)) return;
-            if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
             monitor.report(name, tags, value.doubleValue());
         });
     }
 
     synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
+        if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         for (var entry : metrics.entrySet()) {
             if (!schedulerMetric(entry.getKey()))
                 throw new IllegalArgumentException("Not a scheduler metric: " + entry.getKey());
             if (!belongsToRole(entry.getKey(), labels)) continue;
-            if (registered.add(entry.getKey())) monitor.register(entry.getKey(), FlexMetricType.GAUGE);
+            if (!registered.contains(entry.getKey())) {
+                monitor.register(entry.getKey(), FlexMetricType.GAUGE);
+                registered.add(entry.getKey());
+            }
             monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
         }
         state(labels).schedulerReported = true;
@@ -118,6 +137,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         EngineSample sample = state(labels);
         double seconds = Math.max(1e-9, (now - sample.sampledAt) / 1e9);
         sample.sampledAt = now;
+        if (closed) return;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         boolean hadSchedulerSteps = sample.schedulerReported;
         sample.schedulerReported = false;
@@ -133,7 +153,10 @@ final class WhaleMockMonitor implements AutoCloseable {
         if ("ROLE_TYPE_DECODE".equals(labels.get("role"))
                 && metrics.containsKey("mock_engine_completed_total")) {
             String name = "mock_decode_success_qps";
-            if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
             double successQps = deltas.getOrDefault("mock_engine_completed_total", 0L) / seconds;
             monitor.report(name, tags, successQps);
         }
@@ -149,7 +172,10 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (name.equals("rtp_llm_running_stream_size")
                     && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) return;
             if (hadSchedulerSteps && schedulerMetric(name)) return;
-            if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
+            if (!registered.contains(name)) {
+                monitor.register(name, FlexMetricType.GAUGE);
+                registered.add(name);
+            }
             monitor.report(name, tags, value.doubleValue());
             String rate = switch (name) {
                 case "mock_decode_step_tokens_total" -> "mock_decode_wall_tps";
@@ -190,5 +216,9 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     @Override
-    public void close() { monitor.close(); }
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        monitor.close();
+    }
 }

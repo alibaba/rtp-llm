@@ -162,7 +162,7 @@ class WhaleModeConfigurationTest {
         Path hostname = directory.resolve("hostname");
         Files.writeString(hostname, "#!/bin/sh\necho '10.1.2.3 10.1.2.4'\n");
         assertTrue(hostname.toFile().setExecutable(true));
-        ProcessBuilder builder = new ProcessBuilder("sh", Path.of("whale/start.sh").toAbsolutePath().toString())
+        ProcessBuilder builder = new ProcessBuilder("sh", Path.of("container/start.sh").toAbsolutePath().toString())
                 .redirectErrorStream(true);
         var env = builder.environment();
         env.put("PATH", directory + ":" + env.get("PATH"));
@@ -538,7 +538,7 @@ class WhaleModeConfigurationTest {
 
     @Test
     void wrapperRefusesImplicitActivationAndMapsWhalePortsAndFetch() throws Exception {
-        Path script = Path.of("whale/start.sh").toAbsolutePath();
+        Path script = Path.of("container/start.sh").toAbsolutePath();
         ProcessBuilder refused = new ProcessBuilder("sh", script.toString()).redirectErrorStream(true);
         refused.environment().remove("FLEXLB_MOCK_WHALE");
         Process first = refused.start();

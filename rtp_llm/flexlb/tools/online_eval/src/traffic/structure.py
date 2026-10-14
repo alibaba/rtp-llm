@@ -76,5 +76,5 @@ def generated_shape(rows):
         labels = row['input_token_blocks'][:row['il']//row['cache_key_block_size']]
         blocks.append(row['il'] / BLOCK)
         shared.append(index.observe(labels) * row['cache_key_block_size'] / BLOCK)
-        families[tuple(tuple(v) if isinstance(v, list) else v for v in labels[:4096 // row['cache_key_block_size']])] += 1
+        families[tuple(tuple(v) if isinstance(v, list) else v for v in row['input_token_blocks'][:4096 // row['cache_key_block_size']])] += 1
     return dict(blocks=blocks, shared=shared, families=sorted(families.values(), reverse=True))
