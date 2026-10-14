@@ -1666,6 +1666,11 @@ class W:
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
         moe_gate: sp_id,
+        # gpt-oss: router bias replicates under TP (each rank runs the full
+        # router); per-head sinks split by head row like the Q heads they
+        # belong to (rank r's contiguous head slice of the [head_num] vector).
+        moe_gate_bias: sp_id,
+        attn_sink: sp_0,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,

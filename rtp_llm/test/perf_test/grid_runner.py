@@ -30,6 +30,7 @@ class GridRunner:
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
         log_path: str = "",
+        log_flush_offset: int = 0,
     ):
         self._port = port
         self._dp_size = dp_size
@@ -45,9 +46,21 @@ class GridRunner:
         self._log_path = log_path
         # Byte offset into the server log past the last "profiler trace
         # saved" line, threaded through every BatchPerfImpl call so
-        # consecutive grid cells only scan new log content.
-        self._log_flush_offset = 0
+        # consecutive grid cells only scan new log content. Callers that
+        # chain several runners (one per input_len) must pass the previous
+        # runner's final .log_flush_offset — otherwise each runner rescans
+        # old trace-saved lines and returns before its own trace flushed.
+        self._log_flush_offset = log_flush_offset
         self._title = "Decode Result" if is_decode else "Prefill Result"
+
+    @property
+    def log_flush_offset(self) -> int:
+        """Final byte offset past the last observed trace-save log line.
+
+        Callers chaining runners across input_len cells read this after
+        run() and pass it as the next runner's log_flush_offset.
+        """
+        return self._log_flush_offset
 
     def warmup(self) -> None:
         warmup_runs = int(os.environ.get("PERF_GRID_WARMUP_RUNS", "1"))

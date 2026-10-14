@@ -111,6 +111,11 @@ class GptOssConfigTest(TestCase):
         attn = config.attn_config
         self.assertEqual(config.num_layers, 24)
         self.assertEqual(config.hidden_size, 2880)
+        # BF16-native checkpoint: an unset act_type must default the
+        # unquantized tensors to BF16, never the framework-wide FP16
+        # default (120b carries fp16-subnormal-range router/bias values
+        # that the FP16 cast mangles).
+        self.assertEqual(config.config_dtype, "bf16")
         self.assertEqual(config.vocab_size, 201088)
         self.assertEqual(config.max_seq_len, 131072)
         self.assertEqual(attn.head_num, 64)

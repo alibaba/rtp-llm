@@ -24,6 +24,7 @@ class DistributionRunner:
         decode_test_length: int = 10,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        log_path: str = "",
     ):
         self._port = port
         self._dp_size = dp_size
@@ -33,6 +34,11 @@ class DistributionRunner:
         self._decode_test_length = decode_test_length
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
+        self._log_path = log_path
+        # Byte offset into the server log past the last "profiler trace
+        # saved" line, threaded through every BatchPerfImpl call (same
+        # pattern as GridRunner/TpsBinarySearchRunner).
+        self._log_flush_offset = 0
         self._title = "Distribution Decode Result"
 
     def warmup(self) -> None:
@@ -50,6 +56,8 @@ class DistributionRunner:
             self._decode_test_length,
             False,
             self._generate_config,
+            log_path=self._log_path,
+            log_flush_offset=self._log_flush_offset,
         ).run()
 
     def run(self) -> List[DistributionMetricState]:
@@ -80,7 +88,7 @@ class DistributionRunner:
                 trace_name = (
                     f"bs{actual_bs}_seq{min(seq_len_list)}-{max(seq_len_list)}_decode"
                 )
-                metric = BatchPerfImpl(
+                impl = BatchPerfImpl(
                     self._port,
                     self._dp_size,
                     actual_bs * self._dp_size,
@@ -91,7 +99,11 @@ class DistributionRunner:
                     True,
                     self._generate_config,
                     trace_name,
-                ).run(num_measures=self._num_measures)
+                    log_path=self._log_path,
+                    log_flush_offset=self._log_flush_offset,
+                )
+                metric = impl.run(num_measures=self._num_measures)
+                self._log_flush_offset = impl.log_flush_offset
 
                 metrics_list.append(
                     DistributionMetricState(actual_bs, seq_len_list, metric)
