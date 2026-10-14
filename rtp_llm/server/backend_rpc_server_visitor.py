@@ -17,8 +17,12 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
-from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
+from rtp_llm.server.cache_key_routing import (
+    get_block_cache_keys,
+    get_v41_cache_key_seed,
+    route_cache_keys_for_page_rr,
+)
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
@@ -55,15 +59,23 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+_RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
+    {
+        ExceptionType.GET_HOST_FAILED,
+        ExceptionType.GET_CONNECTION_FAILED,
+        ExceptionType.CONNECT_FAILED,
+        ExceptionType.CONNECT_TIMEOUT,
+        ExceptionType.CONNECTION_RESET_BY_PEER,
+        # Master admission can be retried when no worker was available yet.
+        ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+    }
+)
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
         ExceptionType.PRIORITY_ADMISSION_REJECTED,
         ExceptionType.RESOURCE_EXHAUSTED,
         ExceptionType.ADMISSION_UNAVAILABLE,
-        # A scheduling deadline is already a completed admission outcome.
-        # Retrying it with a new request id silently starts a second admission
-        # attempt with a fresh identity and can hide the original timeout.
         ExceptionType.BATCH_SLO_EXPIRED,
     }
 )
@@ -85,6 +97,7 @@ class BackendRPCServerVisitor:
         prefill_cp_config=None,
         source_role: str = "frontend",
         mm_model_config=None,
+        model_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -102,6 +115,10 @@ class BackendRPCServerVisitor:
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
             source_role: Caller role used for request-info correlation fields.
         """
+        self.cache_key_seed = (
+            get_v41_cache_key_seed(model_config) if model_config is not None else 0
+        )
+        self.remote_vit = vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
@@ -184,20 +201,15 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        # Use isinstance instead of getattr duck-typing — only FtRuntimeException
-        # carries exception_type; gRPC RpcError and other exceptions do not.
+        # Use an explicit allowlist. Numeric ranges are not stable retry
+        # contracts: cancellation, validation, and execution errors also use
+        # values in the 8000+ range and must not be resubmitted with a new id.
         if isinstance(e, FtRuntimeException):
             try:
-                exception_type = int(e.exception_type)
-                # These are completed admission decisions, not transient route
-                # transport failures.  A new request id would change request
-                # identity and hide the typed 429 result selected by Master.
-                if any(
-                    exception_type == int(terminal_type)
-                    for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
-                ):
+                exception_type = e.exception_type
+                if exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES:
                     return False
-                return exception_type >= 8000
+                return exception_type in _RETRYABLE_ROUTE_EXCEPTION_TYPES
             except (TypeError, ValueError):
                 pass
         text = str(e)
@@ -275,6 +287,34 @@ class BackendRPCServerVisitor:
         )
         route_args = {}
         selected_vit = None
+        prepared = getattr(input, "v41_inputs", None)
+        if self.remote_vit and prepared is not None and prepared.images:
+            timeout_ms = (
+                input.generate_config.ttft_timeout_ms
+                or input.generate_config.timeout_ms
+                or self.master_client.master_config.master_default_timeout_ms
+            )
+            if timeout_ms <= 0:
+                timeout_ms = self.master_client.master_config.master_default_timeout_ms
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            vit_result = await self.master_client.get_backend_role_addrs(
+                block_cache_keys=[],
+                cache_key_block_size=self._cache_key_block_size(),
+                input=input,
+                request_id=input.request_id,
+                vit_only=True,
+                timeout_s=timeout_ms / 1000.0,
+            )
+            if not vit_result.is_ok:
+                return vit_result
+            selected_vit = vit_result.role_addrs[0]
+            route_args["selected_vit"] = vit_result.result["server_status"][0]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.DEADLINE_EXCEEDED, "ViT routing deadline exceeded"
+                )
+            route_args["timeout_s"] = remaining
         if getattr(self, "_mm_cache_routing", False) and getattr(
             input, "mm_inputs", None
         ):
@@ -381,7 +421,12 @@ class BackendRPCServerVisitor:
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        full_block_cache_keys = get_block_cache_keys(
+            token_ids,
+            self.seq_size_per_block,
+            v41_inputs=input.v41_inputs,
+            cache_key_seed=self.cache_key_seed,
+        )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
         del token_ids, full_block_cache_keys
@@ -399,6 +444,7 @@ class BackendRPCServerVisitor:
             )
             if (
                 selected_vit is not None
+                and token_expansion is not None
                 and route_result.error_code == VIT_ROUTE_STALE_CODE
             ):
                 # Expanded length may select a different group; old hashes are
@@ -801,6 +847,14 @@ class BackendRPCServerVisitor:
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
+        if input.generate_config.is_prefill_only():
+            if input.prompt_length > self.max_seq_len:
+                raise FtRuntimeException(
+                    ExceptionType.LONG_PROMPT_ERROR,
+                    f"model max tokens is {self.max_seq_len}, "
+                    f"request length is {input.prompt_length}, max_new_tokens is 0",
+                )
+            return
         max_new_tokens = min(
             self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
@@ -873,6 +927,11 @@ class BackendRPCServerVisitor:
                         for output in buffered_outputs:
                             yield output
                     return
+                except (asyncio.CancelledError, GeneratorExit):
+                    # Cancellation and generator teardown are control-flow signals,
+                    # never route failures. Do not replace them with a prior retry
+                    # exception or start another attempt.
+                    raise
                 except BaseException as e:
                     set_aux_info(e)
                     if first_exc is None:
@@ -932,6 +991,7 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
+            input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
@@ -1001,4 +1061,5 @@ def create_backend_rpc_server_visitor(
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
         mm_model_config=getattr(model_config, "mm_model_config", None),
+        model_config=model_config,
     )

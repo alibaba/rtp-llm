@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -40,6 +41,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -270,7 +272,10 @@ class DefaultBatchDispatcherTest {
         ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
                 ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
         verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
-        assertEquals(3000, request.getValue().getFetchAttachTimeoutMs());
+        // Default raised from 3s to 60s by d1dcb3de38 (V4.1 multimodal
+        // delivery stabilization); the explicit-config case below covers the
+        // configured value.
+        assertEquals(60_000, request.getValue().getFetchAttachTimeoutMs());
     }
 
     @Test
@@ -532,11 +537,13 @@ class DefaultBatchDispatcherTest {
         submit(reservation, List.of(item), 4L, 100,
                 "shutdown_drain", callback);
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
-        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
-                "dispatch capacity must be released after the RPC handoff");
+        // New contract (in-flight bounding, 2475756fe5): the admission
+        // permit is held until the EnqueueBatch RPC COMPLETES, so capacity
+        // is NOT released merely by the RPC handoff.
+        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+                "capacity must stay held while the RPC is pending");
         assertFalse(rpcFuture.isDone());
 
-        dispatcher.shutdown();
         rpcFuture.complete(ackResponse(4L, List.of(1L)));
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
@@ -813,15 +820,20 @@ class DefaultBatchDispatcherTest {
                         "dispatch_handoff_capacity", callback));
 
         allowHandoff.countDown();
-        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
-        assertTrue(unavailable.availability().isAvailable());
+        // New contract (in-flight bounding, 2475756fe5): the permit is held
+        // until the RPC completes, not until the handoff returns.
+        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+                "capacity must stay held while the RPC is pending");
+        assertFalse(unavailable.availability().isAvailable());
         assertFalse(rpcFuture.isDone());
         assertEquals(0, callback.successCount.get());
+        rpcFuture.complete(ackResponse(1L, List.of(1L)));
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
+                "capacity must be released after the RPC completes");
+        assertTrue(unavailable.availability().isAvailable());
         PreparedSubmission replacement = reservePermit();
 
         replacement.close();
-
-        rpcFuture.complete(ackResponse(1L, List.of(1L)));
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.successCount.get());
@@ -1026,4 +1038,321 @@ class DefaultBatchDispatcherTest {
             }
         }
     }
+
+    @Test
+    void completionBeforeRegistrationReturnsReleasesCountAndBytes() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> immediate = new CompletableFuture<>() {
+            @Override
+            public <U> CompletableFuture<U> handleAsync(
+                    java.util.function.BiFunction<? super EngineRpcService.EnqueueBatchResponsePB,
+                            Throwable, ? extends U> fn,
+                    java.util.concurrent.Executor executor) {
+                // Deterministically exercise the legal interleaving in which the
+                // completion thread finishes before registration returns.
+                return CompletableFuture.completedFuture(fn.apply(ackResponse(1L, List.of(1L)), null));
+            }
+        };
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(immediate);
+        submit(List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
+                1L, 100, "immediate_completion", callback);
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
+        assertTrue(next.accepted(), "an early callback must not strand AWAITING_RPC ownership");
+        assertInstanceOf(PreparedSubmission.class, next.value()).close();
+        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        dispatcher, "inflightPayloadBytes")).get());
+        assertEquals(0, ((AtomicInteger) org.springframework.test.util.ReflectionTestUtils.getField(
+                dispatcher, "pendingCompletions")).get());
+        dispatcher.shutdown();
+        assertTrue(dispatcherIsTerminatedWithin(5));
+    }
+
+    @Test
+    void completionRegistrationFailureReturnsOwnedPermitAndBytes() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> broken = new CompletableFuture<>() {
+            @Override
+            public <U> CompletableFuture<U> handleAsync(
+                    java.util.function.BiFunction<? super EngineRpcService.EnqueueBatchResponsePB,
+                            Throwable, ? extends U> fn,
+                    java.util.concurrent.Executor executor) {
+                throw new java.util.concurrent.RejectedExecutionException("registration failed");
+            }
+        };
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(broken);
+        submit(List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
+                1L, 100, "registration_failure", callback);
+        assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
+        CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
+        assertTrue(next.accepted());
+        assertInstanceOf(PreparedSubmission.class, next.value()).close();
+        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        dispatcher, "inflightPayloadBytes")).get());
+        assertEquals(0, ((AtomicInteger) org.springframework.test.util.ReflectionTestUtils.getField(
+                dispatcher, "pendingCompletions")).get());
+        dispatcher.shutdown();
+        assertTrue(dispatcherIsTerminatedWithin(5));
+    }
+
+    @Test
+    void admissionPermitHeldUntilRpcCompletion() throws Exception {
+        // Regression: direct-buffer OOM
+        // recurred because the admission permit was released as soon as the
+        // EnqueueBatch dispatch call returned, while the RPC future still
+        // held the serialized batch payload in direct buffers. Admission
+        // must bound IN-FLIGHT RPCs.
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(invocation -> pending);
+
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        // Exhaust the single admission permit with one in-flight batch.
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
+        PreparedSubmission permit = reservePermit();
+        assertDoesNotThrow(() -> submit(
+                permit, List.of(item), 1L, 100,
+                "inflight_hold", callback));
+
+        // The RPC is invoked but not completed: no new admission is possible.
+        CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
+        assertFalse(rejected.accepted(),
+                "permit must stay held while the EnqueueBatch RPC is pending");
+
+        // Completing the RPC (success) releases the permit.
+        pending.complete(ackResponse(1L, List.of(1L)));
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
+                "the completed RPC must deliver its callback");
+        CapacityBoundary.Attempt<?> readmitted = dispatcher.tryPrepareSubmission();
+        assertTrue(readmitted.accepted(),
+                "permit must be released after the RPC completes");
+    }
+
+    /**
+     * with capacity=1, a dispatch that
+     * fails BEFORE RPC invocation (request build failure) must (a) fail the
+     * request, (b) return the permit so the NEXT admission succeeds, and
+     * (c) let shutdown() complete afterwards.
+     */
+    @Test
+    void capacityOnePreSendFailureReturnsPermitForNextAdmissionAndShutdown() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
+        // Force a deterministic pre-send build failure: null generateInput
+        // bytes path is hard to force; use an oversize payload instead by
+        // mocking the config to throw in requireBatchDispatcher — simplest
+        // deterministic pre-send failure is a config error before invocation.
+        when(configService.loadBalanceConfig())
+                .thenThrow(new IllegalStateException("config unavailable before send"));
+        CountDownLatch failed = new CountDownLatch(1);
+        BiConsumer<ScheduledRequest, DeliveryResult> failureCallback =
+                (exactItem, completion) -> {
+                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                        failed.countDown();
+                    }
+                };
+        submit(List.of(item), 1L, 100, "capacity_one_presend", failureCallback);
+        assertTrue(failed.await(5, TimeUnit.SECONDS),
+                "pre-send failure must reach the request callback");
+        // doReturn (not when(...)): when() invokes the method during
+        // stubbing, which would trigger the throwing stub on this thread.
+        doReturn(config).when(configService).loadBalanceConfig();
+
+        // The permit leaked by the failed dispatch must be back: the next
+        // admission must succeed (capacity is 1 and only one batch ran).
+        CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
+        assertTrue(next.accepted(),
+                "permit must return after a pre-send failure with capacity=1; "
+                        + "a rejection means the permit leaked");
+        assertInstanceOf(PreparedSubmission.class, next.value()).close();
+
+        // shutdown() must be able to complete: permits all returned, no
+        // pending completions.
+        dispatcher.shutdown();
+        assertTrue(dispatcherIsTerminatedWithin(5),
+                "dispatch executor must terminate after shutdown when no "
+                        + "completion is outstanding");
+    }
+
+    /**
+     * a Delivery that returns WITHOUT
+     * ever invoking the sender (all requests expired/cancelled before
+     * handoff) must still return its admission permit; shutdown must
+     * complete afterwards. SUBMITTED close() is a no-op by contract, so the
+     * task wrapper is the only release point.
+     */
+    @Test
+    void senderLessDeliveryReleasesPermitAndShutdownCompletes() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        PreparedSubmission permit = reservePermit();
+        CountDownLatch taskDone = new CountDownLatch(1);
+        // Delivery that never calls the sender — returns normally.
+        permit.submit(sender -> {
+            try {
+                TimeUnit.MILLISECONDS.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        // Submit is async on the dispatch executor; wait for the task to run
+        // by watching admission come back (the permit release IS the signal).
+        // Release the polled reservation immediately so the poll itself
+        // never holds the last permit.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        boolean available = false;
+        while (System.nanoTime() < deadline) {
+            CapacityBoundary.Attempt<?> probe = dispatcher.tryPrepareSubmission();
+            if (probe.accepted()) {
+                assertInstanceOf(PreparedSubmission.class, probe.value()).close();
+                available = true;
+                break;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        assertTrue(available,
+                "sender-less delivery must return its admission permit");
+        // Nothing outstanding: shutdown must terminate the executors.
+        dispatcher.shutdown();
+        assertTrue(dispatcherIsTerminatedWithin(5),
+                "shutdown must complete after a sender-less delivery");
+        taskDone.countDown();
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+    }
+
+    /**
+     * real async completion retention —
+     * while the RPC future is pending, the permit stays held; after the
+     * future completes exceptionally, the permit is released. Uses the REAL
+     * async executor (no completed-future shortcut).
+     */
+    @Test
+    void asyncCompletionRetainsThenReleasesPermit() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(7L, 500, 200, prefillEp);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
+                new CompletableFuture<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(invocation -> pending);
+        CountDownLatch uncertain = new CountDownLatch(1);
+        BiConsumer<ScheduledRequest, DeliveryResult> uncertainCallback =
+                (exactItem, completion) -> {
+                    if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                        uncertain.countDown();
+                    }
+                };
+        submit(List.of(item), 7L, 100, "async_retention", uncertainCallback);
+
+        // Retention: while the RPC is pending the permit is held (real async
+        // future, not a completed one).
+        long holdDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(750);
+        boolean heldForAWhile = true;
+        while (System.nanoTime() < holdDeadline) {
+            if (dispatcher.tryPrepareSubmission().accepted()) {
+                heldForAWhile = false;
+                break;
+            }
+            TimeUnit.MILLISECONDS.sleep(25);
+        }
+        assertTrue(heldForAWhile, "permit must stay held while the async RPC is pending");
+
+        // Exceptional completion releases it and marks the batch UNCERTAIN.
+        pending.completeExceptionally(new RuntimeException("connection reset"));
+        assertTrue(uncertain.await(5, TimeUnit.SECONDS),
+                "exceptional RPC completion must deliver UNCERTAIN");
+        long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        boolean released = false;
+        while (System.nanoTime() < releaseDeadline) {
+            CapacityBoundary.Attempt<?> probe = dispatcher.tryPrepareSubmission();
+            if (probe.accepted()) {
+                assertInstanceOf(PreparedSubmission.class, probe.value()).close();
+                released = true;
+                break;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        assertTrue(released, "permit must be released after exceptional RPC completion");
+    }
+
+    /**
+     * Byte-budget admission: the count permit
+     * alone permitted up to 320 x 512MiB of serialized direct buffers in
+     * flight (observed 8.58GB pinned). With a budget smaller than one batch,
+     * the batch must fail NOT_SENT before serialization, the permit AND the
+     * byte charge must return, and shutdown must complete.
+     */
+    @Test
+    void inflightByteBudgetBoundsSerializedPayloadBeforeSend() throws Exception {
+        dispatcher.shutdown();
+        // Budget smaller than the single item's wire size: any dispatch
+        // must be rejected pre-serialization.
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null,
+                1, 0, 64L);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
+        CountDownLatch failed = new CountDownLatch(1);
+        BiConsumer<ScheduledRequest, DeliveryResult> failureCallback =
+                (exactItem, completion) -> {
+                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                        failed.countDown();
+                    }
+                };
+        submit(List.of(item), 1L, 100, "byte_budget", failureCallback);
+        assertTrue(failed.await(5, TimeUnit.SECONDS),
+                "oversize-batch dispatch must fail NOT_SENT without serialization");
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+
+        // Permit and byte charge must both be back: next admission succeeds
+        // (a fresh small item still cannot pass the tiny budget, so instead
+        // assert the COUNT permit returned — the reservation must be
+        // obtainable again).
+        CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
+        assertTrue(next.accepted(),
+                "count permit must return after a byte-budget rejection");
+        assertInstanceOf(PreparedSubmission.class, next.value()).close();
+
+        dispatcher.shutdown();
+        assertTrue(dispatcherIsTerminatedWithin(5),
+                "shutdown must complete after a byte-budget rejection");
+    }
+
+    /**
+     * Shutdown "completes" for this contract when the executors are shut
+     * down with no pending work: pool threads may linger for their 60s
+     * keepalive, which is NOT a permit/completion leak. The real leak signal
+     * is shutdown() never issuing the executor shutdown at all (blocked by
+     * outstanding permits or pendingCompletions), so we assert the
+     * isShutdown state plus empty queue plus no active dispatch tasks.
+     */
+    private boolean dispatcherIsTerminatedWithin(int seconds) throws InterruptedException {
+        ThreadPoolExecutor dispatchExecutor = (ThreadPoolExecutor)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        dispatcher, "dispatchExecutor");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+        while (System.nanoTime() < deadline) {
+            if (dispatchExecutor.isShutdown()
+                    && dispatchExecutor.getQueue().isEmpty()
+                    && dispatchExecutor.getActiveCount() == 0) {
+                return true;
+            }
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        return dispatchExecutor.isShutdown()
+                && dispatchExecutor.getQueue().isEmpty()
+                && dispatchExecutor.getActiveCount() == 0;
+    }
+
+
 }

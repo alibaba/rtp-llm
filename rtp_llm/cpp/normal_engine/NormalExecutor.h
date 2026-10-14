@@ -73,6 +73,7 @@ protected:
                                      std::shared_ptr<torch::Event> sampler_event,
                                      std::function<void()>         profile_step_finish = nullptr);
 
+    bool has_engram_ = false;
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
     void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);
 

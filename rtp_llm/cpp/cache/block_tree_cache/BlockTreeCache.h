@@ -120,7 +120,7 @@ public:
     ~BlockTreeCache();
     bool init();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys);
+    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

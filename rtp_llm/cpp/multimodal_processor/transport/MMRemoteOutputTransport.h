@@ -88,9 +88,10 @@ public:
 };
 
 struct DeliveryContext {
-    const std::string& endpoint;
-    DeadlineBudget&    budget;
-    MMControlClient&   control;
+    const std::string&               endpoint;
+    DeadlineBudget&                  budget;
+    MMControlClient&                 control;
+    std::shared_ptr<MMControlClient> control_owner;
 };
 
 class ConsumeResult {
@@ -186,7 +187,7 @@ private:
 
     std::vector<std::unique_ptr<MMReceiptReader>> readers_;
     std::unique_ptr<MMTerminalReceiptReader>      terminal_;
-    std::unique_ptr<MMControlClient>              control_;
+    std::shared_ptr<MMControlClient>              control_;
     int64_t                                       default_rpc_timeout_ms_;
     int64_t                                       rpc_timeout_margin_ms_;
 };

@@ -280,6 +280,7 @@ class DecodeTopkLengthCaptureFullWidthTest(unittest.TestCase):
         _update_topk_lengths_in_place(meta, start_pos, 2, full_width=True)
         self.assertEqual([int(x) for x in meta.swa_topk_length[:2]], [WINDOW, WINDOW])
 
+
 class DecodeTopkLengthParityTest(unittest.TestCase):
     """Eager build vs allocate+update produce identical length values."""
 
@@ -351,7 +352,11 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
 
         fake.flash_mla_with_kvcache = fake_kv
         old = sys.modules.get("flash_mla")
+        old_flash_mla_legacy = sys.modules.get("flash_mla_legacy")
+        # The production shim prefers the isolated legacy wheel; alias the
+        # fake under both names so the mock still intercepts it.
         sys.modules["flash_mla"] = fake
+        sys.modules["flash_mla_legacy"] = fake
         try:
             module = importlib.import_module(
                 "rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op"
@@ -366,6 +371,10 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
                 sys.modules.pop("flash_mla", None)
             else:
                 sys.modules["flash_mla"] = old
+        if old_flash_mla_legacy is None:
+            sys.modules.pop("flash_mla_legacy", None)
+        else:
+            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
         return calls
 
     def test_dual_paged_forwards_both_lengths(self) -> None:

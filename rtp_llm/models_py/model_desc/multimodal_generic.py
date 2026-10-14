@@ -11,6 +11,7 @@ from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 class MultimodalGenericModel(GenericMoeModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._disable_capture_context()
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

@@ -347,18 +347,41 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigAllowsOnlyFullGr
     EXPECT_EQ(cache_config.group("full").tag, "full");
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigRejectsMultipleFullGroups) {
-    auto cfg = makeTinyModelConfig(/*num_layers=*/2);
-    setHybridLayerDescsWithTags(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE}, {"full", "full1"});
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MultipleFullGroupsPreserveBudgetAndIndependentCapacity) {
+    auto cfg = makeTinyModelConfig(/*num_layers=*/3);
+    setHybridLayerDescsWithTags(cfg,
+                                {HybridAttentionType::NONE, HybridAttentionType::NONE, HybridAttentionType::NONE},
+                                {"full", "full1", "full1"});
+    KVCacheConfig options;
+    options.kv_cache_mem_mb = 1;
+    const ParallelismConfig parallelism;
+    auto                    config = CacheConfigCreator::createConfig(cfg, parallelism, options);
+    ASSERT_EQ(config.groupNums(), 2);
+    EXPECT_EQ(config.layerIdsForGroup("full"), std::vector<int>({0}));
+    EXPECT_EQ(config.layerIdsForGroup("full1"), std::vector<int>({1, 2}));
+    const size_t bytes_per_coordinate =
+        config.group("full").kvBlockStrideBytes() + 2 * config.group("full1").kvBlockStrideBytes();
+    const auto blocks = CacheConfigCreator::computeLocalBlockNum(config, cfg, {}, options, parallelism);
+    EXPECT_EQ(blocks, 1024u * 1024u / bytes_per_coordinate);
 
-    ParallelismConfig parallelism_cfg;
-    parallelism_cfg.tp_size = 1;
-    try {
-        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
-        FAIL() << "expected multiple full groups to be rejected";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("multiple FULL MHA/MLA cache groups"), std::string::npos);
-    }
+    config         = finalizeCacheConfig(std::move(config), 8);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto first  = poolForTag(*allocator, "full");
+    auto second = poolForTag(*allocator, "full1");
+    ASSERT_NE(first, second);
+    const auto initial = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(initial.total_tokens,
+              std::min(first->totalBlocksNum(), second->totalBlocksNum()) * config.seq_size_per_block);
+    EXPECT_EQ(initial.available_tokens,
+              std::min(first->availableBlocksNum(), second->availableBlocksNum()) * config.seq_size_per_block);
+    const auto allocated = allocateReferencedBlocks(second, 2);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens,
+              std::min(first->availableBlocksNum(), second->availableBlocksNum()) * config.seq_size_per_block);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens,
+              initial.available_tokens - 2 * config.seq_size_per_block);
+    second->decRef(allocated);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, initial.available_tokens);
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsModelTokensPerBlock) {

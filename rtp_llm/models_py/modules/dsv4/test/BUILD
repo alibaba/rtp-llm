@@ -284,3 +284,8 @@ py_test(
     srcs = ["test_prefill_communication.py"],
     data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/platforms:ppu_sources", "//rtp_llm/server:backend_manager.py"],
 )
+
+dsv4_sm100_py_test(
+    name = "test_mega_inv_rope_fp8_quant",
+    deps = _DSV4_TEST_DEPS,
+)

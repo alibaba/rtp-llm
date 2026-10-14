@@ -396,6 +396,7 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -715,6 +716,8 @@ def forward_layers(
                     )  # [T, hc, dim]
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
+                    if capture_context is not None:
+                        capture_context.capture_layer(layer_idx, h)
                     if _rt_on:
                         _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                     if write_cache_store_impl_by_tag:
@@ -891,6 +894,8 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if capture_context is not None and capture_context.enabled:
+        return capture_context.finalize(h).hidden_states
     return h  # [T, dim]
 
 
@@ -900,6 +905,7 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -962,6 +968,16 @@ def forward_prefill(
     if rebuild_input_lengths is None or rebuild_input_lengths.numel() == 0:
         rebuild_input_lengths = attn.input_lengths
     if framework_cu_seqlens is not None and framework_cu_seqlens.numel() >= 2:
+        if rebuild_input_lengths is not None and rebuild_input_lengths.numel() > 0:
+            required_cu_seqlens = int(rebuild_input_lengths.numel()) + 1
+            if framework_cu_seqlens.numel() < required_cu_seqlens:
+                raise RuntimeError(
+                    "DSV4 prefill: cu_seqlens has "
+                    f"{framework_cu_seqlens.numel()} entries; batch size "
+                    f"{rebuild_input_lengths.numel()} requires at least {required_cu_seqlens}"
+                )
+            if framework_cu_seqlens.numel() > required_cu_seqlens:
+                framework_cu_seqlens = framework_cu_seqlens[:required_cu_seqlens]
         capture_uses_device_mirror = framework_cu_seqlens.is_cuda and is_capturing
         cu_seqlens_target_device = (
             framework_cu_seqlens.device
@@ -1012,5 +1028,6 @@ def forward_prefill(
         attn_inputs=attn,
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
+        capture_context=capture_context,
+    )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     return PyModelOutputs(hidden)

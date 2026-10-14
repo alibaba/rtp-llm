@@ -385,12 +385,13 @@ std::shared_ptr<LoadAsyncContext>
 CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cache_keys,
                                         BatchKVCacheResource&                kv_resource,
                                         const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                        PreparedKVCache&                     prepared) {
+                                        PreparedKVCache&                     prepared,
+                                        const std::function<bool(size_t)>&   valid_prefix) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys);
+    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -458,12 +459,26 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
 
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
+        const size_t  max_keys   = static_cast<size_t>(config_.maxPrefixReuseTokens(seq_len))
+                                / static_cast<size_t>(std::max(1, reuse_unit_tokens));
+        match_keys.resize(std::min(match_keys.size(), max_keys));
+        while (!match_keys.empty()
+               && !malloc_info.complete_token_ids->isValidReuseLength(
+                   static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
+            match_keys.pop_back();
+        }
         const int64_t begin_us = currentTimeUs();
-        load_context           = prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared);
-        match_end_time_us      = currentTimeUs();
-        match_cost_time_us     = match_end_time_us - begin_us;
-        load_attempted         = load_context != nullptr;
+        load_context =
+            prepareKVCache(match_keys,
+                           *kv_resource,
+                           cp_mapper,
+                           prepared,
+                           [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
+                               return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
+                           });
+        match_end_time_us  = currentTimeUs();
+        match_cost_time_us = match_end_time_us - begin_us;
+        load_attempted     = load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
 
@@ -790,6 +805,33 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
         }
     }
 
+    if (group_tags.size() == 1 && config_.group(group_tags.front()).policy.group_type == CacheGroupType::FULL) {
+        // Release all beam ownership in one pool transaction, preserving other
+        // requests and tree/transfer holds. The callback runs outside the pool lock.
+        std::unordered_map<BlockIdxType, int> counts;
+        counts.reserve(kv_cache_resource->curBlocksNum() + kv_cache_resource->batchSize());
+        for (const auto& blocks_by_group : blocks_by_batch) {
+            for (const auto block : *blocks_by_group.front()) {
+                if (!isNullBlockIdx(block)) {
+                    auto& count = counts[block];
+                    RTP_LLM_CHECK(count < std::numeric_limits<int>::max());
+                    ++count;
+                }
+            }
+        }
+        std::vector<DeviceBlockPool::RequestReferenceUpdate> updates;
+        updates.reserve(counts.size());
+        for (const auto& [block, count] : counts) {
+            updates.push_back({block, count, 0});
+        }
+        BlockIndicesType replacements;
+        int              required_free_blocks = 0;
+        const bool       released =
+            group_block_pools_.front()->tryReplaceRequestReferences(updates, 0, replacements, required_free_blocks);
+        RTP_LLM_CHECK_WITH_INFO(released, "releasing request references must not require free capacity");
+        kv_cache_resource->clearBlocks();
+        return;
+    }
     for (const auto& blocks_by_group : blocks_by_batch) {
         for (size_t group_id = 0; group_id < group_tags.size(); ++group_id) {
             kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
@@ -1081,7 +1123,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
                 retained_slots.emplace_back(i, old_idx);
             } else {
                 auto& fork = staged_resource.cacheResource(i);
-                fork.initGroups(config_.topologyPtr());
+                fork.initGroups(config_.topologyPtr(), /*materialize_layer_views=*/false);
                 fork.setCacheKeys(old_resource.cacheKeys());
                 auto& block_ids = fork.mutableBlockIds(tag);
                 block_ids.assign(old_resource.blocks(tag));
@@ -1518,6 +1560,41 @@ bool CoordinatorCacheManager::doInit() {
         ++group_id;
     }
 
+#if USING_CUDA
+    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1
+        && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
+        const auto&                    group         = topology_groups.front();
+        const auto                     kv_tensors    = kv_cache_groups_.front()->allLayerCacheBase();
+        const auto                     scale_tensors = kv_cache_groups_.front()->allLayerScaleCacheBase();
+        std::vector<GpuBlockCopyPlane> planes;
+        for (int layer_id : config_.layerIdsForGroup(group.tag)) {
+            const auto& physical_group = config_.physicalGroupForLayer(layer_id, group.tag);
+            const auto  kv_it          = kv_tensors.find(layer_id);
+            RTP_LLM_CHECK_WITH_INFO(kv_it != kv_tensors.end(),
+                                    "missing KV storage for layer %d, cache group %s",
+                                    layer_id,
+                                    group.tag.c_str());
+            planes.push_back({kv_it->second, physical_group.kvBlockStrideBytes()});
+            if (physical_group.kvScaleStrideBytes() > 0) {
+                const auto scale_it = scale_tensors.find(layer_id);
+                RTP_LLM_CHECK_WITH_INFO(scale_it != scale_tensors.end(),
+                                        "missing KV scale storage for layer %d, cache group %s",
+                                        layer_id,
+                                        group.tag.c_str());
+                planes.push_back({scale_it->second, physical_group.kvScaleStrideBytes()});
+            }
+        }
+        const bool supported = !planes.empty() && std::all_of(planes.begin(), planes.end(), [](const auto& plane) {
+            return plane.blocks.defined() && plane.blocks.is_cuda() && plane.blocks.dim() > 0
+                   && plane.blocks.size(0) > 0 && plane.blocks.stride(0) > 0 && plane.copy_bytes > 0
+                   && plane.copy_bytes <= plane.blocks.stride(0) * plane.blocks.element_size();
+        });
+        if (supported) {
+            gpu_block_copy_ = GpuBlockCopy::create(std::move(planes));
+            RTP_LLM_LOG_INFO("GPU block ID copy enabled for single-group KV forward updates");
+        }
+    }
+#endif
     RTP_LLM_LOG_INFO("CoordinatorCacheManager init success, group pools=%zu", group_block_pools_.size());
     return true;
 }
@@ -1640,6 +1717,35 @@ void CoordinatorCacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const
         }
     }
     blockBatchCopyByGroup(tagged_mappings);
+}
+
+void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                                       const std::vector<std::string>& group_tags) {
+    RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
+                                && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
+                                && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
+                            "cache update mapping must be a contiguous CPU int32 [N,3] tensor");
+    std::unordered_set<std::string> seen;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
+                                "cache update mapping tags must be non-empty and unique: tag=%s",
+                                tag.c_str());
+    }
+    if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
+        gpu_block_copy_->copy(copy_mapping);
+        return;
+    }
+    std::vector<TaggedBlockIdPair> mappings;
+    mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
+    const auto* rows = copy_mapping.data_ptr<int32_t>();
+    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+        const auto row = rows[3 * i];
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && static_cast<size_t>(row) < group_tags.size(),
+                                "cache update mapping payload row is out of range: row=%d",
+                                row);
+        mappings.push_back({group_tags[row], rows[3 * i + 1], rows[3 * i + 2]});
+    }
+    blockBatchCopyByGroup(mappings);
 }
 
 void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {

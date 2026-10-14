@@ -144,6 +144,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
             0;
     shape_hints[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
+    shape_hints[GptModelInputIndex::skipLmHead]          = inputs.skip_lm_head;
+    shape_hints[GptModelInputIndex::captureHiddenStates] = inputs.capture_hidden_states;
     shape_hints[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesDtype] =
@@ -156,6 +158,13 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
+
+    shape_hints[GptModelInputIndex::mmFeaturesSpans] =
+        inputs.mm_features_spans.defined() ? inputs.mm_features_spans.size(0) : 0;
+    shape_hints[GptModelInputIndex::engramTokenWindowRows] =
+        inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(0) : 0;
+    shape_hints[GptModelInputIndex::engramTokenWindowWidth] =
+        inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(1) : 0;
 
     uint32_t control_flags = 0;
     auto     encode_flag   = [&](bool enabled, GptModelInputControlFlag flag) {
@@ -190,6 +199,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         }
     };
     encode_device(inputs.combo_tokens, GptModelInputDeviceBit::kDeviceBitComboTokens);
+    encode_device(inputs.engram_token_windows, GptModelInputDeviceBit::kDeviceBitEngramWindows);
+    encode_device(inputs.mm_features_spans, GptModelInputDeviceBit::kDeviceBitMmFeaturesSpans);
     encode_device(inputs.input_lengths, GptModelInputDeviceBit::kDeviceBitInputLengths);
     encode_device(inputs.sequence_lengths, GptModelInputDeviceBit::kDeviceBitSequenceLengths);
     encode_device(inputs.prefix_lengths, GptModelInputDeviceBit::kDeviceBitPrefixLengths);
@@ -313,6 +324,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto       has_flag              = [&](GptModelInputControlFlag flag) { return (control_flags & flag) != 0; };
     inputs.need_all_logits           = has_flag(GptModelInputControlFlag::kControlNeedAllLogits);
     inputs.need_all_hidden_states    = has_flag(GptModelInputControlFlag::kControlNeedAllHiddenStates);
+    inputs.skip_lm_head              = shape_hints_ptr[GptModelInputIndex::skipLmHead];
+    inputs.capture_hidden_states     = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
@@ -338,6 +351,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         return;
     }
 
+    const auto mm_spans        = checkedHint(GptModelInputIndex::mmFeaturesSpans, "mmFeaturesSpans");
+    const auto engram_rows     = checkedHint(GptModelInputIndex::engramTokenWindowRows, "engramTokenWindowRows");
+    const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({mm_features_num}, torch::kInt64).pin_memory();
@@ -436,17 +452,26 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             return (device_bits & bit) ? rtp_llm::AllocationType::DEVICE : rtp_llm::AllocationType::HOST;
         };
 
-        inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
+        inputs.combo_tokens         = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
-        inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
+        inputs.mm_features_spans    = mm_spans ? allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                                          {mm_spans, 3},
+                                                       pickAlloc(GptModelInputDeviceBit::kDeviceBitMmFeaturesSpans)) :
+                                                 torch::Tensor();
+        inputs.engram_token_windows = engram_rows ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {engram_rows, engram_width},
+                                                   pickAlloc(GptModelInputDeviceBit::kDeviceBitEngramWindows)) :
+                                          torch::Tensor();
+        inputs.input_lengths        = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
-        inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
+        inputs.sequence_lengths     = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
-        inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {context_batch_size},
+        inputs.prefix_lengths       = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
@@ -574,6 +599,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     };
 
     collect(inputs.combo_tokens);
+    if (mm_spans) {
+        collect(inputs.mm_features_spans);
+    }
+    if (engram_rows) {
+        collect(inputs.engram_token_windows);
+    }
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);

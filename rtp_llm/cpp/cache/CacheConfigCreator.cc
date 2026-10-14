@@ -60,9 +60,9 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             const auto   layer_ids = source.layerIdsForGroup(segment.tag);
             const size_t layer_count =
                 main ? std::count_if(
-                    layer_ids.begin(),
-                    layer_ids.end(),
-                    [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
+                           layer_ids.begin(),
+                           layer_ids.end(),
+                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
                         layer_ids.size();
             addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
             addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
@@ -297,8 +297,10 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
-    config.dtype     = ctx.dtype;
-    config.layer_num = static_cast<uint32_t>(model_config.num_layers);
+    config.dtype                   = ctx.dtype;
+    config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
+    config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
+    config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
@@ -311,17 +313,6 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
         config.use_opaque_kv_cache_store |= opaque;
         config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
-    // Multiple standard FULL attention layouts have not been validated by the
-    // attention backend. Opaque auxiliary pools do not consume this capability.
-    const auto full_attention_group_num =
-        std::count_if(config.topology().groups().begin(), config.topology().groups().end(), [](const GroupBase& group) {
-            return group.policy.group_type == CacheGroupType::FULL && group.spec
-                   && (group.spec->type == KVCacheSpecType::MultiHeadAttention
-                       || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
-        });
-    RTP_LLM_CHECK_WITH_INFO(full_attention_group_num <= 1,
-                            "multiple FULL MHA/MLA cache groups are not supported, got %zu",
-                            static_cast<size_t>(full_attention_group_num));
     config.disable_decode_first_malloc_device_reuse |= config.use_opaque_kv_cache_store;
     return config;
 }

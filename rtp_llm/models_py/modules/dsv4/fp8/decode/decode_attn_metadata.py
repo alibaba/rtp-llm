@@ -310,7 +310,9 @@ def get_or_build_sched_meta(
     inside the graph so it re-runs (with fresh ``topk_length`` values) on every
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+    from rtp_llm.models_py.utils.flash_mla_legacy import (
+        get_mla_metadata,  # type: ignore[import-not-found]
+    )
 
     capturing = False
     try:

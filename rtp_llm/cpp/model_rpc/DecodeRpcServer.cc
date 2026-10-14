@@ -4,6 +4,7 @@
 #include <exception>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <unistd.h>
 #include <limits.h>
@@ -619,6 +620,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    if (generate_stream->generateConfig()->isPrefillOnly()) {
+        decode_context.error_info =
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill-only request cannot enter decode generation");
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -1687,6 +1695,13 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
         EXECUTE_STAGE_FUNC(localGenerate, decode_context);
         decode_context.stat_info.nextStage();
+    } catch (const std::invalid_argument& e) {
+        auto error_msg = "request [" + decode_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        decode_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::INVALID_PARAMS), error_msg);
+        return decode_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
         decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);

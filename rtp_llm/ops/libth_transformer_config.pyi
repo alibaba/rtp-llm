@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -82,6 +82,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    v41_kv_source_layer_ids: list[int]
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
@@ -641,6 +642,43 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
+class HiddenStateCaptureDtype:
+    """
+    Members:
+
+      BF16
+
+      FP8_E4M3
+    """
+    BF16: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.BF16: 0>
+    FP8_E4M3: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.FP8_E4M3: 1>
+    __members__: typing.ClassVar[dict[str, HiddenStateCaptureDtype]]  # value = {'BF16': <HiddenStateCaptureDtype.BF16: 0>, 'FP8_E4M3': <HiddenStateCaptureDtype.FP8_E4M3: 1>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
     hybrid_attention_types: list[HybridAttentionType]
@@ -885,6 +923,7 @@ class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
+    mm_padding_size: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
         ...
@@ -1063,6 +1102,8 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    cache_min_replay_tokens: int
+    cache_key_hash_seed: int
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -1071,6 +1112,8 @@ class ModelConfig:
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
     hidden_size: int
+    hidden_state_capture_dtype: HiddenStateCaptureDtype
+    hidden_state_capture_layer_ids: list[int]
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
@@ -1857,7 +1900,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
     Check if RoPE cache matches the given config
     """
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], initial_hash: int = 0) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """

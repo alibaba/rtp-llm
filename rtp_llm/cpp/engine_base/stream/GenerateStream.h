@@ -312,7 +312,7 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
-    void    checkTimeout();
+    bool    checkTimeoutAndHasError();
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
     void    recordCanRunTime();
@@ -374,8 +374,8 @@ public:
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
-    bool                finishWithoutGenerate();
-    bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+    bool finishWithoutGenerate();
+    bool isActive() const;  // Returns true if stream is active (no error and not finished)
 
     // A response consumer may observe GenerateDone before the scheduler has
     // committed RUNNING -> FINISHED. Preserve that successful completion and
@@ -635,6 +635,7 @@ public:
         // carries this beside next_seq_len so MRoPE target-verify graphs can
         // be prepared without consulting worker-owned host bookkeeping.
         torch::Tensor next_position_ids_gpu;
+        torch::Tensor engram_token_window_gpu;
         torch::Tensor propose_tokens_gpu;
         // Immutable physical and logical-to-kernel page tables for the next
         // speculative round. The async worker may still be committing the
@@ -669,6 +670,10 @@ public:
         state.epoch      = ++mtp_async_epoch_counter_;
         mtp_async_state_ = std::move(state);
         return mtp_async_state_.epoch;
+    }
+    void setEngramTokenWindowGpu(torch::Tensor history) {
+        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        mtp_async_state_.engram_token_window_gpu = std::move(history);
     }
     MtpAsyncDeviceState getMtpAsyncDeviceState() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
@@ -769,8 +774,9 @@ public:
     // token and the committed sequence length after that token.
     struct NormalAsyncDeviceState {
         uint64_t      epoch = 0;
-        torch::Tensor last_sample_token_gpu;  // [1] int32
-        torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        torch::Tensor last_sample_token_gpu;    // [1] int32
+        torch::Tensor next_seq_len_gpu;         // [1] int32, seqLength after sample
+        torch::Tensor engram_token_window_gpu;  // [1,4], current token first
         // Host seqLength before the sampled token represented by this state.
         // -1 = unset (first iter / cleared).
         int last_real_seq_len = -1;
@@ -823,7 +829,8 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        const auto& config = *generate_input_->generate_config;
+        return config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {

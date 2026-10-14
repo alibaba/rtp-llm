@@ -114,6 +114,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         block.layer_id = 0
         block.tp_size = 1
         block.tp_rank = 0
+        block._mega_csa_adapter = None
+        block._mega_hca_adapter = None
         block.attn_hc = PassThroughHC()
         block.ffn_hc = PassThroughHC()
         block.attn_norm = nn.Identity()

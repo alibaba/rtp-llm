@@ -418,9 +418,18 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(
-                patch(
-                    "rtp_llm.models_py.modules.dsv4.fp8._flash_mla_backend.get_flash_mla_sparse_fwd",
-                    return_value=fake_flash_mla_sparse_fwd,
+                patch.dict(
+                    sys.modules,
+                    {
+                        "flash_mla": SimpleNamespace(
+                            flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                        ),
+                        # The production shim prefers the isolated legacy
+                        # wheel; alias the fake under both names.
+                        "flash_mla_legacy": SimpleNamespace(
+                            flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                        ),
+                    },
                 )
             )
             from rtp_llm.models_py.distributed import collective_torch

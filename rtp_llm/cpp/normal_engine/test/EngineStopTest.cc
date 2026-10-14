@@ -23,8 +23,9 @@ public:
     using NormalGenerateStream::NormalGenerateStream;
 
     void updateOutput(const StreamUpdateInfo& update_info) override {
-        // Prefill must finish first: only decode uses the outer AsyncRunner.
-        if (++update_count_ == 2) {
+        // Generation reaches the outer AsyncRunner on decode; prefill-only finishes on its first update.
+        const int gated_update = generateConfig()->isPrefillOnly() ? 1 : 2;
+        if (++update_count_ == gated_update) {
             decode_started.set_value();
             release.wait();
             NormalGenerateStream::updateOutput(update_info);
@@ -42,11 +43,14 @@ private:
     int update_count_ = 0;
 };
 
-class EngineStopTest: public DeviceTestBase, public ::testing::WithParamInterface<int> {};
+class EngineStopTest: public DeviceTestBase, public ::testing::WithParamInterface<int> {
+protected:
+    void checkStopWaitsForDispatch(int max_new_tokens);
+};
 
 // Separate Bazel targets set RTP_LLM_STREAM_ASYNC before process startup because
 // NormalExecutor caches this flag. Both modes also exercise worker counts 0/2.
-TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
+void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
     const char* async_env = std::getenv("RTP_LLM_STREAM_ASYNC");
     ASSERT_NE(async_env, nullptr);
     const bool stream_async = std::string(async_env) == "1";
@@ -62,7 +66,7 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
     auto query                             = std::make_shared<GenerateInput>();
     query->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
     query->generate_config                 = std::make_shared<GenerateConfig>();
-    query->generate_config->max_new_tokens = 2;
+    query->generate_config->max_new_tokens = max_new_tokens;
     query->generate_config->is_streaming   = false;
 
     std::promise<void> release;
@@ -76,7 +80,7 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
     // No fatal assertions while the gate is held: always unblock the worker
     // before destroying the stop future or engine, including failure paths.
     EXPECT_EQ(started.wait_for(std::chrono::seconds(30)), std::future_status::ready);
-    EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async);
+    EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async && max_new_tokens > 0);
     EXPECT_FALSE(stream->decode_completed.load());
     std::promise<void> stop_started;
     auto               stopping = stop_started.get_future();
@@ -87,7 +91,7 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
     EXPECT_EQ(stopping.wait_for(std::chrono::seconds(10)), std::future_status::ready);
     EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
     EXPECT_FALSE(stream->decode_completed.load());
-    EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async);
+    EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async && max_new_tokens > 0);
     release.set_value();
 
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(30)), std::future_status::ready);
@@ -96,8 +100,16 @@ TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
     EXPECT_EQ(engine->executor_, nullptr);
     // stop() cancels scheduled streams, so nextOutput() need not succeed.
-    // The gated update must still have committed both generated tokens.
-    EXPECT_EQ(stream->seqLength(), 4);
+    // A stopped prefill-only request must not manufacture a generated token.
+    EXPECT_EQ(stream->seqLength(), 2 + max_new_tokens);
+}
+
+TEST_P(EngineStopTest, StopWaitsForInFlightDecodeDispatch) {
+    checkStopWaitsForDispatch(2);
+}
+
+TEST_P(EngineStopTest, StopWaitsForInFlightPrefillOnlyDispatch) {
+    checkStopWaitsForDispatch(0);
 }
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));

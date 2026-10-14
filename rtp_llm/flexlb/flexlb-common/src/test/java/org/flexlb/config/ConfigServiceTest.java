@@ -133,22 +133,15 @@ class ConfigServiceTest {
     }
 
     @Test
-    void removed_legacy_environment_fails_fast_with_migration_guidance() {
-        ConfigValidationException failure = assertThrows(
-                ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        ConfigService.FLEXLB_CONFIG_ENV, ConfigTestFixtures.REQUIRED,
-                        "CACHE_STATUS_MAX_INTERVAL_MS", "100",
-                        "DEFAULT_SCHEDULE_MODE", "QUEUE",
-                        "FLEXLB_MONITOR_MODE", "all",
-                        "FLEXLB_MONITOR_METRIC_WHITELIST", "flexlb_")));
-
-        assertTrue(failure.getMessage().contains("CACHE_STATUS_MAX_INTERVAL_MS"));
-        assertTrue(failure.getMessage().contains("DEFAULT_SCHEDULE_MODE"));
-        assertTrue(failure.getMessage().contains("FLEXLB_MONITOR_MODE"));
-        assertTrue(failure.getMessage().contains("FLEXLB_MONITOR_METRIC_WHITELIST"));
-        assertTrue(failure.getMessage().contains("schemaVersion 3"));
-        assertTrue(failure.getMessage().contains("--flexlb.monitor.metric-whitelist"));
+    void legacy_environment_does_not_override_the_config_document() {
+        FlexlbConfig config = new ConfigService(Map.of(
+                ConfigService.FLEXLB_CONFIG_ENV, ConfigTestFixtures.REQUIRED,
+                "CACHE_STATUS_MAX_INTERVAL_MS", "100",
+                "DEFAULT_SCHEDULE_MODE", "QUEUE",
+                "FLEXLB_MONITOR_MODE", "all"))
+                .loadBalanceConfig();
+        assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
+        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
     }
 
     @Test

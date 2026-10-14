@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -94,6 +95,15 @@ void FIFOScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::T
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (hasMixedExecutionModes(streams)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     std::vector<bool> enqueue_successes;
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
@@ -349,6 +359,23 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
+    bool       has_execution_mode      = false;
+    bool       scheduling_prefill_only = false;
+    const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
+        if (has_execution_mode) {
+            return;
+        }
+        const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream && stream->getStatus() == StreamState::RUNNING;
+        });
+        if (it != streams.end()) {
+            has_execution_mode      = true;
+            scheduling_prefill_only = isPrefillOnly(*it);
+        }
+    };
+    capture_execution_mode(running_streams_);
+    capture_execution_mode(already_admitted_streams);
+
     ScheduleRuntime schedule_runtime;
     for (const auto& stream : already_admitted_streams) {
         if (!stream || stream->getStatus() != StreamState::RUNNING) {
@@ -377,6 +404,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                 addStreamToNewState(stream, new_state);
                 waiting_streams.erase(current);
             }
+            continue;
+        }
+
+        const bool prefill_only = isPrefillOnly(stream);
+        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
             continue;
         }
 
@@ -417,6 +449,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
 
         if (scheduling_progress) {
+            // A failed KV allocation owns no work this round and must not pin its execution mode.
+            if (!has_execution_mode) {
+                has_execution_mode      = true;
+                scheduling_prefill_only = prefill_only;
+            }
             // Admission limits cover every stream that made progress in this
             // round, including an async cache load. Otherwise multiple pending
             // loads can oversubscribe max_generate_batch_size before any one of

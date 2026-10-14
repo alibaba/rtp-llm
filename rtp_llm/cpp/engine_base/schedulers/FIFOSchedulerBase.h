@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -74,8 +75,10 @@ protected:
     std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool   refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
-    size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
+    size_t                              evaluateAndUpdateStreams(std::list<GenerateStreamPtr>&              streams,
+                                                                 const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
+    std::unordered_set<GenerateStream*> evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams,
+                                                               bool include_running_mode = true);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;
     void   appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& task_list,

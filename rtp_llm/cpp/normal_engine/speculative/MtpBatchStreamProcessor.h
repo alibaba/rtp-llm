@@ -9,6 +9,9 @@ namespace rtp_llm {
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
+    static torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor, const torch::Tensor& tokens);
+    static torch::Tensor
+    advanceEngramTokenWindows(const torch::Tensor& anchor, const torch::Tensor& tokens, const torch::Tensor& lengths);
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
@@ -110,6 +113,7 @@ public:
         torch::Tensor anchors;
         torch::Tensor committed_ends;
         torch::Tensor position_bases;
+        torch::Tensor engram_windows;
     };
     DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
                                            const GptModelInputs& model_input,
@@ -186,7 +190,7 @@ protected:
     torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
     torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
     torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
-    int64_t dsparkQueryWidth() const {
+    int64_t       dsparkQueryWidth() const {
         return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
     }
 

@@ -180,3 +180,27 @@ py_test(
     srcs = ["qwen3_vl_embedding_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "deepseek_v41_processor_test",
+    srcs = ["deepseek_v41_processor_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_vision_test",
+    srcs = ["deepseek_v41_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_vision_test",
+    srcs = ["deepseek_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)

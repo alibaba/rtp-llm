@@ -63,6 +63,7 @@ public class Request {
     @JsonProperty("force_disable_sp_run")
     private boolean forceDisableSpRun = false;
 
+
     @JsonProperty("model")
     private String model = "";
 

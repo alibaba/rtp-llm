@@ -63,6 +63,7 @@ flashattn = flashattn2 + ["flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
+requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
@@ -88,6 +89,28 @@ py_library(
         "3rdparty/tile_kernels/*.py",
         "3rdparty/tile_kernels/**/*.py",
     ]),
+    # The mhc kernels import tilelang at module scope; carry the wheel (and
+    # its z3-solver/apache-tvm-ffi closure, via the pip pkg deps) in runfiles
+    # instead of relying on the image's site-packages. Only the locks used by
+    # the DSv4 lanes ship tilelang.
+    deps = select({
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dsv41_jit_sources",
+    srcs = glob([
+        "modules/dsv41/**/*.cu",
+        "modules/dsv41/**/*.cuh",
+        "modules/dsv41/**/*.cc",
+        "modules/dsv41/**/*.h",
+        "modules/dsv41/**/*.LICENSE",
+    ]),
     visibility = ["//visibility:public"],
 )
 
@@ -99,6 +122,7 @@ py_library(
     ]),
     data = [
         ":cutlass_moe_config",
+        ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
         "//rtp_llm/platforms:platform_sources",
     ],
@@ -127,7 +151,7 @@ py_library(
     }) + select({
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
         "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({
@@ -216,6 +240,16 @@ py_library(
         "@//:using_rocm": [
             ":modules_rocm"
         ],
+        "//conditions:default": [],
+    }) + select({
+        # deepseek_v4_model.py lazily imports modules/dsv4/tilelang_kernels and
+        # the DSv4 warmup reaches the mhc TileLang kernels; declare tilelang on
+        # the owning library so its runfiles do not depend on the image's
+        # site-packages install. z3-solver/apache-tvm-ffi ride along through the
+        # tilelang pip pkg deps.
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

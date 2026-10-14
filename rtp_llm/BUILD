@@ -49,12 +49,17 @@ flashinfer_with_cache = [
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
-    "flashinfer-jit-cache"
 ]
+
+# flashinfer-jit-cache is intentionally absent: the precompiled AOT modules
+# (~8.4G, every arch family) are dead weight in per-arch images — flashinfer
+# falls back to runtime nvcc JIT on first use, and the CI bazel workers reuse
+# the JIT cache via /tmp/rtp-llm/.jit_cache plus the REMOTE_JIT_DIR snapshot.
 
 flashmla = [
     "fast-hadamard-transform",
     "flash-mla",
+    "flash-mla-legacy",
     "tilelang",
 ]
 
@@ -162,6 +167,7 @@ requirement([
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
     "utils/jit_cache_store.py",
+    "utils/jit_cache_deep_gemm.py",
 ]
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
@@ -327,7 +333,7 @@ py_library(
         # cuda13 tests use the matching cubins from the pip lock.
         # The jit-cache wheel is installed through Requires-Dist in runtime images.
         "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
@@ -721,6 +727,61 @@ whl_reqs = [
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
 ] + grpcio_tools_req + setuptools_req + whl_deps() + platform_deps() + xft_dep
 
+# Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
+# client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
+# nvidia wheels, flashinfer/deep_gemm/flash_attn/tilelang/rtp-kernel...) and the
+# model-loading ML extras are dead weight there.  torch stays (the pybind
+# config/repetition .so's link the torch C++ ABI and ~20 modules import its CPU
+# API) but as the official CPU wheel — the .so's are linked -Wl,--as-needed so
+# their CUDA DT_NEEDED entries (zero referenced symbols) drop out.  Keep the
+# transformers/otel/tokenizer pins aligned with whl_reqs above.
+whl_reqs_frontend = [
+    "torch @ https://download.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "filelock>=3.20.0",
+    "jinja2",
+    "sympy",
+    "typing-extensions",
+    "importlib_metadata",
+    "transformers==5.2.0",
+    "sentencepiece==0.2.0",
+    "fastapi==0.115.6",
+    "uvicorn==0.30.0",
+    "setuptools==60.5.0",
+    "pynvml",
+    "thrift",
+    "numpy<2.0a0,>=1.25",
+    "psutil",
+    "tiktoken==0.7.0",
+    "lru-dict",
+    "Pillow",
+    "pillow-heif",
+    "pillow-avif-plugin",
+    "protobuf==4.25",
+    "prettytable",
+    "pydantic",
+    "grpcio==1.62.0",
+    "oss2",
+    "orjson",
+    "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.25.0",
+    "json5",
+    "jsonschema==4.26.0",
+    "dashscope>=1.11.0",
+    "jieba",
+    "openai",
+    "nest_asyncio",
+    "partial_json_parser",
+    "setproctitle",
+    "portalocker",
+    "concurrent_log_handler",
+    "apache-tvm-ffi",
+    "xgrammar==0.2.5",
+    # OTel trace runtime; keep the pinned protobuf compatibility constraint.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.15.0",
+]
+
 py_wheel(
     name = "rtp_llm_frontend_whl",
     distribution = "rtp_llm_frontend",
@@ -731,7 +792,7 @@ py_wheel(
         ":rtp_llm_frontend_package",
         "@rtp_deps//:extension_package_frontend"
     ],
-    requires = whl_reqs,
+    requires = whl_reqs_frontend,
 )
 
 rename_wheel(

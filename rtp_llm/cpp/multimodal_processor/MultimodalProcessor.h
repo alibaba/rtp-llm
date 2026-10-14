@@ -64,6 +64,12 @@ private:
     bool                              include_sep_tokens_;
     int64_t                           max_seq_len_;
 
+    virtual ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
+                                                                 const std::string&      ip_port,
+                                                                 int64_t                 timeout_ms,
+                                                                 int64_t                 request_id,
+                                                                 grpc::ServerContext*    server_context);
+
     ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,

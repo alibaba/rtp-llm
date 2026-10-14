@@ -30,7 +30,8 @@ int64_t estimateInitialNeedBlocks(const GenerateStreamPtr& stream) {
 }
 
 bool isAdmittedWaitingStream(const GenerateStreamPtr& stream) {
-    return stream->hasEvent(StreamEvents::CanRun) && stream->hasEvent(StreamEvents::LoadInitiated);
+    // Cache completion clears CanRun for fresh admission, not the existing KV ownership.
+    return stream->hasEvent(StreamEvents::LoadInitiated);
 }
 
 // Parse the decode_prefill_ratio string into the internal signed cadence step.
@@ -176,20 +177,23 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     if (!admission_peak_state_) {
         buildAdmissionPeakState();
     }
+    // Completed loads are already in the peak snapshot. They still need this round's mode/token
+    // admission, but counting their batch/KV cost again can prevent them from ever releasing KV.
+    const bool already_in_peak   = isAdmittedWaitingStream(new_stream);
     const auto in_flight_streams = admission_peak_state_->streams.size();
-    if (in_flight_streams + 1 > max_generate_batch_size_) {
+    if (!already_in_peak && in_flight_streams + 1 > max_generate_batch_size_) {
         return false;
     }
 
     size_t max_token_size = static_cast<size_t>(new_stream->contextLength());
     if (streams.empty() && max_token_size < max_seq_len_) {
-        return tryAdmitKVForPrefill(new_stream);
+        return already_in_peak || tryAdmitKVForPrefill(new_stream);
     }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, static_cast<size_t>(stream->contextLength()));
     }
     return max_token_size * (streams.size() + 1) < max_batch_tokens_size_
-           && tryAdmitKVForPrefill(new_stream);
+           && (already_in_peak || tryAdmitKVForPrefill(new_stream));
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
@@ -225,9 +229,9 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
             const size_t prev_waiting_size = waiting_streams_.size();
             // Build once for this in-flight snapshot, then update for accepted candidates.
             admission_peak_state_.reset();
-            evaluateWaitingStreams(waiting_streams_);
+            const auto admitted_streams = evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
             admission_peak_state_.reset();
-            made_progress |= evaluateAndUpdateStreams(waiting_streams_) > 0;
+            made_progress |= evaluateAndUpdateStreams(waiting_streams_, &admitted_streams) > 0;
             if (waiting_streams_.size() < prev_waiting_size) {
                 schedule_trigger_ = true;
             }
@@ -371,7 +375,7 @@ bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
     const bool classified = !new_streams_.empty();
     for (auto it = new_streams_.begin(); it != new_streams_.end();) {
         const auto& stream = *it;
-        stream->checkTimeout();
+        stream->checkTimeoutAndHasError();
 
         const auto state    = stream->getStatus();
         const bool terminal = stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone);

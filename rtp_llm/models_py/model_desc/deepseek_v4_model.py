@@ -37,7 +37,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.dsv4.specs import forward_capabilities, validate_forward_phase
@@ -307,6 +310,7 @@ def _args_from_model_config(
         o_groups=attn_config.o_groups,
         o_lora_rank=attn_config.o_lora_rank,
         window_size=attn_config.sliding_window,
+        kernel_tokens_per_block=attn_config.kernel_tokens_per_block,
         compress_ratios=list(attn_config.layer_compress_ratios)[
             : model_config.num_layers
         ],
@@ -554,6 +558,21 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states.mean(dim=-2)
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Prefill forward owns HC reduction and final normalization.
+        return hidden_states
 
     def get_execution_capabilities(self):
         capabilities = {"graph_requires_kv_cache_layout": True}
@@ -970,11 +989,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from rtp_llm.models_py.modules.dsv4.fp8._flash_mla_backend import (
-                    get_flash_mla_sparse_fwd,
+                from rtp_llm.models_py.utils.flash_mla_legacy import (
+                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
                 )
-
-                _flash_mla_sparse_fwd = get_flash_mla_sparse_fwd()
 
                 _swa_attn = self.v4.layers[0].attn
                 _H_swa = int(_swa_attn.n_heads)
@@ -1537,6 +1554,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
+                capture_context=self.capture_context(inputs.capture_hidden_states),
             )
         else:
             return forward_decode(
