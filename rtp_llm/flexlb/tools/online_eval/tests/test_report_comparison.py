@@ -216,7 +216,7 @@ class ReportComparisonTest(unittest.TestCase):
         paths, expected = [], []
         for name, hit in (('a', .1), ('b', .8)):
             e = cache_fixtures.CacheGateTest().evidence(hit)
-            e['events'] = [dict(id='checkpoint', name='checkpoint', epoch_s=1020, t=20)]
+            e['events'].append(dict(id='checkpoint', name='checkpoint', epoch_s=1020, t=20))
             result = analyze_cache(e)
             expected.append(result)
             root = self.root/name
