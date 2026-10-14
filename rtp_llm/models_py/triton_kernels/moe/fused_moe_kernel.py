@@ -439,20 +439,6 @@ moe_align_block_size_compiled = torch.compile(
 _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] = {
     # w1 GEMM: A [M, hidden] x B [E, 2*inter, hidden] -> [M*top_k, 2*inter]
     (256, 1024, 2048, 8): [
-        # tokens=599 (avg 18.7) head bucket: BM32 measured 6-round all-rounds
-        # win vs BM16 (gemm1 495->473us, gemm2 260->231us, bit-identical; see
-        # runs/minicpmv47_h20_20261013/build_logs/bench_bm32_ab.json cells 4-5).
-        (
-            20.0,
-            {
-                "BLOCK_SIZE_M": 32,
-                "BLOCK_SIZE_N": 128,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 1,
-                "num_warps": 8,
-                "num_stages": 4,
-            },
-        ),
         (
             0.05,
             {
@@ -475,7 +461,22 @@ _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dic
                 "num_stages": 3,
             },
         ),
+                # tokens=599 (avg 18.7) bucket between 16 and 24: BM32 measured 6-round
+        # all-rounds win vs BM16 (gemm1 495->473us, gemm2 260->231us,
+        # bit-identical; see bench_bm32_ab.json cells 4-5). Bucket order is
+        # first-match ascending; this entry must stay between 16.0 and 24.0.
         (
+            20.0,
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 8,
+                "num_stages": 4,
+            },
+        ),
+(
             24.0,
             {
                 "BLOCK_SIZE_M": 16,
@@ -500,18 +501,6 @@ _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dic
     ],
     # w2 GEMM: A [M*top_k, inter] x B [E, hidden, inter] -> [M*top_k, hidden]
     (256, 2048, 512, 8): [
-        # tokens=599 (avg 18.7) BM32 head bucket, same evidence as the w1 twin.
-        (
-            20.0,
-            {
-                "BLOCK_SIZE_M": 32,
-                "BLOCK_SIZE_N": 128,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 1,
-                "num_warps": 4,
-                "num_stages": 3,
-            },
-        ),
         (
             0.05,
             {
@@ -534,7 +523,19 @@ _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dic
                 "num_stages": 3,
             },
         ),
+                # tokens=599 (avg 18.7) BM32 bucket, same evidence as the w1 twin.
         (
+            20.0,
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+(
             24.0,
             {
                 "BLOCK_SIZE_M": 16,

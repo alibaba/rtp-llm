@@ -27,3 +27,11 @@ py_test (
     exec_properties = {"gpu": "L20_CU13"},
 )
 
+
+py_test (
+    name = "triton_fused_executor_test",
+    srcs = ["triton_fused_executor_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
