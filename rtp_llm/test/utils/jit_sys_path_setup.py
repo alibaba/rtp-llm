@@ -275,12 +275,19 @@ def _flashinfer_op_is_stale(op_dir: Path) -> bool:
         rules = rules_path.read_text(errors="ignore")
     except OSError:
         return False
-    # FlashInfer embeds the absolute include paths of the package instance that
-    # generated the rules (both -I and -isystem forms). A bazel action's runfiles
-    # tree only lives for that action, so rules anchored there dangle for every
-    # later consumer of the shared workspace -- whether or not the tree still
-    # exists at eviction time -- and only rules anchored to stable locations
-    # (package-copy cache, toolkit dirs) are safe to keep.
+    # FlashInfer embeds the absolute paths of the package instance that
+    # generated the rules -- include flags, compile inputs, depfiles and the
+    # module source list alike. A bazel action's runfiles tree only lives for
+    # that action, so rules anchored there dangle for every later consumer of
+    # the shared workspace -- whether or not the tree still exists at eviction
+    # time -- and only rules anchored to stable locations (package-copy cache,
+    # toolkit dirs) are safe to keep.
+    # Scanning only the -I/-isystem flags misses ops whose includes point at
+    # the stable package-copy cache while the compile inputs anchor into a dead
+    # per-action runfiles tree (ninja then fails on the missing input file).
+    # Treat any .runfiles-anchored path anywhere in the rules as stale.
+    if re.search(r"/[^/\s]+\.runfiles(/|$|\s)", rules):
+        return True
     include_paths = re.findall(r"(?:-I|-isystem\s+)(/\S+)", rules)
     if any(".runfiles" in path for path in include_paths):
         return True
