@@ -85,11 +85,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long latestFinishedTaskVersion = workerStatus.appliedStatusCursor()
                     .latestFinishedTaskVersion();
 
+            pollLease.statusRpcStarted(syncRequestTimeoutMs);
             engineGrpcService.getWorkerStatusAsync(
                             ip, grpcPort, latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)
                     .thenApply(response -> EngineStatusConverter
                             .convertToStatusObservation(workerStatus, response))
+                    .whenComplete((observation, failure) ->
+                            pollLease.statusRpcCompleted(failure == null
+                                    && observation != null && observation.alive()
+                                    && observation.role() == roleType
+                                    && observation.statusVersion() != null
+                                    && observation.statusVersion() > 0L
+                                    && observation.statusVersion() >= workerStatus
+                                            .appliedStatusCursor().statusVersion()))
                     .handleAsync((observation, failure) -> {
                         try {
                             Throwable cause = unwrapCompletionFailure(failure);

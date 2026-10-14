@@ -39,6 +39,7 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private final ExecutorService cacheStatusExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -59,11 +60,13 @@ public class EngineSyncRunner implements Runnable {
     private final boolean cacheFullSnapshotDebugMode;
 
     private final long statusStaleAfterUs;
+    private final long statusCommitGraceUs;
 
     public EngineSyncRunner(String modelName,
                             WorkerDirectory workerDirectory,
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
+                            ExecutorService cacheStatusExecutor,
                             EngineHealthReporter engineHealthReporter,
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
@@ -73,13 +76,15 @@ public class EngineSyncRunner implements Runnable {
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
                             boolean cacheFullSnapshotDebugMode,
-                            long statusStaleAfterUs) {
+                            long statusStaleAfterUs,
+                            long statusCommitGraceUs) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.cacheStatusExecutor = Objects.requireNonNull(cacheStatusExecutor, "cacheStatusExecutor");
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
@@ -96,6 +101,10 @@ public class EngineSyncRunner implements Runnable {
                     "statusStaleAfterUs must be positive");
         }
         this.statusStaleAfterUs = statusStaleAfterUs;
+        if (statusCommitGraceUs <= 0L) {
+            throw new IllegalArgumentException("statusCommitGraceUs must be positive");
+        }
+        this.statusCommitGraceUs = statusCommitGraceUs;
     }
 
     @Override
@@ -189,8 +198,8 @@ public class EngineSyncRunner implements Runnable {
                                 engineHealthReporter, engineGrpcService,
                                 cacheAwareService, cacheIntervalService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                cacheFullSnapshotDebugMode, statusCheckExecutor);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                                cacheFullSnapshotDebugMode, cacheStatusExecutor);
+                        cacheStatusExecutor.submit(grpcCacheStatusCheckRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
                         logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
@@ -391,7 +400,9 @@ public class EngineSyncRunner implements Runnable {
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
             if (System.nanoTime() / 1000
                     - health.lastSuccessfulPollUs()
-                    <= statusStaleAfterUs) {
+                    <= statusStaleAfterUs
+                    || workerStatus.isStatusPollProtected(
+                            System.nanoTime() / 1000, statusCommitGraceUs)) {
                 return;
             }
 

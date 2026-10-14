@@ -40,6 +40,9 @@ public class WorkerStatus {
     /** Serializes lifecycle transitions for this generation. */
     public final transient ReentrantLock lock = new ReentrantLock();
 
+    /** Serializes address-scoped cache writes and final cleanup. Acquire before lock. */
+    public final transient ReentrantLock cacheMutationLock = new ReentrantLock();
+
     private final long generationId = NEXT_GENERATION_ID.incrementAndGet();
 
     /** Set under {@link #lock}; read lock-free by poll gates. */
@@ -285,6 +288,21 @@ public class WorkerStatus {
         private final WorkerStatus owner;
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
+        private volatile StatusPollProgress statusProgress;
+
+        /** Called when the RPC actually starts, never while merely queued. */
+        public void statusRpcStarted(long timeoutMs) {
+            owner.requireStatusPollLease(this);
+            statusProgress = new StatusPollProgress(
+                    System.nanoTime() / 1000, timeoutMs * 1000L, false);
+        }
+
+        /** Transport completion does not depend on the callback executor or Worker lock. */
+        public void statusRpcCompleted(boolean validAliveResponse) {
+            statusProgress = validAliveResponse
+                    ? new StatusPollProgress(System.nanoTime() / 1000, 0L, true)
+                    : null;
+        }
 
         private PollLease(
                 WorkerStatus owner,
@@ -299,6 +317,20 @@ public class WorkerStatus {
         public void close() {
             slot.compareAndSet(this, null);
         }
+    }
+
+    private record StatusPollProgress(long sinceUs, long rpcTimeoutUs, boolean awaitingCommit) { }
+
+    /** Bounded transport/local-commit grace; this never refreshes scheduling capacity. */
+    public boolean isStatusPollProtected(long nowUs, long commitGraceUs) {
+        PollLease lease = statusPollLease.get();
+        StatusPollProgress progress = lease == null ? null : lease.statusProgress;
+        if (progress == null || retiring) {
+            return false;
+        }
+        long budgetUs = progress.awaitingCommit() ? commitGraceUs : progress.rpcTimeoutUs();
+        long ageUs = nowUs - progress.sinceUs();
+        return ageUs >= 0L && ageUs <= budgetUs;
     }
 
     private WorkerStatus(

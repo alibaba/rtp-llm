@@ -177,35 +177,48 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             long successfulIntervalUs;
-            workerStatus.lock.lock();
+            // Cache work may wait on the global index. Never hold the health/lifecycle
+            // lock while waiting, calculating diffs, or mutating that index.
+            workerStatus.cacheMutationLock.lock();
             try {
-                if (!workerDirectory.isCurrentStatus(
-                        roleType, ipPort, workerStatus)
-                        || !workerStatus.isActiveGeneration()) {
-                    logger.debug(
-                            "Ignore stale cache callback for {}#{}, role:{}",
-                            ipPort, generationId, roleType);
-                    return;
-                }
-                if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
-                    workerStatus.publishCacheStatus(newCacheStatus);
-                    if (roleType.requiresCacheKeys()) {
-                        // CacheAwareService is keyed by address, not generation.
-                        // Keep the generation lock through this in-memory index
-                        // update so retirement cannot publish a replacement or
-                        // clear the address between validation and publication.
-                        WorkerCacheUpdateResult updateResult = updateLocalKvCache();
-                        if (updateResult != null && updateResult.isSuccess()) {
-                            workerStatus.publishCacheIndexedVersion(
-                                    newCacheStatus.getVersion());
-                        }
+                boolean updateRequired;
+                workerStatus.lock.lock();
+                try {
+                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                            || !workerStatus.isActiveGeneration()) {
+                        return;
                     }
+                    updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
+                    if (updateRequired) {
+                        workerStatus.publishCacheStatus(newCacheStatus);
+                    }
+                } finally {
+                    workerStatus.lock.unlock();
+                }
+
+                WorkerCacheUpdateResult result = updateRequired && roleType.requiresCacheKeys()
+                        ? updateLocalKvCache() : null;
+
+                workerStatus.lock.lock();
+                try {
+                    // Retirement can start during the update; its final cleanup waits
+                    // on cacheMutationLock before removing this address identity.
+                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                            || !workerStatus.isActiveGeneration()) {
+                        return;
+                    }
+                    if (result != null && result.isSuccess()) {
+                        workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
+                    }
+                    successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
+                } finally {
+                    workerStatus.lock.unlock();
+                }
+                if (updateRequired) {
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 }
-                successfulIntervalUs =
-                        workerStatus.recordSuccessfulCachePoll();
             } finally {
-                workerStatus.lock.unlock();
+                workerStatus.cacheMutationLock.unlock();
             }
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(

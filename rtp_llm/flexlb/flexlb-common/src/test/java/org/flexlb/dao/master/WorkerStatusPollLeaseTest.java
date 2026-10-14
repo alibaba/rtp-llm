@@ -48,6 +48,30 @@ class WorkerStatusPollLeaseTest {
         assertTrue(status.recordSuccessfulCachePoll() > 0L);
     }
 
+    @Test
+    void rpcAndCommitProtectionAreBoundedAndLeaseFenced() {
+        WorkerStatus status = workerStatus();
+        WorkerStatus.PollLease first = status.tryBeginStatusPoll();
+        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L),
+                "queued polls do not prove transport health");
+        first.statusRpcStarted(5000);
+        long now = System.nanoTime() / 1000;
+        assertTrue(status.isStatusPollProtected(now, 60_000_000L));
+        assertTrue(!status.isStatusPollProtected(now + 5_001_000L, 60_000_000L));
+        first.statusRpcCompleted(true);
+        now = System.nanoTime() / 1000;
+        assertTrue(status.isStatusPollProtected(now, 60_000_000L));
+        assertTrue(!status.isStatusPollProtected(now + 60_001_000L, 60_000_000L));
+        first.statusRpcCompleted(false);
+        assertTrue(!status.isStatusPollProtected(now, 60_000_000L));
+        first.close();
+        WorkerStatus.PollLease second = status.tryBeginStatusPoll();
+        first.statusRpcCompleted(true);
+        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L),
+                "late old completions cannot protect the next poll");
+        second.close();
+    }
+
     private static WorkerStatus workerStatus() {
         return WorkerStatus.createDiscovered(
                 RoleType.PREFILL, null, "127.0.0.1",

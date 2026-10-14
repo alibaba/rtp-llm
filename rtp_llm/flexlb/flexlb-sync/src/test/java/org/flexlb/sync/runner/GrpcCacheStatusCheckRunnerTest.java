@@ -40,6 +40,59 @@ class GrpcCacheStatusCheckRunnerTest {
             Mockito.mock(DynamicCacheIntervalService.class);
 
     @Test
+    void cacheUpdateDoesNotHoldHealthLockAndRetirementWaitsForCacheWriter() throws Exception {
+        WorkerStatus status = workerStatus();
+        WorkerDirectory directory = directory(status);
+        java.util.concurrent.CountDownLatch updating = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(
+                        EngineRpcService.CacheStatusPB.newBuilder().setVersion(1).build()));
+        when(localKvCacheAwareManager.updateEngineBlockCache(status)).thenAnswer(call -> {
+            org.junit.jupiter.api.Assertions.assertFalse(status.lock.isHeldByCurrentThread());
+            org.junit.jupiter.api.Assertions.assertTrue(status.cacheMutationLock.isHeldByCurrentThread());
+            updating.countDown();
+            org.junit.jupiter.api.Assertions.assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            return WorkerCacheUpdateResult.builder().success(true).cacheVersion(1).build();
+        });
+        java.util.concurrent.ExecutorService threads = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Future<?> update = threads.submit(() ->
+                    new GrpcCacheStatusCheckRunner("test-model", status.getIpPort(), "test-site",
+                            RoleType.PREFILL, status, status.tryBeginCachePoll(), directory,
+                            engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                            cacheIntervalService, 5000, new LongAdder(), 20L, true, Runnable::run).run());
+            org.junit.jupiter.api.Assertions.assertTrue(updating.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            org.junit.jupiter.api.Assertions.assertTrue(status.lock.tryLock(1, java.util.concurrent.TimeUnit.SECONDS));
+            org.flexlb.balance.endpoint.EndpointRegistry.DetachedGeneration detached;
+            try {
+                status.recordSuccessfulPoll(true);
+                detached = directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status);
+            } finally {
+                status.lock.unlock();
+            }
+            java.util.concurrent.Future<?> retiring = threads.submit(() -> directory.completeRetirement(
+                    RoleType.PREFILL, status.getIpPort(), status, detached, localKvCacheAwareManager,
+                    org.slf4j.LoggerFactory.getLogger(getClass())));
+            org.junit.jupiter.api.Assertions.assertSame(status,
+                    directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                        throw new AssertionError("replacement published before old cache writer drained");
+                    }));
+            release.countDown();
+            update.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            retiring.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            verify(localKvCacheAwareManager).removeEngineBlockCache(status.getIpPort());
+            org.junit.jupiter.api.Assertions.assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
+            org.junit.jupiter.api.Assertions.assertEquals(-1L, status.getCacheIndexedVersion(),
+                    "retiring callback cannot commit its index version");
+        } finally {
+            release.countDown();
+            threads.shutdownNow();
+        }
+    }
+
+    @Test
     void decodeCacheResponseUpdatesCapacityWithoutBuildingDetailedIndex() {
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");

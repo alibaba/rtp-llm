@@ -189,35 +189,38 @@ public final class WorkerDirectory {
             CacheAwareService cacheAwareService,
             Logger logger) {
         Map<String, WorkerStatus> statuses = statusesByRole.get(role);
-        status.lock.lock();
+        // The status identity stays RETIRING until all cache writers and cleanup
+        // finish. A replacement cannot share the address-scoped index meanwhile.
+        status.cacheMutationLock.lock();
         try {
-            status.requireRetiringGeneration();
-            if (statuses.get(address) != status) {
-                logger.error(
-                        "Status identity changed before retirement finalized for {}#{}",
-                        address, status.getGenerationId());
-                return;
+            status.lock.lock();
+            try {
+                status.requireRetiringGeneration();
+                if (statuses.get(address) != status) {
+                    return;
+                }
+            } finally {
+                status.lock.unlock();
             }
             try {
                 if (role.requiresCacheKeys()) {
                     cacheAwareService.removeEngineBlockCache(address);
                 }
             } catch (Throwable cacheCleanupFailure) {
-                logger.error(
-                        "Cache cleanup failed while retiring generation {} for {}",
+                logger.error("Cache cleanup failed while retiring generation {} for {}",
                         status.getGenerationId(), address, cacheCleanupFailure);
             }
-            if (!statuses.remove(address, status)) {
-                logger.error(
-                        "Exact status removal failed while its generation lock was held for {}#{}",
-                        address, status.getGenerationId());
+            status.lock.lock();
+            try {
+                if (!statuses.remove(address, status)) {
+                    logger.error("Exact status removal failed for {}#{}",
+                            address, status.getGenerationId());
+                }
+            } finally {
+                status.lock.unlock();
             }
-        } catch (Throwable finalizationFailure) {
-            logger.error(
-                    "Status retirement finalization failed for {}#{}",
-                    address, status.getGenerationId(), finalizationFailure);
         } finally {
-            status.lock.unlock();
+            status.cacheMutationLock.unlock();
         }
     }
 
