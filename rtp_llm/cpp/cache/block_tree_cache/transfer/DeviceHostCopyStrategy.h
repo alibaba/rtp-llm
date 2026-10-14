@@ -13,6 +13,7 @@
 namespace rtp_llm {
 
 struct StagedMemoryCopyScratch;
+class GroupSet;
 
 // --- Copy Plan types ---
 
@@ -59,6 +60,17 @@ public:
     virtual StrategyResult tryExecute(const DeviceHostCopyPlan&             plan,
                                       const DeviceHostCopyOptions&          options,
                                       const DeviceHostCopyExecutionContext& context)                        = 0;
+};
+
+class Cuda3DBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
+public:
+    // The template path consumes the original batch, never a tile plan.
+    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
+        return StrategyResult::notApplicable();
+    }
+    virtual StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
+                                      const std::vector<TransferDescriptor>& descriptors,
+                                      const std::vector<const GroupSet*>&    group_sets);
 };
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
