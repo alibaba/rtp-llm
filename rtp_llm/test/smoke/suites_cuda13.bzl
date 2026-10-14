@@ -149,6 +149,20 @@ def cuda13_suites():
                 envs=["DG_JIT_CPP_STANDARD=20"],
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
+            # MiniCPM-V-4.7-1B (dense multimodal): family portability case so
+            # the SM103/B300 lane covers the model's ViT + hybrid LINEAR-cache
+            # path; the H20 lane keeps the full family.  The staged shared
+            # checkpoint keeps the case worker-portable.  The golden starts as
+            # a copy of the H20 1B golden — SM103 numerics may flip the text
+            # query's 0.125-margin greedy tie, in which case the CI golden
+            # update re-pins only this arch file.
+            smoke_test(
+                name="minicpmv4_7_1b_sm103",
+                task_info="data/model/minicpmv47/q_r_1b_sm103.json",
+                smoke_args="--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
+                gpu_type=[cuda13_x86_test_gpu()],
+                data=native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
         ],
         tags = ["manual"],
     )

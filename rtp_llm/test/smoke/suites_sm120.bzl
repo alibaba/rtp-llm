@@ -54,6 +54,20 @@ def sm120_suites():
                 deps = ["//rtp_llm:transformers"],
                 gpu_type = ["RTX_5000_PRO_CU13"],
             ),
+            # MiniCPM-V-4.7-1B (dense multimodal): family portability case so
+            # the sm12x lane covers the model's ViT + hybrid LINEAR-cache path
+            # on Blackwell SM120; the H20 lane keeps the full family.  The
+            # staged shared checkpoint keeps the case worker-portable.  The
+            # golden starts as a copy of the H20 1B golden — SM120 numerics
+            # may flip the text query's 0.125-margin greedy tie, in which case
+            # the CI golden update re-pins only this arch file.
+            smoke_test(
+                name = "minicpmv4_7_1b_sm120",
+                task_info = "data/model/minicpmv47/q_r_1b_sm120.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
         ],
     )
 
