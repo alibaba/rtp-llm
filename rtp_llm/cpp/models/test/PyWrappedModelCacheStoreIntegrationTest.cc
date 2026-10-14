@@ -1062,11 +1062,11 @@ py::list runTpSyncModelInputsScenario(int64_t                                   
 
 py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              const std::string& scenario_name,
-                                             bool               enable_graph,
                                              size_t             forward_count,
                                              bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
-                                             bool               skip_first_deferred_error_take) {
+                                             bool               skip_first_deferred_error_take,
+                                             bool               enable_graph) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -1573,11 +1573,11 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
           py::arg("scenario_name"),
-          py::arg("enable_graph")                  = false,
           py::arg("forward_count")                  = 1,
           py::arg("ignore_deferred_errors")         = false,
           py::arg("capture_only_first_forward")     = false,
-          py::arg("skip_first_deferred_error_take") = false);
+          py::arg("skip_first_deferred_error_take") = false,
+          py::arg("enable_graph")                   = false);
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));
