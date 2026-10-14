@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -11,6 +12,7 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -266,6 +268,79 @@ void CoordinatorCacheManager::attachBlockTreeCache(BlockTreeCachePtr block_tree_
 
 bool CoordinatorCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
+}
+
+bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
+                                                      int                            device_ready_reuse_length) {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    RTP_LLM_CHECK(resource != nullptr && device_ready_reuse_length >= 0);
+
+    const auto groups    = cacheGroups();
+    using BlockLocations = std::map<BlockIdxType, std::vector<std::pair<BlockIds*, size_t>>>;
+    std::vector<BlockLocations>            block_locations(groups.size());
+    std::vector<BlockIndicesType>          allocated_blocks(groups.size());
+    block_tree_cache_detail::ScopeRollback rollback([&] {
+        for (size_t i = 0; i < groups.size(); ++i) {
+            groups[i]->blockPool()->decRef(allocated_blocks[i]);
+        }
+    });
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const auto&  group              = groups[i];
+        const auto&  pool               = group->blockPool();
+        auto&        locations          = block_locations[i];
+        const auto&  tag                = group->tag();
+        const int    local_reuse_length = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+        const size_t recompute_begin    = local_reuse_length / group->seqSizePerBlock();
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            auto&       ids    = resource->mutableBlockIds(batch, tag);
+            const auto& blocks = ids.blocks();
+            for (size_t pos = recompute_begin; pos < blocks.size(); ++pos) {
+                if (!isNullBlockIdx(blocks[pos])) {
+                    locations[blocks[pos]].emplace_back(&ids, pos);
+                }
+            }
+        }
+        for (auto it = locations.begin(); it != locations.end();) {
+            // Device refCount includes request references and a marker for tree ownership.
+            // This also catches failed load targets still held by joined requests.
+            if (pool->refCount(it->first) <= it->second.size()) {
+                it = locations.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (locations.empty()) {
+            continue;
+        }
+        if (!group->ensureFreeBlocks(locations.size() + reserveBlocksForPoolMetrics(i))) {
+            return false;
+        }
+        auto new_blocks = pool->malloc(locations.size());
+        if (!new_blocks) {
+            return false;
+        }
+        pool->incRef(*new_blocks);
+        allocated_blocks[i] = std::move(*new_blocks);
+    }
+    // Reserve every replacement before changing any table. No copy is needed: all
+    // tokens in these blocks will be recomputed from the device-ready prefix.
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+        const auto& pool  = groups[group_index]->blockPool();
+        size_t      index = 0;
+        for (const auto& [old_block, locations] : block_locations[group_index]) {
+            const auto new_block = allocated_blocks[group_index][index++];
+            for (size_t i = 0; i < locations.size(); ++i) {
+                if (i != 0) {
+                    pool->incRef(new_block);
+                }
+                const auto& [ids, pos] = locations[i];
+                ids->setAt(pos, new_block);
+                pool->decRef(old_block);
+            }
+        }
+    }
+    rollback.dismiss();
+    return true;
 }
 
 uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
