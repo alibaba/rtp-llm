@@ -31,6 +31,7 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _write_test_info,
     parse_args,
 )
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import load_profile
 from rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner import (
     CacheGridRunner,
     MaterializedCaseStore,
@@ -954,11 +955,11 @@ class BatchDecodeTest(unittest.TestCase):
             ):
                 _ensure_batch_decode_scheduler(["--use_batch_decode_scheduler", value])
 
-    def test_dsv4_profile_injects_model_identity_and_paths(self):
+    def test_dsv4_example_injects_model_identity_paths_and_launch_config(self):
         profile = (
-            Path(__file__).parent / "cache_grid" / "config" / "dsv4_pro_prefill.json"
+            Path(__file__).parent / "cache_grid" / "config" / "dsv4_local.example.jsonc"
         )
-        payload = json.loads(profile.read_text())
+        payload = load_profile(profile)
         engine = payload["engine"]
         cache_grid = payload["cache_grid"]
         _, remaining = parse_args(["--profile", str(profile)])
@@ -978,6 +979,9 @@ class BatchDecodeTest(unittest.TestCase):
         visible_block_size = engine["seq_size_per_block"] * engine["tp_size"]
         self.assertEqual(cache_grid["cache_alignment"], visible_block_size)
         self.assertEqual(cache_grid["commit_tail_tokens"], visible_block_size)
+        self.assertTrue(payload["engine_env"])
+        self.assertTrue(payload["runtime_env"])
+        self.assertEqual(payload["bazel"]["configs"], ["cuda13"])
 
     def test_redact_argv_hides_embedded_engine_secret(self):
         self.assertEqual(

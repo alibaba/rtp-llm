@@ -72,7 +72,7 @@
   "bazel": {
     // 仅 tools/cache_perf 使用；不是转发给模型的参数。
     "executable": "bazelisk",
-    "configs": ["cuda13", "sm10x"],
+    "configs": ["cuda13"],
     // 可选：本机 Bazel 输出目录；也可删除此项使用 Bazel 默认值, 默认在～/.cache/bazel下，home盘空间不足时更改
     "output_base": "/path/to/cache_grid_bazel_output",
     "test_timeout": 345600

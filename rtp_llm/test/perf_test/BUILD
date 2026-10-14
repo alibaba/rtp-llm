@@ -1,11 +1,21 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
 # across packages.
 exports_files([
+    "requirements_plotly_lock.txt",
     "test_entry.py",
 ])
+
+compile_pip_requirements(
+    name = "requirements_plotly",
+    src = "requirements_plotly.txt",
+    requirements_txt = "requirements_plotly_lock.txt",
+    tags = ["manual"],
+)
 
 py_library(
     name = "perf_test_lib",
@@ -39,6 +49,7 @@ py_library(
         "//rtp_llm:testlib",
         "//rtp_llm/test/utils:maga_server_manager",
         "//rtp_llm/test/utils:device_resource",
+        "@pip_cache_grid_plotly_plotly//:pkg",
     ],
     visibility = ["//visibility:public"],
 )
@@ -46,7 +57,7 @@ py_library(
 py_test(
     name = "batch_decode_test_test",
     srcs = ["batch_decode_test_test.py"],
-    data = ["cache_grid/config/dsv4_pro_prefill.json"],
+    data = ["cache_grid/config/dsv4_local.example.jsonc"],
     deps = [
         ":perf_test_lib",
     ],

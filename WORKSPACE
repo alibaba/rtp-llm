@@ -78,6 +78,18 @@ pip_parse(
 load("@pip_dsv4_test//:requirements.bzl", pip_dsv4_test_install_deps = "install_deps")
 pip_dsv4_test_install_deps()
 
+# Platform-independent chart dependency for cache-grid tools and tests.
+pip_parse(
+    name = "pip_cache_grid_plotly",
+    requirements_lock = "//rtp_llm/test/perf_test:requirements_plotly_lock.txt",
+    python_interpreter = "/opt/conda310/bin/python3",
+    extra_pip_args = ["--extra-index-url=https://mirrors.aliyun.com/pypi/simple/"],
+    timeout = 3600,
+)
+
+load("@pip_cache_grid_plotly//:requirements.bzl", pip_cache_grid_plotly_install_deps = "install_deps")
+pip_cache_grid_plotly_install_deps()
+
 load("@pip_cpu_torch//:requirements.bzl", pip_cpu_torch_install_deps = "install_deps")
 pip_cpu_torch_install_deps()
 

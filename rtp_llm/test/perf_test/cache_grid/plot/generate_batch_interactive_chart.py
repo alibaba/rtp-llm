@@ -91,7 +91,12 @@ def analyze_results(data):
 
 
 def render_html(rows, partial=False, model_label="Model"):
-    from plotly.offline import get_plotlyjs
+    try:
+        from plotly.offline import get_plotlyjs
+    except ModuleNotFoundError as error:
+        raise SystemExit(
+            "Plotly is required. Install the repository Python dependencies first."
+        ) from error
 
     page = r"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <title>__MODEL__ batch / cache / compute / server first-token latency</title>
