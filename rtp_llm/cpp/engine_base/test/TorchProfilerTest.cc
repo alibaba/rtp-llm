@@ -13,6 +13,13 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 
 namespace rtp_llm {
+
+struct TorchProfileTestPeer {
+    static void useCpuActivities(TorchProfile& profile) {
+        profile.activities_ = {tpi::ActivityType::CPU};
+    }
+};
+
 namespace {
 
 namespace tap = torch::autograd::profiler;
@@ -128,6 +135,67 @@ TEST(TorchProfilerTest, DisableFailureIsNonFatal) {
 
 TEST(TorchProfilerTest, UnknownDisableFailureIsNonFatal) {
     EXPECT_EQ(detail::tryDisableProfiler(&throwUnknownProfilerError), nullptr);
+}
+
+TEST(TorchProfilerTest, DrainCompletesBeforeProfilerIsDisabled) {
+    static bool drained;
+    drained      = false;
+    auto disable = +[]() {
+        EXPECT_TRUE(drained);
+        return returnProfilerResult();
+    };
+    auto result = detail::tryDisableProfiler(disable, [] { drained = true; });
+    EXPECT_TRUE(drained);
+    EXPECT_NE(result, nullptr);
+}
+
+TEST(TorchProfilerTest, DrainFailureStillDisablesOnceAndDropsIncompleteTrace) {
+    static int disable_calls;
+    disable_calls = 0;
+    auto disable  = +[]() {
+        ++disable_calls;
+        return returnProfilerResult();
+    };
+    auto result = detail::tryDisableProfiler(disable, [] { throw std::runtime_error("synthetic device failure"); });
+    EXPECT_EQ(disable_calls, 1);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(TorchProfilerTest, UnknownDrainFailureStillDisablesOnce) {
+    static int disable_calls;
+    disable_calls = 0;
+    auto disable  = +[]() {
+        ++disable_calls;
+        return returnProfilerResult();
+    };
+    EXPECT_EQ(detail::tryDisableProfiler(disable, [] { throw 1; }), nullptr);
+    EXPECT_EQ(disable_calls, 1);
+}
+
+TEST(TorchProfilerTest, CpuStopRecordsTeardownAndIsIdempotent) {
+    TorchProfile profile("teardown_test_");
+    TorchProfileTestPeer::useCpuActivities(profile);
+    profile.start();
+    auto [result, name] = profile.stopAndCollect();
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(name.empty());
+    size_t teardown_events = 0;
+    for (const auto& event : result->events()) {
+        teardown_events += event.name() == "profiler.teardown(device_drain)";
+    }
+    EXPECT_EQ(teardown_events, 1);
+    auto [second_result, second_name] = profile.stopAndCollect();
+    EXPECT_EQ(second_result, nullptr);
+    EXPECT_TRUE(second_name.empty());
+}
+
+TEST(TorchProfilerTest, DestructorDoesNotThrowWhenTraceCannotBeSaved) {
+    EXPECT_NO_THROW({
+        // /dev/null is a file, so no trace file can be created beneath it.
+        TorchProfile profile("teardown_test_", "/dev/null/not_a_directory");
+        TorchProfileTestPeer::useCpuActivities(profile);
+        profile.start();
+    });
 }
 
 TEST(TorchProfilerTest, RealDuplicateFlowDoesNotEscapeWrapper) {
