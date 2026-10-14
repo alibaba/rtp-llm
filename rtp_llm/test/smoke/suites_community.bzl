@@ -67,7 +67,13 @@ def community_vl_sm120_suites():
         tests = [
             smoke_test(
                 name = "qwen3_vl_sm120",
-                task_info = "data/model/qwen_vl/q_r_3.json",
+                # per-pool golden (repo convention, cf. q_r_1_7b_bf16_sm120):
+                # the sm120+flash_attn ViT path diverges from the H20-recorded
+                # golden at a near-tie (token 89 of 100; "sitting" vs "sits
+                # attentively" - coherent same-image description, run
+                # 79773827). The E2E path itself is validated by that run
+                # (2752 image tokens embedded, 100 tokens generated).
+                task_info = "data/model/qwen_vl/q_r_3_sm120.json",
                 smoke_args = {
                     "llm": "--act_type BF16 --use_local 1 --tp_size 1 --reuse_cache 1",
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
