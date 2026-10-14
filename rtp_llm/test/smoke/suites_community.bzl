@@ -50,6 +50,36 @@ def community_suites():
         ],
     )
 
+def community_vl_sm120_suites():
+    """First VL-on-sm120 validation for the can_use_flash_attn gate.
+
+    The gate now admits sm12x with flash-attn >= 2.8.4 (commit 7d413a87cf);
+    its real consumers are the qwen_vl-family ViTs, which no sm120-pool
+    smoke covers (merge-gate sm12x suites are dense/MoE/BERT only). This
+    case closes that gap: Qwen3-VL-4B, single RTX PRO GPU, the stock
+    separated llm/vit roles so the ViT server runs the flash_attn path on
+    real images. Golden comparison against the recorded query_result stays
+    exact - a token diff here is the numeric-divergence signal the
+    round-6 review asked to surface, not noise to silence.
+    """
+    native.test_suite(
+        name = "smoke_community_vl_sm120",
+        tests = [
+            smoke_test(
+                name = "qwen3_vl_sm120",
+                task_info = "data/model/qwen_vl/q_r_3.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 1 --reuse_cache 1",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
+                },
+                gpu_type = ["RTX_5000_PRO_CU13"],
+                tags = ["manual"],
+                data = native.glob(["data/model/llava/*.jpg"]),
+            ),
+        ],
+    )
+
+
 def community_measurement_suites():
     """Arch-variant reuse entries for first validation on sm103/sm12x.
 
