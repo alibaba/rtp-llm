@@ -730,7 +730,10 @@ class CEDPlan:
         if (
             len(groups) != 1
             or not isinstance(host, torch.Tensor)
-            or host.device.type != "cpu"
+            # Only exact CED reads the table values (``host[group_id, 0].tolist()``)
+            # and therefore needs a host-resident tensor. Bounded replay uses the
+            # shape only, so a CUDA table (RTP_LLM_DEVICE_INPUT=1) is fine.
+            or (not bounded_replay and host.device.type != "cpu")
             or host.ndim != 3
             or host.shape[1] != len(lengths)
             or host.shape[0] != len(regions)
