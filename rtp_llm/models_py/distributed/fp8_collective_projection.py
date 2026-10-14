@@ -55,10 +55,18 @@ class Fp8Activation:
 
 
 class Fp8CollectiveProjection:
+
     def __init__(
-        self, group, device, *, max_m: int, hidden_size: int,
-        enable_ag: bool = True, enable_rs: bool = True,
+        self,
+        group,
+        device,
+        *,
+        max_m: int,
+        hidden_size: int,
+        enable_ag: bool = True,
+        enable_rs: bool = True,
         decode_staging: bool = False,
+        decode_workspace=None,
     ):
         self.group = group
         self.device = torch.device(device)
@@ -68,10 +76,25 @@ class Fp8CollectiveProjection:
         self.enable_ag = enable_ag
         self.enable_rs = enable_rs
         self.decode_staging = decode_staging
+        if decode_workspace is not None:
+            if (
+                not decode_staging
+                or decode_workspace.width != self.hidden_size
+                or decode_workspace.max_m != self.max_m
+            ):
+                raise ValueError(
+                    "FP8 projection requires a matching decode TP workspace"
+                )
+            self.enable_ag = enable_ag = (
+                enable_ag and decode_workspace.fp8_ag is not None
+            )
+            self.enable_rs = enable_rs = (
+                enable_rs and decode_workspace.push_rs is not None
+            )
         if self.world_size < 2 or self.max_m % self.world_size:
             raise ValueError("FP8 collective capacity must be divisible by TP size")
-        if self.hidden_size % 512:
-            raise ValueError("FP8 collective hidden size must be 512-aligned")
+        if self.hidden_size % 128:
+            raise ValueError("FP8 collective hidden size must be 128-aligned")
         if enable_ag and not decode_staging and not callable(getattr(symm, "_pipelined_multi_all_gather_and_consume", None)):
             raise RuntimeError("PyTorch FP8 AllGather consumer pipeline unavailable")
         self.custom_ag = None
@@ -79,9 +102,17 @@ class Fp8CollectiveProjection:
             if decode_staging:
                 from rtp_llm.models_py.distributed.custom_all_gather import create_custom_all_gather
 
-                self.custom_ag = create_custom_all_gather(
-                    group, self.device, max_m=self.max_m, k=self.hidden_size,
-                    fp8=True, staging_only=True,
+                self.custom_ag = (
+                    decode_workspace.fp8_ag
+                    if decode_workspace is not None
+                    else create_custom_all_gather(
+                        group,
+                        self.device,
+                        max_m=self.max_m,
+                        k=self.hidden_size,
+                        fp8=True,
+                        staging_only=True,
+                    )
                 )
                 if self.custom_ag is None:
                     raise RuntimeError("Decode FP8 staging AllGather is unavailable")
@@ -98,8 +129,12 @@ class Fp8CollectiveProjection:
             if decode_staging:
                 from rtp_llm.models_py.distributed.push_reduce_scatter import create_push_reduce_scatter
 
-                self.push_rs = create_push_reduce_scatter(
-                    group, self.device, max_m=self.max_m, n=self.hidden_size
+                self.push_rs = (
+                    decode_workspace.push_rs
+                    if decode_workspace is not None
+                    else create_push_reduce_scatter(
+                        group, self.device, max_m=self.max_m, n=self.hidden_size
+                    )
                 )
                 if self.push_rs is None:
                     raise RuntimeError("Decode BF16 push ReduceScatter is unavailable")

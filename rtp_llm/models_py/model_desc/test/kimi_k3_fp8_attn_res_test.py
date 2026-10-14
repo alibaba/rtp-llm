@@ -70,6 +70,7 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
         layer.attention_norm = SimpleNamespace(weight=None, variance_epsilon=1e-6)
         layer.mlp_norm = SimpleNamespace(weight=None, variance_epsilon=1e-6)
         layer.mlp = lambda hidden, mask: hidden
+        layer.apply_mlp = layer._apply_regular_mlp
         inputs = SimpleNamespace(is_prefill=True, is_mtp_draft_update=False)
         with patch("torch.cuda.is_current_stream_capturing", return_value=False):
             layer.forward(Hidden(8192), None, None, None, inputs, None, None)

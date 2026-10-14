@@ -127,13 +127,19 @@ cc_library(
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
         ],
         "//conditions:default": [],
     }),
     deps = [
         "@local_config_python//:python_headers",
-    ],
+    ] + select({
+        # CUDA 13 images may ship only versioned NCCL/cuDNN libraries.
+        # Use their declared Bazel inputs instead of system linker names.
+        "@//:using_cuda13_x86": [
+            "@local_config_cuda//cuda:nccl",
+            "@local_config_cuda//cuda:cudnn",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

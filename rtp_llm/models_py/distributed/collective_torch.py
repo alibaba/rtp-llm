@@ -654,6 +654,12 @@ def destroy_distributed_environment():
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
+    from rtp_llm.models_py.distributed.tp_collective_workspace import (
+        clear_tp_collective_workspaces,
+    )
+
+    clear_tp_collective_workspaces()
+
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
@@ -831,6 +837,11 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
             return rocm_rccl.capture_all_gather(tensor, process_group)
 
     if group == Group.TP:
+        from rtp_llm.models_py.distributed.tp_collective_workspace import try_all_gather
+
+        gathered = try_all_gather(tensor, _get_group(group))
+        if gathered is not None:
+            return gathered
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
             tensor
@@ -936,6 +947,8 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
+    if world_size == 1:
+        return input_tensor
     assert input_tensor.shape[0] % world_size == 0, (
         f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
         f"must be divisible by world_size ({world_size})"
@@ -946,6 +959,15 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         device=input_tensor.device,
         dtype=input_tensor.dtype,
     )
+    if input_tensor.numel() == 0:
+        return output_tensor
+    if group == Group.TP:
+        from rtp_llm.models_py.distributed.tp_collective_workspace import (
+            try_reduce_scatter,
+        )
+
+        if try_reduce_scatter(input_tensor, output_tensor, process_group):
+            return output_tensor
     torch.distributed.reduce_scatter_tensor(
         output_tensor,
         input_tensor,

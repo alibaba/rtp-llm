@@ -40,6 +40,16 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("blocks"),
                   py::arg("threads"));
+    rtp_ops_m.def("custom_all_gather_direct",
+                  &custom_all_gather_direct,
+                  py::arg("input"),
+                  py::arg("output"),
+                  py::arg("semaphores"),
+                  py::arg("output_mc_ptr"),
+                  py::arg("semaphore_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
     rtp_ops_m.def("custom_all_gather_fp8_staging",
                   &custom_all_gather_fp8_staging,
                   py::arg("values"),
@@ -52,6 +62,19 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("blocks"),
                   py::arg("threads"));
+    rtp_ops_m.def("custom_all_gather_fp8_direct",
+                  &custom_all_gather_fp8_direct,
+                  py::arg("values"),
+                  py::arg("scales"),
+                  py::arg("output_values"),
+                  py::arg("output_scales"),
+                  py::arg("semaphores"),
+                  py::arg("output_values_mc_ptr"),
+                  py::arg("output_scales_mc_ptr"),
+                  py::arg("semaphore_mc_ptr"),
+                  py::arg("rank"),
+                  py::arg("blocks"),
+                  py::arg("threads"));
     rtp_ops_m.def("push_reduce_scatter",
                   &push_reduce_scatter,
                   py::arg("input"),
@@ -61,6 +84,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("blocks"),
                   py::arg("threads"));
+    rtp_ops_m.def("is_cuda_fabric_allocation", &is_cuda_fabric_allocation, py::arg("tensor"));
 #ifdef RTP_K3_NATIVE_FUSED_A
     rtp_ops_m.def("kimi_k3_fused_a_gemm",
                   &kimi_k3_fused_a_gemm,
