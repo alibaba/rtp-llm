@@ -18,6 +18,7 @@ impl is eager-only: support() rejects is_cuda_graph and the class exposes
 no prepare_cuda_graph.
 """
 
+import re
 from typing import Optional
 
 import torch
@@ -57,14 +58,13 @@ def _has_sm120_kernels() -> bool:
     if not _HAS_FLASH_ATTN_2:
         return False
     try:
-        version = tuple(
-            int(part)
-            for part in _flash_attn_module.__version__.split(".")[:2]
-            if part.isdigit()
-        )
+        parts = []
+        for component in str(_flash_attn_module.__version__).split(".")[:3]:
+            match = re.match(r"^(\d+)", component)
+            parts.append(int(match.group(1)) if match else 0)
+        return tuple(parts) >= (2, 8, 4)
     except (AttributeError, ValueError):
         return False
-    return version >= (2, 8)
 
 # Head dims with tuned FA2 kernels across Ampere..Blackwell consumer.
 _SUPPORTED_HEAD_DIMS = (64, 96, 128, 192, 256)

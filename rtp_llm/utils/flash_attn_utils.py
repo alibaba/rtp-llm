@@ -1,4 +1,5 @@
 import functools
+import re
 
 import torch
 
@@ -27,6 +28,34 @@ def _flash_attn_2_available():
     )
 
 
+def _flash_attn_has_sm120_kernels():
+    """flash-attn builds before 2.8.4 carry no sm_120 cubins.
+
+    Importability only proves the extension loads, not that kernels exist
+    for the arch: the 2.8.3.post1 wheel imports cleanly on sm_120 and then
+    raises cudaErrorNoKernelImageForDevice at the first launch.
+    """
+    try:
+        import flash_attn
+
+        return _flash_attn_version(flash_attn.__version__) >= (2, 8, 4)
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def _flash_attn_version(version_str):
+    """Parse the first three numeric components of a flash-attn version.
+
+    Handles local build suffixes, e.g. "2.8.4+b27cdc3.cu132" -> (2, 8, 4)
+    and "2.8.3.post1+cu13torch2.11" -> (2, 8, 3).
+    """
+    parts = []
+    for component in version_str.split(".")[:3]:
+        match = re.match(r"^(\d+)", component)
+        parts.append(int(match.group(1)) if match else 0)
+    return tuple(parts)
+
+
 def can_use_flash_attn(device_id=0):
     """Check if a GPU supports FlashAttention."""
     if not _flash_attn_2_available():
@@ -38,7 +67,11 @@ def can_use_flash_attn(device_id=0):
     # Check if the GPU architecture is Ampere (SM 8.x) or newer (SM 9.0)
     is_sm8x = major == 8 and minor >= 0
     is_sm90 = major == 9 and minor == 0
+    # SM 12.x (RTX PRO Blackwell): supported since flash-attn 2.8.4
+    # (sm_120 cubins; validated end-to-end on RTX PRO 5000 in CI run
+    # 79742649). Older wheels must keep their original fallback routing.
+    is_sm12x = major == 12 and _flash_attn_has_sm120_kernels()
     if "MI308X" in device_name:
         is_sm90 = major == 9 and minor >= 0
 
-    return is_sm8x or is_sm90
+    return is_sm8x or is_sm90 or is_sm12x
