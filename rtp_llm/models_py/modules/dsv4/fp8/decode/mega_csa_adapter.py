@@ -300,7 +300,7 @@ class MegaCSAAdapter:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
         )
-        from rtp_llm.models_py.modules.dsv4.fp8.indexer import _get_topk_workspace
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import _get_decode_topk_workspace
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, SWA_KV
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -381,7 +381,7 @@ class MegaCSAAdapter:
         schedule = self.runtime.mqa_schedule(
             compressed_lengths_2d, pools.indexer_entries
         )
-        topk_workspace = _get_topk_workspace(hidden.device)
+        topk_workspace = _get_decode_topk_workspace(hidden.device)
 
         tf32_hc_prenorm_gemm(
             hidden_rows.view(token_count, HC * g.dim),
