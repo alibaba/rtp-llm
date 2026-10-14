@@ -187,6 +187,7 @@ def test_paged_score_provider_chunking(batch, next_n, chunk_size):
     )
     with (
         patch.object(score_module, "_HAS_DEEP_GEMM", True),
+        patch.object(score_module, "_sm100_needs_triton_fallback", return_value=False),
         patch.object(score_module, "_deep_gemm", backend),
         patch.object(score_module, "_get_num_sms", return_value=1),
         patch.object(torch, "cat", wraps=torch.cat) as cat,
