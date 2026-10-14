@@ -99,6 +99,50 @@ protected:
     }
 };
 
+TEST_F(HybridKVCacheAllocatorCPShardTest, RecomputeDetachesSuffixUsingGroupCPMapping) {
+    const auto config    = makeCPHybridConfig();
+    auto       allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    const auto pool     = allocator->getDeviceBlockPool();
+    auto       resource = makeBatchRes(1, config, {100, 101, 102, 103});
+    auto       blocks   = pool->malloc(4);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
+    // An eight-token ready prefix occupies two LINEAR slots but one CP FULL slot.
+    resource->mutableBlockIds(0, 0).assign({NULL_BLOCK_IDX, (*blocks)[0], NULL_BLOCK_IDX, (*blocks)[1]});
+    resource->mutableBlockIds(0, 1).assign({(*blocks)[2], (*blocks)[3]});
+
+    // The shared pool cannot fit both groups' replacements.
+    auto held_blocks = pool->malloc(pool->freeBlocksNum() - 1);
+    ASSERT_TRUE(held_blocks.has_value());
+    pool->incRef(*held_blocks);
+    EXPECT_FALSE(allocator->detachSharedBlocksForRecompute(resource, /*reuse_length=*/8));
+    EXPECT_EQ(resource->blocks(0, 0)[3], (*blocks)[1]);
+    EXPECT_EQ(resource->blocks(0, 1)[1], (*blocks)[3]);
+    EXPECT_EQ(pool->refCount((*blocks)[1]), 2u);
+    EXPECT_EQ(pool->refCount((*blocks)[3]), 2u);
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    pool->decRef(*held_blocks);
+
+    ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, /*reuse_length=*/8));
+    EXPECT_EQ(resource->blocks(0, 0)[0], NULL_BLOCK_IDX);
+    EXPECT_EQ(resource->blocks(0, 0)[1], (*blocks)[0]);
+    EXPECT_EQ(resource->blocks(0, 0)[2], NULL_BLOCK_IDX);
+    EXPECT_NE(resource->blocks(0, 0)[3], (*blocks)[1]);
+    EXPECT_EQ(resource->blocks(0, 1)[0], (*blocks)[2]);
+    EXPECT_NE(resource->blocks(0, 1)[1], (*blocks)[3]);
+    const auto& full_ids = resource->mutableBlockIds(0, 1);
+    EXPECT_EQ(full_ids.kernelBlocks()[2], full_ids.blocks()[1] * 2);
+    EXPECT_EQ(full_ids.kernelBlocks()[3], full_ids.blocks()[1] * 2 + 1);
+    EXPECT_EQ(pool->refCount((*blocks)[1]), 1u);
+    EXPECT_EQ(pool->refCount((*blocks)[3]), 1u);
+    allocator->free({resource, makeTokens(1, 16, 4)});
+    pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
 // 1) When cp_slot_mapper is null/passthrough, behavior is identical to the non-CP baseline:
 //    a request occupying 4 logical blocks allocates 4 blocks in the full group.
 TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {

@@ -586,6 +586,125 @@ protected:
     }
 };
 
+TEST_F(HybridPoolKVCacheAllocatorTest, RecomputeDetachesPerPoolAndRollsBackOnShortfall) {
+    const auto config    = makeTinyMultiPoolHybridConfig();
+    auto       allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto        resource = makeBatchResource(2, config);
+    const auto& pools    = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    BlockIndicesType old_blocks;
+    for (int group = 0; group < 2; ++group) {
+        auto block = pools[group]->malloc();
+        ASSERT_TRUE(block.has_value());
+        old_blocks.push_back(*block);
+        pools[group]->incTreeRef(*block, BlockTreeRefType::CACHE);
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            pools[group]->incRef(*block);
+            resource->mutableBlockIds(batch, group).assign({*block});
+        }
+    }
+    // Identical IDs in independent pools must be tracked separately.
+    ASSERT_EQ(old_blocks[0], old_blocks[1]);
+    const auto first_pool_free = pools[0]->freeBlocksNum();
+    auto       held_blocks     = pools[1]->malloc(pools[1]->freeBlocksNum());
+    ASSERT_TRUE(held_blocks.has_value());
+    pools[1]->incRef(*held_blocks);
+    EXPECT_FALSE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    EXPECT_EQ(pools[0]->freeBlocksNum(), first_pool_free);
+    for (int group = 0; group < 2; ++group) {
+        EXPECT_EQ(pools[group]->refCount(old_blocks[group]), 3u);
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            EXPECT_EQ(resource->blocks(batch, group)[0], old_blocks[group]);
+        }
+    }
+    pools[1]->decRef(*held_blocks);
+
+    ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, 0));
+    for (int group = 0; group < 2; ++group) {
+        const auto replacement = resource->blocks(0, group)[0];
+        EXPECT_NE(replacement, old_blocks[group]);
+        EXPECT_EQ(resource->blocks(1, group)[0], replacement);
+        EXPECT_EQ(pools[group]->refCount(replacement), 2u);
+        EXPECT_EQ(pools[group]->refCount(old_blocks[group]), 1u);
+    }
+    allocator->free({resource, makeCompleteTokenIds(2, 4, 4)});
+    for (int group = 0; group < 2; ++group) {
+        pools[group]->decTreeRef(old_blocks[group], BlockTreeRefType::CACHE);
+        EXPECT_EQ(pools[group]->freeBlocksNum(), pools[group]->totalBlocksNum());
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, RecomputePreservesCompactCpReadyPrefix) {
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    SpecBuildContext context;
+    context.dtype                   = DataType::TYPE_FP32;
+    context.seq_size_per_block      = 128;
+    context.kernel_tokens_per_block = 128;
+    context.parallelism_config      = &parallelism;
+    context.gen_num_per_cycle       = 1;
+
+    for (const int cp_size : {2, 4}) {
+        SCOPED_TRACE(cp_size);
+        parallelism.tp_size                 = cp_size;
+        const int device_ready_reuse_length = context.seq_size_per_block * cp_size;
+        for (const std::string tag : {"swa_kv", "csa_state"}) {
+            SCOPED_TRACE(tag);
+            const auto  desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
+            const auto  spec = SpecBuilder::build(desc, context);
+            CacheConfig config;
+            config.dtype     = context.dtype;
+            config.layer_num = config.layer_all_num = 1;
+            config.block_num                        = 8;
+            config.seq_size_per_block               = context.seq_size_per_block;
+            config.kernel_seq_size_per_block        = context.kernel_tokens_per_block;
+            config.use_independent_block_pools      = true;
+            config.kv_block_stride_bytes            = spec->block_size_bytes();
+            config.kv_block_size_bytes = config.block_size_bytes = config.kv_block_stride_bytes;
+            config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {SpecBuilder::groupPolicy(desc)});
+            ASSERT_EQ(config.seqSizePerBlockForGroup(0), device_ready_reuse_length);
+            auto mapper = std::make_shared<CPSlotMapper>(0, cp_size, context.seq_size_per_block);
+            ASSERT_TRUE(mapper->compactLastRankGroup(config, 0));
+            auto allocator = makeAllocator(config, RoleType::PREFILL);
+            ASSERT_TRUE(allocator->init());
+            allocator->setCPSlotMapper(mapper);
+            auto       resource = makeBatchResource(1, config);
+            auto       tokens   = makeCompleteTokenIds(1, 2 * device_ready_reuse_length, context.seq_size_per_block);
+            MallocInfo malloc_info{resource, tokens};
+            malloc_info.enable_cache_lookup = false;
+            ASSERT_TRUE(allocator->malloc(malloc_info).success);
+            const auto original = resource->blocks(0, 0);
+            ASSERT_EQ(original.size(), 2u);
+            const auto pool = allocator->groupBlockPools()[0];
+            pool->incTreeRef(original, BlockTreeRefType::CACHE);
+            const auto block_tensor = [&](BlockIdxType block) {
+                const auto buffer = pool->convertIndexToBuffer(0, block).front();
+                return torch::from_blob(buffer.addr,
+                                        {static_cast<int64_t>(buffer.size_bytes)},
+                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            };
+            const auto prefix = block_tensor(original[0]).fill_(37).clone();
+
+            ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, device_ready_reuse_length));
+            const auto& ids = resource->mutableBlockIds(0, 0);
+            EXPECT_EQ(ids.blocks()[0], original[0]);
+            EXPECT_TRUE(torch::equal(block_tensor(ids.blocks()[0]), prefix));
+            EXPECT_NE(ids.blocks()[1], original[1]);
+            const auto kernel_blocks_per_kv = config.kernelBlocksPerKvBlockForGroup(0);
+            EXPECT_EQ(ids.kernelBlocks()[0], original[0] * kernel_blocks_per_kv);
+            EXPECT_EQ(ids.kernelBlocks()[kernel_blocks_per_kv], ids.blocks()[1] * kernel_blocks_per_kv);
+            EXPECT_EQ(pool->refCount(original[0]), 2u);
+            EXPECT_EQ(pool->refCount(original[1]), 1u);
+            EXPECT_EQ(pool->refCount(ids.blocks()[1]), 1u);
+            allocator->free({resource, tokens});
+            pool->decTreeRef(original, BlockTreeRefType::CACHE);
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, ResidentInsertProtectsAllReusableGroups) {
     const CacheConfig                                     config    = makeTinyFullSwaMultiPoolHybridConfig(12, 12);
     const std::shared_ptr<TestHybridPoolKVCacheAllocator> allocator = makeAllocator(config);
