@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <c10/util/Exception.h>
+#include <c10/core/DeviceGuard.h>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -54,7 +55,7 @@ SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(const Spe
 }  // namespace
 
 void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size) {
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     const auto& packed_allow_mask  = result.packed_allow_mask_gpu;
     const auto& logits_row_indices = result.logits_row_indices_gpu;
 #else
@@ -109,7 +110,7 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     if (!has1DCapacity(logits_row_indices_cpu_, rows)) {
         logits_row_indices_cpu_ = torch::empty({rows}, pinned_i32);
     }
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
         merged_bitmask_gpu_ = torch::empty({rows, W}, device_i32);
@@ -121,7 +122,7 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     if (!has1DCapacity(spec_cap_gpu_, B)) {
         spec_cap_gpu_ = torch::empty({B}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     }
@@ -146,7 +147,7 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
                             static_cast<long long>(P),
                             static_cast<long long>(P + 1),
                             static_cast<long long>(draft_cols));
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     if (task.draft_tokens_ready_event && draft_tokens.is_cuda()) {
         // Async MTP records this on the producer stream; order our D2H after it.
         task.draft_tokens_ready_event->block(cuda_graph::graphGetCurrentStream());
@@ -217,7 +218,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
     auto row_indices_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
 
     LaunchResult result;
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     auto packed_mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
     auto row_indices_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
@@ -248,7 +249,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     if (task.active.empty()) {
         return LaunchResult{};
     }
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     if (last_consumed_event_) {
         // Pinned scratch is reused across rounds; wait for the previous
         // consumer's recorded GPU work before overwriting it. An event the
@@ -258,6 +259,15 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     }
 #endif
     try {
+#if USING_CUDA || USING_ROCM
+        // Async verification runs on a worker thread whose current device may
+        // differ from the producer's. Allocate buffers and record events on
+        // the same device as the draft tokens (and target logits).
+        c10::OptionalDeviceGuard device_guard;
+        if (task.draft_tokens.is_cuda()) {
+            device_guard.reset_device(task.draft_tokens.device());
+        }
+#endif
         const size_t B = task.total_streams;
         const int    P = task.propose_step;
         const size_t V = task.vocab_size;
