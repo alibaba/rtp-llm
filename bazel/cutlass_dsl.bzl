@@ -1,7 +1,7 @@
 def _cutlass_install_impl(ctx):
     output = ctx.actions.declare_directory(ctx.label.name)
     args = ctx.actions.args()
-    args.add("--output", output)
+    args.add("--output", output.path)
     args.add("--version", ctx.attr.version)
     args.add_all(ctx.files.wheels)
     ctx.actions.run(
