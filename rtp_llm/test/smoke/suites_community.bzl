@@ -61,7 +61,7 @@ def community_measurement_suites():
     # block-crossing corruption is specific to graph+async; eager mode is safe).
     base_args = "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --warm_up 0 --max_seq_len 16384 --concurrency_limit 4 --enable_fp32_lm_head false --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0"
     for name, gpu, page, graph in (
-        ("lfm2_reuse_cache_sm103", "SM103_CU13", "64", "0"),
+        ("lfm2_reuse_cache_sm103", "SM103_CU13", "64", "1"),
         ("lfm2_reuse_cache_sm12x", "RTX_5000_PRO_CU13", "2048", "1"),
     ):
         custom_smoke_test(

@@ -1024,7 +1024,7 @@ py_test(
         "--output_len_max", "256",
         "--concurrency_limit", "8",
         "--seq_size_per_block", "64",
-        "--enable_cuda_graph", "0",
+        "--enable_cuda_graph", "1",
         "--enable_fp32_lm_head", "false",
     ],
 )
@@ -1055,7 +1055,7 @@ py_test(
         "--concurrency_limit", "2",
         "--total_requests", "2",
         "--seq_size_per_block", "64",
-        "--enable_cuda_graph", "0",
+        "--enable_cuda_graph", "1",
         "--enable_fp32_lm_head", "false",
         "--profile",
         "--profile_steps", "5",
