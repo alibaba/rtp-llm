@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -344,6 +345,47 @@ TEST_F(FusedCopyTest, MixedPinnedAndDeviceSrc) {
 // ---------------------------------------------------------------------------
 // FusedStridedCopy tests (invokeFusedStridedCopy)
 // ---------------------------------------------------------------------------
+
+// MTP prefill packs a 240 MiB hidden tensor beside tiny metadata. Cover the
+// bulk launch, vector tail, unaligned metadata, and fresh data on graph replay.
+TEST_F(FusedCopyTest, LargeMixedCopiesGraphLiveInputs) {
+    constexpr size_t large_bytes = 240 * 1024 * 1024 + 7;
+    constexpr size_t small_bytes = 17;
+    uint8_t *        large_src = nullptr, *large_dst = nullptr, *small_src = nullptr, *small_dst = nullptr;
+    CUDA_CHECK(cudaMalloc(&large_src, large_bytes));
+    CUDA_CHECK(cudaMalloc(&large_dst, large_bytes));
+    CUDA_CHECK(cudaMalloc(&small_src, small_bytes + 2));
+    CUDA_CHECK(cudaMalloc(&small_dst, small_bytes + 4));
+    rtp_llm::FusedD2DCopyParams params;
+    params.add(large_src, large_dst, large_bytes);
+    params.add(small_src + 1, small_dst + 3, small_bytes);
+    CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
+    rtp_llm::invokeFusedCopy(params, stream_);
+    cudaGraph_t graph = nullptr;
+    CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
+    cudaGraphExec_t replay = nullptr;
+    CUDA_CHECK(cudaGraphInstantiate(&replay, graph, nullptr, nullptr, 0));
+    for (int value : {39, 83, 197}) {
+        CUDA_CHECK(cudaMemsetAsync(large_src, value, large_bytes, stream_));
+        CUDA_CHECK(cudaMemsetAsync(small_src, value + 1, small_bytes + 2, stream_));
+        CUDA_CHECK(cudaMemsetAsync(small_dst, 0, small_bytes + 4, stream_));
+        CUDA_CHECK(cudaGraphLaunch(replay, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        const auto large = deviceToHost(large_dst, large_bytes);
+        EXPECT_EQ(std::count(large.begin(), large.end(), static_cast<uint8_t>(value)), large_bytes);
+        const auto small = deviceToHost(small_dst, small_bytes + 4);
+        EXPECT_EQ(std::count(small.begin() + 3, small.end(), static_cast<uint8_t>(value + 1)), small_bytes);
+        EXPECT_EQ(small[0], 0);
+        EXPECT_EQ(small[1], 0);
+        EXPECT_EQ(small[2], 0);
+    }
+    CUDA_CHECK(cudaGraphExecDestroy(replay));
+    CUDA_CHECK(cudaGraphDestroy(graph));
+    CUDA_CHECK(cudaFree(large_src));
+    CUDA_CHECK(cudaFree(large_dst));
+    CUDA_CHECK(cudaFree(small_src));
+    CUDA_CHECK(cudaFree(small_dst));
+}
 
 class FusedStridedCopyTest: public ::testing::Test {
 protected:

@@ -108,10 +108,12 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs
+                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -437,10 +439,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 params.hidden_size,
                                 params.hc_mult,
                                 params.mtp_input_hidden_size);
-        const size_t configured_mtp_input_hidden_size = params.mtp_input_hidden_size == 0 ?
-                                                            static_cast<size_t>(params.hidden_size)
-                                                                * static_cast<size_t>(params.hc_mult) :
-                                                            static_cast<size_t>(params.mtp_input_hidden_size);
+        const size_t configured_mtp_input_hidden_size =
+            params.mtp_input_hidden_size == 0 ?
+                static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult) :
+                static_cast<size_t>(params.mtp_input_hidden_size);
         graph_params.input_hidden_size      = configured_mtp_input_hidden_size;
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
