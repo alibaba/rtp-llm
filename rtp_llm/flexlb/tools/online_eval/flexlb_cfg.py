@@ -135,7 +135,7 @@ class ConfigOverride:
     decision: Optional[str] = None
     dispatcher: Optional[str] = None
     default_priority: Optional[int] = None
-    preemption: Optional[dict] = None
+    preemption: Union[dict, _Omit, None] = None
     max_requests: Optional[int] = None
     max_collection_wait_ms: Optional[int] = None
     max_predicted_execution_ms: Optional[int] = None
@@ -318,6 +318,15 @@ def _ordering_policy(ordering, default_priority, preemption):
 # FORMULA estimator with the profile data fit injected explicitly.
 
 
+def _validate_health(rpc, stale, cleanup):
+    for name, value in (("status_rpc_ms", rpc), ("status_stale_after_ms", stale),
+                        ("cleanup_interval_ms", cleanup)):
+        if type(value) is not int or not 1 <= value <= 2_147_483_647:
+            raise ValueError(name + " must be a positive Java integer")
+    if stale < 2 * rpc:
+        raise ValueError("status_stale_after_ms must be at least twice status_rpc_ms")
+
+
 def build_flexlb_config(
     *,
     ordering: str = GENERATOR_DEFAULTS["ordering"],
@@ -344,6 +353,9 @@ def build_flexlb_config(
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
+    _validate_health(status_rpc_ms, max(10_000, status_rpc_ms * 2)
+                     if status_stale_after_ms is None else status_stale_after_ms,
+                     cleanup_interval_ms)
     if decision not in ("single", "fixed_window") or dispatcher not in (
         "batch", "non_batch"
     ):
@@ -530,7 +542,7 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
 def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
     decision = doc["scheduler"]["decision"]
     if overrides.decision is None and all(
-        getattr(overrides, name) is None or getattr(overrides, name) is OMIT
+        getattr(overrides, name) is None
         for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms")
     ):
         return
@@ -543,7 +555,7 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
     if new_type == "single":
         for field in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
             value = getattr(overrides, field)
-            if value is not None and value is not OMIT:
+            if value is not None:
                 raise ValueError(f"ConfigOverride.{field} applies only to decision='fixed_window'")
         doc["scheduler"]["decision"] = SingleDecision().to_json()
         return
@@ -554,7 +566,7 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
         value = getattr(overrides, field)
         values[key] = (
             decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key])
-            if value is None or value is OMIT else value
+            if value is None else value
         )
     doc["scheduler"]["decision"] = FixedWindowDecision(
         values["maxRequests"], values["maxCollectionWaitMs"],
@@ -566,10 +578,11 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     if overrides.dispatcher is None and overrides.max_inflight_per_prefill_worker is None:
         return
     cap = overrides.max_inflight_per_prefill_worker
-    if cap is None or cap is OMIT:
+    if cap is None:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
+    kind = overrides.dispatcher or doc["dispatcher"]["type"]
     doc["dispatcher"] = DispatcherPolicy(
-        overrides.dispatcher or doc["dispatcher"]["type"].lower(), cap,
+        kind.lower() if type(kind) is str else kind, cap,
     ).to_json()
 
 
@@ -586,6 +599,8 @@ def _render_stress(overrides: Optional[ConfigOverride]) -> str:
         if value is None or value is OMIT:
             continue
         _edit_doc(doc, path, value, name)
+    health = doc["workerRegistry"]["health"]
+    _validate_health(health["statusRpcTimeoutMs"], health["statusStaleAfterMs"], health["cleanupIntervalMs"])
     return json.dumps(doc, separators=(",", ":"))
 
 
@@ -613,6 +628,10 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         validate_profile_identity(profile, {
             axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]
         })
+        if kwargs["decision"] == "single":
+            for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
+                if getattr(overrides, name) is not None:
+                    raise ValueError(f"ConfigOverride.{name} applies only to decision='fixed_window'")
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)
             if value is None:
@@ -637,9 +656,6 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
                 if overrides.strip_preemption:
                     kwargs["preemption"] = None
                 continue
-            if f.name == "decode_max_engine_requests":
-                kwargs["decode_max_engine_requests"] = value
-                continue
             kwargs[f.name] = value
     return build_flexlb_config(**kwargs)
 
@@ -662,7 +678,7 @@ def render_process_config(
     *raw_config* bypasses the generator entirely (the EnvSpec
     negative-test channel — the atpm strict-reject variants inject
     deliberately-illegal documents).  The raw string is projected into
-    the envelope verbatim; EnvManager._master_env injects the SAME string
+    the envelope verbatim; MasterLifecycle.master_environment injects the SAME string
     into the master env, preserving the single-source/two-projections
     invariant on the bypass path too.
     """

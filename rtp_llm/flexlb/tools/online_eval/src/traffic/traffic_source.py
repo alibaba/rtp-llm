@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from file_digest import sha256_file
+from artifacts.json_io import write_json
 from traffic.codecs import codec_for_version, decode_model
 from traffic.lineage_transforms import LineageProjector, LineageProjection
 from traffic.datasets import CapturedDataset
@@ -48,6 +49,8 @@ def validate_plan(path, namespace=None):
             if ts < 0 or not isinstance(tokens, list) or not tokens:
                 raise ValueError("canonical arrival and exact input_ids required")
             block_size = row.get("cache_key_block_size")
+            if type(block_size) is not int or block_size not in (64,128,256,512,1024,2048,4096):
+                raise ValueError("unsupported cache block size")
             def valid_token(t):
                 return type(t) is int and 0 <= t <= 2147483647
             if any(not (valid_token(t) or (compact and isinstance(t,list) and len(t)==block_size and all(valid_token(v) for v in t))) for t in tokens):
@@ -173,12 +176,7 @@ def publish_plan(path, specification, namespace, base_dir, writer, *, max_reques
             **semantics,
             key_validation="Java token hashing before sending",
         )
-        path.with_suffix(".manifest.json").write_text(
-            json.dumps(manifest, indent=2, allow_nan=False)
-        )
+        write_json(path.with_suffix(".manifest.json"), manifest)
         return path
     finally:
         temporary.unlink(missing_ok=True)
-        pending_manifest = temporary.with_suffix(".manifest.json")
-        if pending_manifest != path.with_suffix(".manifest.json"):
-            pending_manifest.unlink(missing_ok=True)

@@ -20,7 +20,7 @@ from scenario.actions.environment import (
 )
 from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
-from scenario.compiler import environment
+from scenario.environment_config import environment
 from scenario.contracts import PlanContext
 from scenario.runtime import (
     Deadline,
@@ -333,7 +333,7 @@ class EnvironmentTest(unittest.TestCase):
         ), patch(
             "adapters.master_lifecycle.port_accepting", return_value=False
         ), patch.object(
-            manager.master_lifecycle, "_master_env", return_value={}
+            manager.master_lifecycle, "master_environment", return_value={}
         ), patch(
             "adapters.master_lifecycle.ProcessOps.start", side_effect=launch
         ):

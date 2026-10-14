@@ -186,6 +186,8 @@ final class DynamicEngineManager {
      */
     RemovedEngine removeEngine(JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
             throws EngineOperationException, IOException {
+        if (config.whale && !config.whaleBundle)
+            throw new EngineOperationException(409, "Whale scales Pods, not engines inside a Pod");
         long started = System.nanoTime();
         int port = service.getGrpcPort();
         CompletableFuture<RemovedEngine> drain;
@@ -333,7 +335,19 @@ final class DynamicEngineManager {
                 server.shutdownNow();
             }
         }
-        service.shutdown();
+        try {
+            service.shutdown();
+        } finally {
+            if (server != null) {
+                try {
+                    if (!server.awaitTermination(2, TimeUnit.SECONDS))
+                        throw new IOException("engine transport did not terminate; port remains reserved");
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted awaiting engine transport", error);
+                }
+            }
+        }
         synchronized (mutationLock) {
             if (server != null) serversByPort.remove(port, server);
             services.remove(port, service);

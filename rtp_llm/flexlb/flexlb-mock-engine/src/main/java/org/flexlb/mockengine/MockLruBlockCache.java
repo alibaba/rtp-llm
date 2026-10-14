@@ -355,8 +355,9 @@ final class MockLruBlockCache {
 
     /** Publish computed P keys while retaining the connector's references until KV transfer. */
     synchronized BlockLease retainComputed(BlockLease lease, List<Long> keys) {
-        // The P lease was provisioned from this exact key set. Convert its
-        // keyless blocks into referenced keys atomically: no evictable gap.
+        // Retain only the materialized physical KV. An explicit hash channel
+        // can describe more keys than a token-caliber FIFO lease owns; those
+        // extra keys cannot grow the lease during completion.
         List<Long> retained = new ArrayList<>(lease.hitKeys);
         int naked = lease.nakedBlocks;
         for (Long key : keys) {
@@ -364,7 +365,7 @@ final class MockLruBlockCache {
                 continue;
             }
             if (naked == 0) {
-                throw new IllegalStateException("computed keys exceed prefill allocation");
+                break;
             }
             Integer references = blocks.get(key);
             if (references == null || references == 0) referencedBlocks++;
@@ -380,7 +381,7 @@ final class MockLruBlockCache {
             naked--;
             retained.add(key);
         }
-        indexSequence(keys);
+        indexSequence(retained);
         return new BlockLease(retained, naked);
     }
 

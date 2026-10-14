@@ -57,19 +57,24 @@ class RuntimeCapabilities:
             raise TypeError("registered client must implement cleanup(deadline)")
         from case_api.extension_contracts import validate_call
         validate_call(client.cleanup, 1, "client." + name + ".cleanup")
-        handle = self._context.register_resource("client", client, client.cleanup, evidence=capability.evidence)
+        handle = self._context.register_resource("client", client, client.cleanup, evidence=capability.evidence,
+            request_stop=getattr(client, "request_stop", None))
+        if not callable(getattr(client, "start", None)):
+            raise TypeError("registered client factory must return an unstarted client with start(deadline)")
+        validate_call(client.start, 1, "client." + name + ".start")
+        client.start(deadline)
         deadline.check()
         return handle
 
     def snapshot(self, name, params):
         reader = self.capability("snapshot", name).factory(self, deepcopy(params))
-        if not callable(getattr(reader, "read", None)):
-            raise TypeError("snapshot source must implement read(deadline)")
         from case_api.extension_contracts import validate_call
-        validate_call(reader.read, 1, "snapshot." + name + ".read")
         if callable(getattr(reader, "close", None)):
             validate_call(reader.close, 1, "snapshot." + name + ".close")
             self._context.add_cleanup("snapshot-" + name, reader.close)
+        if not callable(getattr(reader, "read", None)):
+            raise TypeError("snapshot source must implement read(deadline)")
+        validate_call(reader.read, 1, "snapshot." + name + ".read")
         return reader
 
     def records(self, handle, kind, deadline):

@@ -32,6 +32,19 @@ class BundleConfigurationTest(unittest.TestCase):
                 json.loads(performance.read_text()) if performance.exists() else None
             )
 
+    def test_integer_heap_override_reaches_jvm_as_bytes(self):
+        command, _ = self.launch_to_process_boundary({
+            "MOCK_BUNDLE_OVERRIDES_YAML": "{mock_heap: 536870912, master_heap: 536870912}"
+        })
+        self.assertIn("-Xmx536870912", command)
+
+    def test_invalid_heap_is_rejected_before_launch(self):
+        for value in (None, True, 0, -1, 1.5, "0g", "-1g", "1g -Dunsafe=true"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "mock_heap"):
+                self.launch_to_process_boundary({
+                    "MOCK_BUNDLE_OVERRIDES_YAML": json.dumps({"mock_heap": value})
+                })
+
     def test_default_performance_remains_file_based(self):
         command, performance = self.launch_to_process_boundary({})
         self.assertEqual(performance["calibration_id"], "dsv4_l20_legacy_mock")

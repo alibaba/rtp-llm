@@ -308,6 +308,7 @@ final class MockPerformanceModel {
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.runtimePrefill = runtimePrefill;
+        copy.runtimeDecode = runtimeDecode;
         copy.prefillNoise = prefillNoise;
         copy.decodeNoise = decodeNoise;
         copy.configuredPrefillExpression = configuredPrefillExpression;

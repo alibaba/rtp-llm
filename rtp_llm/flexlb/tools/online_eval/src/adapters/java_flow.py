@@ -3,6 +3,7 @@
 import json
 import time
 from pathlib import Path
+from artifacts.json_io import write_json
 
 from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
 
@@ -103,9 +104,7 @@ class JavaFlowGroup:
             self.monitor.add_client_target(
                 self.monitor_target, json.loads(target_path.read_text())["url"], deadline=deadline
             )
-            (self.directory / "metrics-ready").write_text(
-                str(int(time.time() * 1000) + 500)
-            )
+            write_json(self.directory / "metrics-ready", int(time.time() * 1000) + 500)
         from artifacts.startup import startup_phase
         from adapters.flow_control import wait_flow_started
         with startup_phase(self.directory, 'client/sending', deadline):
@@ -170,6 +169,12 @@ class JavaFlowGroup:
                 raise RuntimeError(message + ": client exited before final control state")
             deadline.check()
             time.sleep(min(self.poll_s, deadline.remaining()))
+
+    def request_stop(self):
+        """Publish cancellation without waiting for the Java producer."""
+        if self.proc is not None and self.proc.alive() and self.control.exists():
+            from adapters.flow_control import stop_sending
+            self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
 
     def stop_sending(self, deadline):
         if self._drain_result is not None:

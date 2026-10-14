@@ -7,6 +7,25 @@ import static org.junit.jupiter.api.Assertions.*;
 class CacheReferenceAccountingTest {
     private record Active(MockLruBlockCache.BlockLease lease, List<Long> keys) {}
 
+    @Test void fullReuseBelowReserveRejectsAndRollsBackEveryPin() {
+        var cache = new MockLruBlockCache(10);
+        var held = cache.acquire(1, List.of());
+        var keys = List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L);
+        cache.admit(keys);
+        int available = cache.availableBlocks();
+        var rejected = cache.acquireWithReuseDetailed(9, keys);
+        assertNull(rejected.lease());
+        assertEquals(MockLruBlockCache.AllocationFailure.RETRYABLE, rejected.failure());
+        assertEquals(0, cache.referencedKeyBlocks());
+        assertEquals(available, cache.availableBlocks());
+        cache.release(held);
+        var boundary = cache.acquireWithReuseDetailed(9, keys);
+        assertNotNull(boundary.lease());
+        assertEquals(1, cache.availableBlocks());
+        cache.release(boundary.lease());
+        assertEquals(10, cache.availableBlocks());
+    }
+
     @Test
     void incrementalCountMatchesFullScanAcrossSharedLeasesAndEvictions() throws Exception {
         var cache = new MockLruBlockCache(64);

@@ -166,6 +166,7 @@ final class MasterTargetRouter {
     }
 
     private TargetPool newTargetPool(String target) {
+        if (nChannels < 1) throw new IllegalStateException("no injected channel for discovery target: " + target);
         ManagedChannel[] channels = new ManagedChannel[nChannels];
         FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs =
                 new FlexlbServiceGrpc.FlexlbServiceBlockingStub[nChannels];
@@ -294,9 +295,15 @@ final class MasterTargetRouter {
         List<ScheduleAttempt> attempts = new ArrayList<>();
         Exception lastFailure = null;
         for (String target : targets) {
-            TargetPool pool = discoveredPools.computeIfAbsent(target, this::newTargetPool);
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = pool.nextStub()
-                    .withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+            TargetPool pool;
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub;
+            try {
+                pool = discoveredPools.computeIfAbsent(target, this::newTargetPool);
+                stub = pool.nextStub().withDeadlineAfter(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (RuntimeException failure) {
+                return new ScheduleOutcome(null, target, attempts.size() > 1,
+                        ErrorKind.BUSINESS, failure, attempts);
+            }
             long startedEpochMs = System.currentTimeMillis();
             long startedNanos = System.nanoTime();
             try {
@@ -309,17 +316,18 @@ final class MasterTargetRouter {
                 Status.Code code = e.getStatus().getCode();
                 attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
                         code.name(), null));
-                if (code == Status.Code.DEADLINE_EXCEEDED) {
+                if (code != Status.Code.UNAVAILABLE) {
                     return new ScheduleOutcome(null, target, attempts.size() > 1,
-                            ErrorKind.DEADLINE, e, attempts);
+                            code == Status.Code.DEADLINE_EXCEEDED ? ErrorKind.DEADLINE : ErrorKind.BUSINESS,
+                            e, attempts);
                 }
-                retireDiscoveredPool(target, pool);
+                // A request failure does not own other requests on the shared pool.
                 lastFailure = e;
             } catch (RuntimeException e) {
                 attempts.add(new ScheduleAttempt(target, startedEpochMs, startedNanos,
                         "EXCEPTION", null));
-                retireDiscoveredPool(target, pool);
-                lastFailure = e;
+                return new ScheduleOutcome(null, target, attempts.size() > 1,
+                        ErrorKind.BUSINESS, e, attempts);
             }
         }
         return new ScheduleOutcome(null, targets.get(targets.size() - 1), attempts.size() > 1,

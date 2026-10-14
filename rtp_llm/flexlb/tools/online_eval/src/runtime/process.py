@@ -38,29 +38,16 @@ class ManagedProcess:
 
     def terminate(self, timeout_s: float = 10.0) -> None:
         """SIGTERM → wait → SIGKILL fallback."""
-        if not self.alive():
-            return
-        try:
-            self.proc.terminate()
-        except OSError:
-            pass
-        if not self.wait(timeout_s):
-            self.kill9()
-        # Drain zombies.
-        try:
-            self.proc.wait(timeout=5)
-        except Exception:
-            pass
+        from runtime.cleanup import stop_process
+        from runtime.deadline import Deadline
+        stop_process(self, Deadline(time.monotonic() + timeout_s))
 
     def kill9(self) -> None:
         try:
             os.kill(self.proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
-        try:
-            self.proc.wait(timeout=5)
-        except Exception:
-            pass
+        self.proc.wait(timeout=5)
 
     # -- Mode 2 (freeze) primitives, per-master directed -------------------
 

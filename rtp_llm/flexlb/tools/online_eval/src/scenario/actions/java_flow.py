@@ -13,6 +13,7 @@ from traffic.traffic_source import materialize, SourceSpecification
 from traffic.contracts import source_priority
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
+from case_api.execution_contract import ExecutionRequirements
 from scenario.parameters import validate_fields
 from adapters.mock_control import engine_snapshot
 
@@ -85,7 +86,7 @@ def _start(ctx, p, deadline):
             flow.drain(d)
 
     from adapters.resource_evidence import flow_evidence
-    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
+    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence, request_stop=flow.request_stop)
     flow.start(trace, environment, deadline,
                target=f"127.0.0.1:{ctx.env.master_http_port + 2}",
                priority=source_priority(p["source"]))
@@ -122,7 +123,10 @@ def _checkpoint_validate(params, plan):
         if type(p[k]) is not int or p[k] < 0:
             raise ValueError("checkpoint bounds must be explicit nonnegative integers")
     if "engine" in p:
-        plan.reference(p["engine"], "string")
+        if isinstance(p["engine"], dict):
+            plan.reference(p["engine"], "string")
+        elif not isinstance(p["engine"], str) or not p["engine"]:
+            raise ValueError("engine must be a name or string output reference")
     return p
 
 
@@ -230,5 +234,6 @@ HANDLERS = [
         _check,
         {},
         checks=frozenset({"complete", "success_rate"}),
+        execution_requirements=ExecutionRequirements(request_evidence=True),
     ),
 ]

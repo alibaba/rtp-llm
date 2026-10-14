@@ -99,11 +99,7 @@ PROFILE_CAPS = {
 STRESS_PROFILE = "stress-na130"
 
 
-STRESS_DECISION_RETYPE_DEFAULTS = {
-    "maxRequests": 32,
-    "maxCollectionWaitMs": 10,
-    "maxPredictedExecutionMs": 550,
-}
+
 
 FUNCTIONAL_PROFILE_QUEUE_TIMEOUT_MS = 60_000
 
@@ -218,6 +214,9 @@ STRESS_BASE: dict = {
         "decision": {"lifetime": 2.0},
     },
 }
+
+STRESS_DECISION_RETYPE_DEFAULTS = {key: STRESS_BASE["scheduler"]["decision"][key]
+                                  for key in ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs")}
 
 # All renderable profiles, including workload defaults, share axis metadata.
 REGISTERED_PROFILE_SPECS = {

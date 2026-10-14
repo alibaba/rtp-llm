@@ -45,7 +45,9 @@ def build(output, internal, spec_path, master_config_path):
         adapter_tests.mkdir(parents=True)
         shutil.copyfile(ROOT / "discovery_adapter/FileSnapshotDiscoveryTest.java", adapter_tests / "FileSnapshotDiscoveryTest.java")
         pom = project / "flexlb-api/pom.xml"
-        text = pom.read_text()
+        text = pom.read_text(encoding="utf-8")
+        if text.count("<profiles>") != 1:
+            raise ValueError("legacy flexlb-api pom must contain one profiles anchor")
         text = text.replace("<profiles>", """<profiles>
           <profile><id>whale-bundle</id><dependencies><dependency>
             <groupId>org.flexlb</groupId><artifactId>kmonitor</artifactId>

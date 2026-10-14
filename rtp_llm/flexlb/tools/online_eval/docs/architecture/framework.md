@@ -159,7 +159,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
 
-流量强度由 `RateCurve`、两种 retention schedule 和 `PlaybackIntensity` 表达，环境变量由 `PlaybackEnvCodec` 解码。时间积分与带 seed 的事件计数保持确定性，发送与循环仍由 Java 客户端控制。
+回放配置由 `PlaybackConfiguration` 表达，`PlaybackConfigurationCodec` 校验 uniform/true-ts、圈数和请求身份策略。`normalize()` 生成 Java 环境变量；Java 客户端控制发送与循环，发送端的 `PLAYBACK_V1` 快照用于离线重建和一致性验证。
 
 lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。
 
@@ -168,3 +168,14 @@ lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，�
 严格文件读取由 `document_io` 提供，共享异常定义在 `document_io`。该模块不依赖 program 装载或编译总装；`scenario.loader` 只负责读取 case 数据、应用实验参数和调用注册程序。`scenario.references` 统一 `$ref` 语法及先前 stage 的输出类型解析，契约和冻结参数读取直接复用该规则，不回调 stage 编译实现。
 
 `scenario.backend_spec` 将冻结环境计划转换为受租约约束的启动规格。`EnvManager` 通过显式的环境创建与进程变化回调交付所有权；外部有界清理负责回收时，必须同时提供两个回调。启动和重启失败也记录已产生的进程，保留部分环境供独立清理预算回收。启动负例使用单独的 mock 规格，避免无效 Master 配置阻止 mock 启动或临时修改 live environment 的规格。Master 拓扑和 owner ledger 的证据解码由 `adapters.master_evidence` 提供，readiness、残留上界及收敛判定仍由 action 决定。
+
+
+## 异常收尾与资源监管
+
+`ResourceScope` 为清理项保留 ACTIVE、STOPPING、CLOSE_FAILED、CLOSED 状态。清理先向所有声明了 `request_stop` 的资源发出有界停止请求，再按 LIFO 等待关闭；失败项保留到后续独立预算重试。预算耗尽后不执行任意用户回调。每次失败记录保留，后续回收成功不抹掉原始执行或清理错误。
+
+实例父进程通过独立 session 的管道监管进程启动 runner。正常 TERM/INT 传递给 workload 执行协作清理；父进程死亡导致管道 EOF，监管进程强制结束本次 session。父编排器的异常、TERM 和 KeyboardInterrupt 都先停止调度并回收子进程，再等待线程池退出。残留进程、端口占用、超时或无法验证释放时，lane 不复用。
+
+session 监管只覆盖留在该进程组的后代；主动另建 session 的后代、内核不可中断状态及监管进程自身被同时杀死，需要 CI executor 的任务容器或 cgroup 生命周期兜底。禁止将 Python finally、JVM shutdown hook 或进程名扫描当作覆盖这些故障的保证。
+
+监控关闭失败后继续保留 server/线程所有权，只有验证退出后才设置 closed。查询归档失败不能跳过进程回收。结果判定、清理状态与 evidence/report/archive 交付状态独立保留。

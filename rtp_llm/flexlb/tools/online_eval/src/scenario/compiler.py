@@ -14,7 +14,7 @@ from adapters.java_mock_resources import VICTIM_OFFSETS
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
 from scenario.execution_policy import EXECUTION_FIELDS, EXECUTION_BUDGETS
-from scenario.environment_config import environment, read_environment
+from scenario.environment_config import environment as _environment, read_environment
 from scenario.environment_declaration import variant_environment_fields
 from scenario.environment_resolver import CAPABILITIES
 
@@ -374,6 +374,11 @@ def _compile_profile(context, p):
     stage_caps = caps
     for stage in compiled:
         descriptor = handlers.get(stage["action"])
+        if descriptor:
+            try:
+                descriptor.execution_requirements.validate(variant_execution)
+            except ValueError as exc:
+                fail(source + f"::{vid}.{stage['id']}.execution", str(exc))
         stage_requires = set(variant_requires) | (
             set(descriptor.requires) if descriptor else set()
         )
@@ -392,7 +397,7 @@ def _compile_profile(context, p):
                 f"profile {p} stage {stage['id']}: deferred consumption requires enqueue_batch",
             )
         if descriptor and descriptor.next_environment is not None:
-            next_env = environment(
+            next_env = _environment(
                 descriptor.next_environment(stage["params"]),
                 source + f"::{vid}.{stage['id']}.environment",
                 p,

@@ -42,7 +42,7 @@ class JavaLoadClientParityTest {
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
                 "engine_service", "", 0, 0, "", false, "", true);
-        return new JavaLoadClient(config);
+        return new JavaLoadClient(config, true);
     }
 
     @Test

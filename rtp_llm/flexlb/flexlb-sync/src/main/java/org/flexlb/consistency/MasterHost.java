@@ -1,6 +1,7 @@
 package org.flexlb.consistency;
 
 import java.net.InetAddress;
+import java.net.Inet4Address;
 import java.net.UnknownHostException;
 import org.springframework.core.env.Environment;
 
@@ -24,6 +25,9 @@ public final class MasterHost {
                     ? InetAddress.getLocalHost() : InetAddress.getByName(configured);
             if (address.isAnyLocalAddress()) {
                 throw new IllegalArgumentException("advertised Master address cannot be wildcard");
+            }
+            if (!(address instanceof Inet4Address)) {
+                throw new IllegalArgumentException("advertised Master address requires IPv4");
             }
             return address.getHostAddress();
         } catch (UnknownHostException e) {

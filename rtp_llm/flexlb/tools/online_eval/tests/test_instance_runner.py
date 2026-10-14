@@ -39,7 +39,7 @@ class InstanceRunnerTest(unittest.TestCase):
             mock.patch.object(runner, "SCENARIO_RUNNER", self.child),
             mock.patch.dict(
                 os.environ,
-                {"FLEXLB_FT_INSTANCE_TIMING_BASELINE": str(self.root / "timing.json")},
+                {"FLEXLB_FT_TIMING_BASELINE": str(self.root / "timing.json")},
                 clear=True,
             ),
         ]

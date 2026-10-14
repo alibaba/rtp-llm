@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 from artifacts.json_io import write_json
@@ -26,6 +27,12 @@ from runtime.deadline import Deadline
 from runtime.cleanup import cleanup_all
 from runtime.startup import startup_deadline, wait_ready
 from monitoring.collection_plan import scrape_job, collection_plan
+
+
+def _available_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class PrometheusSession:
@@ -182,34 +189,56 @@ class PrometheusSession:
             "scrape_configs": jobs,
         }
         (self.directory / "prometheus.json").write_text(json.dumps(config, indent=2))
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-        self.client.url = f"http://127.0.0.1:{port}"
         self.started, self.monotonic = time.time(), time.monotonic()
         self.log = (self.directory / "prometheus.log").open("w")
-        self.process = subprocess.Popen(
-            [
-                self.binary,
-                "--config.file=" + str(self.directory / "prometheus.json"),
-                "--storage.tsdb.path=" + str(self.directory / "data"),
-                "--storage.tsdb.retention.time=24h",
-                "--storage.tsdb.retention.size=1GB",
-                "--web.listen-address=127.0.0.1:" + str(port),
-                "--web.enable-lifecycle",
-            ],
-            stdout=self.log,
-            stderr=subprocess.STDOUT,
-        )
+        prefix = "/" + uuid.uuid4().hex
+        attempts, log_offset = 0, 0
+        def launch():
+            nonlocal attempts, log_offset
+            deadline.check()
+            port = _available_port()
+            self.client.url = f"http://127.0.0.1:{port}{prefix}"
+            attempts += 1
+            log_offset = self.log.tell()
+            self.process = subprocess.Popen(
+                [
+                    self.binary,
+                    "--config.file=" + str(self.directory / "prometheus.json"),
+                    "--storage.tsdb.path=" + str(self.directory / "data"),
+                    "--storage.tsdb.retention.time=24h",
+                    "--storage.tsdb.retention.size=1GB",
+                    "--web.listen-address=127.0.0.1:" + str(port),
+                    "--web.enable-lifecycle",
+                    "--web.route-prefix=" + prefix,
+                ],
+                stdout=self.log,
+                stderr=subprocess.STDOUT,
+            )
         try:
             deadline = startup_deadline(deadline, 30)
+            launch()
+            def retry_bind_collision():
+                if self.process.poll() is None or attempts >= 3:
+                    return False
+                with (self.directory / 'prometheus.log').open('rb') as stream:
+                    stream.seek(log_offset)
+                    failed_log = stream.read(65536).lower()
+                if b'address already in use' not in failed_log:
+                    return False
+                self.process.wait(timeout=deadline.remaining())
+                launch()
+                return True
             def ready():
                 if self.process.poll() is not None:
+                    if retry_bind_collision():
+                        return False
                     raise RuntimeError('Prometheus exited; inspect ' + str(self.directory / 'prometheus.log'))
                 try:
                     with urllib.request.urlopen(self.client.url + '/-/ready', timeout=min(1, deadline.remaining())):
                         return True
                 except TimeoutError:
+                    if retry_bind_collision():
+                        return False
                     raise
                 except OSError:
                     return False

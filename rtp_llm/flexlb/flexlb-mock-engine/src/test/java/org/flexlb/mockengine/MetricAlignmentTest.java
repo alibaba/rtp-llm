@@ -13,7 +13,8 @@ class MetricAlignmentTest {
     @Test
     void realNamesMustHaveCurrentCppProducers() throws Exception {
         Path root = Path.of("").toAbsolutePath();
-        while (root != null && !Files.exists(root.resolve("rtp_llm/cpp/metrics/RtpLLMMetrics.cc")))
+        while (root != null && !(Files.isRegularFile(root.resolve("rtp_llm/cpp/metrics/RtpLLMMetrics.cc"))
+                && Files.isRegularFile(root.resolve("rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.cc"))))
             root = root.getParent();
         assertNotNull(root, "C++ source registry must be available to validate real names");
         String registry = Files.readString(root.resolve("rtp_llm/cpp/metrics/RtpLLMMetrics.cc"))

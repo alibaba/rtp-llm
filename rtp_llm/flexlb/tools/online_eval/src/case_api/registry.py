@@ -5,6 +5,7 @@ from __future__ import annotations
 from case_api.extension_contracts import SnapshotFactory, RuntimeClientFactory, EvidenceExporter
 
 from dataclasses import dataclass, field
+from case_api.execution_contract import ExecutionRequirements
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
@@ -82,12 +83,15 @@ class CaseDefinition:
     producers: Mapping[str, MetricProducer] = field(default_factory=dict)
     sources: Mapping[str, EvidenceSource] = field(default_factory=dict)
 
+    execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
     input_contract: object = None
     snapshot_sources: Mapping = field(default_factory=dict)
     clients: Mapping = field(default_factory=dict)
     gates: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
+        if not isinstance(self.execution_requirements, ExecutionRequirements):
+            raise ValueError('execution_requirements must be an ExecutionRequirements')
         if self.input_contract is not None:
             from case_api.input_contract import InputContract
             if not isinstance(self.input_contract, InputContract):

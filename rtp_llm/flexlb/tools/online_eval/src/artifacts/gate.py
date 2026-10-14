@@ -41,7 +41,7 @@ def load_gate(directory, name):
     committed = directory / f"{name}-gate-manifest.json"
     if not committed.is_file():
         raise ArtifactNotProduced("gate result was not committed: " + name)
-    manifest = json.loads(committed.read_text())
+    manifest = json.loads(committed.read_text(encoding='utf-8'))
     if not matches_schema(manifest, "gate_result_schema_version", 1):
         raise ValueError("unsupported frozen gate manifest")
     values = []
@@ -53,11 +53,12 @@ def load_gate(directory, name):
         path = directory / filename
         if not path.is_file() or _sha(path) != entry["sha256"]:
             raise ValueError("gate artifact checksum mismatch: " + filename)
-        values.append(json.loads(path.read_text()))
+        values.append(json.loads(path.read_text(encoding='utf-8')))
     return tuple(values)
 
 
 def gate_check(identity, result, path, expected):
     return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
                        detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
-                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"]))
+                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"],
+                                     gate_references=result.get('gate_references', [])))

@@ -111,7 +111,7 @@ class MasterConfigContractTest(unittest.TestCase):
             with self.assertRaises(TypeError):
                 build_flexlb_config(**{field: 1})
 
-    def test_master_env_contains_config_documents_and_role_hosts(self):
+    def test_master_environment_contains_config_documents_and_role_hosts(self):
         with TemporaryDirectory() as tmp:
             spec = EnvSpec(
                 discovery="domain",
@@ -124,7 +124,7 @@ class MasterConfigContractTest(unittest.TestCase):
                 spec=spec, run_dir=Path(tmp), zk_connect_string="127.0.0.1:2181"
             )
             manager = EnvManager(Path(tmp), verbose=False)
-            result = manager.master_lifecycle._master_env(env)
+            result = manager.master_lifecycle.master_environment(env)
             self.assertTrue({"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG"} <= set(result))
             model = json.loads(result["MODEL_SERVICE_CONFIG"])
             self.assertEqual(
@@ -136,7 +136,7 @@ class MasterConfigContractTest(unittest.TestCase):
             )
             from adapters.zookeeper_config import ZooKeeperConfig
             spec.zk_consistency = ZooKeeperConfig()
-            result = manager.master_lifecycle._master_env(env, MasterSpec(name="A", http_port=18080))
+            result = manager.master_lifecycle.master_environment(env, MasterSpec(name="A", http_port=18080))
             self.assertEqual(
                 {"needConsistency", "zookeeperConfig"},
                 set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])),

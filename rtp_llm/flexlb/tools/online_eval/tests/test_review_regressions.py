@@ -245,3 +245,9 @@ def test_published_contract_errors_keep_the_original_cause(tmp_path,monkeypatch,
     else:
         assert raised.value.__cause__ is None
         if kind=="contract_error":assert raised.value is failure
+
+
+def test_stress_dispatcher_normalizes_case_like_ordering_and_decision():
+    import json
+    config = json.loads(render_env("stress-na130", ConfigOverride(dispatcher="NON_BATCH")))
+    assert config["dispatcher"]["type"] == "NON_BATCH"

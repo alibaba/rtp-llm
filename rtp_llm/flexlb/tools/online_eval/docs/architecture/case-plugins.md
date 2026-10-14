@@ -1,5 +1,9 @@
 # Case 插件结构
 
+`CaseDefinition.execution_requirements` 和 `StageHandler.execution_requirements` 用 `ExecutionRequirements` 声明逐请求证据与监控依赖。编译和冻结计划读取都会拒绝与消费者要求冲突的 `collection: aggregate`、`capture_metrics: false`；该声明不修改检查算法、窗口或阈值。
+
+公共 snapshot 源提供 engine_snapshot、engine_requests、client_records。Master 调试端点由实际工件决定，case 必须通过 `snapshot_sources` 注册工厂并声明字段；公共层不会假设任意 Master 都提供 `/rtp_llm/debug/snapshot`。底层环境的 `master_profile='none'` 关闭 Master 时，仍须提供 `raw_config` 供 mock 读取调度参数。
+
 新增 case 是组合已有能力并补充业务差异，不是重新实现采集、归档、判定发布和 HTML 系统。YAML 表达运行输入、指标与窗口选择、检查门槛和视图；Python 声明流程和业务算法。唯一必需的代码入口是 `program.py` 导出的 `CASE: CaseDefinition`。
 
 ## 两种执行模型

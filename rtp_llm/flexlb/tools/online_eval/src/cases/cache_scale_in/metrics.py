@@ -12,8 +12,8 @@ def metric_contract(producer, identity, calculation):
     from implementation_identity import implementation_identity
     if producer != 'cache_windows' or calculation is not None:
         raise ValueError('cache producer owns its survivor-window calculation')
-    if identity == 'derived/survivor_hit_ratio':
-        source, population, accuracy = 'prometheus', 'surviving_prefill_engines', 'counter_delta'
+    if identity in {'derived/survivor_hit_ratio', 'derived/baseline_hit_ratio'}:
+        source, population, accuracy = 'prometheus', ('initial_prefill_engines' if identity.endswith('baseline_hit_ratio') else 'surviving_prefill_engines'), 'counter_delta'
     elif identity == 'cache_gate/offered_qps_deviation':
         source, population, accuracy = 'client_journal', 'baseline_initial_fleet_and_post_survivors', 'request_ledger'
     elif identity in {'cache_gate/status_min_qps', 'cache_gate/status_max_rt_us'}:
@@ -34,15 +34,16 @@ def produce(directory, evidence, result):
     store = MetricStore.read(directory)
     epoch = evidence["provenance"]["env_epoch"]
     anchor = evidence_origin(evidence)
-    identity = "derived/survivor_hit_ratio"
-    if identity in store.document["definitions"]:
-        publish(store, identity, store.document["definitions"][identity],
-                [series_row([[anchor+w["end"], w["hit"] if not w["errors"] else None]
-                             for w in result["windows"]], epoch=epoch, source="cache_gate", labels={})], producer="cache_windows",
-                evidence=dict(path=str(directory) + "/cache-gate-evidence.json",
-                              calculation="survivor hit/context counter delta; timestamp is window end",
-                              survivors=evidence.get("survivors", []),
-                              measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID"))
+    for identity, windows, population in (
+            ('derived/survivor_hit_ratio', result['windows'], evidence.get('survivors', [])),
+            ('derived/baseline_hit_ratio', result.get('baseline_windows', []), evidence.get('initial_engines', []))):
+        if identity in store.document['definitions']:
+            publish(store, identity, store.document['definitions'][identity],
+                [series_row([[anchor+w['end'], w['hit'] if not w['errors'] else None] for w in windows if identity != 'derived/baseline_hit_ratio' or w['start'] < w['end']],
+                            epoch=epoch, source='cache_gate', labels={})], producer='cache_windows',
+                evidence=dict(path=str(directory) + '/cache-gate-evidence.json',
+                    calculation='selected population hit/context counter delta; timestamp is window end',
+                    engines=population, measurement_validity='INVALID' if result['verdict'] == 'INVALID' else 'VALID'))
 
     for metric, value in result["gate_metrics"].items():
         identity = "cache_gate/" + metric

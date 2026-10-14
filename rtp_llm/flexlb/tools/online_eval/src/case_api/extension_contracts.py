@@ -82,10 +82,12 @@ class SnapshotFactory(Protocol):
 
 
 class RuntimeClient(Protocol):
+    def start(self, deadline: Deadline) -> None: ...
     def cleanup(self, deadline: Deadline) -> None: ...
 
 
 class RuntimeClientFactory(Protocol):
+    """Construct an unstarted owner; acquisition happens only in start()."""
     def __call__(self, services: object, params: dict, deadline: Deadline) -> RuntimeClient: ...
 
 

@@ -57,9 +57,10 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
     """An explicit empty capture_paths disables discovery and fit-source fallback."""
     profile_file=Path(profile_file)
     raw=profile_file.read_bytes(); profile=json.loads(raw)
-    resolve(dict(seed=seed,count=1,output_tokens=420),document=profile)
+    output = {} if {'output_distribution', 'output_tokens'} & set(profile['parameters']) else {'output_tokens': 420}
+    resolve(dict(seed=seed,count=1,**output),document=profile)
     if 'joint_distribution' in profile['parameters']:
-        resolve(dict(seed=seed,count=1,output_tokens=420,sampling='joint'),document=profile)
+        resolve(dict(seed=seed,count=1,**output,sampling='joint'),document=profile)
     captures=[load_capture(p) for p in (capture_paths if capture_paths is not None else trace_models().values())]
     # Content addressing, never infer fit identity from filenames.
     fit=next((c for c in captures if c['sha256']==profile.get('calibration',{}).get('model_sha256')),None)
@@ -79,7 +80,8 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
             if method=='joint' and 'joint_distribution' not in selected['parameters']:
                 methods[method]=dict(status='UNAVAILABLE', reason='profile has no joint distribution; recalibrate explicitly')
                 continue
-            parameters=dict(seed=seed,count=count or cap['model'].metadata.count,output_tokens=420,sampling=method)
+            output = {} if {'output_distribution', 'output_tokens'} & set(selected['parameters']) else {'output_tokens': 420}
+            parameters=dict(seed=seed,count=count or cap['model'].metadata.count,sampling=method,**output)
             if progress:
                 progress(f"{cap['name']}: {method}, {parameters['count']} requests")
             resolved,_=resolve(parameters,document=selected)

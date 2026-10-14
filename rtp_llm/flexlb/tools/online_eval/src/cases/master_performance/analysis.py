@@ -104,6 +104,7 @@ def analyze(evidence):
         )
         if not all(finite(x) for x in (lo, hi)) or hi <= lo:
             raise ValueError("invalid measurement window")
+        result['gate_references'] = gate_references(c, evidence['window'])
         duration = (hi - lo) / 1000
         if abs(duration - c["measure_s"]) > 0.001:
             raise ValueError("measurement duration differs from contract")
@@ -280,4 +281,29 @@ def analyze(evidence):
         )
     verdict, checks = gate_checks(checks, errors)
     result.update(metrics=m, checks=checks, verdict=verdict)
+    return result
+
+
+from analysis.gate_references import definition, freeze_reference, window
+
+GATE_REFERENCES = [
+    definition('engine_tps.' + name, 'threshold', 'mock/' + name + '_engine_mean', 'tokens/s',
+               labels={'role': role}, description='整窗单引擎平均 TPS 下界，不是逐采样点断言')
+    for name, role in (('rtp_llm_context_tps', 'prefill'),
+                       ('rtp_llm_context_tps_with_cache', 'prefill'),
+                       ('mock_decode_wall_tps', 'decode'))
+] + [definition('ttft', 'threshold', 'request/ttft_p99_ms', 'ms',
+                description='measurement 请求 cohort 的整窗 TTFT p99 上限，不是逐桶 p99 断言')]
+
+
+def gate_references(criteria, bounds):
+    spans = [window('measurement', bounds['start_epoch_ms'] / 1000, bounds['end_epoch_ms'] / 1000)]
+    result = []
+    for spec in GATE_REFERENCES:
+        value = (criteria.get('engine_tps', {}).get('mock/' + spec['check'].split('.', 1)[1])
+                 if spec['check'].startswith('engine_tps.') else criteria['max_ttft_p99_ms'])
+        result.append(freeze_reference(spec, value, spans if value is not None else [],
+            op='ge' if spec['check'].startswith('engine_tps.') else 'le',
+            status='AVAILABLE' if value is not None else 'UNAVAILABLE',
+            reason='' if value is not None else '该次执行未声明此门禁'))
     return result

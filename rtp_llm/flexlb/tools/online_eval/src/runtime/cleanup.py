@@ -21,8 +21,14 @@ def stop_process(process, deadline):
     """Terminate, escalate and reap a process even after its budget expires."""
     if process is None:
         return
+    if not process.alive():
+        process.proc.wait(timeout=0)
+        return
     if process.alive():
-        process.proc.terminate()
+        try:
+            process.proc.terminate()
+        except ProcessLookupError:
+            pass
         try:
             process.proc.wait(timeout=min(2, deadline.remaining()))
         except (TimeoutExpired, TimeoutError):
@@ -30,6 +36,8 @@ def stop_process(process, deadline):
     try:
         remaining = deadline.remaining()
     except TimeoutError:
-        process.proc.wait(timeout=0)
+        if process.proc.poll() is None:
+            process.proc.kill()
+        process.proc.wait(timeout=2)
         raise
     process.proc.wait(timeout=remaining)

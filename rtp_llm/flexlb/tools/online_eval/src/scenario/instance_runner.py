@@ -53,14 +53,23 @@ class ChildProcesses:
         with self.lock:
             if self.stopping:
                 raise RuntimeError("suite interrupted before child launch")
-            with open(log_path, "wb") as output:
-                child = subprocess.Popen(
-                    command,
-                    env=env,
-                    stdout=output,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
+            read_end, owner_pipe = os.pipe()
+            try:
+                with open(log_path, "wb") as output:
+                    guard = Path(__file__).resolve().parents[1] / "runtime/process_guard.py"
+                    child = subprocess.Popen(
+                        [sys.executable, str(guard), str(read_end), *command],
+                        env=env,
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        pass_fds=(read_end,),
+                    )
+            except BaseException:
+                os.close(owner_pipe)
+                raise
+            finally:
+                os.close(read_end)
             self.processes[child] = cleanup_timeout
         settled = False
         try:
@@ -73,16 +82,18 @@ class ChildProcesses:
                 self._wait_or_kill(child, cleanup_timeout)
                 return 124
         finally:
+            os.close(owner_pipe)
             with self.lock:
                 self.processes.pop(child, None)
-            if settled and not self.stopping:
+            if not self.stopping:
                 try:
                     os.killpg(child.pid, 0)
                 except ProcessLookupError:
                     pass
                 else:
                     self._signal(child, signal.SIGKILL)
-                    raise RuntimeError("runner exited with live descendant processes")
+                    if settled:
+                        raise RuntimeError("runner exited with live descendant processes")
 
     @staticmethod
     def _signal(child, sig):
@@ -102,11 +113,17 @@ class ChildProcesses:
         with self.lock:
             self.stopping = True
             children = dict(self.processes)
-        for child in children:
-            self._signal(child, signal.SIGTERM)
         deadline = time.monotonic() + max(children.values(), default=0)
-        for child in children:
-            self._wait_or_kill(child, max(0, deadline - time.monotonic()))
+        from runtime.cleanup import cleanup_all
+        def settle(child):
+            try:
+                self._wait_or_kill(child, max(0, deadline - time.monotonic()))
+            finally:
+                self._signal(child, signal.SIGKILL)
+        operations = [(str(child.pid) + " signal", lambda child=child: self._signal(child, signal.SIGTERM))
+                      for child in children]
+        operations.extend((str(child.pid) + " reap", lambda child=child: settle(child)) for child in children)
+        cleanup_all(operations)
 
 
 def _catalog(args):
@@ -127,6 +144,7 @@ def _catalog(args):
             "--grade",
             args.grade,
             *selection_arguments(args),
+            *(["--instances", args.instances] if getattr(args, "instances", None) else []),
             *(["--experiment-params", args.experiment_params] if getattr(args, "experiment_params", None) else []),
             "--list-json",
         ],
@@ -432,6 +450,12 @@ def _run_admitted(args, out, admission):
         for (i, lane) in enumerate(lanes)
     ]
     interrupted = False
+    def terminate(signum, frame):
+        if not children.stopping:
+            raise KeyboardInterrupt("suite terminated")
+    previous_term = None
+    if threading.current_thread() is threading.main_thread():
+        previous_term = signal.signal(signal.SIGTERM, terminate)
     try:
         results = [future.result() for future in futures]
     except KeyboardInterrupt:
@@ -439,7 +463,12 @@ def _run_admitted(args, out, admission):
         children.stop()
         results = [future.result() for future in futures]
     finally:
-        pool.shutdown(wait=True)
+        try:
+            children.stop()
+        finally:
+            pool.shutdown(wait=True)
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
     if dispatch is not None:
         reasons = "; ".join(row["retirement_reason"] for row in results
                             if row.get("retirement_reason"))

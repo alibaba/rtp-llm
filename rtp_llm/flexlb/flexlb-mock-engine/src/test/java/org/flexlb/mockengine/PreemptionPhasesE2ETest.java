@@ -35,6 +35,60 @@ class PreemptionPhasesE2ETest {
 
     private static final int BASE_PORT = 62700;
 
+    @Test
+    @Timeout(15)
+    void notFoundCancelFailsIncomingWithoutDispatchOrTerminalizingVictim() throws Exception {
+        try (var h = new AutoTpmE2EHarness(BASE_PORT + 70, 1, 1, "1", 10_000, false)) {
+            h.allowPreemption(VictimStage.DECODE_ENGINE_OWNED);
+            h.setCancelReply(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.NOT_FOUND);
+            h.config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+            h.fixedWindowDecision().setMaxRequests(1);
+            try (var held = h.holdBatchAck(711)) {
+                var low = h.scheduler.submit(h.context(711, 30));
+                AutoTpmE2EHarness.await(() -> h.decodeEngines.get(0).getActiveDecodeCount() == 1,
+                        2000, "victim executing on Decode");
+                h.pumpDecodeOnce(0); h.pumpDecodeOnce(0);
+                h.fixedWindowDecision().setMaxRequests(100);
+                var high = h.scheduler.submit(h.context(712, 70));
+                var result = high.get(3, TimeUnit.SECONDS);
+                assertFalse(result.isSuccess());
+                assertTrue(result.getErrorMessage().contains("cancel_not_found"), result.getErrorMessage());
+                assertFalse(h.decodeEndpoint(0).resourceSnapshot().reserved().containsKey(712L));
+                assertFalse(low.isDone());
+                assertEquals(0, h.decodeEndpoint(0).getInflightCount());
+                assertEquals(java.util.List.of(711L), h.engineArrivalOrder,
+                        "NOT_FOUND must not dispatch the incoming request");
+            }
+        }
+    }
+
+    @Test
+    @Timeout(15)
+    void fencedCancelSettlesVictimBeforeIncomingReservesTheReleasedSlot() throws Exception {
+        try (var h = new AutoTpmE2EHarness(BASE_PORT + 80, 1, 1, "1", 10_000, false)) {
+            h.allowPreemption(VictimStage.DECODE_ENGINE_OWNED);
+            h.setCancelReply(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_FENCED);
+            h.config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+            h.fixedWindowDecision().setMaxRequests(1);
+            try (var held = h.holdBatchAck(721)) {
+                var low = h.scheduler.submit(h.context(721, 30));
+                AutoTpmE2EHarness.await(() -> h.decodeEngines.get(0).getActiveDecodeCount() == 1,
+                        2000, "victim executing on Decode");
+                h.pumpDecodeOnce(0); h.pumpDecodeOnce(0);
+                h.fixedWindowDecision().setMaxRequests(100);
+                var high = h.scheduler.submit(h.context(722, 70));
+                AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).resourceSnapshot().reserved().containsKey(722L),
+                        2000, "incoming owns the released Decode slot");
+                var victim = low.get(3, TimeUnit.SECONDS);
+                assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victim.getCode());
+                assertFalse(high.isDone());
+                assertFalse(h.decodeEndpoint(0).resourceSnapshot().confirmed().stream()
+                        .anyMatch(task -> task.requestId() == 721L));
+                assertEquals(1, h.decodeEndpoint(0).getInflightCount());
+            }
+        }
+    }
+
     // ==================== A1 Prefill 优先级插队 ====================
 
     @Test

@@ -98,6 +98,7 @@ public final class JavaLoadClient implements AutoCloseable {
             TimeUnit.MILLISECONDS.toNanos(100);
 
     private final Config config;
+    private final boolean monitoringEnabled;
     private final EventLoopGroup eventLoopGroup;
     /**
      * HA multi-target router (GRPC_TARGETS with >= 2 addresses): per-target
@@ -131,10 +132,11 @@ public final class JavaLoadClient implements AutoCloseable {
     private final io.micrometer.prometheus.PrometheusMeterRegistry monitor =
             new io.micrometer.prometheus.PrometheusMeterRegistry(io.micrometer.prometheus.PrometheusConfig.DEFAULT);
     private com.sun.net.httpserver.HttpServer metricsServer;
+    private final Map<String, io.micrometer.core.instrument.Timer> latencyTimers = new ConcurrentHashMap<>();
     private final AtomicInteger monitoredCompleted = new AtomicInteger();
 
     private void startMetricsServer() throws IOException {
-        if (!"true".equalsIgnoreCase(System.getenv("CLIENT_MONITORING"))) return;
+        if (!monitoringEnabled) return;
         metricsServer = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_send", sentTotal, AtomicInteger::doubleValue).register(monitor);
         io.micrometer.core.instrument.FunctionCounter.builder("flexlb_client_actual_send", actualSentCount, AtomicInteger::doubleValue).register(monitor);
@@ -148,15 +150,23 @@ public final class JavaLoadClient implements AutoCloseable {
             try (var output = exchange.getResponseBody()) { output.write(body); }
         });
         metricsServer.start();
-        Files.writeString(Path.of(config.outputDir, "metrics-target.json"),
-                "{\"url\":\"http://127.0.0.1:" + metricsServer.getAddress().getPort() + "/metrics\"}");
+        Path target = Path.of(config.outputDir, "metrics-target.json");
+        Path temporary = Files.createTempFile(target.getParent(), "metrics-target-", ".tmp");
+        try {
+            Files.writeString(temporary,
+                    "{\"url\":\"http://127.0.0.1:" + metricsServer.getAddress().getPort() + "/metrics\"}");
+            Files.move(temporary, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     private void observeLatency(String name, double milliseconds) {
-        if (milliseconds > 0 && Double.isFinite(milliseconds)) {
-            io.micrometer.core.instrument.Timer.builder("flexlb_client_" + name)
+        if (monitoringEnabled && milliseconds > 0 && Double.isFinite(milliseconds)) {
+            latencyTimers.computeIfAbsent(name, key -> io.micrometer.core.instrument.Timer.builder("flexlb_client_" + key)
                     .publishPercentileHistogram().minimumExpectedValue(Duration.ofMillis(1))
-                    .maximumExpectedValue(Duration.ofMinutes(2)).register(monitor)
+                    .maximumExpectedValue(Duration.ofMinutes(2)).register(monitor))
                     .record((long) (milliseconds * 1_000_000), TimeUnit.NANOSECONDS);
         }
     }
@@ -171,7 +181,12 @@ public final class JavaLoadClient implements AutoCloseable {
     private final AtomicInteger fallbackDecodeRR = new AtomicInteger();
 
     JavaLoadClient(Config config) {
+        this(config, "true".equalsIgnoreCase(System.getenv("CLIENT_MONITORING")));
+    }
+
+    JavaLoadClient(Config config, boolean monitoringEnabled) {
         this.config = config;
+        this.monitoringEnabled = monitoringEnabled;
         if (config.dryRun) {
             // Test-only mode: no gRPC channels are created.
             this.eventLoopGroup = null;
@@ -181,6 +196,8 @@ public final class JavaLoadClient implements AutoCloseable {
             return;
         }
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
+        List<ManagedChannel> opened = new ArrayList<>();
+        try {
         if (config.isMultiTarget()) {
             // A discovery file enables the frontend-style VIP + /master/info
             // route. GRPC_TARGETS alone retains the older transport-only mode.
@@ -208,8 +225,14 @@ public final class JavaLoadClient implements AutoCloseable {
                     .keepAliveTimeout(10, TimeUnit.SECONDS)
                     .usePlaintext()
                     .build();
+            opened.add(channel);
             scheduleChannels[i] = channel;
             scheduleStubs[i] = FlexlbServiceGrpc.newBlockingStub(channel);
+        }
+        } catch (RuntimeException | Error failure) {
+            opened.forEach(ManagedChannel::shutdownNow);
+            eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS).syncUninterruptibly();
+            throw failure;
         }
     }
 
@@ -300,7 +323,7 @@ public final class JavaLoadClient implements AutoCloseable {
         playbackManifest.put("trace_span_ms", sourceSpanMs);
         playbackManifest.put("token_stride", tokenStride);
         playbackManifest.put("offline_plan_supported", config.maxInputLen == 0 && config.maxOutputLen == 0
-                && config.forcePriority == 0);
+                && config.forcePriority == 0 && records.stream().allMatch(record -> record.tokenBacked));
         MAPPER.writeValue(Path.of(config.outputDir,"playback.json").toFile(), playbackManifest);
         String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
         if (controlDirectory != null && !controlDirectory.isBlank()) {
@@ -645,8 +668,10 @@ public final class JavaLoadClient implements AutoCloseable {
         Playback policy = playback != null ? playback : new Playback(Map.of("MAX_LAPS","1"), false, config.durationS);
         if (req.tokenIds == null) throw new IllegalArgumentException("lap relabel requires token-backed plans");
         if (playback == null) tokenStride = req.tokenIds.stream().mapToLong(t -> (long)t+1).max().orElse(1);
-        List<Integer> tokens = policy.relabel(req.tokenIds, loopIdx, tokenStride);
-        List<Long> blockKeys = tokens == req.tokenIds ? req.blockKeys : computeBlockKeys(tokens, req.cacheKeyBlockSize);
+        List<Integer> tokens = req.tokenBacked ? policy.relabel(req.tokenIds, loopIdx, tokenStride) : req.tokenIds;
+        List<Long> blockKeys = !req.tokenBacked && loopIdx > 0 && !policy.identity.equals("none")
+                ? req.blockKeys.stream().map(key -> key ^ stableRequestId("playback-lap:" + loopIdx)).toList()
+                : tokens == req.tokenIds ? req.blockKeys : computeBlockKeys(tokens, req.cacheKeyBlockSize);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
                 req.inputLen, req.outputLen, blockKeys, tokens, req.priority, req.cacheKeyBlockSize, loopIdx);
     }
@@ -1374,11 +1399,6 @@ public final class JavaLoadClient implements AutoCloseable {
         long tsMs = raw.path("ts").asLong(raw.path("request_enter_ts_epoch_ms")
                 .asLong(raw.path("ts_epoch_ms").asLong(0)));
 
-        JsonNode encoded = raw.has("input_token_blocks") ? raw.get("input_token_blocks") : raw.get("input_ids");
-        if (encoded != null && encoded.isArray()) for (JsonNode value : encoded) {
-            if (value.isArray()) for (JsonNode token : value) tokenStride = Math.max(tokenStride, token.asLong()+1);
-            else tokenStride = Math.max(tokenStride, value.asLong()+1);
-        }
         List<Integer> tokenIds = decodeInputTokens(raw, inputLen);
         if (tokenIds == null) {
             tokenIds = Collections.nCopies(inputLen, 0);
@@ -1419,9 +1439,12 @@ public final class JavaLoadClient implements AutoCloseable {
             }
         }
 
-        return new TraceRecord(requestId, sourceRid, traceId, tsMs,
+        for (int token : tokenIds) tokenStride = Math.max(tokenStride, (long) token + 1);
+        TraceRecord record = new TraceRecord(requestId, sourceRid, traceId, tsMs,
                 inputLen, outputLen, blockKeys, tokenIds, priority,
                 raw.path("cache_key_block_size").asInt(BLOCK_SIZE));
+        record.tokenBacked = raw.has("input_ids") || raw.has("input_token_blocks");
+        return record;
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -2363,6 +2386,7 @@ public final class JavaLoadClient implements AutoCloseable {
         final int priority;
         final int cacheKeyBlockSize;
         final int iteration;
+        boolean tokenBacked = true;
 
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds) {

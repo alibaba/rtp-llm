@@ -158,3 +158,14 @@ def classify(plans, suite=None, catalog=CATALOG, *, kind=None):
         if missing:
             raise ScenarioError('suite is unsupported by the selected source/profile; missing: ' + ', '.join(sorted(missing)))
     return selected
+
+
+def exact_documents(documents, identities):
+    if identities is None:
+        return documents
+    ids = identities.split(',') if isinstance(identities, str) else identities
+    if not ids or len(set(ids)) != len(ids) or any(len(value.split('::')) != 3 or not all(value.split('::')) for value in ids):
+        raise ScenarioError('instances requires unique complete case::variant::profile IDs')
+    cases = {value.split('::')[0] for value in ids}
+    return [(source, document) for source, document in documents
+            if document.get('id', document.get('case')) in cases]

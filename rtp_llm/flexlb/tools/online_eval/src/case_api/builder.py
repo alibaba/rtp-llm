@@ -14,7 +14,6 @@ class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
     def __init__(self, environment, parameters, *, number_rules, profiles=(), optional_numbers=()):
-        self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
         self.number_rules = dict(number_rules)
         self.profiles = tuple(profiles)
@@ -34,11 +33,6 @@ class CaseBuilder:
                 raise ScenarioError(f"missing YAML parameter {path!r}")
             value = value[part]
         return copy.deepcopy(value)
-
-    def inputs(self, **contract):
-        from case_api.inputs import ProgramInputs
-
-        return ProgramInputs.read(self, **contract)
 
     def bind(self, contract):
         return contract.bind(self)

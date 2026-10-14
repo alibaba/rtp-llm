@@ -33,6 +33,7 @@ class PrometheusEvidence:
         self.server = self.thread = None
         self.started = self.ended = None
         self.closed = False
+        self.stopping = False
         self.lock = threading.Lock()
         self.names = {field: 'online_eval_' + source + '_' + field for field in self.fields}
         self.job = 'probe-' + source
@@ -45,7 +46,7 @@ class PrometheusEvidence:
     def collect(self):
         from prometheus_client.core import GaugeMetricFamily
         with self.lock:
-            if self.closed:
+            if self.closed or self.stopping:
                 return
             if self.error is not None:
                 raise RuntimeError('probe failed') from self.error
@@ -84,8 +85,9 @@ class PrometheusEvidence:
             self.session.add_probe(self, self.url, deadline=deadline)
         except BaseException as exc:
             self.error = self.error or exc
-            self.closed = True
+            self.stopping = True
             self._close_server()
+            self.closed = True
             raise
         return self
 
@@ -115,7 +117,8 @@ class PrometheusEvidence:
             self._close_server(deadline)
             raise TimeoutError('probe adapter did not finish')
         try:
-            self.closed, self.ended = True, time.time()
+            self.stopping = True
+            self.ended = self.ended if self.ended is not None else time.time()
         finally:
             self.lock.release()
         try:
@@ -126,6 +129,7 @@ class PrometheusEvidence:
             raise
         finally:
             self._close_server(deadline)
+            self.closed = True
         if self.error is not None:
             raise RuntimeError('probe collection failed: ' + str(self.error)) from self.error
 

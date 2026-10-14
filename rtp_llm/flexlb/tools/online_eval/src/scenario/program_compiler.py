@@ -136,8 +136,13 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
 def _variant_contract(config, builder, source):
     metadata = config.metadata
     execution = config.execution.to_dict()
-    if (builder.metric_dependencies or "metric_whitelist" in builder.environment
-            or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
+    from case_api.registry import registry
+    try:
+        registry().cases[config.case].definition.execution_requirements.validate(execution)
+    except ValueError as exc:
+        raise ScenarioError(f"{source}.execution: {exc}") from exc
+    if (builder.metric_dependencies or "metric_whitelist" in builder.env
+            or any("metric_whitelist" in patch for patch in builder.env.get("profile_overrides", {}).values())):
         _bind_metric_dependencies(builder.metric_dependencies, execution)
     variant = dict(metadata=metadata, execution=execution)
     _bind_reports(config, variant, source, builder.steps)
@@ -164,7 +169,7 @@ def _variant_contract(config, builder, source):
             collection = definition.get("collection", {})
             if collection.get("source"):
                 registry().capability("source", collection["source"], case=config.case)
-        validate_export_filter(selected, builder.environment)
+        validate_export_filter(selected, builder.env)
         variant["monitoring_query_plan"] = frozen_plan(name, selected)
     return variant
 

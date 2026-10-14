@@ -64,6 +64,9 @@ class SampleWorker:
                         CaptureDeadline(self.clock, self.end, self.stop_event)
                     )
                 )
+        except TimeoutError as error:
+            if not self.stop_event.is_set() and self.clock() < self.end:
+                self.error = f"incomplete sampling: {type(error).__name__}: {error}"
         except Exception as error:
             self.error = f"incomplete sampling: {type(error).__name__}: {error}"
         finally:

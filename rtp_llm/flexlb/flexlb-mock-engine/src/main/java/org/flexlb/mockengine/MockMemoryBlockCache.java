@@ -114,6 +114,7 @@ final class MockMemoryBlockCache {
             Entry e = entries.get(key);
             if (e == null) break;
             touch(e);
+            if (held.containsKey(key)) continue;
             if (e.pins++ == 0) { pinned++; victims.remove(e); }
             held.put(key, e);
         }

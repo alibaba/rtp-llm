@@ -41,6 +41,11 @@ class LeakCanaryLongRunE2ETest {
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
+            // Prefill rejection cannot prove whether the upstream Decode was
+            // allocated. Its quarantined shadow reservation settles at the
+            // request's declared inactivity deadline; keep that deadline bounded
+            // in this fixture while successful completions still use status.
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(5_000L);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);
@@ -105,8 +110,7 @@ class LeakCanaryLongRunE2ETest {
                         "LEAK on engine " + svc.getGrpcPort());
             }
 
-            // 调度器账目必须由 finished 上报正常收敛，不依赖 TTL 清扫
-            // 掩盖完成游标丢记录。
+            // 成功请求由 finished 游标结算；拒绝窗口的隔离账目按声明 deadline 收敛。
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),

@@ -72,6 +72,8 @@ class CiPlanner:
         from scenario.experiment_params import ExperimentParams
         overrides = ExperimentParams.read(experiment_params)
         documents = preselect_documents(load_scenarios(self.source, experiment_params=overrides.to_json()), None if exact is not None else suite, catalog=self.catalog_path)
+        from scenario.suites import exact_documents
+        documents = exact_documents(documents, exact)
         selected = []
         registry = handlers()
         for profile in selected_profiles:

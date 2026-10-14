@@ -78,6 +78,7 @@ SPEC.panels.forEach(p=>{
 
   // Time and category charts both consume the producer-owned points.
   const isTime = !!(p.timeX && TIME_AXIS);
+  const numericX = p.type !== 'bar' || p.series.every(s=>s.points.every(point=>typeof point.x==='number'));
   let legendController;
   const chart = new Chart(ctx,{
     plugins: [{id:'phaseEvents', afterDraw(chart) {
@@ -101,7 +102,7 @@ SPEC.panels.forEach(p=>{
         data: s.points,
         yAxisID:s.axis, hidden:s.hidden, borderDash:s.dash,
         borderColor:s.color, backgroundColor:s.color+'33',
-        borderWidth:1.5, pointRadius:0, tension:0.15, fill:false,
+        borderWidth:1.5, pointRadius:s.points.length === 1 ? 3 : 0, tension:0.15, fill:false,
       }))
     },
     options:{
@@ -121,7 +122,7 @@ SPEC.panels.forEach(p=>{
       },
       scales: Object.assign({x:isTime ? {
         type:'linear',min:TA_MIN,max:TA_MAX,ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:12}
-      } : {type:'category',ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:12}}},
+      } : {type:numericX?'linear':'category',ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:12}}},
       axisOptions(p.axes))
     }
   });

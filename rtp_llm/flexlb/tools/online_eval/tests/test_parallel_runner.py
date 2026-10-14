@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+import pytest
 from pathlib import Path
 from unittest import mock
 
@@ -21,9 +22,7 @@ from adapters import port_windows as parallel_runner
 PARALLEL_RUNNER = TOOLS_DIR / "scripts/pipeline/execute_cases.py"
 
 
-DEFAULT_LANES = parallel_runner.max_lanes(
-    parallel_runner.MOCK_PORT_STRIDE, parallel_runner.MOCK_BASE_GRPC_PORT
-)
+DEFAULT_LANES = (65535 - 151 - parallel_runner.MOCK_BASE_GRPC_PORT) // parallel_runner.MOCK_PORT_STRIDE + 1
 
 _FAMILY_WEIGHTS = {
     "master": 60 * 8,
@@ -270,7 +269,9 @@ class PortPreflightResolveTest(PortAdmissionMixin, unittest.TestCase):
     """
 
     def setUp(self):
-        lockdir = Path(tempfile.mkdtemp(prefix="ft_portlock_"))
+        temporary_locks = tempfile.TemporaryDirectory(prefix="ft_portlock_")
+        self.addCleanup(temporary_locks.cleanup)
+        lockdir = Path(temporary_locks.name)
         patcher = mock.patch.object(parallel_runner, "PORT_WINDOW_LOCK_DIR", lockdir)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -700,3 +701,10 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
                     self.assertEqual(0o1777, mode)
                 finally:
                     parallel_runner._close_window_locks(holders)
+
+
+@pytest.fixture(autouse=True)
+def isolated_port_capacity():
+    from adapters import java_mock_resources
+    with mock.patch.object(parallel_runner, 'MOCK_PORT_WINDOW_LAST', 151), mock.patch.object(java_mock_resources, 'MOCK_WINDOW_LAST', 151), mock.patch.dict(os.environ, {'FLEXLB_FT_WORKER_PORT_CAPACITY': '149'}):
+        yield

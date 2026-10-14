@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from traffic.playback.configuration import JAVA_REPLAY_SPEED
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class PlaybackEvidence:
         for field, target in expected.items():
             if value.get(field) != target:
                 raise ValueError('Java playback launch mismatch: ' + field)
-        for field, name, fallback in [('qps', 'SEND_MODE_QPS', 0), ('speed', 'REPLAY_SPEED', 1),
+        for field, name, fallback in [('qps', 'SEND_MODE_QPS', 0), ('speed', 'REPLAY_SPEED', JAVA_REPLAY_SPEED),
                                       ('ramp_up_seconds', 'RAMP_UP_SECONDS', 0)]:
             if value.get(field) != float(environment.get(name, fallback)):
                 raise ValueError('Java playback launch mismatch: ' + field)

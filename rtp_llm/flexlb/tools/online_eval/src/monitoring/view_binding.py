@@ -7,6 +7,9 @@ def validate_bindings(path, data, plan, fail):
     for curve_id, binding in data.charts.curves.items():
         if binding.metric_id not in declared or binding.labels is None:
             fail(path, "curve must bind a declared metric id and labels: " + curve_id)
+        if any(line.curve_id == curve_id for panel in data.charts.panels for line in panel.gate_lines):
+            if binding.source_unit != declared[binding.metric_id]['unit']:
+                fail(path, 'gate_lines source_unit must match the declared metric: ' + curve_id)
 
 
 def validate_monitoring_policy(path, data, plan, fail):

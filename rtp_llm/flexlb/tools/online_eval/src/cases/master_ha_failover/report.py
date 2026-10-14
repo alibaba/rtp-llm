@@ -22,8 +22,10 @@ def build_spec(payload, presentation):
             labels = row["labels"]
             if any(labels.get(k) != v for k,v in style.labels):
                 continue
+            qualifier = row['provenance'].get('evidence', {}).get('check')
             curves.append(materialize(
                 curve_id, style, row["points"], origin=anchor, labels=labels,
+                name=style.name.format(**labels) + (' · ' + qualifier if qualifier else ''),
                 unit=store.document["definitions"][identity]["unit"], provenance=row["provenance"],
             ))
     panels = project_panels(curves, presentation)
@@ -48,7 +50,8 @@ def build_spec(payload, presentation):
     attach_events(spec, presentation, origin=anchor,
                   phases=payload.get("phases", []), events=payload.get("events", []))
     spec["timeAxis"]["max"] = max(maximum, max((event["t"] for event in spec["events"]), default=1))
-    return spec
+    from reporting.gate_lines import apply_gate_lines, check_references
+    return apply_gate_lines(spec, presentation, check_references(RunPresentation.read(payload).checks))
 
 
 def write_report(directory, payload, presentation):
@@ -64,4 +67,7 @@ def write_report(directory, payload, presentation):
 
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
+    from reporting.gate_lines import validate_bindings
+    from cases.master_ha_failover.analysis import GATE_REFERENCES
+    validate_bindings(data, GATE_REFERENCES)
     validate_section_contract(path, data, {"sources": None}, fail)

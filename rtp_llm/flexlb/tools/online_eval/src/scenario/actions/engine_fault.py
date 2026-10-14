@@ -138,7 +138,7 @@ def inject(ctx, params, deadline):
         not isinstance(name, str) or not ENGINE_NAME.fullmatch(name) for name in targets
     ) or len(set(targets)) != len(targets):
         raise ValueError("resolved fault targets must be distinct engine names")
-    before = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
+    before = select_engines(control_json(ctx.ops, "snapshot?view=topology", deadline), targets)
     ports = {}
     for name, entry in before.items():
         try:

@@ -3,11 +3,11 @@ import json
 import time
 import urllib.request
 
-from adapters.debug_client import DebugClient, DebugUnavailable
+from adapters.debug_client import DebugUnavailable
 from runtime.observation import FrozenSnapshot
 
 SOURCES = frozenset(
-    {"master_debug", "engine_snapshot", "engine_requests", "client_records"}
+    {"engine_snapshot", "engine_requests", "client_records"}
 )
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_DATASET_BYTES = 32 * 1024 * 1024
@@ -31,7 +31,6 @@ class Sources:
         self.env = ctx.env
         if self.env is None:
             raise DebugUnavailable("snapshot requires setup")
-        self.master_port = self.env.master_http_port if "master_debug" in params["sources"] else None
         self.mock_port = self.env.mock_http_port if {"engine_snapshot", "engine_requests"} & set(params["sources"]) else None
         self.custom = {name: ctx.services.snapshot(name, params) for name in params["sources"] if name not in SOURCES}
         self.records = None
@@ -42,7 +41,6 @@ class Sources:
                     raise DebugUnavailable(
                         f"{kind} does not implement snapshot_records"
                     )
-        self.master_instance = None
         self.initial_members = {}
 
     def capture(self, deadline):
@@ -68,34 +66,6 @@ class Sources:
                 if name in self.custom:
                     sample["data"] = self.custom[name].read(deadline)
                     json.dumps(sample["data"], allow_nan=False)
-                elif name == "master_debug":
-                    result = DebugClient(
-                        f"http://127.0.0.1:{self.master_port}",
-                        timeout_s=min(5.0, deadline.remaining()),
-                    ).snapshot(
-                        include=",".join(self.params["master_include"]),
-                        limit=self.params["limit"],
-                        scan_limit=self.params["scan_limit"],
-                        endpoint_limit=self.params["endpoint_limit"],
-                    )
-                    sample["data"] = result.payload
-                    instance = result.payload["instanceId"]
-                    sample["master_instance_id"] = instance
-                    if self.master_instance is None:
-                        self.master_instance = instance
-                    elif self.master_instance != instance:
-                        sample["status"] = "epoch_changed"
-                        raise DebugUnavailable(
-                            "Master instance changed; previous baseline is no longer comparable"
-                        )
-                    if result.payload["status"] != "ok" or any(
-                        page["status"] != "ok" or page["truncated"]
-                        for page in result.payload["components"].values()
-                    ):
-                        sample["status"] = "partial"
-                        raise DebugUnavailable(
-                            "Master snapshot has partial/busy/truncated components"
-                        )
                 elif name == "client_records":
                     from case_api.client_records import read_records
                     records = read_records(self.records, deadline, self.epoch)
