@@ -1151,22 +1151,6 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 // Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
 // ---------------------------------------------------------------------------
 
-static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
-                                                  const ModelConfig&      model_config,
-                                                  const RuntimeConfig&    runtime_config,
-                                                  const ResourceContext&  resource_context,
-                                                  int                     max_new_tokens       = 1,
-                                                  int                     num_return_sequences = 1,
-                                                  const std::vector<int>& variable_num_beams   = {}) {
-    auto query                                   = std::make_shared<GenerateInput>();
-    query->input_ids                             = torch::tensor(ids, torch::kInt32);
-    query->generate_config                       = makeTestGenerateConfig();
-    query->generate_config->max_new_tokens       = max_new_tokens;
-    query->generate_config->num_return_sequences = num_return_sequences;
-    query->generate_config->variable_num_beams   = variable_num_beams;
-    return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-}
-
 static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<int>& ids,
                                                             int64_t                 group_id,
                                                             int                     group_size,
