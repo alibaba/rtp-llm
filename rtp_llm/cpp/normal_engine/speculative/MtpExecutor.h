@@ -137,8 +137,11 @@ protected:
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    bool            launchTargetVerifyPrepareAsync(const GptModelInputs&                    model_input,
+                                                   size_t                                   batch_size,
+                                                   const std::optional<LinearReplayInputs>& replay,
+                                                   uint64_t                                 prepare_id);
+    bool            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, uint64_t prepare_id);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
@@ -237,12 +240,12 @@ protected:
                                    const torch::Tensor&                         verify_position_ids,
                                    const MergedOutput&                          draft_prefill_output);
 
-    static torch::Tensor advanceDSparkPositionIds(const torch::Tensor& verify_position_ids,
-                                                  const torch::Tensor& accept_len,
-                                                  int64_t              batch_size,
-                                                  int64_t              verify_width);
+    static torch::Tensor advanceMtpPositionIds(const torch::Tensor& verify_position_ids,
+                                               const torch::Tensor& accept_len,
+                                               int64_t              batch_size,
+                                               int64_t              verify_width);
 
-    void releaseAllModelBuffers();
+    void releaseAllModelBuffers(std::vector<torch::Tensor>* expired = nullptr);
 
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
@@ -312,6 +315,8 @@ private:
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
+    uint64_t                              next_attention_prepare_id_{0};
+    std::shared_ptr<const GptModelInputs> target_verify_prepare_inputs_;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;

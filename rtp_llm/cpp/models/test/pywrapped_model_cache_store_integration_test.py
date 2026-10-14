@@ -53,6 +53,153 @@ run_dirty_generation_prefill_capture_scenario = (
 run_scenario = _extension.run_scenario
 
 
+class TpSyncCacheRowsTest(unittest.TestCase):
+    def _round_trip(self, tags, blocks, kernel, group_types):
+        # Replay only the transport; native packing, canonical group order and
+        # receiver reordering all execute through production tpSyncModelInputs.
+        frames = {"cpu": [], "cuda": []}
+        positions = {"cpu": 0, "cuda": 0}
+        receiving = False
+
+        def broadcast(tensors, root, _mode):
+            self.assertEqual(root, 0)
+            for tensor in tensors:
+                kind = "cuda" if tensor.is_cuda else "cpu"
+                if receiving:
+                    tensor.copy_(frames[kind][positions[kind]])
+                    positions[kind] += 1
+                else:
+                    frames[kind].append(tensor.clone())
+
+        def unexpected(*_args):
+            self.fail("cache input synchronization must only broadcast")
+
+        _extension.register_comm_ops(broadcast, unexpected, unexpected, broadcast)
+        try:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profile:
+                root_result = _extension.run_tp_sync_cache_rows(
+                    0, tags, blocks, kernel, group_types
+                )
+            if blocks.is_cuda:
+                self.assertNotIn(
+                    "aten::index_select", [event.name for event in profile.events()]
+                )
+            self.assertEqual(root_result["blocks"].data_ptr(), blocks.data_ptr())
+            self.assertEqual(root_result["kernel"].data_ptr(), kernel.data_ptr())
+            self.assertEqual(root_result["types"].data_ptr(), group_types.data_ptr())
+            receiving = True
+            canonical_tags = sorted(tags)
+            for local_tags in (canonical_tags, canonical_tags[1:] + canonical_tags[:1]):
+                positions = {"cpu": 0, "cuda": 0}
+                result = _extension.run_tp_sync_cache_rows(
+                    1, local_tags, blocks, kernel, group_types
+                )
+                self.assertEqual(result["tags"], local_tags)
+                order = [tags.index(tag) for tag in local_tags]
+                for key, source in (
+                    ("blocks", blocks),
+                    ("kernel", kernel),
+                    ("types", group_types),
+                ):
+                    if source.numel() == 0:
+                        self.assertTrue(result[key] is None or result[key].numel() == 0)
+                        continue
+                    self.assertEqual(result[key].device, source.device)
+                    torch.testing.assert_close(
+                        result[key].cpu(), source.cpu()[order], rtol=0, atol=0
+                    )
+                    if source.is_pinned():
+                        self.assertTrue(result[key].is_pinned())
+                self.assertEqual(
+                    positions, {key: len(value) for key, value in frames.items()}
+                )
+        finally:
+            _extension.clear_comm_ops()
+
+    def test_cuda_group_order_and_noncontiguous_tables(self):
+        for groups, noncontiguous in ((2, False), (2, True), (65, False)):
+            with self.subTest(groups=groups, noncontiguous=noncontiguous):
+                tags = [f"g{i:03d}" for i in reversed(range(groups))]
+                blocks = torch.arange(groups * 2 * 3, device="cuda", dtype=torch.int32)
+                blocks = blocks.reshape(groups, 2, 3)
+                kernel = blocks + 1000
+                if noncontiguous:
+                    blocks = blocks.transpose(1, 2)
+                    kernel = kernel.transpose(1, 2)
+                types = torch.arange(groups, device="cuda", dtype=torch.int32)
+                self._round_trip(tags, blocks, kernel, types)
+
+    def test_identity_empty_and_pinned_cpu_tables(self):
+        for device, empty, reverse in (
+            ("cuda", False, False),
+            ("cuda", True, False),
+            ("cuda", True, True),
+            ("cpu", False, True),
+        ):
+            with self.subTest(device=device, empty=empty, reverse=reverse):
+                tags = ["z", "a"] if reverse else ["a", "z"]
+                width = 0 if empty else 3
+                blocks = torch.arange(2 * 2 * width, device=device, dtype=torch.int32)
+                blocks = blocks.reshape(2, 2, width)
+                kernel = blocks + 1000
+                types = torch.arange(2, device=device, dtype=torch.int32)
+                if device == "cpu":
+                    blocks = blocks.transpose(1, 2)
+                    kernel = kernel.transpose(1, 2)
+                    blocks, kernel, types = (
+                        value.pin_memory() for value in (blocks, kernel, types)
+                    )
+                self._round_trip(tags, blocks, kernel, types)
+
+    def test_identity_still_validates_group_shapes(self):
+        def unexpected(*_args):
+            self.fail("invalid cache group metadata must fail before broadcasting")
+
+        _extension.register_comm_ops(unexpected, unexpected, unexpected, unexpected)
+        try:
+            types = torch.arange(2, device="cuda", dtype=torch.int32)
+            for shape, tags in (
+                ((3, 2, 1), ["a", "z"]),
+                ((2, 3), ["a", "z"]),
+                ((2, 2, 1), ["a", "a"]),
+            ):
+                with self.subTest(shape=shape, tags=tags):
+                    blocks = torch.zeros(shape, device="cuda", dtype=torch.int32)
+                    with self.assertRaises(RuntimeError):
+                        _extension.run_tp_sync_cache_rows(
+                            0, tags, blocks, blocks, types
+                        )
+        finally:
+            _extension.clear_comm_ops()
+
+    @unittest.skipIf(torch.version.hip is not None, "CUDA pending-work probe")
+    def test_cuda_reorder_does_not_wait_for_queued_gpu_work(self):
+        frames = []
+
+        def broadcast(tensors, _root, _mode):
+            frames.extend(tensor.clone() for tensor in tensors)
+
+        blocks = torch.arange(12, device="cuda", dtype=torch.int32).reshape(2, 2, 3)
+        types = torch.arange(2, device="cuda", dtype=torch.int32)
+        _extension.register_comm_ops(broadcast, broadcast, broadcast, broadcast)
+        event = torch.cuda.Event()
+        try:
+            _extension.run_tp_sync_cache_rows(0, ["z", "a"], blocks, blocks, types)
+            torch.cuda.synchronize()
+            frames.clear()
+            # Keep work pending long enough that a tiny pageable index upload
+            # would wait for it. Check before any correctness copy back to CPU.
+            torch.cuda._sleep(2_000_000_000)
+            event.record()
+            _extension.run_tp_sync_cache_rows(0, ["z", "a"], blocks, blocks, types)
+            self.assertFalse(event.query())
+        finally:
+            event.synchronize()
+            _extension.clear_comm_ops()
+
+
 class CacheStoreForwardModel:
     """Test model that replaces attention math but keeps the real cache-store call."""
 
@@ -136,6 +283,14 @@ class CacheStoreForwardModel:
 
 
 class K3RequestPaddingTest(unittest.TestCase):
+    def test_prepared_identity_rejects_stale_phase_shape_layout_and_every_replay_binding(
+        self,
+    ):
+        result = _extension.run_scenario(
+            CacheStoreForwardModel(), "attention_prepare_identity"
+        )
+        self.assertEqual(result["rejected"], 16)
+
     def test_request_padding_keeps_complete_rows_and_null_cache(self):
         import math
 
@@ -934,6 +1089,178 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                 result = self.run_case(handler, python_norm=False)
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
+
+
+class MtpGreedyForwardModel(SuccessfulGenerationPrefillCaptureModel):
+    def __init__(self, inspect_padding=False, inspect_metadata=False):
+        super().__init__()
+        self.forward_calls = 0
+        self.inspect_padding = inspect_padding
+        self.inspect_metadata = inspect_metadata
+        self.fail_next_prepare = False
+        self.device_only_decode_attention_metadata = inspect_metadata
+        if inspect_padding:
+            # The C++ constructor must capture SP geometry before creating
+            # its graph runner; toggling its test peer afterward is too late.
+            self.requires_sequence_parallel_padding = True
+
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
+    ):
+        super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        return self if self.inspect_metadata else None
+
+    def prepare_cuda_graph(self, _inputs):
+        if self.fail_next_prepare:
+            self.fail_next_prepare = False
+            raise RuntimeError("injected Q1 prepare failure")
+
+    def forward(self, inputs, fmha_impl=None):
+        self.forward_calls += 1
+        hidden = (
+            inputs.input_ids.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1
+        ).to(torch.bfloat16)
+        if self.inspect_padding:
+            hidden = hidden + inputs.input_ids[-1].to(hidden.dtype)
+            if inputs.input_hiddens is not None and inputs.input_hiddens.numel():
+                hidden = hidden + inputs.input_hiddens
+                # A stale nonzero dummy row changes live outputs too. The test
+                # primes that row before the first unaligned replay.
+                hidden = hidden + inputs.input_hiddens[-1].sum()
+        return PyModelOutputs(rms_norm(hidden), hidden + 100)
+
+
+@unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "requires CUDA")
+class MtpGreedyForwardIntegrationTest(unittest.TestCase):
+    def run_case(self, scenario):
+        tagged_q1 = scenario == "multi_tag_q1_prepare"
+        sp_unaligned = tagged_q1 or scenario in (
+            "sp_unaligned",
+            "sp_unaligned_inline_prepare",
+        )
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            result = _extension.run_mtp_greedy_forward(
+                MtpGreedyForwardModel(
+                    inspect_padding=sp_unaligned, inspect_metadata=tagged_q1
+                ),
+                scenario,
+            )
+        events = [event.name for event in profile.events()]
+        # Both user forwards must replay graphs, without invoking Python again.
+        self.assertEqual(
+            result["python_calls_before"], result["python_calls_after_first"]
+        )
+        self.assertEqual(
+            result["python_calls_before"], result["python_calls_after_second"]
+        )
+        self.assertEqual(
+            events.count("py_model.forward(snapshot_outputs)"),
+            3 if sp_unaligned else 2,
+        )
+        self.assertNotIn("cuda_graph.prepareInputData(publish_graph_sources)", events)
+        self.assertEqual(
+            events.count("cuda_graph.prepareInputData(fused_sp_staging)"),
+            2 if sp_unaligned else 0,
+        )
+        self.assertTrue(result["normal_snapshots_distinct"])
+        self.assertTrue(result["recurrent_snapshots_distinct"])
+        if tagged_q1:
+            self.assertEqual(
+                events.count(
+                    "cuda_graph.prepareAttentionInputs(direct_decode_metadata)"
+                ),
+                3,
+            )
+        rows = 6 if scenario == "context" else 1 if sp_unaligned else 2
+        for prefix, first_token in (("first_", 1), ("next_", 4)):
+            tokens = torch.arange(first_token, first_token + rows, device="cuda")
+            hidden = (tokens.unsqueeze(1) * 4 + torch.arange(4, device="cuda") + 1).to(
+                torch.bfloat16
+            )
+            if sp_unaligned:
+                expected_input = torch.arange(
+                    10, 14, device="cuda", dtype=torch.bfloat16
+                ).reshape(1, 4)
+                if prefix == "next_":
+                    expected_input = expected_input + 5
+                torch.testing.assert_close(
+                    result[prefix + "input_hiddens"], expected_input, rtol=0, atol=0
+                )
+                hidden = hidden + expected_input
+            # Inspect after the second replay: first-round tensors must still
+            # contain their own normalized and recurrent values.
+            torch.testing.assert_close(
+                result[prefix + "normalized"], rms_norm(hidden), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                result[prefix + "recurrent"], hidden + 100, rtol=0, atol=0
+            )
+        return result
+
+    def test_unaligned_sp_staging_zeroes_old_token_and_hidden_tail(self):
+        result = self.run_case("sp_unaligned")
+        self.assertEqual(result["valid_vocab"], 0)
+        self.assertIsNone(result["first_logits"])
+        self.assertIsNone(result["first_rank_major"])
+
+    def test_q1_inline_prepare_selects_fused_sp_staging_without_external_prepare(self):
+        # The fixture omits both prepareAttentionInputs and updateKVCacheKernelBlockId
+        # before the two B=1 forwards, matching the real Q1 executor entry.
+        result = self.run_case("sp_unaligned_inline_prepare")
+        self.assertEqual(result["valid_vocab"], 0)
+        self.assertIsNone(result["first_logits"])
+        self.assertIsNone(result["first_rank_major"])
+
+    def test_multitag_q1_metadata_is_published_and_recovers_after_prepare_failure(self):
+        result = self.run_case("multi_tag_q1_prepare")
+        self.assertFalse(result["published_after_failure"])
+        for prefix, length in (("first_", 4), ("next_", 7)):
+            metadata = result[prefix + "tag_metadata"]
+            self.assertEqual(set(metadata), {"full", "aux"})
+            for tag_inputs in metadata.values():
+                self.assertEqual(
+                    tag_inputs["sequence_lengths_plus_1"].tolist(), [length, 1]
+                )
+                self.assertEqual(tag_inputs["decode_cu_seqlens"].tolist(), [0, 1, 2])
+                self.assertEqual(tag_inputs["valid_token_mask"].tolist(), [True, False])
+        metadata = result["fallback_tag_metadata"]
+        self.assertEqual(set(metadata), {"common", "full", "aux"})
+        for tag_inputs in metadata.values():
+            self.assertEqual(
+                tag_inputs["sequence_lengths_plus_1"].tolist(), [7, 7, 7, 1]
+            )
+            self.assertEqual(tag_inputs["decode_cu_seqlens"].tolist(), [0, 1, 2, 3, 4])
+            self.assertEqual(
+                tag_inputs["valid_token_mask"].tolist(), [True, True, True, False]
+            )
+
+    def test_real_forward_selects_greedy_rank_major_and_keeps_snapshots(self):
+        result = self.run_case("greedy")
+        self.assertEqual(result["valid_vocab"], 4)
+        for prefix in ("first_", "next_"):
+            self.assertIsNone(result[prefix + "logits"])
+            rank_major = result[prefix + "rank_major"]
+            self.assertEqual(tuple(rank_major.shape), (1, 2, 4))
+            self.assertEqual(rank_major.dtype, torch.float32)
+            torch.testing.assert_close(
+                rank_major[0], result[prefix + "normalized"].float(), rtol=0, atol=0
+            )
+
+    def test_ordinary_all_logits_debug_and_context_keep_dense_logits(self):
+        for scenario in ("default", "all_logits", "check_nan", "context"):
+            with self.subTest(scenario=scenario):
+                result = self.run_case(scenario)
+                self.assertEqual(result["valid_vocab"], 0)
+                for prefix in ("first_", "next_"):
+                    self.assertIsNone(result[prefix + "rank_major"])
+                    logits = result[prefix + "logits"]
+                    self.assertEqual(tuple(logits.shape), (2, 4))
+                    expected = result[prefix + "normalized"].float()
+                    if scenario == "context":
+                        expected = expected[[2, 5]]
+                    torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

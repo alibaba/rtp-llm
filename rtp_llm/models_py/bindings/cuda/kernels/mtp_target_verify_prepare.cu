@@ -4,10 +4,41 @@
 
 #include <algorithm>
 #include <climits>
+#include <c10/cuda/CUDAException.h>
 
 namespace rtp_llm {
 
 namespace {
+
+constexpr int kAcceptedTokenRowsPerLaunch = 128;
+
+struct AcceptedTokenRow {
+    const void* tokens;
+    const void* length;
+    int32_t     token_count;
+    int32_t     dtype_flags;
+};
+
+struct AcceptedTokenRows {
+    AcceptedTokenRow rows[kAcceptedTokenRowsPerLaunch];
+};
+
+static_assert(sizeof(AcceptedTokenRows) + sizeof(void*) + sizeof(int) < 4096,
+              "accepted-token descriptors must fit CUDA kernel arguments");
+
+__global__ void
+mtpAcceptedTokenGatherKernel(const __grid_constant__ AcceptedTokenRows inputs, int32_t* output, int count) {
+    const int index = threadIdx.x;
+    if (index >= count) {
+        return;
+    }
+    const auto&   row = inputs.rows[index];
+    const int64_t length =
+        (row.dtype_flags & 2) ? *static_cast<const int64_t*>(row.length) : *static_cast<const int32_t*>(row.length);
+    CUDA_KERNEL_ASSERT(length > 0 && length <= row.token_count);
+    output[index] = (row.dtype_flags & 1) ? static_cast<int32_t>(static_cast<const int64_t*>(row.tokens)[length - 1]) :
+                                            static_cast<const int32_t*>(row.tokens)[length - 1];
+}
 
 __global__ void mtpTargetVerifyPrepareKernel(const int32_t* __restrict__ sequence_lengths,
                                              int32_t* __restrict__ input_lengths,
@@ -15,7 +46,10 @@ __global__ void mtpTargetVerifyPrepareKernel(const int32_t* __restrict__ sequenc
                                              int32_t* __restrict__ sequence_lengths_plus_1,
                                              int32_t* __restrict__ lm_output_indexes,
                                              int32_t tokens_per_batch,
-                                             int32_t batch_size) {
+                                             int32_t batch_size,
+                                             const int32_t* __restrict__ position_bases,
+                                             int32_t* __restrict__ position_ids,
+                                             int32_t position_factor) {
     const int32_t idx = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
     if (idx >= batch_size) {
         return;
@@ -24,6 +58,15 @@ __global__ void mtpTargetVerifyPrepareKernel(const int32_t* __restrict__ sequenc
     prefix_lengths[idx]          = sequence_lengths[idx];
     sequence_lengths_plus_1[idx] = sequence_lengths[idx] + 1;
     lm_output_indexes[idx]       = idx * tokens_per_batch;
+    if (position_ids != nullptr) {
+        for (int32_t q = 0; q < tokens_per_batch; ++q) {
+            for (int32_t f = 0; f < position_factor; ++f) {
+                const auto base = position_bases[static_cast<int64_t>(idx) * position_factor + f];
+                position_ids[(static_cast<int64_t>(idx) * tokens_per_batch + q) * position_factor + f] =
+                    static_cast<int32_t>(static_cast<uint32_t>(base) + static_cast<uint32_t>(q));
+            }
+        }
+    }
 }
 
 __global__ void mtpSpecDecodeMetadataPrepareKernel(int32_t* __restrict__ input_lengths,
@@ -143,13 +186,59 @@ void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t b
 
 }  // namespace
 
+bool tryInvokeMtpAcceptedTokenGather(const std::vector<torch::Tensor>& accept_tokens,
+                                     const std::vector<torch::Tensor>& accept_lengths,
+                                     torch::Tensor&                    output,
+                                     cudaStream_t                      stream) {
+    if (accept_tokens.empty() || accept_tokens.size() != accept_lengths.size()) {
+        return false;
+    }
+    const auto& first = accept_tokens.front();
+    if (!first.defined() || !first.is_cuda()) {
+        return false;
+    }
+    const auto device    = first.device();
+    auto       supported = [device](const torch::Tensor& tensor) {
+        return tensor.defined() && tensor.device() == device && tensor.is_contiguous()
+               && (tensor.scalar_type() == torch::kInt32 || tensor.scalar_type() == torch::kInt64);
+    };
+    for (size_t i = 0; i < accept_tokens.size(); ++i) {
+        if (!supported(accept_tokens[i]) || !supported(accept_lengths[i]) || accept_lengths[i].numel() != 1
+            || accept_tokens[i].numel() <= 0 || accept_tokens[i].numel() > INT_MAX) {
+            return false;
+        }
+    }
+
+    output = torch::empty({static_cast<int64_t>(accept_tokens.size())}, first.options().dtype(torch::kInt32));
+    for (size_t offset = 0; offset < accept_tokens.size(); offset += kAcceptedTokenRowsPerLaunch) {
+        AcceptedTokenRows rows{};
+        const int         count =
+            static_cast<int>(std::min<size_t>(kAcceptedTokenRowsPerLaunch, accept_tokens.size() - offset));
+        for (int i = 0; i < count; ++i) {
+            const auto& tokens = accept_tokens[offset + i];
+            const auto& length = accept_lengths[offset + i];
+            rows.rows[i]       = {tokens.data_ptr(),
+                                  length.data_ptr(),
+                                  static_cast<int32_t>(tokens.numel()),
+                                  (tokens.scalar_type() == torch::kInt64 ? 1 : 0)
+                                      | (length.scalar_type() == torch::kInt64 ? 2 : 0)};
+        }
+        mtpAcceptedTokenGatherKernel<<<1, kAcceptedTokenRowsPerLaunch, 0, stream>>>(
+            rows, output.data_ptr<int32_t>() + offset, count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return true;
+}
+
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,
                                   torch::Tensor&       prefix_lengths,
                                   torch::Tensor&       sequence_lengths_plus_1,
                                   torch::Tensor&       lm_output_indexes,
                                   int32_t              tokens_per_batch,
-                                  cudaStream_t         stream) {
+                                  cudaStream_t         stream,
+                                  const torch::Tensor* position_bases,
+                                  torch::Tensor*       position_ids) {
     const int64_t batch_size = input_lengths.numel();
     if (batch_size <= 0) {
         return;
@@ -159,16 +248,36 @@ void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
     checkCudaI32Vector(prefix_lengths, "prefix_lengths", batch_size);
     checkCudaI32Vector(sequence_lengths_plus_1, "sequence_lengths_plus_1", batch_size);
     checkCudaI32Vector(lm_output_indexes, "lm_output_indexes", batch_size);
+    RTP_LLM_CHECK_WITH_INFO((position_bases == nullptr) == (position_ids == nullptr),
+                            "MTP target position bases and output must be provided together");
+    int32_t position_factor = 0;
+    if (position_bases != nullptr) {
+        RTP_LLM_CHECK_WITH_INFO(tokens_per_batch > 0 && position_bases->numel() % batch_size == 0
+                                    && position_bases->numel() / batch_size <= INT_MAX,
+                                "MTP target position bases must have one tuple per request");
+        position_factor = static_cast<int32_t>(position_bases->numel() / batch_size);
+        RTP_LLM_CHECK_WITH_INFO(position_factor > 0, "MTP target position factor must be positive");
+        checkCudaI32Vector(*position_bases, "position_bases", batch_size * position_factor);
+        checkCudaI32Vector(*position_ids, "position_ids", batch_size * tokens_per_batch * position_factor);
+        RTP_LLM_CHECK_WITH_INFO(position_bases->device() == sequence_lengths.device()
+                                    && position_ids->device() == sequence_lengths.device(),
+                                "MTP target positions and sequence lengths must use the same device");
+    }
 
     constexpr int block_size = 256;
     const int     grid_size  = static_cast<int>((batch_size + block_size - 1) / block_size);
-    mtpTargetVerifyPrepareKernel<<<grid_size, block_size, 0, stream>>>(sequence_lengths.data_ptr<int32_t>(),
-                                                                       input_lengths.data_ptr<int32_t>(),
-                                                                       prefix_lengths.data_ptr<int32_t>(),
-                                                                       sequence_lengths_plus_1.data_ptr<int32_t>(),
-                                                                       lm_output_indexes.data_ptr<int32_t>(),
-                                                                       tokens_per_batch,
-                                                                       static_cast<int32_t>(batch_size));
+    mtpTargetVerifyPrepareKernel<<<grid_size, block_size, 0, stream>>>(
+        sequence_lengths.data_ptr<int32_t>(),
+        input_lengths.data_ptr<int32_t>(),
+        prefix_lengths.data_ptr<int32_t>(),
+        sequence_lengths_plus_1.data_ptr<int32_t>(),
+        lm_output_indexes.data_ptr<int32_t>(),
+        tokens_per_batch,
+        static_cast<int32_t>(batch_size),
+        position_bases ? position_bases->data_ptr<int32_t>() : nullptr,
+        position_ids ? position_ids->data_ptr<int32_t>() : nullptr,
+        position_factor);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,

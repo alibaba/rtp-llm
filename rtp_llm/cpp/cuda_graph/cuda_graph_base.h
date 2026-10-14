@@ -39,6 +39,7 @@ struct CudaGraphState {
 
 struct GraphParams {
     bool             enable_cuda_graph                  = false;
+    bool             device_only_attention_metadata     = false;
     bool             enable_cuda_graph_debug_mode       = false;
     bool             is_prefill_cuda_graph_mode         = false;
     bool             is_target_verify                   = false;
@@ -53,8 +54,8 @@ struct GraphParams {
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult                                    = 1;
-    // Models whose draft attention requires rectangular physical query rows
-    // keep the full draft-prefill graph capacity in every token bucket.
+    // Draft attention with rectangular physical query rows keeps a fixed B*Q
+    // capacity within each graph, sized independently for its token bucket.
     bool             fixed_capacity_mtp_draft_prefill            = false;
     int              generation_prefill_cuda_graph_max_requests = 0;
     int              generation_prefill_cuda_graph_pad_token_id = 0;
@@ -100,6 +101,13 @@ public:
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false)  = 0;
+
+    // Device-only Q1 replay can generate derived metadata directly in captured
+    // storage. Call after canRun(PREPARE), with normalized Q1 device metadata
+    // from PyWrappedModel. Other backends keep the ordinary preparation path.
+    virtual bool tryPrepareDecodeAttentionInputs(PyModelInputs&, CudaGraphState&, bool, bool) {
+        return false;
+    }
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.

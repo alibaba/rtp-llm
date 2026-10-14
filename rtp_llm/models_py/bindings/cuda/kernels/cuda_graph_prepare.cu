@@ -12,9 +12,102 @@ namespace rtp_llm {
 
 namespace {
 
+__device__ void
+copyAndZeroGraphInput(const uint8_t* source, int64_t source_bytes, uint8_t* destination, int64_t capacity_bytes) {
+    if (!source || !destination)
+        return;
+    const int64_t tid    = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (int64_t word = tid; word < (capacity_bytes + 15) / 16; word += stride) {
+        const int64_t offset = word * 16;
+        if (offset + 16 <= capacity_bytes && offset + 16 <= source_bytes
+            && reinterpret_cast<uintptr_t>(source + offset) % 16 == 0
+            && reinterpret_cast<uintptr_t>(destination + offset) % 16 == 0) {
+            reinterpret_cast<uint4*>(destination)[word] = *reinterpret_cast<const uint4*>(source + offset);
+        } else if (offset >= source_bytes && offset + 16 <= capacity_bytes
+                   && reinterpret_cast<uintptr_t>(destination + offset) % 16 == 0) {
+            reinterpret_cast<uint4*>(destination)[word] = make_uint4(0, 0, 0, 0);
+        } else {
+            for (int j = 0; j < 16 && offset + j < capacity_bytes; ++j)
+                destination[offset + j] = offset + j < source_bytes ? source[offset + j] : 0;
+        }
+    }
+}
+
+__global__ void cudaGraphInputStagingKernel(CudaGraphInputStagingSources sources,
+                                            uint8_t*                     input_ids,
+                                            int64_t                      input_ids_capacity_bytes,
+                                            uint8_t*                     input_hiddens,
+                                            int64_t                      input_hiddens_capacity_bytes) {
+    const auto source = sources;
+    copyAndZeroGraphInput(source.input_ids, source.input_ids_bytes, input_ids, input_ids_capacity_bytes);
+    copyAndZeroGraphInput(
+        source.input_hiddens, source.input_hiddens_bytes, input_hiddens, input_hiddens_capacity_bytes);
+}
+
+__global__ void sequenceParallelPadKernel(SequenceParallelPadParams params) {
+    const int64_t tid    = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+    for (int32_t region_idx = 0; region_idx < params.region_count; ++region_idx) {
+        const auto    region = params.regions[region_idx];
+        const int64_t bytes  = region.groups * region.destination_group_bytes;
+        for (int64_t word = tid; word < (bytes + 3) / 4; word += stride) {
+            const int64_t offset = word * 4;
+            const int64_t group  = region.groups == 1 ? 0 : offset / region.destination_group_bytes;
+            const int64_t local  = region.groups == 1 ? offset : offset % region.destination_group_bytes;
+            const auto*   source = region.source + group * region.source_group_bytes + local;
+            if (local + 4 <= region.source_group_bytes && offset + 4 <= bytes
+                && reinterpret_cast<uintptr_t>(source) % 4 == 0) {
+                reinterpret_cast<uint32_t*>(region.destination)[word] = *reinterpret_cast<const uint32_t*>(source);
+            } else if (local >= region.source_group_bytes && local + 4 <= region.destination_group_bytes
+                       && offset + 4 <= bytes
+                       && (region.fill_bits == 0 || region.fill_bits == uint64_t(-1) || region.element_bytes <= 4)) {
+                uint32_t fill = static_cast<uint32_t>(region.fill_bits);
+                if (region.element_bytes == 1)
+                    fill = (fill & 255u) * 0x01010101u;
+                else if (region.element_bytes == 2)
+                    fill = (fill & 65535u) * 0x00010001u;
+                reinterpret_cast<uint32_t*>(region.destination)[word] = fill;
+            } else {
+                // Handle partial words and group boundaries byte-wise, including
+                // bool/BF16 rows and the upper word of an int64 Replay field.
+                for (int j = 0; j < 4 && offset + j < bytes; ++j) {
+                    const int64_t byte     = offset + j;
+                    const int64_t g        = byte / region.destination_group_bytes;
+                    const int64_t in_group = byte % region.destination_group_bytes;
+                    region.destination[byte] =
+                        in_group < region.source_group_bytes ?
+                            region.source[g * region.source_group_bytes + in_group] :
+                            static_cast<uint8_t>(region.fill_bits >> (8 * (in_group % region.element_bytes)));
+                }
+            }
+        }
+    }
+}
+
 __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
     const int64_t tid    = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+
+    for (int64_t i = tid; params.valid_token_mask && i < params.mask_count; i += stride) {
+        params.valid_token_mask[i] =
+            i < params.source_mask_count && (params.generate_valid_token_mask || params.source_valid_token_mask[i]);
+    }
+    for (int64_t i = tid; params.decode_sequence_lengths_plus_1 && i < params.decode_batch_size; i += stride) {
+        params.decode_sequence_lengths_plus_1[i] = params.decode_sequence_lengths[i] + 1;
+    }
+    const int64_t alignment_bytes = (4 - reinterpret_cast<uintptr_t>(params.zero_bytes) % 4) % 4;
+    const int64_t leading         = alignment_bytes < params.zero_byte_count ? alignment_bytes : params.zero_byte_count;
+    for (int64_t i = tid; params.zero_bytes && i < leading; i += stride)
+        params.zero_bytes[i] = 0;
+    const int64_t words = (params.zero_byte_count - leading) / sizeof(uint32_t);
+    for (int64_t i = tid; params.zero_bytes && i < words; i += stride) {
+        reinterpret_cast<uint32_t*>(params.zero_bytes + leading)[i] = 0;
+    }
+    for (int64_t i = leading + words * sizeof(uint32_t) + tid; params.zero_bytes && i < params.zero_byte_count;
+         i += stride) {
+        params.zero_bytes[i] = 0;
+    }
 
     for (int32_t region_idx = 0; region_idx < params.region_count; ++region_idx) {
         const auto region = params.regions[region_idx];
@@ -72,12 +165,70 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
 
 }  // namespace
 
+void invokeCudaGraphInputStaging(CudaGraphInputStagingSources sources,
+                                 uint8_t*                     input_ids,
+                                 int64_t                      input_ids_capacity_bytes,
+                                 uint8_t*                     input_hiddens,
+                                 int64_t                      input_hiddens_capacity_bytes,
+                                 CudaGraphPrepareStream       stream) {
+    TORCH_CHECK(sources.input_ids && input_ids && sources.input_ids_bytes > 0
+                    && sources.input_ids_bytes <= input_ids_capacity_bytes,
+                "input staging requires valid token sources and destination capacity");
+    TORCH_CHECK(input_hiddens_capacity_bytes >= 0 && (input_hiddens || !input_hiddens_capacity_bytes),
+                "input staging hidden destination is missing");
+    TORCH_CHECK(sources.input_hiddens_bytes >= 0 && sources.input_hiddens_bytes <= input_hiddens_capacity_bytes,
+                "input staging hidden source exceeds destination capacity");
+    constexpr int threads = 256;
+    const int64_t words   = (std::max(input_ids_capacity_bytes, input_hiddens_capacity_bytes) + 15) / 16;
+    const int     blocks  = static_cast<int>(std::min<int64_t>((words + threads - 1) / threads, 128));
+    cudaGraphInputStagingKernel<<<blocks, threads, 0, stream>>>(
+        sources, input_ids, input_ids_capacity_bytes, input_hiddens, input_hiddens_capacity_bytes);
+#if USING_ROCM
+    const auto error = hipGetLastError();
+    TORCH_CHECK(error == hipSuccess, "input staging failed: ", hipGetErrorString(error));
+#else
+    const auto error = cudaGetLastError();
+    TORCH_CHECK(error == cudaSuccess, "input staging failed: ", cudaGetErrorString(error));
+#endif
+}
+
+void invokeSequenceParallelPad(SequenceParallelPadParams params, CudaGraphPrepareStream stream) {
+    TORCH_CHECK(params.region_count >= 0 && params.region_count <= kMaxCudaGraphPrepareFillRegions,
+                "invalid SP padding region count");
+    int64_t words = 0;
+    for (int i = 0; i < params.region_count; ++i) {
+        const auto& region = params.regions[i];
+        TORCH_CHECK(region.source && region.destination && region.groups > 0 && region.source_group_bytes > 0
+                        && region.destination_group_bytes >= region.source_group_bytes
+                        && (region.element_bytes == 1 || region.element_bytes == 2 || region.element_bytes == 4
+                            || region.element_bytes == 8),
+                    "invalid SP padding region");
+        words += (region.groups * region.destination_group_bytes + 3) / 4;
+    }
+    if (!words)
+        return;
+    constexpr int threads = 256;
+    const int     blocks  = static_cast<int>(std::min<int64_t>((words + threads - 1) / threads, 1024));
+    sequenceParallelPadKernel<<<blocks, threads, 0, stream>>>(params);
+#if USING_ROCM
+    const auto error = hipGetLastError();
+    TORCH_CHECK(error == hipSuccess, "SP padding kernel failed: ", hipGetErrorString(error));
+#else
+    const auto error = cudaGetLastError();
+    TORCH_CHECK(error == cudaSuccess, "SP padding kernel failed: ", cudaGetErrorString(error));
+#endif
+}
+
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream) {
     TORCH_CHECK(params.region_count >= 0 && params.region_count <= kMaxCudaGraphPrepareFillRegions,
                 "invalid cuda graph prepare fill region count: ",
                 params.region_count);
 
-    int64_t total_count = 0;
+    TORCH_CHECK(params.decode_batch_size >= 0
+                    && (params.decode_batch_size == 0
+                        || (params.decode_sequence_lengths && params.decode_sequence_lengths_plus_1)),
+                "invalid cuda graph decode metadata pointers");
+    int64_t total_count = params.mask_count + (params.zero_byte_count + 3) / 4 + params.decode_batch_size;
     for (int32_t i = 0; i < params.region_count; ++i) {
         total_count += params.regions[i].count > 0 ? params.regions[i].count : 0;
     }

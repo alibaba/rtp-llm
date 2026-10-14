@@ -478,7 +478,12 @@ def init_exec_ctx(
     mla_ops_type: int,
 ) -> None: ...
 
-def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:
+def register_comm_ops(
+    broadcast_fn: typing.Callable,
+    allreduce_fn: typing.Callable,
+    allgather_fn: typing.Callable,
+    cpu_broadcast_fn: typing.Optional[typing.Callable] = None,
+) -> None:
     """
     Register Python callbacks for C++ communication ops.
     """

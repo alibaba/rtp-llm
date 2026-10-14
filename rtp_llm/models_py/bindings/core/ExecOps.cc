@@ -692,18 +692,25 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn = nullptr;
-py::function* g_allreduce_fn = nullptr;
-py::function* g_allgather_fn = nullptr;
+py::function* g_broadcast_fn     = nullptr;
+py::function* g_cpu_broadcast_fn = nullptr;
+py::function* g_allreduce_fn     = nullptr;
+py::function* g_allgather_fn     = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
+    py::function cpu_broadcast_fn;
     py::function allreduce_fn;
     py::function allgather_fn;
     if (g_broadcast_fn != nullptr) {
         broadcast_fn = std::move(*g_broadcast_fn);
         delete g_broadcast_fn;
         g_broadcast_fn = nullptr;
+    }
+    if (g_cpu_broadcast_fn != nullptr) {
+        cpu_broadcast_fn = std::move(*g_cpu_broadcast_fn);
+        delete g_cpu_broadcast_fn;
+        g_cpu_broadcast_fn = nullptr;
     }
     if (g_allreduce_fn != nullptr) {
         allreduce_fn = std::move(*g_allreduce_fn);
@@ -741,13 +748,14 @@ void execBroadcastCpu(const BroadcastParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
                             "execBroadcastCpu supports only ParallelMode::TP; got %d",
                             static_cast<int>(params.mode));
+    for (const auto& tensor : params.buffers) {
+        RTP_LLM_CHECK_WITH_INFO(
+            tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+    }
 
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
-                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
-                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -755,6 +763,24 @@ void execBroadcastCpu(const BroadcastParams& params) {
             }
         }
         return;
+    }
+    {
+        py::gil_scoped_acquire gil;
+        py::function           fn;
+        {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            if (g_cpu_broadcast_fn != nullptr) {
+                fn = *g_cpu_broadcast_fn;
+            }
+        }
+        if (fn) {
+            py::list tensors;
+            for (const auto& tensor : params.buffers) {
+                tensors.append(tensor);
+            }
+            fn(tensors, params.root, static_cast<int>(params.mode));
+            return;
+        }
     }
     execBroadcast(params);
     execSyncCommunication(false);
@@ -897,16 +923,25 @@ void registerExecCtxOps(pybind11::module& m) {
 
     m.def(
         "register_comm_ops",
-        [](py::function broadcast_fn, py::function allreduce_fn, py::function allgather_fn) {
+        [](py::function broadcast_fn,
+           py::function allreduce_fn,
+           py::function allgather_fn,
+           py::object   cpu_broadcast_fn) {
+            RTP_LLM_CHECK_WITH_INFO(cpu_broadcast_fn.is_none() || PyCallable_Check(cpu_broadcast_fn.ptr()),
+                                    "cpu_broadcast_fn must be callable or None");
             std::lock_guard<std::mutex> lock(g_comm_mutex);
             clearCommOpsUnlocked();
             g_broadcast_fn = new py::function(std::move(broadcast_fn));
             g_allreduce_fn = new py::function(std::move(allreduce_fn));
             g_allgather_fn = new py::function(std::move(allgather_fn));
+            if (!cpu_broadcast_fn.is_none()) {
+                g_cpu_broadcast_fn = new py::function(cpu_broadcast_fn.cast<py::function>());
+            }
         },
         py::arg("broadcast_fn"),
         py::arg("allreduce_fn"),
         py::arg("allgather_fn"),
+        py::arg("cpu_broadcast_fn") = py::none(),
         "Register Python callbacks for C++ communication ops.");
 
     m.def(

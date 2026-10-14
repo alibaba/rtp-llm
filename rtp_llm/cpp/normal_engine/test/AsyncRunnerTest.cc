@@ -99,6 +99,29 @@ TEST_F(AsyncRunnerTest, CudaTensorWork) {
     EXPECT_TRUE(torch::equal(result, torch::ones({64}, torch::kFloat32)));
 }
 
+TEST_F(AsyncRunnerTest, FailedTaskDrainsCudaWorkAndRetainsItsSnapshot) {
+    AsyncRunner        runner(makeStream());
+    auto               output = torch::zeros({8192}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto               hold   = std::make_shared<int>(19);
+    std::weak_ptr<int> snapshot = hold;
+    auto               ready    = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(currentStream());
+    runner.launch([hold, ready, output] {
+        ready->block(cuda_graph::graphGetCurrentStream());
+        output.fill_(*hold);
+        throw std::runtime_error("failed after CUDA submission");
+    });
+    hold.reset();
+    EXPECT_THROW(runner.sync(currentStream()), std::runtime_error);
+    EXPECT_FALSE(snapshot.expired());
+    runner.drain();
+    EXPECT_TRUE(snapshot.expired());
+    EXPECT_TRUE(torch::equal(output.cpu(), torch::full({8192}, 19, torch::kInt32)));
+    runner.launch([output] { output.fill_(23); });
+    runner.sync(currentStream());
+    EXPECT_TRUE(torch::equal(output.cpu(), torch::full({8192}, 23, torch::kInt32)));
+}
+
 TEST_F(AsyncRunnerTest, DoesNotPropagateRecordFunctionCallbacksToWorker) {
     auto        stream = makeStream();
     AsyncRunner runner(stream);

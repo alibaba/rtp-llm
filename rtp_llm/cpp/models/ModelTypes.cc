@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
+#include <c10/core/DeviceGuard.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -61,8 +62,38 @@ torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<in
     RTP_LLM_CHECK_WITH_INFO(tensor.dim() == (block_table ? 3 : 1)
                                 && tensor.size(0) == static_cast<int64_t>(rows.size()),
                             "cache payload row count must match its group tags (groups)");
-    if (rows.size() <= 1) {
+    bool identity = true;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(rows[i] >= 0 && rows[i] < static_cast<int64_t>(rows.size()),
+                                "cache payload row is out of range");
+        identity = identity && rows[i] == static_cast<int64_t>(i);
+    }
+    if (identity) {
         return tensor;
+    }
+    if (tensor.is_cuda()) {
+        c10::DeviceGuard guard(tensor.device());
+        // Group order is host metadata. Pass source/destination pointers as
+        // kernel arguments instead of uploading a GPU index tensor per table.
+        // A contiguous temporary is allocated and consumed on this same stream.
+        const auto source = tensor.contiguous();
+        auto       result = torch::empty(tensor.sizes(), tensor.options());
+        if (source.numel() == 0) {
+            return result;
+        }
+        const auto         row_bytes = source.nbytes() / rows.size();
+        const auto*        src       = static_cast<const uint8_t*>(source.data_ptr());
+        auto*              dst       = static_cast<uint8_t*>(result.data_ptr());
+        FusedD2DCopyParams params;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (params.num_copies == MAX_FUSED_D2D_COPIES) {
+                fusedCopy(params);
+                params.clear();
+            }
+            params.add(src + rows[i] * row_bytes, dst + i * row_bytes, row_bytes);
+        }
+        fusedCopy(params);
+        return result;
     }
     auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
     return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
@@ -222,7 +253,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::kInt64).pin_memory();
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -293,18 +325,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                  reorderCacheCopyRows(inputs.kv_cache_update_mapping, local_rows);
     }
 
-    // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
-    // bootstrapped from Python in collective_torch._register_process_groups_to_cpp,
-    // which guarantees deterministic timing across TP siblings. Cross-node TP
-    // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
-
     // first sync stage: shape hints
     auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
 
-    // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
-    // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
-    // contract for cross-node TP.
+    // Python initializes intra-node UDS or cross-node Gloo for CPU control data;
+    // execBroadcastCpu retains the synchronized GPU fallback if neither is registered.
     execBroadcastCpu({{shape_hints_t}, 0});
 
     // multimodal features shape broadcast

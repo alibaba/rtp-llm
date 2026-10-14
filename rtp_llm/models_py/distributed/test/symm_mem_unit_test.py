@@ -61,7 +61,9 @@ class SymmMemConfigurationTest(unittest.TestCase):
     def test_collective_forwards_explicit_config(self) -> None:
         world_group = object()
         communicator_module = MagicMock()
-        config = SimpleNamespace(world_rank=0, world_size=2, tp_size=2, dp_size=1)
+        config = SimpleNamespace(
+            world_rank=0, world_size=2, tp_size=2, dp_size=1, local_world_size=2
+        )
 
         group_namespace = SimpleNamespace(WORLD=world_group)
         with patch.object(

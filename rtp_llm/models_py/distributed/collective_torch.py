@@ -34,6 +34,7 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_cpu_tp_group: Optional[torch.distributed.ProcessGroup] = None
 _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
@@ -346,6 +347,47 @@ def _create_process_groups(
             disable_custom_all_reduce=disable_custom_all_reduce,
         )
 
+    _create_cpu_tp_group(parallelism_config, timeout)
+
+
+def _create_cpu_tp_group(
+    parallelism_config: ParallelismConfig, timeout: Optional[timedelta]
+) -> None:
+    """Create CPU-only TP groups when TP spans multiple nodes.
+
+    All world ranks create the groups in DP-rank order, including non-members.
+    Keep these separate from NCCL groups so CPU control messages never wait for
+    queued CUDA work. Intra-node TP continues to use CpuTpBroadcaster's UDS path.
+    """
+    global _cpu_tp_group
+    _cpu_tp_group = None
+    if (
+        parallelism_config.tp_size <= 1
+        or parallelism_config.tp_size <= parallelism_config.local_world_size
+    ):
+        return
+    if not torch.distributed.is_gloo_available():
+        raise RuntimeError("Cross-node TP CPU broadcast requires PyTorch Gloo support")
+
+    tp_size = parallelism_config.tp_size
+    cpu_tp_group = None
+    for dp_rank in range(parallelism_config.dp_size):
+        ranks = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+        group = torch.distributed.new_group(
+            ranks=ranks, backend="gloo", timeout=timeout
+        )
+        if parallelism_config.world_rank in ranks:
+            cpu_tp_group = group
+            logging.info(
+                "[rank: %s] Created CPU TP Gloo group with ranks: %s",
+                parallelism_config.world_rank,
+                ranks,
+            )
+    # Publish only after every group has been created. On initialization
+    # failure, destroy_distributed_environment() tears down the full c10d
+    # environment, including any groups already created by new_group().
+    _cpu_tp_group = cpu_tp_group
+
 
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
@@ -452,6 +494,26 @@ def _register_process_groups_to_cpp():
             if was_cpu:
                 t.copy_(gpu_t)
 
+    cpu_tp_group = _cpu_tp_group
+
+    def cpp_broadcast_cpu(tensors: List[torch.Tensor], root: int, mode: int) -> None:
+        if mode != _CPP_PARALLEL_MODE_TP or cpu_tp_group is None:
+            raise ValueError("CPU broadcast requires the CPU TP process group")
+        global_root = torch.distributed.get_global_rank(cpu_tp_group, root)
+        for tensor in tensors:
+            if tensor.device.type != "cpu":
+                raise ValueError("CPU broadcast requires CPU tensors")
+            if tensor.numel() == 0:
+                continue
+            contiguous = tensor.contiguous()
+            # Match the UDS byte-wise contract without depending on Gloo's
+            # supported dtype set. The blocking CPU collective returns readable
+            # data and does not synchronize any CUDA stream.
+            data = contiguous.reshape(-1).view(torch.uint8)
+            torch.distributed.broadcast(data, global_root, group=cpu_tp_group)
+            if contiguous is not tensor:
+                tensor.copy_(contiguous)
+
     _REDUCE_OPS = {
         0: torch.distributed.ReduceOp.SUM,
         1: torch.distributed.ReduceOp.PRODUCT,
@@ -554,14 +616,19 @@ def _register_process_groups_to_cpp():
             if recv_on_cpu:
                 recv_buf.copy_(gpu_recv)
 
-    librtp_compute_ops.register_comm_ops(cpp_broadcast, cpp_allreduce, cpp_allgather)
+    librtp_compute_ops.register_comm_ops(
+        cpp_broadcast,
+        cpp_allreduce,
+        cpp_allgather,
+        cpp_broadcast_cpu if cpu_tp_group is not None else None,
+    )
     logging.info(
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
     # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
     # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
-    # binds; cross-node TP keeps the NCCL fallback.
+    # binds; cross-node TP uses the CPU-only Gloo callback registered above.
     if (
         _parallelism_config is not None
         and _parallelism_config.tp_size > 1
@@ -622,7 +689,8 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path, _cpu_tp_group
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -666,6 +734,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    _cpu_tp_group = None
     _initialized = False
     gc.collect()
 

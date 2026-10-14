@@ -26,9 +26,16 @@
 
 namespace py = pybind11;
 
+namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
+}
+
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
+    static void validatePrepared(PyWrappedModel& model, const GptModelInputs& inputs) {
+        model.validatePreparedAttentionInputs(inputs);
+    }
     static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
         return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
     }
@@ -51,12 +58,58 @@ struct PyWrappedModelTestPeer {
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
+
+    static bool attentionInputsPrepared(const PyWrappedModel& model) {
+        return model.prepared_attention_inputs_.load(std::memory_order_acquire);
+    }
+
+    static py::dict preparedTagMetadata(const PyWrappedModel& model, bool include_common = false) {
+        py::dict result;
+        auto     inputs_by_tag = model.attention_inputs_by_tag_;
+        if (include_common)
+            inputs_by_tag.emplace("common", model.attention_inputs_);
+        for (const auto& [tag, inputs] : inputs_by_tag) {
+            py::dict metadata;
+            metadata["sequence_lengths_plus_1"] = inputs.sequence_lengths_plus_1_device.clone();
+            metadata["decode_cu_seqlens"]       = inputs.decode_cu_seqlens_device.clone();
+            metadata["valid_token_mask"]        = inputs.valid_token_mask.clone();
+            result[py::str(tag)]                = std::move(metadata);
+        }
+        return result;
+    }
 };
 
 namespace {
 
 constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
+
+py::dict runTpSyncCacheRows(int                             rank,
+                            const std::vector<std::string>& tags,
+                            torch::Tensor                   blocks,
+                            torch::Tensor                   kernel_blocks,
+                            torch::Tensor                   group_types) {
+    GptModelInputs inputs;
+    inputs.kv_cache_group_tags = tags;
+    if (rank == 0) {
+        const auto batch                = blocks.dim() == 3 ? blocks.size(1) : blocks.size(0);
+        inputs.combo_tokens             = torch::zeros({batch}, torch::kInt32);
+        inputs.input_lengths            = torch::ones({batch}, torch::kInt32);
+        inputs.kv_cache_block_id        = std::move(blocks);
+        inputs.kv_cache_kernel_block_id = std::move(kernel_blocks);
+        inputs.kv_cache_group_types     = std::move(group_types);
+    }
+    ParallelismConfig config;
+    config.tp_size = 2;
+    config.tp_rank = rank;
+    tpSyncModelInputs(inputs, config);
+    py::dict result;
+    result["tags"]   = inputs.kv_cache_group_tags;
+    result["blocks"] = inputs.kv_cache_block_id;
+    result["kernel"] = inputs.kv_cache_kernel_block_id;
+    result["types"]  = inputs.kv_cache_group_types;
+    return result;
+}
 
 struct TestCacheSpec: public KVCacheSpec {
     TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
@@ -617,6 +670,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     MlaOpsType::AUTO);
     });
 
+    const bool inspect_prepare  = scenario_name == "attention_prepare_identity";
     const bool inspect_padding  = scenario_name.rfind("request_padding ", 0) == 0;
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
     const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
@@ -626,7 +680,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
         scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
     const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
                                                 (cacheless_warmup ? "multi_tag" : scenario_name);
-    auto       scenario       = makeScenario(inspect_padding ? "multi_tag" : input_scenario);
+    auto       scenario       = makeScenario((inspect_padding || inspect_prepare) ? "multi_tag" : input_scenario);
     if (inspect_padding) {
         std::istringstream parameters(scenario_name);
         std::string        name;
@@ -713,6 +767,64 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     {
         PyWrappedModel model(params, std::move(py_model));
+        if (inspect_prepare) {
+            auto inputs                 = scenario.inputs;
+            inputs.pd_separation        = false;
+            inputs.is_target_verify     = true;
+            inputs.attention_prepare_id = 41;
+            inputs.linear_replay        = LinearReplayInputs::allocate(1, 2);
+            for (auto* tensor : inputs.linear_replay->tensors())
+                tensor->zero_();
+            model.prepareAttentionInputs(inputs);
+            PyWrappedModelTestPeer::validatePrepared(model, inputs);
+            int        rejected       = 0;
+            const auto check_rejected = [&](GptModelInputs changed) {
+                try {
+                    model.forward(changed);
+                } catch (const std::exception& e) {
+                    const std::string message = e.what();
+                    TORCH_CHECK(message.find("attention prepare identity/layout mismatch") != std::string::npos
+                                    || message.find("attention prepare Replay binding mismatch") != std::string::npos
+                                    || message.find("LINEAR replay prepare page-table snapshot was replaced")
+                                           != std::string::npos,
+                                "unexpected forward failure: ",
+                                message);
+                    ++rejected;
+                    return;
+                }
+                TORCH_CHECK(false, "mismatched preparation was consumed");
+            };
+            auto changed = inputs;
+            changed.attention_prepare_id++;
+            check_rejected(changed);
+            changed                  = inputs;
+            changed.is_target_verify = false;
+            check_rejected(changed);
+            changed              = inputs;
+            changed.combo_tokens = torch::empty({2}, inputs.combo_tokens.options());
+            check_rejected(changed);
+            changed = inputs;
+            std::reverse(changed.kv_cache_group_tags.begin(), changed.kv_cache_group_tags.end());
+            check_rejected(changed);
+            changed = inputs;
+            changed.linear_replay.reset();
+            check_rejected(changed);
+            changed                          = inputs;
+            changed.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.clone();
+            check_rejected(changed);
+            for (size_t field = 0; field < 10; ++field) {
+                changed        = inputs;
+                auto fields    = changed.linear_replay->tensors();
+                *fields[field] = fields[field]->clone();
+                check_rejected(changed);
+            }
+            PyWrappedModelTestPeer::validatePrepared(model, inputs);
+            model.invalidatePreparedAttentionInputs();
+            cuda_graph::graphGetCurrentStream().synchronize();
+            py::dict result;
+            result["rejected"] = rejected;
+            return result;
+        }
         if (inspect_padding) {
             const auto padded = PyWrappedModelTestPeer::padInputs(model, scenario.inputs);
             py::dict   result;
@@ -1014,12 +1126,198 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+// Replace decoder arithmetic only. Both calls pass through the production
+// PyWrappedModel graph replay, input staging, snapshot and post-layer routing.
+py::dict runMtpGreedyForward(py::object py_model, const std::string& scenario) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    constexpr int width          = 4;
+    const bool    inline_prepare = scenario == "sp_unaligned_inline_prepare";
+    const bool                     tagged_q1      = scenario == "multi_tag_q1_prepare";
+    const bool                     sp_unaligned   = scenario == "sp_unaligned" || inline_prepare || tagged_q1;
+    const std::vector<std::string> tags =
+        tagged_q1 ? std::vector<std::string>{"full", "aux"} : std::vector<std::string>{"full"};
+    auto          config = makeCacheConfig(tagged_q1 ? std::vector<GroupSpec>{{"full", 4, 64}, {"aux", 4, 64}} :
+                                              std::vector<GroupSpec>{{"full", 4, 64}});
+    Weights       weights;
+    weights.layers.resize(1);
+    auto lm_head    = std::make_shared<DenseWeights>();
+    lm_head->kernel = torch::eye(width, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBFloat16));
+    weights.lm_head = std::move(lm_head);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = width;
+    description.output_vocab_size            = width;
+    description.output_vocab_padded_size     = width;
+    if (sp_unaligned) {
+        weights.lm_head.reset();
+    }
+    GptModelInitParams params{weights, description, std::make_optional(makeLayout(config).layout)};
+    if (sp_unaligned) {
+        // Exercise TP2 padding geometry on one GPU. No decoder or post-layer
+        // collective is mocked: the fake decoder has no collectives, and this
+        // scenario omits lm_head rather than pretending to test TP transport.
+        params.parallelism_config.tp_size = 2;
+        // world_size describes real test participants, unlike the synthetic
+        // TP2 padding geometry. Do not request a distributed capture barrier.
+        params.parallelism_config.world_size = 1;
+    }
+    params.cache_manager =
+        std::make_shared<KVCacheManager>(config, true, nullptr, KVCacheConfig{}, ParallelismConfig{});
+    TORCH_CHECK(params.cache_manager->init(), "greedy forward test cache manager init failed");
+    params.max_seq_len                        = 8;
+    params.hidden_size                        = width;
+    params.kernel_block_table_width           = 2;
+    params.hw_kernel_config.enable_cuda_graph = true;
+    if (!sp_unaligned) {
+        params.hw_kernel_config.generation_prefill_cuda_graph_max_requests = 2;
+        params.hw_kernel_config.generation_prefill_capture_token_buckets   = {8};
+    }
+    params.hw_kernel_config.decode_capture_batch_sizes                 = {1, 2};
+    params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    params.profile_debug_logging_config.check_nan                      = scenario == "check_nan";
+    PyWrappedModel model(params, py_model);
+    PyWrappedModelTestPeer::enableSequenceParallelPadding(model);
+
+    const bool context = scenario == "context";
+    auto       inputs =
+        makeInputs(context ? std::vector<int32_t>{3, 3} : std::vector<int32_t>{1, 1},
+                   {1, 2},
+                   {1, 2, 3, 4},
+                   2,
+                   tagged_q1 ? std::vector<int32_t>{1, 2, 3, 4, 4, 3, 2, 1} : std::vector<int32_t>{1, 2, 3, 4},
+                   tags,
+                   2,
+                   4,
+                   64);
+    inputs.pd_separation            = false;
+    if (!tagged_q1) {
+        inputs.kv_cache_block_id        = inputs.kv_cache_block_id.squeeze(0);
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.squeeze(0);
+    }
+    inputs.combo_tokens             = torch::arange(
+        1, inputs.combo_tokens.numel() + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    if (!context) {
+        inputs.sequence_lengths = pinnedTensor({3, 4}, {2});
+        inputs.prefix_lengths   = pinnedTensor({}, {0});
+    }
+    inputs.prefer_rank_major_logits = scenario != "default";
+    inputs.need_all_logits          = scenario == "all_logits";
+    if (sp_unaligned) {
+        // Prime the same physical B=2 graph with nonzero data in both rows.
+        // The later B=1 replay must actively zero the old second row.
+        inputs.combo_tokens = inputs.combo_tokens + 6;
+        inputs.last_hidden_states =
+            torch::full({2, width}, 7, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
+        model.prepareAttentionInputs(inputs);
+        model.updateKVCacheKernelBlockId(inputs);
+        (void)model.forward(inputs);
+        inputs                          = makeInputs({1},
+                                                     {1},
+                                                     {1, 2},
+                            2,
+                            tagged_q1 ? std::vector<int32_t>{1, 2, 3, 4} : std::vector<int32_t>{1, 2},
+                            tags,
+                            2,
+                            4,
+                            64);
+        inputs.pd_separation            = false;
+        if (!tagged_q1) {
+            inputs.kv_cache_block_id        = inputs.kv_cache_block_id.squeeze(0);
+            inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.squeeze(0);
+        }
+        inputs.combo_tokens = torch::ones({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        inputs.last_hidden_states =
+            torch::arange(10, 10 + width, torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA))
+                .reshape({1, width});
+        inputs.sequence_lengths = pinnedTensor({3}, {1});
+        inputs.prefix_lengths   = pinnedTensor({}, {0});
+    }
+    if (tagged_q1) {
+        inputs.input_lengths            = inputs.input_lengths.cuda();
+        inputs.sequence_lengths         = inputs.sequence_lengths.cuda();
+        inputs.kv_cache_block_id        = inputs.kv_cache_block_id.cuda();
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.cuda();
+    }
+    py::dict result;
+    result["first_input_hiddens"] = inputs.last_hidden_states;
+    result["python_calls_before"] = py_model.attr("forward_calls");
+    if (!inline_prepare) {
+        model.prepareAttentionInputs(inputs);
+        if (tagged_q1) {
+            result["first_tag_metadata"] = PyWrappedModelTestPeer::preparedTagMetadata(model);
+        }
+        model.updateKVCacheKernelBlockId(inputs);
+    }
+    auto first                         = model.forward(inputs);
+    result["python_calls_after_first"] = py_model.attr("forward_calls");
+    result["first_normalized"]         = first.all_hidden_states;
+    result["first_recurrent"]          = first.mtp_target_hidden_states;
+    result["first_logits"]             = first.logits;
+    result["first_rank_major"]         = first.greedy_logits_rank_major;
+    result["valid_vocab"]              = first.greedy_vocab_size;
+
+    // Change source addresses and values before replaying the same graph key.
+    inputs.combo_tokens = inputs.combo_tokens + 3;
+    if (sp_unaligned) {
+        inputs.last_hidden_states = inputs.last_hidden_states + 5;
+    }
+    if (tagged_q1) {
+        inputs.sequence_lengths            = inputs.sequence_lengths + 3;
+        py_model.attr("fail_next_prepare") = true;
+        try {
+            model.prepareAttentionInputs(inputs);
+            TORCH_CHECK(false, "injected Q1 prepare failure was not propagated");
+        } catch (const py::error_already_set& e) {
+            TORCH_CHECK(std::string(e.what()).find("injected Q1 prepare failure") != std::string::npos, e.what());
+        }
+        result["published_after_failure"] = PyWrappedModelTestPeer::attentionInputsPrepared(model);
+    }
+    result["next_input_hiddens"] = inputs.last_hidden_states;
+    if (!inline_prepare) {
+        model.prepareAttentionInputs(inputs);
+        if (tagged_q1) {
+            result["next_tag_metadata"] = PyWrappedModelTestPeer::preparedTagMetadata(model);
+        }
+        model.updateKVCacheKernelBlockId(inputs);
+    }
+    auto next                           = model.forward(inputs);
+    result["python_calls_after_second"] = py_model.attr("forward_calls");
+    result["next_normalized"]           = next.all_hidden_states;
+    result["next_recurrent"]            = next.mtp_target_hidden_states;
+    result["next_logits"]               = next.logits;
+    result["next_rank_major"]           = next.greedy_logits_rank_major;
+    result["normal_snapshots_distinct"] = first.all_hidden_states.data_ptr() != next.all_hidden_states.data_ptr();
+    result["recurrent_snapshots_distinct"] =
+        first.mtp_target_hidden_states.data_ptr() != next.mtp_target_hidden_states.data_ptr();
+    if (tagged_q1) {
+        // B=3 pads to physical B=4, exceeding the largest captured bucket B=2.
+        // Prepare must materialize eager metadata for common and every tag.
+        auto fallback                     = inputs;
+        fallback.combo_tokens             = inputs.combo_tokens.repeat({3});
+        fallback.last_hidden_states       = inputs.last_hidden_states.repeat({3, 1});
+        fallback.input_lengths            = inputs.input_lengths.repeat({3});
+        fallback.sequence_lengths         = inputs.sequence_lengths.repeat({3});
+        fallback.kv_cache_block_id        = inputs.kv_cache_block_id.repeat({1, 3, 1});
+        fallback.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.repeat({1, 3, 1});
+        model.prepareAttentionInputs(fallback);
+        result["fallback_tag_metadata"] = PyWrappedModelTestPeer::preparedTagMetadata(model, true);
+    }
+    return result;
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+    rtp_llm::registerExecCtxOps(m);
+    m.def("run_tp_sync_cache_rows", &rtp_llm::test::runTpSyncCacheRows);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_mtp_greedy_forward", &rtp_llm::test::runMtpGreedyForward);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

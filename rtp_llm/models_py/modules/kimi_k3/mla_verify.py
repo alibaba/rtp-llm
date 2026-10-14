@@ -43,6 +43,7 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
             parallelism_config=parallelism,
         )
         self.graph_mode = is_cuda_graph
+        self._graph_metadata_inputs = None
         self.batch = inputs.input_lengths.numel()
         self.tokens = inputs.physical_token_count
         if self.batch <= 0 or self.tokens <= 0:
@@ -257,7 +258,50 @@ class KimiK3MlaVerifyImpl(MlaImplBase):
         self.slot_mapping.copy_(self.slot_mapping_h, non_blocking=True)
 
     def prepare_cuda_graph(self, inputs):
+        if self._graph_metadata_inputs is not None:
+            if (
+                self._page_rr_graph_input_contract(inputs)
+                != self._graph_metadata_inputs
+            ):
+                raise ValueError(
+                    "K3 MLA captured Page-RR input shape or storage changed; "
+                    "replay must update the captured device buffers in place"
+                )
+            self.attn_inputs = inputs
+            return
         self.prepare(inputs, forbid_realloc=True)
+
+    @staticmethod
+    def _page_rr_graph_input_contract(inputs):
+        multi = inputs.is_target_verify or inputs.is_mtp_draft_update
+        base = (
+            inputs.prefix_lengths_device
+            if multi
+            else inputs.sequence_lengths_plus_1_device
+        )
+        tensors = (base, inputs.kv_cache_kernel_block_id_device)
+        return (
+            inputs.input_lengths.numel(),
+            inputs.physical_token_count,
+            inputs.is_target_verify,
+            inputs.is_mtp_draft_update,
+            inputs.is_cuda_graph,
+            tuple(
+                (
+                    tensor.data_ptr(),
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                    tensor.dtype,
+                    tensor.device,
+                )
+                for tensor in tensors
+            ),
+        )
+
+    def prepare_model_graph_inputs(self, inputs):
+        if self.graph_mode and self.page_rr:
+            self.prepare(inputs, forbid_realloc=True)
+            self._graph_metadata_inputs = self._page_rr_graph_input_contract(inputs)
 
     def forward(self, q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices=None):
         if topk_indices is not None or kv_cache is None:

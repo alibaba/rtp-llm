@@ -4,6 +4,10 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_greedy_sampling.h"
+#endif
 
 namespace rtp_llm {
 namespace speculative {
@@ -23,6 +27,44 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
 
+    return output;
+}
+
+FastTopKSamplerOutput FastTopKSampler::forwardRankMajor(const torch::Tensor& logits,
+                                                        int64_t              vocab_size,
+                                                        const torch::Tensor& sequence_lengths,
+                                                        const torch::Tensor& position_ids) {
+    RTP_LLM_PROFILE_SCOPE("mtp.greedy_rank_major");
+    FastTopKSamplerOutput output;
+#if USING_CUDA
+    if (tryInvokeMtpGreedyRankMajor(logits,
+                                    d2t_map_,
+                                    vocab_size,
+                                    sequence_lengths,
+                                    position_ids,
+                                    output.token_ids,
+                                    output.all_probs,
+                                    output.next_sequence_lengths,
+                                    output.next_position_ids,
+                                    at::cuda::getCurrentCUDAStream().stream())) {
+        return output;
+    }
+#endif
+    RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.dim() == 3 && logits.size(0) > 0 && logits.size(1) > 0
+                                && vocab_size > 0 && vocab_size <= logits.size(0) * logits.size(2),
+                            "invalid rank-major MTP logits layout");
+    auto dense_logits = logits.permute({1, 0, 2})
+                            .reshape({logits.size(1), logits.size(0) * logits.size(2)})
+                            .narrow(1, 0, vocab_size)
+                            .contiguous();
+    output           = forward(dense_logits, 1);
+    output.token_ids = output.token_ids.to(torch::kInt32);
+    if (sequence_lengths.defined()) {
+        output.next_sequence_lengths = (sequence_lengths + 1).to(torch::kInt32);
+    }
+    if (position_ids.defined()) {
+        output.next_position_ids = position_ids + 1;
+    }
     return output;
 }
 

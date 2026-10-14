@@ -31,6 +31,19 @@ struct LinearReplayInputs {
                 &anchor_processed_lengths};
     }
 
+    std::array<const torch::Tensor*, 10> tensors() const {
+        return {&slot_ids,
+                &slot_generations,
+                &active_block_ids,
+                &prev_accept_lengths,
+                &history_valid_lengths,
+                &history_epochs,
+                &verify_epochs,
+                &init_kinds,
+                &state_read_block_ids,
+                &anchor_processed_lengths};
+    }
+
     LinearReplayInputs slice(int64_t start, int64_t count) const {
         auto result = *this;
         for (auto* tensor : result.tensors()) {
@@ -61,10 +74,15 @@ struct LinearReplayInputs {
         return result;
     }
 
-    static LinearReplayInputs allocate(int64_t batch, int64_t groups, torch::Device device = torch::kCUDA) {
+    static LinearReplayInputs
+    allocate(int64_t batch, int64_t groups, torch::Device device = torch::kCUDA, bool pin_memory = false) {
+        TORCH_CHECK(!pin_memory || device.is_cpu(), "pinned LINEAR replay metadata must use a CPU device");
         LinearReplayInputs result;
-        const auto         i32          = torch::TensorOptions().dtype(torch::kInt32).device(device);
-        const auto         i64          = i32.dtype(torch::kInt64);
+        auto               i32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
+        if (pin_memory) {
+            i32 = i32.pinned_memory(true);
+        }
+        const auto i64                  = i32.dtype(torch::kInt64);
         result.slot_ids                 = torch::empty({batch}, i32);
         result.slot_generations         = torch::empty({batch}, i64);
         result.active_block_ids         = torch::empty({groups, batch}, i32);

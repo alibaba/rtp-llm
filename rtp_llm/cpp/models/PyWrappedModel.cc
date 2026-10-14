@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
+#endif
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -30,6 +33,17 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+#if USING_CUDA
+bool isQ1DecodeInput(const GptModelInputs& inputs) {
+    if (inputs.is_target_verify || inputs.is_mtp_draft_update || !inputs.sequence_lengths.defined()) {
+        return false;
+    }
+    const auto batch = inputs.input_lengths.numel();
+    return batch > 0 && inputs.combo_tokens.numel() == batch && inputs.sequence_lengths.numel() == batch
+           && (!inputs.prefix_lengths.defined() || inputs.prefix_lengths.numel() == 0);
+}
+#endif
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
@@ -86,7 +100,8 @@ private:
 
 }  // namespace
 
-GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& source) {
+GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& source, SpPadding mode) {
+    const bool reuse_prepared_metadata = mode == SpPadding::ReuseMetadata || mode == SpPadding::DeferPayload;
     if (!sequence_parallel_padding_enabled_ || source.sp_logical_tokens > 0) {
         return source;
     }
@@ -111,16 +126,19 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
     }
     out.sp_logical_requests = requests;
     out.sp_logical_tokens = tokens;
-    if (source.linear_replay) {
+    if (source.linear_replay && !reuse_prepared_metadata) {
         RTP_LLM_CHECK_WITH_INFO(source.is_target_verify && !prefill,
                                 "LINEAR replay metadata is only valid for target verification");
-        out.linear_replay = source.linear_replay->padToBatch(requests + extra_requests);
     }
     if (!extra_tokens) {
         return out;
     }
-    const auto append = [](const torch::Tensor& tensor, int64_t rows, int64_t value, int64_t dim = 0) {
-        if (!tensor.defined() || tensor.numel() == 0 || rows == 0) return tensor;
+#if USING_CUDA
+    SequenceParallelPadParams  pad_params;
+#endif
+    const auto append = [&](const torch::Tensor& tensor, int64_t rows, int64_t value, int64_t dim = 0) {
+        if (!tensor.defined() || tensor.numel() == 0 || rows == 0)
+            return tensor;
         auto shape = tensor.sizes().vec();
         const auto original_rows = shape[dim];
         shape[dim] += rows;
@@ -132,28 +150,91 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
             options = options.pinned_memory(true);
         }
         auto padded = torch::empty(shape, options);
+#if USING_CUDA
+        if (!prefill && tensor.is_cuda() && tensor.is_contiguous()) {
+            RTP_LLM_CHECK_WITH_INFO(pad_params.region_count < kMaxCudaGraphPrepareFillRegions,
+                                    "too many SP padding regions");
+            auto& region       = pad_params.regions[pad_params.region_count++];
+            region.source      = static_cast<const uint8_t*>(tensor.data_ptr());
+            region.destination = static_cast<uint8_t*>(padded.data_ptr());
+            region.groups      = 1;
+            for (int64_t i = 0; i < dim; ++i)
+                region.groups *= tensor.size(i);
+            const int64_t bytes_per_row    = tensor.numel() / region.groups / original_rows * tensor.element_size();
+            region.source_group_bytes      = original_rows * bytes_per_row;
+            region.destination_group_bytes = (original_rows + rows) * bytes_per_row;
+            region.element_bytes           = tensor.element_size();
+            region.fill_bits               = static_cast<uint64_t>(value);
+            // Floating padding uses zero in model payloads. Keep other values
+            // on the existing typed ATen path instead of encoding integer bits.
+            if (tensor.is_floating_point() && value != 0) {
+                --pad_params.region_count;
+            } else {
+                return padded;
+            }
+        }
+#endif
         padded.narrow(dim, 0, original_rows).copy_(tensor);
         padded.narrow(dim, original_rows, rows).fill_(value);
         return padded;
     };
-    const auto append_prefill_token = [this, &append, prefill](const torch::Tensor& tensor,
-                                                               int64_t              rows,
-                                                               int64_t              value) {
-        if (!prefill || !tensor.defined() || tensor.numel() == 0 || rows == 0 || !tensor.device().is_cpu()
-            || !tensor.is_pinned()) {
-            return append(tensor, rows, value);
+    if (source.linear_replay && !reuse_prepared_metadata) {
+        auto          replay = *source.linear_replay;
+        const int64_t batch  = replay.slot_ids.numel();
+        RTP_LLM_CHECK_WITH_INFO(batch == requests, "LINEAR replay request count disagrees with SP input");
+        for (auto* tensor : replay.tensors()) {
+            RTP_LLM_CHECK_WITH_INFO(tensor->defined() && (tensor->dim() == 1 || tensor->dim() == 2)
+                                        && tensor->size(tensor->dim() - 1) == requests,
+                                    "LINEAR replay request rows disagree");
+            const int64_t fill = tensor == &replay.slot_ids || tensor == &replay.active_block_ids
+                                         || tensor == &replay.state_read_block_ids ?
+                                     -1 :
+                                     0;
+            *tensor            = append(*tensor, extra_requests, fill, tensor->dim() - 1);
         }
-        // Keep the original pinned input alive while its H2D copy is queued.
-        // Padding on CUDA avoids copying the full token array into a second
-        // pinned host allocation before each Prefill forward.
-        buffer_holder_.hold_host(tensor);
-        return append(tensor.to(torch::kCUDA, /*non_blocking=*/true), rows, value);
-    };
-    out.combo_tokens = append_prefill_token(source.combo_tokens, extra_tokens, 0);
-    out.last_hidden_states = append(source.last_hidden_states, extra_tokens, 0);
+        out.linear_replay = std::move(replay);
+    }
+    const auto append_prefill_token =
+        [this, &append, prefill](const torch::Tensor& tensor, int64_t rows, int64_t value) {
+            if (!prefill || !tensor.defined() || tensor.numel() == 0 || rows == 0 || !tensor.device().is_cpu()
+                || !tensor.is_pinned()) {
+                return append(tensor, rows, value);
+            }
+            // Keep the original pinned input alive while its H2D copy is queued.
+            // Padding on CUDA avoids copying the full token array into a second
+            // pinned host allocation before each Prefill forward.
+            buffer_holder_.hold_host(tensor);
+            return append(tensor.to(torch::kCUDA, /*non_blocking=*/true), rows, value);
+        };
+    out.combo_tokens =
+        mode == SpPadding::DeferPayload ? source.combo_tokens :
+        mode == SpPadding::MetadataOnly ? torch::empty({tokens + extra_tokens}, source.combo_tokens.options()) :
+                                          append_prefill_token(source.combo_tokens, extra_tokens, 0);
+    if (mode == SpPadding::Full || mode == SpPadding::ReuseMetadata) {
+        out.last_hidden_states    = append(source.last_hidden_states, extra_tokens, 0);
+        out.combo_tokens_type_ids = append(source.combo_tokens_type_ids, extra_tokens, 0);
+        out.text_tokens_mask      = append(source.text_tokens_mask, extra_tokens, 1);
+    }
+    if (reuse_prepared_metadata) {
+        RTP_LLM_CHECK_WITH_INFO(prepared_padded_input_snapshot_.has_value(), "SP prepared input snapshot is missing");
+        const auto& prepared = *prepared_padded_input_snapshot_;
+        RTP_LLM_CHECK_WITH_INFO(prepared.input_lengths.numel() == requests + extra_requests
+                                    && prepared.combo_tokens.numel() == tokens + extra_tokens,
+                                "SP prepared physical geometry does not match forward");
+        out.combo_position_ids       = prepared.combo_position_ids;
+        out.input_lengths            = prepared.input_lengths;
+        out.prefix_lengths           = prepared.prefix_lengths;
+        out.sequence_lengths         = prepared.sequence_lengths;
+        out.sequence_lengths_plus_1  = prepared.sequence_lengths_plus_1;
+        out.kv_cache_block_id        = prepared.kv_cache_block_id;
+        out.kv_cache_kernel_block_id = prepared.kv_cache_kernel_block_id;
+        out.linear_replay            = prepared.linear_replay;
+#if USING_CUDA
+        invokeSequenceParallelPad(pad_params, cuda_graph::graphGetCurrentStream().stream());
+#endif
+        return out;
+    }
     out.combo_position_ids = append_prefill_token(source.combo_position_ids, extra_tokens, 0);
-    out.combo_tokens_type_ids = append(source.combo_tokens_type_ids, extra_tokens, 0);
-    out.text_tokens_mask = append(source.text_tokens_mask, extra_tokens, 1);
     out.input_lengths = append(source.input_lengths, extra_requests, dummy_width);
     out.prefix_lengths = append(source.prefix_lengths, extra_requests, 0);
     out.sequence_lengths = append(source.sequence_lengths, extra_requests, 0);
@@ -163,6 +244,9 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
         out.kv_cache_block_id = append(source.kv_cache_block_id, extra_requests, 0, source.kv_cache_block_id.dim() - 2);
     if (source.kv_cache_kernel_block_id.defined())
         out.kv_cache_kernel_block_id = append(source.kv_cache_kernel_block_id, extra_requests, 0, source.kv_cache_kernel_block_id.dim() - 2);
+#if USING_CUDA
+    invokeSequenceParallelPad(pad_params, cuda_graph::graphGetCurrentStream().stream());
+#endif
     RTP_LLM_LOG_DEBUG("K3 SP padding requests=%ld/%ld tokens=%ld/%ld prefill=%d", requests,
                       requests + extra_requests, tokens, tokens + extra_tokens, prefill);
     return out;
@@ -218,8 +302,11 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
 }
 
 void PyWrappedModel::releaseBuffers() {
+    py::gil_scoped_acquire gil;
+    while (!retired_attention_inputs_.empty() && retired_attention_inputs_.front().event.query()) {
+        retired_attention_inputs_.pop_front();
+    }
     if (held_attn_pyobj_.ptr()) {
-        py::gil_scoped_acquire gil;
         held_attn_pyobj_ = py::object();
     }
     // TensorHolder release point (PyWrappedModel): advances model-internal
@@ -258,6 +345,9 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
+        for (auto& inputs : retired_attention_inputs_)
+            inputs.event.synchronize();
+        retired_attention_inputs_.clear();
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
         generation_prefill_graph_runner_.reset();
@@ -273,8 +363,29 @@ PyWrappedModel::~PyWrappedModel() {
     }
 }
 
+// Materialize only the Q1 fields deferred for a CUDA graph attempt. All
+// sources are already device-resident; this cannot add deferred H2D copies
+// after prepareAttentionInputs() has flushed its staging queue.
+static void materializeDecodeGraphMetadata(torch_ext::PyAttentionInputs& inputs, bool is_fake_stream) {
+    const auto    options                 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const int64_t batch                   = inputs.sequence_lengths.numel();
+    inputs.cu_seqlens_device              = torch::zeros({batch + 1}, options);
+    inputs.cu_kv_seqlens_device           = torch::zeros({batch + 1}, options);
+    inputs.decode_cu_seqlens_device       = torch::arange(0, batch + 1, 1, options);
+    inputs.sequence_lengths_plus_1_device = inputs.sequence_lengths + 1;
+    if (inputs.physical_token_count > 0) {
+        inputs.valid_token_mask =
+            torch::arange(inputs.physical_token_count, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA))
+            < inputs.logical_token_count;
+        if (is_fake_stream) {
+            inputs.valid_token_mask.zero_();
+        }
+    }
+}
+
 // Helper function to build PyAttentionInputs from GptModelInputs
-torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                                    bool                  defer_decode_graph_metadata) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
@@ -342,6 +453,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
     py_attn_inputs.is_mtp_draft_update = inputs.is_mtp_draft_update;
+    if (sequence_parallel_padding_enabled_) {
+        py_attn_inputs.logical_request_count  = inputs.sp_logical_requests;
+        py_attn_inputs.physical_request_count = inputs.input_lengths.numel();
+        py_attn_inputs.logical_token_count    = inputs.sp_logical_tokens;
+        py_attn_inputs.physical_token_count   = inputs.combo_tokens.numel();
+    }
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -376,7 +493,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // prefix_lengths here is a source tensor (never a deferred H2D copy),
         // so summing it is safe; item() adds one stream sync on this path.
         int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+        const bool needs_host_kv_total =
+            !device_only_decode_attention_metadata_ || (!inputs.is_target_verify && !inputs.is_mtp_draft_update);
+        if (needs_host_kv_total && py_attn_inputs.prefix_lengths.defined()
+            && py_attn_inputs.prefix_lengths.numel() > 0) {
             prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
         }
         py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
@@ -385,12 +505,18 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
+        if (sequence_parallel_padding_enabled_) {
+            py_attn_inputs.valid_token_mask = torch::empty(
+                {inputs.combo_tokens.numel()}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+        }
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths_device,
                                           py_attn_inputs.prefix_lengths_device,
                                           py_attn_inputs.cu_seqlens_device,
                                           py_attn_inputs.cu_kv_seqlens_device,
                                           py_attn_inputs.padding_offset,
-                                          c10::cuda::getCurrentCUDAStream().stream());
+                                          c10::cuda::getCurrentCUDAStream().stream(),
+                                          py_attn_inputs.valid_token_mask,
+                                          inputs.is_fake_stream ? 0 : inputs.sp_logical_tokens);
 #else
         RTP_LLM_FAIL("device attention input metadata requires CUDA");
 #endif
@@ -408,15 +534,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
-        py_attn_inputs.total_tokens         = 0;
-        py_attn_inputs.cu_seqlens_device    = torch::zeros({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens_device = torch::zeros({batch_size + 1}, cuda_i32);
+        py_attn_inputs.total_tokens = 0;
         if (py_attn_inputs.sequence_lengths.is_cuda()) {
             py_attn_inputs.cu_seqlens        = torch::empty({0}, host_i32);
             py_attn_inputs.decode_cu_seqlens = torch::empty({0}, host_i32);
-            py_attn_inputs.decode_cu_seqlens_device =
-                torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, cuda_i32);
+            if (!defer_decode_graph_metadata) {
+                materializeDecodeGraphMetadata(py_attn_inputs, inputs.is_fake_stream);
+            }
         } else {
+            py_attn_inputs.cu_seqlens_device    = torch::zeros({batch_size + 1}, cuda_i32);
+            py_attn_inputs.cu_kv_seqlens_device = torch::zeros({batch_size + 1}, cuda_i32);
             py_attn_inputs.cu_seqlens = torch::zeros({batch_size + 1}, host_i32);
             auto decode_cu_seqlens    = torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, host_i32);
             py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens;
@@ -439,18 +566,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.sequence_lengths_plus_1_device = to_device_i32(inputs.sequence_lengths_plus_1);
     } else if (py_attn_inputs.is_target_verify) {
         py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.prefix_lengths);
-    } else {
+    } else if (!defer_decode_graph_metadata && !py_attn_inputs.sequence_lengths_plus_1_device.defined()) {
         py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.sequence_lengths);
     }
 
-    if (sequence_parallel_padding_enabled_) {
-        py_attn_inputs.logical_request_count = inputs.sp_logical_requests;
-        py_attn_inputs.physical_request_count = inputs.input_lengths.numel();
-        py_attn_inputs.logical_token_count = inputs.sp_logical_tokens;
-        py_attn_inputs.physical_token_count = inputs.combo_tokens.numel();
-        py_attn_inputs.valid_token_mask = torch::arange(inputs.combo_tokens.numel(),
-            torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA)) < inputs.sp_logical_tokens;
-        if (inputs.is_fake_stream) py_attn_inputs.valid_token_mask.zero_();
+    if (sequence_parallel_padding_enabled_ && !defer_decode_graph_metadata
+        && !py_attn_inputs.valid_token_mask.defined()) {
+        py_attn_inputs.valid_token_mask =
+            torch::arange(inputs.combo_tokens.numel(), torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA))
+            < inputs.sp_logical_tokens;
+        if (inputs.is_fake_stream)
+            py_attn_inputs.valid_token_mask.zero_();
     }
     return py_attn_inputs;
 }
@@ -883,11 +1009,16 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, false);
 }
 
-void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs, bool skip_forward_event_sync) {
-    auto padded_inputs = sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs) : GptModelInputs{};
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs,
+                                            bool                  skip_forward_event_sync,
+                                            const GptModelInputs* publication_inputs) {
+    auto        padded_inputs = sequence_parallel_padding_enabled_ ?
+                                    padSequenceParallelInputs(raw_inputs, SpPadding::MetadataOnly) :
+                                    GptModelInputs{};
     const auto& inputs = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     PreparedAttentionInputsGuard prepared_guard(prepared_attention_inputs_);
+    prepared_input_snapshot_.reset();
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
@@ -895,12 +1026,24 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs, bo
 
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model prepareAttentionInputs");
     torch_ext::PyAttentionInputs attention_inputs;
+    bool                         defer_decode_graph_metadata = false;
+#if USING_CUDA
+    // No host planner consumes these fields on this path. Generate them only
+    // after selecting a replay graph; a rejected graph materializes the usual
+    // eager metadata below before publishing attention_inputs_.
+    defer_decode_graph_metadata = enable_cuda_graph_ && device_only_decode_attention_metadata_ && !inputs.warmup
+                                  && isQ1DecodeInput(inputs) && inputs.sequence_lengths.is_cuda()
+                                  && inputs.input_lengths.is_cuda();
+#endif
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
-        attention_inputs = buildPyAttentionInputs(inputs);
+        attention_inputs = buildPyAttentionInputs(inputs, defer_decode_graph_metadata);
     }
     if (!inputs.warmup && inputs.pd_separation && !inputs.is_target_verify) {
-        attention_inputs.cache_store_inputs = prepareWriteCacheParams(raw_inputs);
+        // Compute may already carry SP padding. Publication must retain the
+        // original request rows, without a dummy request or padded prefix.
+        attention_inputs.cache_store_inputs =
+            prepareWriteCacheParams(publication_inputs ? *publication_inputs : raw_inputs);
         if (attention_inputs.cache_store_inputs.has_value()) {
             attention_inputs.cache_store_writer = cache_store_async_writer_;
         }
@@ -910,11 +1053,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs, bo
         calculatePaddingOffsetDeviceAware(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
     }
+    torch_ext::AttentionInputsByTag attention_inputs_by_tag;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
-        attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        attention_inputs_by_tag = setupKVCacheForAttentionInputs(attention_inputs, inputs);
     }
-    attention_inputs_ = std::move(attention_inputs);
 
     // CRITICAL ORDERING: flush queued H2D copies BEFORE graph_runner_->prepareAttentionInputs.
     // The graph runner internally launches strided D2D copies that READ from these freshly
@@ -936,25 +1079,118 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& raw_inputs, bo
     // device.  Keep the top-level PyModelInputs field consistent with the
     // nested attention field: CudaGraphRunner validates and copies the
     // top-level tensor during replay preparation.
-    auto  py_model_inputs = PyModelInputs({empty,
-                                           empty,
-                                           attention_inputs_.combo_position_ids,
-                                           torch_ext::PyEmbeddingInputs(),
-                                           torch_ext::PyMultimodalInputs(),
-                                           attention_inputs_,
-                                           attention_inputs_by_tag_,
-                                           torch_ext::BertEmbeddingInputs()});
-    auto* runner          = selectGraphRunner(attention_inputs_);
-    auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && runner != nullptr
-        && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
+    auto       py_model_inputs = PyModelInputs({empty,
+                                                empty,
+                                                attention_inputs.combo_position_ids,
+                                                torch_ext::PyEmbeddingInputs(),
+                                                torch_ext::PyMultimodalInputs(),
+                                                std::move(attention_inputs),
+                                                std::move(attention_inputs_by_tag),
+                                                torch_ext::BertEmbeddingInputs()});
+    auto*      runner          = selectGraphRunner(py_model_inputs.attention_inputs);
+    auto&      state           = selectGraphState(py_model_inputs.attention_inputs);
+    const bool can_prepare_graph =
+        enable_cuda_graph_ && runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE);
+    const bool prepared_decode_metadata = can_prepare_graph && defer_decode_graph_metadata
+                                          && runner->tryPrepareDecodeAttentionInputs(
+                                              py_model_inputs, state, skip_forward_event_sync, inputs.is_fake_stream);
+    if (defer_decode_graph_metadata) {
+        // Publish valid views for every consumer, including a later eager
+        // fallback. Never expose deferred/uninitialized metadata outside this
+        // preparation call. Tagged inputs share the same derived Q1 geometry.
+        if (!prepared_decode_metadata) {
+            materializeDecodeGraphMetadata(py_model_inputs.attention_inputs, inputs.is_fake_stream);
+        }
+        const auto& metadata      = py_model_inputs.attention_inputs;
+        const auto  bind_metadata = [&](torch_ext::PyAttentionInputs& destination) {
+            destination.cu_seqlens_device              = metadata.cu_seqlens_device;
+            destination.cu_kv_seqlens_device           = metadata.cu_kv_seqlens_device;
+            destination.decode_cu_seqlens_device       = metadata.decode_cu_seqlens_device;
+            destination.sequence_lengths_plus_1_device = metadata.sequence_lengths_plus_1_device;
+            destination.valid_token_mask               = metadata.valid_token_mask;
+        };
+        for (auto& [tag, tagged_inputs] : py_model_inputs.attention_inputs_by_tag) {
+            (void)tag;
+            bind_metadata(tagged_inputs);
+        }
+    }
+    if (can_prepare_graph && !prepared_decode_metadata) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
     }
+    // Preparation owns one metadata set; publish its handles without copying
+    // the full tagged container before and after derived Q1 metadata binding.
+    attention_inputs_               = std::move(py_model_inputs.attention_inputs);
+    attention_inputs_by_tag_        = std::move(py_model_inputs.attention_inputs_by_tag);
+    prepared_input_snapshot_        = raw_inputs;
+    prepared_padded_input_snapshot_ = inputs;
     prepared_guard.commit();
 }
 
+void PyWrappedModel::invalidatePreparedAttentionInputs() {
+    prepared_attention_inputs_.store(false, std::memory_order_release);
+    prepared_input_snapshot_.reset();
+    prepared_padded_input_snapshot_.reset();
+}
+
+void PyWrappedModel::validatePreparedAttentionInputs(const GptModelInputs& inputs) const {
+    RTP_LLM_CHECK_WITH_INFO(prepared_input_snapshot_.has_value(), "prepared attention snapshot is missing");
+    const auto& snapshot = *prepared_input_snapshot_;
+    const auto  count    = [](const torch::Tensor& tensor) { return tensor.defined() ? tensor.numel() : 0; };
+    RTP_LLM_CHECK_WITH_INFO(snapshot.attention_prepare_id == inputs.attention_prepare_id
+                                && snapshot.is_target_verify == inputs.is_target_verify
+                                && snapshot.is_mtp_draft_update == inputs.is_mtp_draft_update
+                                && count(snapshot.input_lengths) == count(inputs.input_lengths)
+                                && count(snapshot.combo_tokens) == count(inputs.combo_tokens)
+                                && count(snapshot.combo_position_ids) == count(inputs.combo_position_ids)
+                                && snapshot.kv_cache_group_tags == inputs.kv_cache_group_tags
+                                && snapshot.kv_block_stride_bytes == inputs.kv_block_stride_bytes
+                                && snapshot.kv_scale_stride_bytes == inputs.kv_scale_stride_bytes
+                                && snapshot.seq_size_per_block == inputs.seq_size_per_block
+                                && snapshot.kernel_seq_size_per_block == inputs.kernel_seq_size_per_block
+                                && snapshot.linear_replay.has_value() == inputs.linear_replay.has_value(),
+                            "attention prepare identity/layout mismatch: prepared=%lu forward=%lu",
+                            snapshot.attention_prepare_id,
+                            inputs.attention_prepare_id);
+    if (inputs.linear_replay) {
+        RTP_LLM_CHECK_WITH_INFO(
+            snapshot.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.defined()
+                && snapshot.kv_cache_kernel_block_id.data_ptr() == inputs.kv_cache_kernel_block_id.data_ptr()
+                && snapshot.kv_cache_kernel_block_id.sizes() == inputs.kv_cache_kernel_block_id.sizes()
+                && snapshot.kv_cache_kernel_block_id.strides() == inputs.kv_cache_kernel_block_id.strides(),
+            "LINEAR replay prepare page-table snapshot was replaced");
+        const auto expected = snapshot.linear_replay->tensors();
+        const auto actual   = inputs.linear_replay->tensors();
+        for (size_t i = 0; i < expected.size(); ++i) {
+            RTP_LLM_CHECK_WITH_INFO(
+                expected[i]->defined() && actual[i]->defined() && expected[i]->data_ptr() == actual[i]->data_ptr()
+                    && expected[i]->sizes() == actual[i]->sizes() && expected[i]->strides() == actual[i]->strides()
+                    && expected[i]->scalar_type() == actual[i]->scalar_type(),
+                "attention prepare Replay binding mismatch: field=%zu prepare=%lu",
+                i,
+                inputs.attention_prepare_id);
+        }
+    }
+}
+
+void PyWrappedModel::retirePreparedAttentionInputs() {
+    if (prepared_input_snapshot_ && prepared_input_snapshot_->attention_prepare_id != 0) {
+        py::gil_scoped_acquire gil;
+        auto                   event = cuda_graph::makeGraphEvent();
+        event.record(cuda_graph::graphGetCurrentStream());
+        retired_attention_inputs_.push_back({std::move(event),
+                                             std::move(*prepared_input_snapshot_),
+                                             std::move(*prepared_padded_input_snapshot_),
+                                             attention_inputs_,
+                                             attention_inputs_by_tag_,
+                                             held_attn_pyobj_});
+    }
+    invalidatePreparedAttentionInputs();
+}
+
 void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& raw_inputs) {
+    if (!prepared_attention_inputs_.load(std::memory_order_acquire))
+        return;
     auto padded_inputs = sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs) : GptModelInputs{};
     const auto& inputs = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
     RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockId");
@@ -996,20 +1232,64 @@ void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
-    auto padded_inputs = sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs) : GptModelInputs{};
-    const auto& inputs = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
-    const auto& post_inputs = sequence_parallel_padding_enabled_ ? raw_inputs : inputs;
-    RTP_LLM_PROFILE_SCOPE("py_model.forward");
-
+    if (prepared_attention_inputs_.load(std::memory_order_acquire)) {
+        validatePreparedAttentionInputs(raw_inputs);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(raw_inputs.attention_prepare_id == 0,
+                                "attention prepare %lu was not published",
+                                raw_inputs.attention_prepare_id);
+    }
     // Establish the cleanup guard before touching inputs: both the performance
     // wrapper and host-buffer retention can throw. A failed async prepare must
     // never leave the next forward observing stale prepared inputs.
     struct PreparedFlagGuard {
-        std::atomic<bool>& flag;
+        PyWrappedModel& model;
         ~PreparedFlagGuard() {
-            flag.store(false, std::memory_order_release);
+            try {
+                model.retirePreparedAttentionInputs();
+            } catch (const std::exception& e) {
+                model.prepared_attention_inputs_.store(false, std::memory_order_release);
+                RTP_LLM_LOG_ERROR("attention input retirement failed: %s", e.what());
+            }
         }
-    } flag_guard{prepared_attention_inputs_};
+    } flag_guard{*this};
+
+    RTP_LLM_PROFILE_SCOPE("py_model.forward");
+
+    bool defer_input_payload = false;
+#if USING_CUDA
+    const auto empty_tensor = [](const torch::Tensor& tensor) { return !tensor.defined() || tensor.numel() == 0; };
+    const auto empty_list   = [](const auto& tensors) { return !tensors.has_value() || tensors->empty(); };
+    const bool needs_sp_padding = sequence_parallel_padding_enabled_ && device_props_.tp_size > 1
+                                  && raw_inputs.sp_logical_tokens == 0
+                                  && raw_inputs.combo_tokens.numel() % device_props_.tp_size != 0;
+    const bool plain_sp_graph_input =
+        needs_sp_padding && enable_cuda_graph_ && !device_props_.enable_prefill_cp
+        && empty_tensor(raw_inputs.combo_tokens_type_ids) && empty_tensor(raw_inputs.text_tokens_mask)
+        && empty_tensor(raw_inputs.mm_features_locs) && empty_list(raw_inputs.multimodal_features)
+        && empty_list(raw_inputs.mm_extra_input) && empty_list(raw_inputs.input_embeddings);
+    if (plain_sp_graph_input) {
+        const bool prepared = prepared_attention_inputs_.load(std::memory_order_acquire);
+        // Q1 has no background prepare. Build its metadata before deciding
+        // whether to stage the original payload directly into graph storage.
+        if (!prepared && !raw_inputs.warmup && !raw_inputs.linear_replay && isQ1DecodeInput(raw_inputs)) {
+            RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(before_sp_payload)");
+            prepareAttentionInputs(raw_inputs, /*skip_forward_event_sync=*/true, &raw_inputs);
+        }
+        if (prepared_attention_inputs_.load(std::memory_order_acquire)) {
+            auto* runner = dynamic_cast<CudaGraphRunner*>(selectGraphRunner(attention_inputs_));
+            defer_input_payload =
+                runner && runner->canStageUnpaddedInputs(raw_inputs.combo_tokens, raw_inputs.last_hidden_states);
+        }
+    }
+#endif
+    const auto padding_mode = defer_input_payload                                        ? SpPadding::DeferPayload :
+                              prepared_attention_inputs_.load(std::memory_order_acquire) ? SpPadding::ReuseMetadata :
+                                                                                           SpPadding::Full;
+    auto       padded_inputs =
+        sequence_parallel_padding_enabled_ ? padSequenceParallelInputs(raw_inputs, padding_mode) : GptModelInputs{};
+    const auto& inputs        = sequence_parallel_padding_enabled_ ? padded_inputs : raw_inputs;
+    const auto& post_inputs   = sequence_parallel_padding_enabled_ ? raw_inputs : inputs;
 
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
@@ -1029,7 +1309,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
 
         if (int(device_props_.enable_layer_micro_batch)) {
             auto outputs = forwardMicroBatched(inputs);
-            finalizeLinearReplay(inputs);
+            finalizeLinearReplay(post_inputs);
             return with_generation_prefill_cuda_graph_status(std::move(outputs));
         }
         PyContextParallelParams cp_params;
@@ -1051,7 +1331,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
         torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
+        if (prepared_attention_inputs_.load(std::memory_order_acquire)
+            && attention_inputs_.combo_position_ids.defined()) {
+            combo_position_ids = attention_inputs_.combo_position_ids;
+        } else if (inputs.combo_position_ids.defined()) {
             if (inputs.combo_position_ids.device().is_cuda()) {
                 combo_position_ids = inputs.combo_position_ids;
             } else {
@@ -1062,9 +1345,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
 
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        // Reuse the nonblocking position copy already queued above. The BERT
+        // helper must not synchronously copy the original host positions again.
+        auto bert_inputs               = inputs;
+        bert_inputs.combo_position_ids = combo_position_ids;
+        auto bert_embedding_inputs     = buildBertEmbeddingInputs(bert_inputs);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(raw_inputs, /*skip_forward_event_sync=*/true);
+            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true, &post_inputs);
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
@@ -1090,6 +1377,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
+        py_model_inputs.input_payload_unpadded = defer_input_payload;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -1104,6 +1392,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         }
         const bool can_run_graph =
             enable_cuda_graph_ && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (!can_run_graph && defer_input_payload) {
+            // Eager execution must receive the original complete SP payload.
+            // Metadata aliases are identical: both paths reuse the same
+            // validated prepared snapshot, including LINEAR and tagged tables.
+            padded_inputs             = padSequenceParallelInputs(raw_inputs, SpPadding::ReuseMetadata);
+            py_model_inputs.input_ids = padded_inputs.combo_tokens;
+            py_model_inputs.input_hiddens =
+                padded_inputs.last_hidden_states.defined() ? padded_inputs.last_hidden_states : torch::empty({0});
+            py_model_inputs.input_payload_unpadded = false;
+        }
         if (is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1125,7 +1423,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
+            hidden_states = py_model_outputs.hidden_states;
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -1140,13 +1438,40 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         }
 
         if (sequence_parallel_padding_enabled_) {
-            hidden_states = hidden_states.narrow(0, 0, raw_inputs.combo_tokens.numel());
+            const int64_t rows = raw_inputs.combo_tokens.numel();
+            hidden_states      = hidden_states.narrow(0, 0, rows);
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
-                py_model_outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states
-                    .narrow(0, 0, raw_inputs.combo_tokens.numel()).clone();
+                py_model_outputs.mtp_target_hidden_states =
+                    py_model_outputs.mtp_target_hidden_states.narrow(0, 0, rows);
             }
         }
-        finalizeLinearReplay(inputs);
+#if USING_CUDA
+        if (can_run_graph && sequence_parallel_padding_enabled_ && hidden_states.is_cuda()
+            && hidden_states.is_contiguous() && py_model_outputs.mtp_target_hidden_states.defined()
+            && py_model_outputs.mtp_target_hidden_states.is_cuda()
+            && py_model_outputs.mtp_target_hidden_states.is_contiguous()) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forward(snapshot_outputs)");
+            auto          normalized                  = hidden_states;
+            auto          recurrent                   = py_model_outputs.mtp_target_hidden_states;
+            hidden_states                             = torch::empty_like(normalized);
+            py_model_outputs.mtp_target_hidden_states = torch::empty_like(recurrent);
+            FusedD2DCopyParams copies;
+            copies.add(normalized.data_ptr(), hidden_states.data_ptr(), normalized.numel() * normalized.element_size());
+            copies.add(recurrent.data_ptr(),
+                       py_model_outputs.mtp_target_hidden_states.data_ptr(),
+                       recurrent.numel() * recurrent.element_size());
+            fusedCopy(copies);
+        } else
+#endif
+        {
+            if (can_run_graph) {
+                hidden_states = hidden_states.clone();
+            }
+            if (sequence_parallel_padding_enabled_ && py_model_outputs.mtp_target_hidden_states.defined()) {
+                py_model_outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states.clone();
+            }
+        }
+        finalizeLinearReplay(post_inputs);
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
@@ -1224,20 +1549,19 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
     return kv_cache_block_id;
 }
 
-torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
+torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool rank_major) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
-    const auto tp_size     = device_props_.tp_size;
-    const auto tp_rank     = device_props_.tp_rank;
-    const auto rows        = input.size(0);
-    const auto cols        = input.size(1);
-    const auto local_numel = input.numel();
-    auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
-    // Copy local data into the correct rank position
-    auto all_data_flat = all_data.reshape({rows * cols * (int64_t)tp_size});
-    auto input_flat    = input.reshape({local_numel});
-    all_data_flat.slice(0, local_numel * tp_rank, local_numel * (tp_rank + 1)).copy_(input_flat);
-    execAllGather({{all_data}});
+    const auto tp_size = device_props_.tp_size;
+    const auto rows    = input.size(0);
+    const auto cols    = input.size(1);
+    // Explicit send avoids packing local logits into the receive buffer first.
+    auto all_data = torch::empty({rows * (int64_t)tp_size, cols}, input.options());
+    auto send     = input.is_contiguous() ? input : input.contiguous();
+    execAllGather({{all_data}, ParallelMode::TP, {send}, false});
     cudaCheckLastError();
+    if (rank_major) {
+        return all_data.view({(int64_t)tp_size, rows, cols});
+    }
     // Transpose [tp_size, batch, hidden] -> [batch, tp_size, hidden] -> [batch, hidden * tp_size]
     auto transposed = all_data.reshape({(int64_t)tp_size, rows, cols})
                           .permute({1, 0, 2})
@@ -1374,9 +1698,37 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
+        bool rank_major_greedy = false;
+#if USING_CUDA
+        rank_major_greedy = inputs.prefer_rank_major_logits && !has_context_request && !need_all_logits
+                            && device_props_.enable_layer_micro_batch == MicroBatchType::NONE && !check_nan_
+                            && !merged_eagle3_hidden.defined() && logits.is_cuda()
+                            && logits.scalar_type() == torch::kFloat32 && logits.is_contiguous();
+#endif
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits);
+            logits = tpSyncEmbeddingOrLogits(logits, rank_major_greedy);
+        } else if (rank_major_greedy) {
+            logits = logits.unsqueeze(0);
+        }
+        if (rank_major_greedy) {
+            const int64_t padded_vocab = logits.size(0) * logits.size(2);
+            const int64_t valid_vocab  = description_.output_vocab_size > 0 ?
+                                             static_cast<int64_t>(description_.output_vocab_size) :
+                                             padded_vocab;
+            RTP_LLM_CHECK_WITH_INFO(valid_vocab > 0 && valid_vocab <= padded_vocab,
+                                    "invalid greedy output vocabulary: %ld/%ld",
+                                    valid_vocab,
+                                    padded_vocab);
+            if (description_.output_vocab_size > 0) {
+                RTP_LLM_CHECK_WITH_INFO(padded_vocab == static_cast<int64_t>(description_.output_vocab_padded_size),
+                                        "rank-major output vocabulary width mismatch");
+            }
+            outputs.greedy_logits_rank_major = logits;
+            outputs.greedy_vocab_size        = valid_vocab;
+            outputs.hidden_states            = last_hidden;
+            outputs.all_hidden_states        = hidden;
+            return outputs;
         }
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
