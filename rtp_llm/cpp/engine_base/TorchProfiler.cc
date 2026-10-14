@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -15,6 +17,29 @@ namespace {
 // through StepWindowProfiler::configure, so enforcing them here covers all callers.
 constexpr size_t kMaxTraceNameLen = 64;
 constexpr int    kMaxNumSteps     = 1000;
+
+int currentProfileDevice() {
+#if USING_CUDA || USING_ROCM
+    // PyTorch's ROCm backend also registers the CUDA device type.
+    c10::impl::VirtualGuardImpl guard(c10::DeviceType::CUDA);
+    if (guard.deviceCount() > 0) {
+        return guard.getDevice().index();
+    }
+#endif
+    return -1;
+}
+
+void drainProfileDevice(int device) {
+#if USING_CUDA || USING_ROCM
+    if (device >= 0) {
+        // Drain all streams on the device recorded at profiler start, including
+        // asynchronous draft/commit work. A stream-only wait can miss its tail.
+        c10::impl::VirtualGuardImpl(c10::DeviceType::CUDA).synchronizeDevice(device);
+    }
+#else
+    (void)device;
+#endif
+}
 
 std::string sanitizeTraceName(const std::string& trace_name) {
     std::string out;
@@ -32,9 +57,28 @@ std::string sanitizeTraceName(const std::string& trace_name) {
 }  // namespace
 namespace detail {
 
-std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disable_profiler) {
+std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn            disable_profiler,
+                                                        const std::function<void()>& drain_device) {
+    bool drained = true;
+    if (drain_device) {
+        try {
+            // This scope must end before disableProfiler finalizes its events.
+            // It is profiling teardown, not part of the measured forward.
+            RTP_LLM_PROFILE_SCOPE("profiler.teardown(device_drain)");
+            drain_device();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("failed to drain profiling device; dropping incomplete trace: %s", e.what());
+            drained = false;
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to drain profiling device with unknown exception; dropping incomplete trace");
+            drained = false;
+        }
+    }
+    // Even a failed drain must pop the active Kineto state exactly once. In
+    // particular, unwinding a device failure must not retry from the destructor.
     try {
-        return disable_profiler();
+        auto result = disable_profiler();
+        return drained ? std::move(result) : nullptr;
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("failed to disable torch profiler; dropping trace and continuing inference: %s", e.what());
     } catch (...) {
@@ -55,11 +99,18 @@ TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
 
 TorchProfile::~TorchProfile() {
     if (!stopped_) {
-        stop();
+        try {
+            stop();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("failed to save torch profiler trace during destruction: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to save torch profiler trace during destruction with unknown exception");
+        }
     }
 }
 
 void TorchProfile::start() {
+    profile_device_ = activities_.count(tpi::ActivityType::CUDA) ? currentProfileDevice() : -1;
     count_ += 1;
     stopped_ = false;
     tap::prepareProfiler(config_, activities_);
@@ -74,7 +125,7 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
-    auto res = detail::tryDisableProfiler(&tap::disableProfiler);
+    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this] { drainProfileDevice(profile_device_); });
     if (!res) {
         return {nullptr, ""};
     }
