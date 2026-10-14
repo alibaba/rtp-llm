@@ -89,6 +89,10 @@ sys.modules[arch.__name__] = arch
 
 
 package(PREFIX)
+load_file(
+    "rtp_llm.models.dsv4_indexer_cache",
+    DSV4.parents[2] / "models/dsv4_indexer_cache.py",
+)
 packed = load_file(PREFIX + "._cp_packed_rows", FP8 / "_cp_packed_rows.py")
 runtime = load_file(PREFIX + "._compact_cp_runtime", FP8 / "_compact_cp_runtime.py")
 workspace_module = load_file(
@@ -214,6 +218,7 @@ def make_module(kind="indexer", rank=0, *, modeltest=False):
     """Synthetic default retained; modeltest=True selects measured production ABI."""
     head, ratio, state_eb, role = (MODELTEST_LAYOUTS if modeltest else LAYOUTS)[kind]
     m = caller.CompressorFP8()
+    m._fp4_indexer = False
     m.head_dim, m.compress_ratio, m.overlap, m._cp_role = head, ratio, ratio == 4, role
     m._state_eb, m._state_tokens_per_block = state_eb, 256
     m._kv_tokens_per_block = 256 if modeltest else 128

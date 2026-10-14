@@ -22,6 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
+from functools import partial
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -153,6 +154,7 @@ class _IndexerScoreState(NamedTuple):
     k_quant_flat: torch.Tensor
     k_scale_buf: torch.Tensor
     out_shape: tuple
+    q_scales: Optional[torch.Tensor] = None
 
 
 class _PendingIndexerTopk(NamedTuple):
@@ -530,6 +532,43 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        from rtp_llm.models.dsv4_indexer_cache import fp4_indexer_enabled
+
+        self._fp4_indexer = fp4_indexer_enabled()
+        self._fp4_native_paged = False
+        self._cache_payload_dim = 64 if self._fp4_indexer else INDEXER_HEAD_DIM
+        self._cache_payload_dtype = (
+            torch.uint8 if self._fp4_indexer else torch.float8_e4m3fn
+        )
+        self._quantize_q = indexer_q_rope_fp8_quant_fold
+        self._score_paged = fp8_paged_indexer_score
+        self._score_prefill = fp8_mqa_indexer_score
+        self._gather_cache = rtp_llm_ops.cp_gather_indexer_k_quant_cache
+        if self._fp4_indexer:
+            from rtp_llm.models_py.modules.dsv4.fp4.native import (
+                prefill_score,
+                provider,
+            )
+            from rtp_llm.models_py.modules.dsv4.fp4.quantization import quantize_q_rope
+            from rtp_llm.models_py.modules.dsv4.fp4.score import (
+                gather_cache,
+                paged_score,
+            )
+
+            provider()
+            paged_backend = os.environ.get("DSV4_FP4_PAGED_BACKEND", "triton")
+            if paged_backend not in ("triton", "native"):
+                raise ValueError("DSV4_FP4_PAGED_BACKEND must be triton or native")
+            self._fp4_native_paged = paged_backend == "native"
+            if self._fp4_native_paged:
+                from rtp_llm.models_py.modules.dsv4.fp4.native import paged_score
+
+            self._quantize_q = partial(
+                quantize_q_rope, weight_scale=self.softmax_scale * self.n_heads**-0.5
+            )
+            self._score_paged = paged_score
+            self._score_prefill = prefill_score
+            self._gather_cache = gather_cache
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -546,6 +585,11 @@ class IndexerFP8(PoolBackedModule):
         self.weights_proj = (
             layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
         ).contiguous()
+        if self._fp4_indexer:
+            if torch.cuda.get_device_capability(self.weights_proj.device) != (12, 0):
+                raise ValueError("Experimental FP4 indexer requires SM120")
+            # FP4 folds the scale after the BF16 projection, in FP32.
+            self.weights_proj = layer_weights[W.v4_indexer_weights_proj_w].contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
         inner_cmp_weights = {
@@ -642,7 +686,7 @@ class IndexerFP8(PoolBackedModule):
             and cp_ctx.cp_size > 1
         )
         if not kv_cache_sharded:
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._gather_cache(
                 self._kv_pool_view,
                 k_quant_flat,
                 k_scale_buf,
@@ -678,7 +722,7 @@ class IndexerFP8(PoolBackedModule):
                 dtype=k_scale_buf.dtype,
                 device=k_scale_buf.device,
             )
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._gather_cache(
                 self._kv_pool_view,
                 actual_q,
                 actual_s,
@@ -841,12 +885,18 @@ class IndexerFP8(PoolBackedModule):
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
 
-            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
-                _as_bf16_contig(q),
-                _as_bf16_contig(weights),
-                freqs,
-                self.rope_head_dim,
-            )
+            if self._fp4_native_paged:
+                payload, w_fold, scales = self._quantize_query_with_scales(
+                    _as_bf16_contig(q), _as_bf16_contig(weights), freqs
+                )
+                q_fp8 = (payload, scales)
+            else:
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q),
+                    _as_bf16_contig(weights),
+                    freqs,
+                    self.rope_head_dim,
+                )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
@@ -858,7 +908,7 @@ class IndexerFP8(PoolBackedModule):
                 if self._kv_pool_view.dim() == 3
                 else self._kv_pool_view
             )
-            logits = fp8_paged_indexer_score(
+            logits = self._score_paged(
                 q_fp8,
                 w_fold.view(bsz * q_len, self.n_heads),
                 pool_2d,
@@ -1334,6 +1384,22 @@ class IndexerFP8(PoolBackedModule):
             done_event.record(tail_stream)
         return _PendingIndexerTopk(out_buf, done_event, tail_stream, state)
 
+    def _quantize_query_with_scales(self, q, weights, freqs):
+        if self._fp4_indexer:
+            from rtp_llm.models_py.modules.dsv4.fp4.quantization import (
+                quantize_q_rope_packed,
+            )
+
+            return quantize_q_rope_packed(
+                q,
+                weights,
+                freqs,
+                self.rope_head_dim,
+                weight_scale=self.softmax_scale * self.n_heads**-0.5,
+            )
+        quantized, folded = self._quantize_q(q, weights, freqs, self.rope_head_dim)
+        return quantized, folded, None
+
     def _prefill_score_prefix(
         self,
         x: torch.Tensor,
@@ -1392,11 +1458,10 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_scales = self._quantize_query_with_scales(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
                 )
 
             assert has_fp8_mqa_logits(
@@ -1417,8 +1482,8 @@ class IndexerFP8(PoolBackedModule):
             # via (block_table, cu_kv_seqlens). No host-side slot mapping.
             with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
                 k_quant_flat = torch.empty(
-                    (T, INDEXER_HEAD_DIM),
-                    dtype=torch.float8_e4m3fn,
+                    (T, self._cache_payload_dim),
+                    dtype=self._cache_payload_dtype,
                     device=x.device,
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
@@ -1443,6 +1508,7 @@ class IndexerFP8(PoolBackedModule):
                 k_quant_flat=k_quant_flat,
                 k_scale_buf=k_scale_buf,
                 out_shape=out_shape,
+                q_scales=q_scales,
             )
         finally:
             self._discard_prefill_k_cache_gather(indexer_k_pending)
@@ -1463,9 +1529,18 @@ class IndexerFP8(PoolBackedModule):
         K = self.index_topk
         # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
         # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-        k_scale_flat = state.k_scale_buf.view(torch.float32).squeeze(-1)
+        k_scale_flat = (
+            state.k_scale_buf
+            if self._fp4_indexer
+            else state.k_scale_buf.view(torch.float32).squeeze(-1)
+        )
 
-        q_score = state.q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+        q_score = state.q_fp8.view(M, self.n_heads, state.q_fp8.shape[-1])
+        q_scales = (
+            state.q_scales.view(M, self.n_heads, 4)
+            if state.q_scales is not None
+            else None
+        )
         w_score = state.w_fold.view(M, self.n_heads)
         score_chunk_rows = _fp8_prefill_score_chunk_rows()
         chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
@@ -1480,8 +1555,12 @@ class IndexerFP8(PoolBackedModule):
         for row_start in range(0, M, score_chunk_rows):
             row_end = min(M, row_start + score_chunk_rows)
             with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                logits = fp8_mqa_indexer_score(
-                    q_score[row_start:row_end],
+                logits = self._score_prefill(
+                    (
+                        (q_score[row_start:row_end], q_scales[row_start:row_end])
+                        if q_scales is not None
+                        else q_score[row_start:row_end]
+                    ),
                     w_score[row_start:row_end],
                     state.k_quant_flat,
                     k_scale_flat,
@@ -1627,11 +1706,10 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_scales = self._quantize_query_with_scales(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
                 )
 
             assert has_fp8_mqa_logits(
@@ -1652,8 +1730,8 @@ class IndexerFP8(PoolBackedModule):
 
             with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
                 k_quant_flat = torch.empty(
-                    (T, INDEXER_HEAD_DIM),
-                    dtype=torch.float8_e4m3fn,
+                    (T, self._cache_payload_dim),
+                    dtype=self._cache_payload_dtype,
                     device=x.device,
                 )
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
@@ -1671,9 +1749,15 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = (
+                k_scale_buf
+                if self._fp4_indexer
+                else k_scale_buf.view(torch.float32).squeeze(-1)
+            )
 
-            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            q_score = q_fp8.view(M, self.n_heads, q_fp8.shape[-1])
+            if q_scales is not None:
+                q_scales = q_scales.view(M, self.n_heads, 4)
             w_score = w_fold.view(M, self.n_heads)
             score_chunk_rows = _fp8_prefill_score_chunk_rows()
             chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
@@ -1684,8 +1768,12 @@ class IndexerFP8(PoolBackedModule):
             for row_start in range(0, M, score_chunk_rows):
                 row_end = min(M, row_start + score_chunk_rows)
                 with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
+                    logits = self._score_prefill(
+                        (
+                            (q_score[row_start:row_end], q_scales[row_start:row_end])
+                            if q_scales is not None
+                            else q_score[row_start:row_end]
+                        ),
                         w_score[row_start:row_end],
                         k_quant_flat,
                         k_scale_flat,

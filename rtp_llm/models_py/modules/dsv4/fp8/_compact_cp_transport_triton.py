@@ -16,7 +16,7 @@ def _regions(data, scales, slots):
     if data.shape[:2] != scales.shape[:2] or min(data.shape[:2]) <= 0:
         raise ValueError("compact transport pool dimensions")
     db, sb = data.shape[2], scales.shape[2]
-    if (db, sb) not in ((128, 4), (576, 8)):
+    if (db, sb) not in ((64, 4), (128, 4), (576, 8)):
         raise ValueError("unsupported split-row format")
     if data.dtype != torch.uint8 or scales.dtype != torch.uint8:
         raise ValueError("split regions must be raw uint8")

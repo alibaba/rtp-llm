@@ -373,7 +373,10 @@ filegroup(
 # test_pd_transfer_geometry).
 filegroup(
     name = "dsv4_kv_cache_source",
-    srcs = ["models/dsv4_kv_cache.py"],
+    srcs = [
+        "models/dsv4_indexer_cache.py",
+        "models/dsv4_kv_cache.py",
+    ],
     visibility = ["//visibility:public"],
 )
 

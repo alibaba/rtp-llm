@@ -18,6 +18,31 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_fp4_indexer_contract",
+    srcs = ["test_fp4_indexer_contract.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_fp4_native_indexer",
+    srcs = [
+        "test_fp4_indexer_contract.py",
+        "test_fp4_native_indexer.py",
+    ],
+    main = "test_fp4_native_indexer.py",
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_fp4_speculative_state",
+    srcs = ["test_fp4_speculative_state.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_sm120_precision_contract",
     srcs = ["test_sm120_precision_contract.py"],
     deps = _DSV4_TEST_DEPS,

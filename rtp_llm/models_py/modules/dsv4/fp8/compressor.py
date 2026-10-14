@@ -502,6 +502,11 @@ class CompressorFP8(PoolBackedModule):
         self._pool_entry_bytes = (
             KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
         )
+        from rtp_llm.models.dsv4_indexer_cache import fp4_indexer_enabled
+
+        self._fp4_indexer = head_dim == 128 and fp4_indexer_enabled()
+        if self._fp4_indexer:
+            self._pool_entry_bytes = 68
 
         # ape stays FP32. wkv/wgate are stored as BF16, while the fused
         # projection below uses BF16 operands with FP32 accumulation/output.
@@ -911,6 +916,7 @@ class CompressorFP8(PoolBackedModule):
                 self._state_pool_3d,
                 meta.state_slots,
                 compress_ratio=self.compress_ratio,
+                raw_scores=self._fp4_indexer,
             )
 
         # Decode path passes seq_start=None: disable the raw branch so the
@@ -975,6 +981,7 @@ class CompressorFP8(PoolBackedModule):
                 seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
+                fp4_indexer=self._fp4_indexer,
             )
 
     # ----------------------------------------------------------------------

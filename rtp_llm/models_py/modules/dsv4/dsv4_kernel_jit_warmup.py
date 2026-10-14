@@ -687,9 +687,12 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     fixed_region_cp_size: int,
     fixed_region_prefill_sliced: bool,
 ) -> None:
+    from rtp_llm.models.dsv4_indexer_cache import (
+        fp4_indexer_enabled,
+        indexer_entry_bytes,
+    )
     from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
         DSV4_KERNEL_TOKENS_PER_BLOCK,
-        INDEXER_ENTRY_BYTES,
         KV_ENTRY_BYTES,
     )
     from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
@@ -736,7 +739,8 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     )
 
     kv_block_size = 64
-    entry_bytes = KV_ENTRY_BYTES if head_dim == 512 else INDEXER_ENTRY_BYTES
+    entry_bytes = KV_ENTRY_BYTES if head_dim == 512 else indexer_entry_bytes()
+    fp4_indexer = head_dim == 128 and fp4_indexer_enabled()
     kv_cache = torch.zeros(
         (1, kv_block_size, entry_bytes), dtype=torch.uint8, device=device
     )
@@ -779,6 +783,7 @@ def _warmup_fused_kv_compress_norm_rope_insert(
                 compress_ratio=compress_ratio,
                 overlap=bool(overlap),
                 state_tokens_per_block=state_block_size,
+                fp4_indexer=fp4_indexer,
                 **kwargs,
             )
 

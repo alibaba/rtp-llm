@@ -238,7 +238,9 @@ class Geometry:
         )
 
     def bytes_per_rank(self):
-        data = 132 if self.width == 512 else 584
+        from rtp_llm.models.dsv4_indexer_cache import indexer_entry_bytes
+
+        data = indexer_entry_bytes() if self.width == 512 else 584
         return {
             "raw_tail_send": len(self.tails()) * self.width * 4,
             "raw_tail_receive": 4 * len(self.tails()) * self.width * 4,
@@ -537,9 +539,14 @@ def _assert_fused(checks):
 
 
 def split_pool(pool, head_dim):
-    db, sb = (128, 4) if head_dim == 128 else (576, 8)
     if pool.dtype != torch.uint8 or pool.ndim != 3 or pool.stride(2) != 1:
         raise ValueError("compact CP requires production uint8 split-page pool")
+    if head_dim == 128 and pool.shape[-1] in (68, 132):
+        db, sb = pool.shape[-1] - 4, 4
+    elif head_dim == 512 and pool.shape[-1] == 584:
+        db, sb = 576, 8
+    else:
+        raise ValueError("unsupported compact CP split-page representation")
     blocks, entries = pool.shape[:2]
     stride, offset = pool.stride(0), pool.storage_offset()
     required = offset + (blocks - 1) * stride + entries * (db + sb)

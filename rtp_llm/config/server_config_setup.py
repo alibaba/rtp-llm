@@ -795,5 +795,14 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Validate after all defaults resolve, before spawning model processes.
     # Unset release profiles leave normal startup unchanged.
     from rtp_llm.config.release_profile import enforce_release_profile
+    from rtp_llm.models.dsv4_indexer_cache import validate_fp4_indexer_config
 
+    validate_fp4_indexer_config(
+        model_type=py_env_configs.model_args.model_type,
+        speculative_type=py_env_configs.sp_config.type,
+        generation_slots=py_env_configs.sp_config.gen_num_per_cycle,
+        reuse_cache=py_env_configs.kv_cache_config.reuse_cache,
+        tokens_per_block=py_env_configs.kv_cache_config.seq_size_per_block,
+        kernel_tokens_per_block=py_env_configs.kv_cache_config.kernel_seq_size_per_block,
+    )
     enforce_release_profile(py_env_configs)

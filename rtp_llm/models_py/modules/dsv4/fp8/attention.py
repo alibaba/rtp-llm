@@ -1423,7 +1423,9 @@ class AttentionFP8(nn.Module):
         coff_idx = 2  # Indexer's nested Compressor overlap=True
         # HCA uses coff=1 (overlap=False) so HCA_STATE vec_dim = 2*head_dim.
         kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
-        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        from rtp_llm.models.dsv4_indexer_cache import indexer_entry_bytes
+
+        indexer_kv_spec = (torch.uint8, indexer_entry_bytes())
         self._pool_spec: Dict[str, tuple] = {
             SWA_KV: kv_spec,
             CSA_KV: kv_spec,
@@ -6868,7 +6870,9 @@ class CommitOnlyAttentionFP8(AttentionFP8):
 
         idx_hd = int(index_head_dim)
         kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
-        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        from rtp_llm.models.dsv4_indexer_cache import indexer_entry_bytes
+
+        indexer_kv_spec = (torch.uint8, indexer_entry_bytes())
         self._pool_spec: Dict[str, tuple] = {
             SWA_KV: kv_spec,
             CSA_KV: kv_spec,

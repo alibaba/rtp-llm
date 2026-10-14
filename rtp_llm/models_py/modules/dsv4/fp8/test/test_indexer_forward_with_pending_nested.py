@@ -71,6 +71,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
     ind.compress_ratio = 4
     ind.freqs_cis = torch.zeros(1, dtype=torch.float32, device=device)
     ind._cp_ctx = None
+    ind._gather_cache = MagicMock(name="gather_cache")
     if bind_pool:
         ind._kv_pool_view = torch.zeros(1, 1, 132, dtype=torch.uint8, device=device)
         ind._kv_block_table = torch.ones(1, 1, dtype=torch.int32, device=device)
@@ -307,14 +308,11 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         def fake_copy(**kwargs):
             copy_calls.append(kwargs)
 
-        import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
-
         with (
             patch.object(
-                indexer_mod.rtp_llm_ops,
-                "cp_gather_indexer_k_quant_cache",
+                ind,
+                "_gather_cache",
                 side_effect=fake_cpp,
-                create=True,
             ),
             patch(
                 "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_indexer_cp_chunk_plan",
@@ -392,13 +390,17 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs):
+        def fake_compute_q(qr_in, freqs, *, apply_rope=True):
+            self.assertFalse(apply_rope)
             compute_q_calls.append((qr_in, freqs))
             return torch.zeros(
                 2, ind.n_heads, ind.head_dim, dtype=torch.bfloat16, device=self.device
             )
 
         ind._compute_indexer_q = fake_compute_q  # type: ignore[assignment]
+        ind._quantize_query_with_scales = MagicMock(
+            side_effect=lambda q, weights, freqs: (q, weights, None)
+        )
         # weights_proj is loaded by __init__; we bypassed __init__, so stub it.
         ind.weights_proj = torch.zeros(
             ind.n_heads, x.size(-1), dtype=torch.bfloat16, device=self.device
@@ -422,6 +424,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # T==0 branch returns the empty-topk shape.
         self.assertEqual(tuple(out.shape), (2, 0))
         self.assertEqual(out.dtype, torch.int32)
+        ind._quantize_query_with_scales.assert_called_once()
         # The supplied pending was drained exactly once — start_prefill must
         # not be re-called on the late path.
         ind.compressor.finish_prefill.assert_called_once_with(pending)

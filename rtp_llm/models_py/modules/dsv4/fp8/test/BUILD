@@ -237,6 +237,7 @@ py_test(
         name = name,
         srcs = [name + ".py"],
         data = [
+            "//rtp_llm:dsv4_kv_cache_source",
             "//rtp_llm/models_py:prefill_optimization_source_data",
             "//rtp_llm/models_py/modules/dsv4/test:cpu_test_support",
         ],

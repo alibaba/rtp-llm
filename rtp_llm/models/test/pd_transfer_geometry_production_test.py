@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 # Import order matters: rtp_llm.models.dsv4_kv_cache pulls rtp_llm.ops, which
 # imports torch first; torch's loader makes the bundled torch libs (incl.
@@ -159,6 +160,24 @@ class ProductionGeometryTest(unittest.TestCase):
         }
         for tag, layers in want.items():
             self.assertEqual(sorted(self.g128[tag]["layers"]), layers, tag)
+
+    def test_fp4_transfer_geometry_for_admitted_speculation(self):
+        with patch.dict(os.environ, {"DSV4_INDEXER_CACHE_MODE": "fp4"}):
+            descs = _build_descs()
+        for slots, ring_rows in ((0, 8), (3, 12)):
+            with self.subTest(generation_slots=slots):
+                geometry = dsv4_block_geometry(descs, 256, 256, slots)
+                self.assertEqual(geometry["indexer_kv"]["block_size_bytes"], 64 * 68)
+                self.assertEqual(geometry["indexer_kv"]["block_payload_bytes"], 64 * 68)
+                self.assertEqual(
+                    geometry["indexer_state"]["block_size_bytes"], ring_rows * 512 * 4
+                )
+                self.assertEqual(geometry["csa_kv"]["block_size_bytes"], 37440)
+                self.assertEqual(geometry["hca_kv"]["block_size_bytes"], 1728)
+                self.assertEqual(
+                    geometry["indexer_kv"]["layers"],
+                    geometry["indexer_state"]["layers"],
+                )
 
 
 def _expect_production_reject(seq_size: int, kernel: int) -> None:
