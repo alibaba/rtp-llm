@@ -196,20 +196,45 @@ def transpose_gate_up(ts: List[torch.Tensor]):
     return torch.cat([up, gate], dim=1)
 
 
+def _la_qkv_out_features(cfg) -> int:
+    """in_proj_qkv output width: q + k + v segments (split_qkvz widths)."""
+    return (
+        2 * cfg.linear_num_key_heads * cfg.linear_key_head_dim
+        + cfg.linear_num_value_heads * cfg.linear_value_head_dim
+    )
+
+
+def _la_z_out_features(cfg) -> int:
+    """in_proj_z output width: one v segment."""
+    return cfg.linear_num_value_heads * cfg.linear_value_head_dim
+
+
+def _la_b_out_features(cfg) -> int:
+    """in_proj_b output width: one beta per value head."""
+    return cfg.linear_num_value_heads
+
+
+def _la_a_out_features(cfg) -> int:
+    """in_proj_a output width: one decay per value-head dim element."""
+    return cfg.linear_num_value_heads * cfg.linear_value_head_dim
+
+
 def _fill_unprojected(ts, builder):
     """Zero-fill None entries from a partially-targeted fused-projection set.
 
     ``ts`` holds one adapter tensor per fused projection; an adapter that does
     not target a projection leaves None there. The delta for an untargeted
     projection is exactly zero, so rebuild each missing tensor with
-    ``builder(template, reference)`` using any targeted tensor as the shape
-    reference. All-None means the adapter targets none of this fused weight's
-    projections and must not merge at all (None passthrough upstream).
+    ``builder(reference, index)`` — the builder must use the MISSING
+    projection's own geometry (codex round-2 C2/B5: zero B borrowing another
+    projection's output width corrupts the fused layout). All-None means the
+    adapter targets none of this fused weight's projections and must not
+    merge at all (None passthrough upstream).
     """
     reference = next((t for t in ts if t is not None), None)
     if reference is None:
         return None
-    return [builder(reference) if t is None else t for t in ts]
+    return [builder(reference, i) if t is None else t for i, t in enumerate(ts)]
 
 
 def qkv_lora_a_func_wrap(ts):
@@ -218,11 +243,12 @@ def qkv_lora_a_func_wrap(ts):
     The merged qkv weight is concat([q.T, k.T, v.T], dim=1), so the rank
     axis concatenates on the column side of A.T.  An adapter targeting only
     a subset (e.g. q_proj+v_proj without k_proj) contributes zero deltas for
-    the untargeted projections; none targeted at all returns None.
+    the untargeted projections; none targeted at all returns None.  A blocks
+    share [r, hidden] across projections, so zero-A may borrow the shape.
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 3
     ts = _fill_unprojected(
-        ts, lambda ref: torch.zeros_like(ref)
+        ts, lambda ref, i: torch.zeros_like(ref)
     )
     if ts is None:
         return None
@@ -245,19 +271,27 @@ def _split_gated_q_lora_b(ts, head_num: int, head_dim: int, part: int):
     return t[:, part, :, :].reshape(-1, r)
 
 
-def qkv_lora_b_func_wrap(ts, head_num: int, head_dim: int):
+def qkv_lora_b_func_wrap(ts, head_num: int, head_dim: int, kv_head_num: int = 0):
     """peft per-projection q/k/v LoRA B tensors -> block-diagonal [3r, 3proj].
 
     A' @ B' then equals concat([qA.T@qB.T, kA.T@kB.T, vA.T@vB.T], dim=1),
     the transpose of the per-projection deltas, matching merge_qkv_hf. The
     gated q_proj B rows are split to the q half first (the gate half belongs
-    to attn_gate_w).  Untargeted projections get zero B rows; none targeted
-    at all returns None.
+    to attn_gate_w).  Untargeted projections get zero B rows with the
+    projection's OWN output width (q: head_num*head_dim, k/v:
+    kv_head_num*head_dim) — widths differ under GQA, so borrowing another
+    projection's width corrupts the fused layout (codex round-2 C2/B5).
+    None targeted at all returns None.
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 3
-    ts = _fill_unprojected(
-        ts, lambda ref: torch.zeros_like(ref)
-    )
+    kv_out = (kv_head_num or head_num) * head_dim
+    widths = [head_num * head_dim, kv_out, kv_out]
+    rank = next((t.shape[-1] for t in ts if t is not None), None)
+
+    def zero_b(ref, i):
+        return torch.zeros(widths[i], rank, dtype=ref.dtype)
+
+    ts = _fill_unprojected(ts, zero_b)
     if ts is None:
         return None
     q_b, k_b, v_b = ts
@@ -321,11 +355,13 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         return AtomicWeight(
             W.lm_head,
             [CkptWeightInfo("lm_head.weight", identity)],
-            # peft adapters (e.g. JEV) carry a trained lm_head delta; merging
-            # it into the weight means decision heads that select lm_head
-            # rows by label_token_ids automatically score the adapted rows
+            # peft adapters (e.g. JEV) carry a trained lm_head delta. The
+            # merge formula A.T@B.T lands in [hidden, vocab]; the base keeps
+            # the checkpoint layout [vocab, hidden], so transpose the merged
+            # delta back before the strict shape check (codex round-2 C1).
             lora_a_process_func=transpose,
             lora_b_process_func=transpose,
+            lora_merge_transpose=True,
         )
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:
@@ -381,6 +417,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                     qkv_lora_b_func_wrap,
                     head_num=self.model_config.attn_config.head_num,
                     head_dim=self.model_config.attn_config.size_per_head,
+                    kv_head_num=self.model_config.attn_config.kv_head_num,
                 ),
             ),
             AttnAtomicWeight(
@@ -755,10 +792,20 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
             LinearAttnConfig(self.model_config.linear_attention_config),
             # peft adapters (e.g. JEV) target in_proj_qkv/in_proj_z as two
             # per-projection LoRA pairs; raw projection list + the wrap math
-            # keeps each delta on its own columns of the merged weight
+            # keeps each delta on its own columns of the merged weight.  The
+            # zero-B fill needs each projection's own output width (qkv vs z
+            # differ; codex round-2 C2).
             lora_raw_projection_list=True,
             lora_a_process_func=qkvz_lora_a_func_wrap,
-            lora_b_process_func=qkvz_lora_b_func_wrap,
+            lora_b_process_func=functools.partial(
+                qkvz_lora_b_func_wrap,
+                qkv_out=_la_qkv_out_features(
+                    self.model_config.linear_attention_config
+                ),
+                z_out=_la_z_out_features(
+                    self.model_config.linear_attention_config
+                ),
+            ),
         )
 
     def _create_linear_attn_ba_weight(self) -> LinearAttnAtomicWeight:
@@ -780,10 +827,15 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                 linear_attention_config=self.model_config.linear_attention_config,
             ),
             LinearAttnConfig(self.model_config.linear_attention_config),
-            # peft adapters may target in_proj_b/in_proj_a independently
+            # peft adapters may target in_proj_b/in_proj_a independently;
+            # zero-B uses each projection's own output width (round-2 C2)
             lora_raw_projection_list=True,
             lora_a_process_func=ba_lora_a_func_wrap,
-            lora_b_process_func=ba_lora_b_func_wrap,
+            lora_b_process_func=functools.partial(
+                ba_lora_b_func_wrap,
+                b_out=_la_b_out_features(self.model_config.linear_attention_config),
+                a_out=_la_a_out_features(self.model_config.linear_attention_config),
+            ),
         )
 
 
@@ -904,6 +956,12 @@ class Qwen35DenseWeight(Qwen35MoeWeight):
                         self._lm_head_ckpt_name or "lm_head.weight", identity
                     )
                 ],
+                # peft lm_head delta merges into [vocab, hidden]; the merge
+                # formula lands transposed, so flip it back (codex round-2
+                # C1) — dense override must match the base factory wiring
+                lora_a_process_func=transpose,
+                lora_b_process_func=transpose,
+                lora_merge_transpose=True,
             )
         if not self.tie_word_embeddings and not self._has_decision_block():
             # Ordinary checkpoints keep the loud failure: substituting the

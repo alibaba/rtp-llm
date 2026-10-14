@@ -113,14 +113,19 @@ def w13_lora_a_func_wrap(
 
 
 def w13_lora_b_func_wrap(
-    ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
+    ts: torch.Tensor,
+    origin_w1: FfnAtomicWeight,
+    origin_w3: FfnAtomicWeight,
 ):
     assert origin_w1.lora_b_process_func and origin_w3.lora_b_process_func
     if isinstance(ts, (list, tuple)):
         # peft layout: per-projection LoRA B tensors; the merged w13 delta
         # must keep each rank block on its own projection's output columns,
         # i.e. block-diagonal rather than rank-concatenated.  An adapter
-        # targeting only one side leaves the other side's block zero.
+        # targeting only one side leaves the other side's block zero, sized
+        # by THAT side's output width (w1/w3 widths differ in general;
+        # borrowing the other side's width corrupts the fused layout —
+        # codex round-2 C2).
         w1_size = len(origin_w1.weights)
         w3_size = len(origin_w3.weights)
         assert len(ts) == w1_size + w3_size
@@ -128,10 +133,11 @@ def w13_lora_b_func_wrap(
         w3 = _side_or_none(origin_w3.lora_b_process_func, ts[w1_size:])
         if w1 is None and w3 is None:
             return None
+        rank = (w1 if w1 is not None else w3).shape[0]
         if w1 is None:
-            w1 = torch.zeros_like(w3)
+            w1 = torch.zeros(rank, w3.shape[1], dtype=w3.dtype)
         if w3 is None:
-            w3 = torch.zeros_like(w1)
+            w3 = torch.zeros(rank, w1.shape[1], dtype=w1.dtype)
         return torch.block_diag(w1, w3).contiguous()
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_b_process_func(w1)

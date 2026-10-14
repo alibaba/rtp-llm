@@ -16,6 +16,15 @@ from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 
 
+class CorruptLoraTensorError(RuntimeError):
+    """An adapter tensor the checkpoint names exists but fails to load.
+
+    Distinct from an untargeted projection (no delta, legal) so the merge
+    layer can hard-fail on corruption instead of silently serving base
+    weights (codex round-2 B5 path two).
+    """
+
+
 class WeightModule(ABC):
     _registry = weakref.WeakValueDictionary()
     _cache = weakref.WeakKeyDictionary()
@@ -43,6 +52,12 @@ class WeightModule(ABC):
         # tensor (e.g. split_q_gate) set this to receive the untouched
         # per-projection tensor list in lora_a/b_process_func.
         self.lora_raw_projection_list = kwargs.pop("lora_raw_projection_list", False)
+        # The merge formula is A_proc @ B_proc, which lands in the
+        # transposed layout for weights whose base process keeps the
+        # checkpoint layout (e.g. lm_head [vocab, hidden] with transposed
+        # A/B). Set this flag to transpose the merged delta back to the
+        # base orientation before the shape check (codex round-2 C1).
+        self.lora_merge_transpose = kwargs.pop("lora_merge_transpose", False)
         self.lora_a: Optional["WeightModule"] = None
         self.lora_b: Optional["WeightModule"] = None
         self.is_lora = kwargs.pop("is_lora", False)
@@ -238,6 +253,8 @@ class WeightModule(ABC):
                 lora_name,
                 load_config.compute_dtype,
             )
+        except CorruptLoraTensorError:
+            raise
         except Exception as e:
             logging.warning(
                 f"load layer: {layer_id} lora tensor {self.lora_a} or {self.lora_b} failed: traceback: {traceback.format_exc()}"
@@ -439,6 +456,7 @@ class AtomicWeight(WeightModule):
     ):
         if self.lora_a_process_func is None or self.lora_b_process_func is None:
             return {}
+        self._validate_lora_pair_completeness(database, layer_id, lora_name)
         a_res = self._load_lora_a(
             database, layer_id, device, load_config, lora_name, data_type
         )
@@ -447,6 +465,36 @@ class AtomicWeight(WeightModule):
         )
         a_res.update(b_res)
         return a_res
+
+    def _validate_lora_pair_completeness(
+        self,
+        database: BaseDatabase,
+        layer_id: Optional[int],
+        lora_name: str,
+    ) -> None:
+        """A projection targeted on one side but not the other is corruption.
+
+        An adapter may target a subset of projections, but every targeted
+        projection must carry BOTH its A and B tensor. "gate B present, gate
+        A missing" used to fall through the untargeted zero-fill and serve
+        a silently half-applied adapter (codex round-2 B5 path three).
+        """
+        available = set(database.get_lora_tensor_names(lora_name))
+        for ckpt_weight in self.weights:
+            a_name = self._resolve_lora_tensor_name(
+                database, layer_id, ckpt_weight.name, self.lora_A_suffix, lora_name
+            )
+            b_name = self._resolve_lora_tensor_name(
+                database, layer_id, ckpt_weight.name, self.lora_B_suffix, lora_name
+            )
+            a_present = a_name in available
+            b_present = b_name in available
+            if a_present != b_present:
+                raise CorruptLoraTensorError(
+                    f"adapter {lora_name} has an incomplete lora pair for "
+                    f"{ckpt_weight.name}: A({a_name}) present={a_present}, "
+                    f"B({b_name}) present={b_present}"
+                )
 
     def _split_lora(
         self, tensor: Dict[str, torch.Tensor], load_config: LoadConfig
@@ -593,7 +641,7 @@ class AtomicWeight(WeightModule):
             return None
         tensors = list(database.load_lora_tensor(lora_name, tensor_name, data_type))
         if not tensors:
-            raise RuntimeError(
+            raise CorruptLoraTensorError(
                 f"lora tensor {tensor_name} is listed in adapter {lora_name} "
                 f"but failed to load"
             )
@@ -629,6 +677,11 @@ class AtomicWeight(WeightModule):
             )
             lora_a_tensor = raw_loras[self.lora_a_name]
             lora_b_tensor = raw_loras[self.lora_b_name]
+        except CorruptLoraTensorError:
+            # A targeted adapter tensor that fails to load (or a projection
+            # with only one of its A/B pair) is corruption: serving base
+            # weights would silently drop trained deltas (round-2 B5).
+            raise
         except Exception as e:
             logging.warning(
                 f"load layer: {layer_id} lora tensor {self.lora_a} or {self.lora_b} failed: traceback: {traceback.format_exc()}"
@@ -676,14 +729,18 @@ class AtomicWeight(WeightModule):
             )
 
         shape = raw_tensor.shape
-        if merge_tensor.nelement() != raw_tensor.nelement():
+        if self.lora_merge_transpose and merge_tensor.dim() == 2:
+            merge_tensor = merge_tensor.t().contiguous()
+        # Strict shape equality: an element-count match with a different
+        # layout means the delta is silently spread over wrong rows/columns
+        # (round-2 C1 caught exactly that with nelement-only checks).
+        if tuple(merge_tensor.shape) != tuple(shape):
             raise RuntimeError(
                 f"lora merge shape mismatch for weight {self.name}: "
-                f"raw {list(raw_tensor.shape)} ({raw_tensor.nelement()}) vs "
-                f"merge {list(merge_tensor.shape)} ({merge_tensor.nelement()})"
+                f"raw {list(raw_tensor.shape)} vs merge {list(merge_tensor.shape)}"
             )
         raw_tensor = raw_tensor.reshape(raw_tensor.nelement()) + merge_tensor.reshape(
-            raw_tensor.nelement()
+            merge_tensor.nelement()
         )
         raw_tensor = raw_tensor.reshape(shape)
 

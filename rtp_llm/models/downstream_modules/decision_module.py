@@ -66,7 +66,7 @@ from rtp_llm.models.downstream_modules.decider_decision import (
 from rtp_llm.models.downstream_modules.embedding.api_datatype import ContentPart, ContentPartTypeEnum
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.model_weight import CkptWeightInfo
+from rtp_llm.utils.model_weight import CkptWeightInfo, transpose
 from rtp_llm.utils.tensor_utils import (
     get_first_token_from_combo_tokens,
     get_last_token_from_combo_tokens,
@@ -314,6 +314,22 @@ class DecisionHandler(CustomHandler):
             raise ValueError(f"unknown decision head_type: {self.head_type!r}")
 
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
+        # peft adapters (e.g. JEV) train an lm_head delta; the row-select
+        # consumer reads lm_head rows, so the adapter delta must merge into
+        # this custom weight too (codex round-2 B4 path two). The merge
+        # formula lands transposed vs the [vocab, hidden] base, hence the
+        # transpose flag.
+        lora_kwargs = {}
+        if (
+            self.head_type == HEAD_TYPE_LINEAR
+            and self.label_token_ids is not None
+            and self.weight_key == "lm_head.weight"
+        ):
+            lora_kwargs = dict(
+                lora_a_process_func=transpose,
+                lora_b_process_func=transpose,
+                lora_merge_transpose=True,
+            )
         if self.head_type == HEAD_TYPE_LINEAR:
             if self.label_token_ids is not None:
                 # the verbalizer head reads backbone lm_head rows (reranker
@@ -332,7 +348,9 @@ class DecisionHandler(CustomHandler):
             keys += [self.query_bias_key] if self.query_bias_key else []
             keys += [self.key_bias_key] if self.key_bias_key else []
         return [
-            CustomAtomicWeight(CustomAtomicWeight.prefix + k, [CkptWeightInfo(k)])
+            CustomAtomicWeight(
+                CustomAtomicWeight.prefix + k, [CkptWeightInfo(k)], **lora_kwargs
+            )
             for k in keys
         ]
 
@@ -628,12 +646,23 @@ class DecisionRenderer(CustomRenderer):
 
     def create_input(self, request: DecisionRequest) -> EngineInputs:
         # Duplicate question ids would merge response entries (and collapse
-        # packed-format per-question records) before any GPU work; reject
-        # them once at the shared entry (codex round1 B10).
+        # packed-format per-question records); duplicate response labels
+        # would silently drop probability mass in the response dict
+        # ({"same":0.5} instead of two distinct options). Both are rejected
+        # here, before any format dispatch or GPU work (codex round-2 B10:
+        # the round-1 check lived in a helper that several formats bypass).
         ids = [q.id for q in request.questions]
         if len(set(ids)) != len(ids):
             dupes = sorted({i for i in ids if ids.count(i) > 1})
             raise ValueError(f"duplicate question ids in request: {dupes}")
+        for q in request.questions:
+            labels = self._response_labels(q)
+            if len(set(labels)) != len(labels):
+                dupes = sorted({l for l in labels if labels.count(l) > 1})
+                raise ValueError(
+                    f"question '{q.id}' has duplicate response labels {dupes}; "
+                    "each option becomes a response key and must be unique"
+                )
         if self.prompt_format == PROMPT_FORMAT_CLEF:
             return self._create_clef_input(request)
         if self.prompt_format == PROMPT_FORMAT_DECIDER:
@@ -751,7 +780,13 @@ class DecisionRenderer(CustomRenderer):
         encoded = encode_clef_record(
             self.tokenizer_,
             record,
-            max_length=int(self.settings.get("max_length", 16384)),
+            # effective budget is the tighter of the clef settings and the
+            # engine cap: encoding to settings.max_length only to be rejected
+            # by max_seq_len later wastes the request (codex round-2 B9)
+            max_length=min(
+                int(self.settings.get("max_length", 16384)),
+                int(self.config_.max_seq_len),
+            ),
             sentinel_token_id=int(self.settings.get("sentinel_token_id", 248055)),
             table_digit_token_ids=self.table_digit_token_ids,
             escape=bool(self.settings.get("escape_special_tokens", True)),

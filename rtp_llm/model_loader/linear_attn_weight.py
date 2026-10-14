@@ -21,7 +21,8 @@ def qkvz_lora_a_func_wrap(ts):
 
     The merged qkvz weight concatenates the two projections' columns, so the
     per-projection A deltas rank-concatenate on the column axis of A.T.
-    An adapter targeting only one projection zero-fills the other.
+    An adapter targeting only one projection zero-fills the other (A blocks
+    share [r, hidden], so shape borrowing is safe).
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 2
     reference = next((t for t in ts if t is not None), None)
@@ -31,17 +32,25 @@ def qkvz_lora_a_func_wrap(ts):
     return torch.concat([t.t() for t in ts], dim=1).contiguous()
 
 
-def qkvz_lora_b_func_wrap(ts):
+def qkvz_lora_b_func_wrap(ts, qkv_out: int, z_out: int):
     """peft per-projection in_proj_qkv/in_proj_z LoRA B -> block-diagonal.
 
     Each projection's delta must stay on its own columns of the merged
-    weight, so B is block-diagonal rather than rank-concatenated.
+    weight, so B is block-diagonal rather than rank-concatenated.  An
+    untargeted projection's zero B uses ITS OWN output width (qkv/z widths
+    differ: e.g. JEV 10,240 vs 6,144), never the sibling's (codex round-2
+    C2).
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 2
     reference = next((t for t in ts if t is not None), None)
     if reference is None:
         return None
-    ts = [torch.zeros_like(reference) if t is None else t for t in ts]
+    widths = [qkv_out, z_out]
+    rank = reference.shape[-1]
+    ts = [
+        torch.zeros(widths[i], rank, dtype=reference.dtype) if t is None else t
+        for i, t in enumerate(ts)
+    ]
     return torch.block_diag(ts[0].t(), ts[1].t()).contiguous()
 
 
@@ -50,9 +59,9 @@ def ba_lora_a_func_wrap(ts):
     return qkvz_lora_a_func_wrap(ts)
 
 
-def ba_lora_b_func_wrap(ts):
+def ba_lora_b_func_wrap(ts, b_out: int, a_out: int):
     """peft per-projection in_proj_b/in_proj_a LoRA B -> block-diagonal."""
-    return qkvz_lora_b_func_wrap(ts)
+    return qkvz_lora_b_func_wrap(ts, b_out, a_out)
 
 
 # qkvz layout: [hidden_size, head_k, xx] -> [hidden, local_head_k, xx]
