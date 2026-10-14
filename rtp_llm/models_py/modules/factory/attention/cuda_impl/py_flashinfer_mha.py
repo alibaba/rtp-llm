@@ -232,7 +232,49 @@ def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     return attn_configs.dtype
 
 
-class PyFlashinferPrefillPagedAttnOp(object):
+class _LayerSinksMixin(object):
+    """Per-layer attention sinks for backends without native sink support.
+
+    gpt-oss (and dsv4-family) models carry per-head attention sinks that
+    enter the softmax as a denominator-only column. Backends that cannot
+    pass them into the kernel return the plain output plus the LSE, and
+    the closed-form correction applies post-hoc:
+    ``y' = y * sigmoid(lse - sink_h)`` (proven in gpt_oss_math_test).
+
+    ``window_left`` is NOT enforced on this path: these backends run
+    causal attention only, so long-sequence sliding layers need the
+    trtllm-gen path (SM10x). Registering extras here only activates the
+    sink correction.
+    """
+
+    _layer_sinks: dict
+
+    def _init_layer_sinks(self) -> None:
+        self._layer_sinks = {}
+
+    def register_layer_sinks(self, layer_sinks: dict) -> None:
+        """Store {layer_idx: [local_head_num] fp32 sinks} (replaces)."""
+        self._layer_sinks = {
+            int(k): v for k, v in (layer_sinks or {}).items() if v is not None
+        }
+
+    def _sinks_for(self, layer_idx: int):
+        if layer_idx is None or layer_idx < 0 or not getattr(self, "_layer_sinks", None):
+            return None
+        return self._layer_sinks.get(int(layer_idx))
+
+    def _apply_layer_sinks(self, out: torch.Tensor, lse: torch.Tensor, sinks):
+        """y' = y * sigmoid(lse - sink_h); out [rows, heads, dim], lse [rows, heads]."""
+        if sinks is None or lse is None:
+            return out
+        heads = out.shape[1] if out.dim() == 3 else out.shape[-1] // 1
+        out3 = out.view(out.shape[0], out.shape[1], -1) if out.dim() != 3 else out
+        scale = torch.sigmoid(lse.float() - sinks[: out3.shape[1]].to(lse.dtype)[None, :])
+        corrected = out3.float() * scale[..., None]
+        return corrected.to(out.dtype).view(out.shape)
+
+
+class PyFlashinferPrefillPagedAttnOp(_LayerSinksMixin):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
     def __init__(
@@ -508,7 +550,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
         return True
 
     def forward(
-        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache]
+        self,
+        q: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         """
         Forward pass with paged KV cache
@@ -607,7 +652,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 q_aligned = self._aligned_q_cast_buf
 
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
+            sinks = self._sinks_for(layer_idx)
+            if sinks is not None:
+                result, lse = self.prefill_wrapper.run(
+                    q_aligned, paged_kv_cache, return_lse=True
+                )
+                result = self._apply_layer_sinks(result, lse, sinks)
+            else:
+                result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
 
             # Reshape result to 2D for copy back (ensure contiguous)
             result_2d = result.view(total_len, hidden_size).contiguous()
@@ -630,14 +682,23 @@ class PyFlashinferPrefillPagedAttnOp(object):
         else:
             # No CUDA graph copy, direct execution
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(
-                quantize_to_fp8_if_needed(q, self.q_dtype), paged_kv_cache
-            )
+            sinks = self._sinks_for(layer_idx)
+            if sinks is not None:
+                result, lse = self.prefill_wrapper.run(
+                    quantize_to_fp8_if_needed(q, self.q_dtype),
+                    paged_kv_cache,
+                    return_lse=True,
+                )
+                result = self._apply_layer_sinks(result, lse, sinks)
+            else:
+                result = self.prefill_wrapper.run(
+                    quantize_to_fp8_if_needed(q, self.q_dtype), paged_kv_cache
+                )
 
         return result
 
 
-class PyFlashinferPrefillAttnOp(object):
+class PyFlashinferPrefillAttnOp(_LayerSinksMixin):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -721,10 +782,15 @@ class PyFlashinferPrefillAttnOp(object):
         k: torch.Tensor,
         v: torch.Tensor,
         kv_cache: Optional[LayerKVCache] = None,
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         q = quantize_to_fp8_if_needed(q, self.q_dtype)
         k = quantize_to_fp8_if_needed(k, self.kv_dtype)
         v = quantize_to_fp8_if_needed(v, self.kv_dtype)
+        sinks = self._sinks_for(layer_idx)
+        if sinks is not None:
+            out, lse = self.prefill_wrapper.run(q, k, v, return_lse=True)
+            return self._apply_layer_sinks(out, lse, sinks)
         if q.dtype == torch.float8_e4m3fn:
             # FlashInfer's FA3 FP8 need scale_q, scale_k, scale_v and an output matching the planned dtype.
             out = torch.empty(
@@ -742,7 +808,7 @@ class PyFlashinferPrefillAttnOp(object):
         return self.prefill_wrapper.run(q, k, v)
 
 
-class PyFlashinferHybridPrefillAttnOp(object):
+class PyFlashinferHybridPrefillAttnOp(_LayerSinksMixin):
     """FlashInfer hybrid prefill op.
 
     It evaluates attention over the newest ragged KV segment and the existing
@@ -876,6 +942,7 @@ class PyFlashinferHybridPrefillAttnOp(object):
         v: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         kv_cache_write_op: Optional[KVCacheWriteOp] = None,
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for hybrid prefill"
         paged_kv_cache = kv_cache.kv_cache_base
@@ -913,6 +980,11 @@ class PyFlashinferHybridPrefillAttnOp(object):
             q, paged_kv_cache, return_lse=True
         )
         merge_state_in_place(new_out, new_lse, prefix_out, prefix_lse)
+        sinks = self._sinks_for(layer_idx)
+        if sinks is not None:
+            # new_lse is the merged LSE in place — the sink correction then
+            # applies once over the merged output.
+            return self._apply_layer_sinks(new_out, new_lse, sinks)
         return new_out
 
 
@@ -947,6 +1019,22 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.create_params(attn_inputs)
         self.fmha_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: dict,
+        layer_window_left: dict,
+    ) -> None:
+        """Per-layer attention sinks via LSE post-correction (no native support).
+
+        window_left is accepted but not enforced on this backend: it runs
+        causal attention only, so sliding layers need the SM10x trtllm-gen
+        path for window masking.
+        """
+        register = getattr(self.fmha_impl, "register_layer_sinks", None)
+        if register is not None:
+            register(layer_sinks)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
@@ -1037,7 +1125,7 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         )
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(*fmha_inputs, kv_cache)
+        return self.fmha_impl.forward(*fmha_inputs, kv_cache, layer_idx=layer_idx)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
@@ -1138,6 +1226,7 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
             value,
             kv_cache,
             kv_cache_write_op,
+            layer_idx=layer_idx,
         )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
@@ -1210,7 +1299,7 @@ def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bo
     return attn_configs.head_num // attn_configs.kv_head_num >= 4
 
 
-class PyFlashinferDecodeAttnOp(object):
+class PyFlashinferDecodeAttnOp(_LayerSinksMixin):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1447,7 +1536,11 @@ class PyFlashinferDecodeAttnOp(object):
         return True
 
     def forward(
-        self, q: torch.Tensor, kv_cache: Optional[LayerKVCache], params: ParamsBase
+        self,
+        q: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        params: ParamsBase,
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required"
         q = quantize_to_fp8_if_needed(
@@ -1463,6 +1556,10 @@ class PyFlashinferDecodeAttnOp(object):
                 self.head_dim_qk,
             )
         # Decode FP8 defaults to unit scales and the output dtype from plan().
+        sinks = self._sinks_for(layer_idx)
+        if sinks is not None:
+            out, lse = self.decode_wrapper.run(q, paged_kv_cache, return_lse=True)
+            return self._apply_layer_sinks(out, lse, sinks)
         return self.decode_wrapper.run(q, paged_kv_cache)
 
 
@@ -1487,6 +1584,22 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: dict,
+        layer_window_left: dict,
+    ) -> None:
+        """Per-layer attention sinks via LSE post-correction (no native support).
+
+        window_left is accepted but not enforced on this backend: it runs
+        causal attention only, so sliding layers need the SM10x trtllm-gen
+        path for window masking.
+        """
+        register = getattr(self.fmha_impl, "register_layer_sinks", None)
+        if register is not None:
+            register(layer_sinks)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
@@ -1536,4 +1649,6 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         )
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+        return self.fmha_impl.forward(
+            qkv, kv_cache, self.fmha_params, layer_idx=layer_idx
+        )
