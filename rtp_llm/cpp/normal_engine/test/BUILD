@@ -8,6 +8,15 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_test(
+    name = "device_input_mode_test",
+    srcs = ["DeviceInputModeTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/normal_engine:device_input_mode",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -128,11 +137,13 @@ cc_test(
             "@//:using_rocm": {
                 "TEST_USING_DEVICE": "ROCM",
                 "RTP_LLM_STREAM_ASYNC": stream_async,
+                "RTP_LLM_DEVICE_INPUT": "0",
             },
             "//conditions:default": {
                 "TEST_USING_DEVICE": "CUDA",
                 "LD_PRELOAD": "libtorch_cpu.so",
                 "RTP_LLM_STREAM_ASYNC": stream_async,
+                "RTP_LLM_DEVICE_INPUT": "0",
             },
         }),
         exec_properties = {"gpu": "L20_CU13"},

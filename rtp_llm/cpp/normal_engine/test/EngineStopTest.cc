@@ -61,6 +61,7 @@ void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
     auto* executor                        = dynamic_cast<NormalExecutor*>(engine->executor_.get());
     ASSERT_NE(executor, nullptr);
     EXPECT_EQ(executor->useStreamAsync(), stream_async);
+    EXPECT_EQ(executor->useDeviceInput(), stream_async);
     EXPECT_EQ(executor->batch_stream_processor_->output_dispatcher_->thread_pool_ != nullptr, GetParam() > 0);
 
     auto query                             = std::make_shared<GenerateInput>();
@@ -82,6 +83,14 @@ void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
     EXPECT_EQ(started.wait_for(std::chrono::seconds(30)), std::future_status::ready);
     EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), stream_async && max_new_tokens > 0);
     EXPECT_FALSE(stream->decode_completed.load());
+    if (stream_async && max_new_tokens > 0) {
+        // Output delivery is still pending. The device snapshot must describe
+        // this decode step and its next scheduler reservation.
+        const auto state = stream->getNormalAsyncDeviceState();
+        EXPECT_EQ(state.last_real_seq_len, 3);
+        EXPECT_EQ(state.next_real_seq_len, 4);
+        EXPECT_TRUE(state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda());
+    }
     std::promise<void> stop_started;
     auto               stopping = stop_started.get_future();
     auto               stopped  = std::async(std::launch::async, [&]() {

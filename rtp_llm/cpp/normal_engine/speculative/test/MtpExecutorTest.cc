@@ -708,7 +708,16 @@ public:
         auto sp_output_buffer = stream->getSPOutputBuffer();
         auto tokens           = sp_output_buffer->tokens;
         auto tokens_h         = tokens.cpu().clone();
-        EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        if (sp_output_buffer->propose_tokens_gpu.defined()) {
+            // Device-input mode carries the new proposal only in the GPU
+            // mirror; the legacy CPU proposal slot intentionally stays stale.
+            ASSERT_FALSE(expect_propose_tokens.empty());
+            EXPECT_EQ(expect_propose_tokens.front(), tokens_h.reshape({-1})[0].item<int32_t>());
+            EXPECT_EQ(vector<int>(expect_propose_tokens.begin() + 1, expect_propose_tokens.end()),
+                      toVec<int>(sp_output_buffer->propose_tokens_gpu));
+        } else {
+            EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        }
 
         auto all_probs   = sp_output_buffer->all_probs;
         auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
@@ -2023,6 +2032,16 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
+    if (components.executor->useStreamAsync()) {
+        EXPECT_TRUE(components.executor->useDeviceInput());
+        // Async MTP keeps the full verify width for device inputs; only the
+        // accepted prefix is committed to the stream after the worker joins.
+        next_draft_input.combo_tokens       = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states = next_draft_output.all_hidden_states.to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
     components.fake_draft_model->expectTargetVerify(false);
@@ -2062,6 +2081,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -2110,6 +2134,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto status = with_prefill_only ? components.executor->process({prefill_only_stream, stream1}) :
                                       components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    stream1->waitPendingAsyncBookkeeping();
+    if (components.executor->useStreamAsync()) {
+        const auto state = stream1->getMtpAsyncDeviceState();
+        EXPECT_GT(state.epoch, 0u);
+        EXPECT_EQ(state.next_seq_len_upper_bound, 8);
+        ASSERT_TRUE(state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda());
+        EXPECT_EQ(state.next_seq_len_gpu.cpu().item<int32_t>(), 6);
+        EXPECT_EQ(stream1->seqLength(), 6);
+    }
     if (with_prefill_only) {
         EXPECT_TRUE(prefill_only_stream->hasEvent(StreamEvents::GenerateDone));
         auto prefill_output = prefill_only_stream->nextOutput();
