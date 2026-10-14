@@ -463,7 +463,7 @@ def fix_fmha_gen_jit_cache() -> None:
             return
     except ImportError:
         pass
-    # last resort: any flashinfer_cubin copy on the system
+    # next: any flashinfer_cubin copy on the system
     import importlib.util
 
     spec = importlib.util.find_spec("flashinfer_cubin")
@@ -474,3 +474,17 @@ def fix_fmha_gen_jit_cache() -> None:
             shutil.copy2(candidate, header)
             logging.info(f"staged flashInferMetaInfo.h from {candidate}")
             return
+    # last resort: the vendored copy shipped with this repo (deterministic
+    # source - some remote workers extract the flashinfer_cubin pip package
+    # only partially, and neither the python package nor the system search
+    # carries the header; CI runs 79780452/79781607 hit exactly that)
+    vendored = Path(__file__).parent / "flashinfer_headers" / "flashInferMetaInfo.h"
+    if vendored.exists():
+        header.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(vendored, header)
+        logging.info(f"staged flashInferMetaInfo.h from vendored copy {vendored}")
+        return
+    logging.warning(
+        "flashInferMetaInfo.h not stageable from any source "
+        "(cubin package, python package, system, vendored copy)"
+    )
