@@ -373,6 +373,7 @@ class MegaCSAAdapter:
             num_heads=attn.n_heads,
             topk=attn.window_size,
             extra_attn_type=CSA_KV,
+            extra_index_width=topk,
         )
 
         score_capacity = int(pools.indexer_block_table.shape[1]) * pools.indexer_entries

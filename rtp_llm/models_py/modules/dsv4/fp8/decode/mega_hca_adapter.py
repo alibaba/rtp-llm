@@ -290,6 +290,7 @@ class MegaHCAAdapter:
             num_heads=attn.n_heads,
             topk=window,
             extra_attn_type=HCA_KV,
+            extra_index_width=int(cmp_local_raw.shape[-1]),
         )
 
         tf32_hc_prenorm_gemm(
