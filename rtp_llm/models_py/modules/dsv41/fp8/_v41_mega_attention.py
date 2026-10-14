@@ -137,6 +137,7 @@ class MegaAttention(torch.nn.Module):
         self.softmax_scale = softmax_scale
         self.heads = heads
         self.groups = groups
+        self.merged_qb = None
 
     @torch.no_grad()
     def reload_weights(self, attn):
@@ -168,6 +169,8 @@ class MegaAttention(torch.nn.Module):
                     "mega attention weight geometry changed during reload"
                 )
             target.copy_(source)
+        if self.merged_qb is not None:
+            self.merged_qb.reload(self, attn.index_wq)
 
     @property
     def padded_heads(self):
@@ -467,7 +470,11 @@ def warmup(attn, *, rows, decode, swa_entries=32, global_entries=128):
     device = state.query_weight.device
     qr = torch.zeros(rows, attn.wq_b.K, dtype=torch.bfloat16, device=device)
     positions = torch.zeros(rows, dtype=torch.int32, device=device)
-    q = state.project_q(attn.wq_b, qr)
+    if decode and state.merged_qb is not None:
+        q, _ = state.merged_qb.forward_quantized(*attn.wq_b._quantize_input(qr))
+        q = q.unflatten(-1, (state.heads, _HEAD_DIM))
+    else:
+        q = state.project_q(attn.wq_b, qr)
     width = attn.window_size + (attn.index_topk if attn.compress_ratio else 0)
     if not decode:
         kv = torch.zeros(128, 1, 512, dtype=torch.bfloat16, device=device)

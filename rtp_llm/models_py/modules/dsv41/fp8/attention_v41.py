@@ -646,6 +646,7 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         w = kwargs["layer_weights"]
+        self._qb_weight_owner = w if self.is_index_source else None
         if self.is_kv_source:
             self.global_wkv = w[W.v4_compressor_wkv]
             self.global_norm = w[W.v4_compressor_norm]
@@ -683,7 +684,21 @@ class AttentionV41FP8(AttentionFP8):
         super().init_rope_cache(device=device)
         from ._v41_mega_attention import prepare
 
-        self._mega_attention = prepare(self, shared=self._shared_attention)
+        if self._mega_attention is not None:
+            # Reinitialization must refresh the buffers captured by existing
+            # graphs, including the shared Main/Indexer Q-B weight slices.
+            self._mega_attention.reload_weights(self)
+        else:
+            self._mega_attention = prepare(self, shared=self._shared_attention)
+            if self._mega_attention is not None:
+                from ._v41_merged_qb import MergedQB
+
+                merged = MergedQB.create(
+                    self, self._mega_attention, self._qb_weight_owner
+                )
+                self._mega_attention.merged_qb = merged
+                if merged is not None:
+                    self._qb_weight_owner = None
 
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
@@ -2687,7 +2702,7 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
-    def _select_indices_decode(self, x, qr, positions, qr_quantized=None):
+    def _select_indices_decode(self, x, qr, positions, qr_quantized=None, index_q=None):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
         if not self.is_index_source:
@@ -2705,11 +2720,14 @@ class AttentionV41FP8(AttentionFP8):
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-        q = (
-            self.index_wq.forward_quantized(*qr_quantized)
-            if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
-            else self._lin(self.index_wq, qr.reshape(T, -1))
-        ).view(T, self.index_n_heads, self.index_head_dim)
+        if index_q is None:
+            index_q = (
+                self.index_wq.forward_quantized(*qr_quantized)
+                if qr_quantized is not None
+                and isinstance(self.index_wq, V41MXFP8Linear)
+                else self._lin(self.index_wq, qr.reshape(T, -1))
+            )
+        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
         config = self.v41_config
@@ -2984,7 +3002,7 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])

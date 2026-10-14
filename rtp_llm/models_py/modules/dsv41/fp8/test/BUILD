@@ -29,6 +29,7 @@ _TESTS = [
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
     "test_v41_mega_attention",
+    "test_v41_merged_qb",
     "test_v41_mega_wiring",
     "test_v41_joint_pool",
     "test_v41_norm_quant",
