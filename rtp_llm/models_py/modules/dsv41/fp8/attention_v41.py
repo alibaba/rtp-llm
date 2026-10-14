@@ -473,7 +473,7 @@ def select_candidate_blocks(logits, visible, block_size, topk_blocks):
     padded = F.pad(
         logits, (0, nblocks * block_size - logits.shape[1]), value=-torch.inf
     )
-    scores = padded.view(logits.shape[0], nblocks, block_size).amax(-1)
+    scores = padded.view(logits.shape[0], nblocks, block_size).amax(-1).float()
     newest = ((visible - 1).clamp_min(0) // block_size).long()
     scores.scatter_(
         1, newest[:, None], torch.where(visible > 0, torch.inf, -torch.inf)[:, None]
@@ -2720,6 +2720,7 @@ class AttentionV41FP8(AttentionFP8):
                 rope_head_dim=self.rope_head_dim,
                 logical_entries_per_block=keys.logical_entries_per_block,
                 positions=positions.reshape(T),
+                preserve_score_dtype=True,
             )
         else:
             weights = (
