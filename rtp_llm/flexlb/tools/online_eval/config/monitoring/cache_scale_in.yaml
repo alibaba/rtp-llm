@@ -288,6 +288,12 @@ sources:
       exported_metrics:
       - rtp_llm_rpc_worker_status_total_rt_us
 produced:
+  derived/baseline_hit_ratio:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: gauge
+    labels: []
   derived/survivor_hit_ratio:
     producer: cache_windows
     source_type: prometheus

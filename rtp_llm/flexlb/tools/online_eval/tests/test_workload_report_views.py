@@ -30,7 +30,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in.yaml")
         self.assertEqual(
-            presentation.charts.panels[0].curve_ids[1], "mock/cache_hit_ratio"
+            presentation.charts.panels[0].curve_ids[2], "mock/cache_hit_ratio"
         )
         broken = presentation.to_dict()
         broken["charts"]["panels"] = [panel.to_dict() for panel in presentation.charts.panels]
@@ -88,7 +88,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             path = paths["master_ha_failover.yaml"]
             spec = json.loads((path.parent / "report-spec.json").read_text())
             panels = {panel["id"]: panel for panel in spec["panels"]}
-            self.assertEqual({"request_qps", "inflight", "prefill_balance"}, set(panels))
+            self.assertEqual({"request_qps", "inflight", "prefill_balance", "gate-success", "gate-balance", "gate-route"}, set(panels))
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][2]["points"]])
             self.assertEqual([1, 0], [point["y"] for point in panels["request_qps"]["series"][3]["points"]])
             self.assertEqual([3, None], [point["y"] for point in panels["inflight"]["series"][0]["points"]])
@@ -101,7 +101,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
             self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
-                                and panel["events"] for panel in panels.values()))
+                                and panel["events"] for name, panel in panels.items() if not name.startswith('gate-')))
+            self.assertTrue(all(panels[name]['axes']['share_pct']['max'] == 100
+                                and panels[name]['events'] for name in ('gate-success', 'gate-balance', 'gate-route')))
             self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
             self.assertEqual(11.1, spec["timeOriginEpochS"])

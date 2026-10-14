@@ -178,6 +178,9 @@ def render(spec):
                 "unit": p.get("unit", "") or "",
                 "series": [
                     {
+                        "curve_id": s.get("curve_id"),
+                        "source_type": s.get("source_type"),
+                        "role": s.get("role"),
                         "metric_id": s.get("metric_id"),
                         "statistics_samples": _statistics_samples(s.get("statistics_points")),
                         "provenance": s.get("provenance"),

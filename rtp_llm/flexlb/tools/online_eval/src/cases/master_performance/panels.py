@@ -2,8 +2,7 @@
 
 
 from monitoring.metric_store import MetricStore
-from reporting.curves import materialize, project_panels, apply_panel_presets
-from reporting.catalog import PALETTE
+from reporting.curves import materialize, project_panels
 
 
 def prepare_curves(directory, evidence, presentation):
@@ -57,31 +56,7 @@ def prepare_curves(directory, evidence, presentation):
     return curves, dict(queries=audit, gaps=gaps, errors=errors, available=bool(series), metric_classification=inventory)
 
 
-def report_panels(curves, criteria, presentation):
-    """Show the four measured views; keep gate floors separate from measurements."""
-    panels = project_panels(curves, presentation)
-    duration = criteria.get("measure_s", 1)
-    floor_metrics = {
-        "mock/rtp_llm_context_tps_engine_mean/P": "mock/rtp_llm_context_tps",
-        "mock/rtp_llm_context_tps_with_cache_engine_mean/P": "mock/rtp_llm_context_tps_with_cache",
-        "mock/mock_decode_wall_tps_engine_mean/D": "mock/mock_decode_wall_tps",
-    }
-    for panel, descriptor in zip(panels, presentation.charts.panels):
-        selected = panel["series"]
-        if descriptor.id == "engine-tps":
-            floors = criteria.get("engine_tps", {})
-            for metric_id in descriptor.curve_ids:
-                metric = floor_metrics[metric_id]
-                if metric in floors:
-                    source = next((curve for curve in selected if curve["curve_id"] == metric_id), None)
-                    name = presentation.charts.curves[metric_id].name
-                    selected.append(dict(
-                        curve_id=metric_id + "/gate_floor", source_type="configuration",
-                        name=name + " 门禁线", group="门禁", axis="forward",
-                        unit="执行 tok/s", color=source["color"] if source else presentation.charts.curves[metric_id].color or PALETTE[len(selected) % len(PALETTE)],
-                        dash=[6, 4], hidden=False,
-                        points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
-                        description="场景配置中的绝对下界；不是实测值",
-                    ))
-        apply_panel_presets(panel, descriptor)
-    return panels
+def report_panels(curves, result, presentation, *, origin=0):
+    from reporting.gate_lines import apply_gate_lines
+    return apply_gate_lines(dict(panels=project_panels(curves, presentation), timeOriginEpochS=origin),
+                            presentation, result.get('gate_references', []))['panels']

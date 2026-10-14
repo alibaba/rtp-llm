@@ -1,5 +1,5 @@
 """Explicit run presentation data; dictionaries are decoded at this boundary."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 from typing import Optional
 
@@ -17,6 +17,7 @@ class CheckNode:
     actual: object
     expected: object
     children: tuple['CheckNode', ...] = ()
+    evidence: dict = field(default_factory=dict)
 
     @classmethod
     def read(cls, data, prefix):
@@ -29,7 +30,7 @@ class CheckNode:
         if not isinstance(children, list):
             raise ValueError('check children must be an array')
         return cls(identity, data['status'], data.get('actual'), data.get('expected'),
-                   tuple(cls.read(child, identity) for child in children))
+                   tuple(cls.read(child, identity) for child in children), evidence)
 
     def rows(self):
         yield [self.identity, self.status, self.actual, self.expected]

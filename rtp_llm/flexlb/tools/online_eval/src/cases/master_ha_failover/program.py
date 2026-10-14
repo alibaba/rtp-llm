@@ -68,9 +68,12 @@ def _cycle(case, restart_mode):
     else:
         selected_windows.extend(["a_handover", "post_recovery", "all_requests"])
     rows = {"full_run": output("finish", "rows")}
+    scopes = {"full_run": output("finish", "window")}
     for name in selected_windows:
-        case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **windows[name].boundaries})
+        case.step(name, "master_client_window", params={"rows": output("finish", "rows"), "scope": output("finish", "window"),
+                  "window_name": name, **windows[name].boundaries})
         rows[name] = output(name, "rows")
+        scopes[name] = output(name, "window")
 
     checks = ["baseline_success", "b_success", "b_route", "b_balance", "a_success",
               "a_route", "a_balance", "both_success", "both_balance"]
@@ -82,9 +85,10 @@ def _cycle(case, restart_mode):
     for name in checks:
         params = dict(data.checks[name])
         window, = params.pop("windows")
-        params.pop("unit")
+        params['check_id'] = name
         if window not in rows:
             raise ScenarioError(f"parameters.checks.{name}: window unavailable in {restart_mode}")
+        params['scope'] = scopes[window]
         params["rows"] = rows[window]
         case.observe(name, "master_client_check", params=params)
     case.step("clean_a", "master_inflight_clean", params={"target": "A"})
