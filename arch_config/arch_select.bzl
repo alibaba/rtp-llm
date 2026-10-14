@@ -130,7 +130,7 @@ def whl_deps():
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "fast-hadamard-transform@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "deep-ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl",
-            "tilelang==0.1.9",
+            "tilelang==0.1.15",
             "flash-attn-4@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl",
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl",
             "triton==3.6.0",
@@ -153,7 +153,7 @@ def whl_deps():
             "nccl-extensions==0.1.0",
             "cuda-core==1.0.1",
             "cuda-pathfinder==1.6.0",
-            "apache-tvm-ffi==0.1.11",
+            "apache-tvm-ffi==0.1.12",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
