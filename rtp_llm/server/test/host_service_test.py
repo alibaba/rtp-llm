@@ -3,12 +3,21 @@ Unit tests for MasterService: VIP discovery and heartbeat probes are mocked.
 """
 
 import os
+import threading
+import time
 import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
+from rtp_llm.server.host_service import (
+    FlexlbHeartbeatInfo,
+    HostService,
+    HostServiceArgs,
+    MasterService,
+    VipServerWrapper,
+)
 from rtp_llm.vipserver.host import Host
+from rtp_llm.vipserver.host_reactor import HostReactor
 from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
 
@@ -275,22 +284,117 @@ class TestMasterService(unittest.TestCase):
         self.assertIsNone(svc.get_master_addr())
 
 
-class TestNativeVipTimeout(unittest.TestCase):
-    def test_opt_in_timeout_bounds_joined_discovery_http(self):
-        proxy = VIPServerProxy()
-        proxy.srv_hosts = ["127.0.0.1"]
+class TestVipTimeout(unittest.TestCase):
+    def test_idle_reactors_close_without_interval_wait_or_final_callback(self):
+        callbacks = []
+        reactors = []
+        for index in range(5):
+            proxy = VIPServerProxy(http_timeout=0.25)
+            # Only replace the network callbacks; lifecycle uses real threads.
+            proxy.refresh_srv_lst = lambda: None
+            proxy.update_srv_thread.func = lambda: callbacks.append("server")
+            reactor = HostReactor(proxy)
+            reactor.update_domain_thread.func = lambda: callbacks.append("domain")
+            reactor.start()
+            reactors.append(reactor)
+            self.addCleanup(reactor.close)
+        started = time.monotonic()
+        for reactor in reactors:
+            reactor.close()
+            self.assertFalse(reactor.update_domain_thread.is_alive())
+            self.assertFalse(reactor.proxy.update_srv_thread.is_alive())
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(callbacks, [])
+
+    def test_close_signals_both_workers_before_joining_inflight_callback(self):
+        entered = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        proxy = VIPServerProxy(http_timeout=0.25)
+        proxy.refresh_srv_lst = lambda: None
+        reactor = HostReactor(proxy)
+
+        def blocked_callback():
+            entered.set()
+            release.wait(5)
+
+        reactor.update_domain_thread.func = blocked_callback
+        reactor.update_domain_thread.interval = 0.001
+        reactor.start()
+        self.addCleanup(reactor.close)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(2))
+
+        def close():
+            reactor.close()
+            closed.set()
+
+        closer = threading.Thread(target=close)
+        closer.start()
+        try:
+            # The server worker must exit even while domain join is blocked.
+            proxy.update_srv_thread.join(timeout=2)
+            self.assertFalse(proxy.update_srv_thread.is_alive())
+            self.assertFalse(closed.is_set())
+        finally:
+            release.set()
+            closer.join(timeout=2)
+        self.assertTrue(closed.is_set())
+        self.assertFalse(reactor.update_domain_thread.is_alive())
+
+    def test_timeout_is_instance_local_and_default_ignores_native_env(self):
         response = MagicMock()
+        response.text = "127.0.0.1"
         response.json.return_value = {"hosts": []}
         with patch.dict(
-            os.environ, {"PG_NATIVE_VIP_HTTP_TIMEOUT_SECONDS": "0.25"}
+            os.environ, {"PG_NATIVE_VIP_HTTP_TIMEOUT_SECONDS": "0.75"}
         ), patch(
             "rtp_llm.vipserver.vipserver_proxy.requests.get", return_value=response
         ) as get, patch(
             "rtp_llm.vipserver.vipserver_proxy.get_address_server_params",
             return_value={},
         ):
-            proxy.req_api("srvIPXT", {"dom": "example"})
-        self.assertEqual(get.call_args.kwargs["timeout"], 0.25)
+            for timeout in (None, 0.25):
+                proxy = VIPServerProxy(http_timeout=timeout)
+                proxy.refresh_srv_lst()
+                expected = {} if timeout is None else {"timeout": timeout}
+                self.assertEqual(get.call_args.kwargs, expected)
+                proxy.req_api("srvIPXT", {"dom": "example"})
+                self.assertEqual(get.call_args.kwargs, expected)
+
+    def test_wrapper_owns_bounded_reactor(self):
+        with patch("rtp_llm.vipserver.host_reactor.HostReactor") as reactor, patch(
+            "rtp_llm.vipserver.vipserver_proxy.VIPServerProxy"
+        ) as proxy:
+            wrapper = VipServerWrapper("example", http_timeout=0.25)
+            proxy.assert_called_once_with(http_timeout=0.25)
+            reactor.return_value.start.assert_called_once_with()
+            wrapper.get_hosts(refresh=True)
+            reactor.return_value.get_host_list_by_domain_now.assert_called_once_with(
+                "example"
+            )
+            wrapper.close()
+            wrapper.close()
+            reactor.return_value.close.assert_called_once_with()
+
+    def test_host_service_passes_optional_timeout_to_every_role(self):
+        args = HostServiceArgs(
+            master_domain="master",
+            pdfusion_domain="pdfusion",
+            prefill_domain="prefill",
+            decode_domain="decode",
+            vit_domain="vit",
+        )
+        for timeout in (None, 0.25):
+            with patch(
+                "rtp_llm.server.host_service.VipServerWrapper"
+            ) as wrapper, patch("rtp_llm.server.host_service.MasterService"):
+                service = HostService(args, http_timeout=timeout)
+                self.assertEqual(wrapper.call_count, 5)
+                for call in wrapper.call_args_list:
+                    self.assertEqual(call.kwargs, {"http_timeout": timeout})
+                service.close()
+                self.assertEqual(wrapper.return_value.close.call_count, 5)
 
 
 if __name__ == "__main__":

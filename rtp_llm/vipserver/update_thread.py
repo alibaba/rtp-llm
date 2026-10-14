@@ -1,5 +1,4 @@
 import threading
-import time
 
 
 class UpdateThread(threading.Thread):
@@ -8,10 +7,20 @@ class UpdateThread(threading.Thread):
         self.name = name
         self.func = func
         self.interval = interval
-        self.stop_flag = False
+        self._stop_event = threading.Event()
         self.setDaemon(True)
 
+    @property
+    def stop_flag(self):
+        return self._stop_event.is_set()
+
+    @stop_flag.setter
+    def stop_flag(self, value):
+        if value:
+            self._stop_event.set()
+        else:
+            self._stop_event.clear()
+
     def run(self):
-        while not self.stop_flag:
-            time.sleep(self.interval)
+        while not self._stop_event.wait(self.interval):
             self.func()
