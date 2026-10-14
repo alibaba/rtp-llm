@@ -49,8 +49,8 @@ int main() {
         check(collector.gpu_loads[0] == std::vector<int64_t>({100, 100, 100, 100}), "Incorrect window totals");
         check(collector.gpu_loads[1] == std::vector<int64_t>({200, 100, 100, 0}), "Lost destination columns");
         check(collector.window_steps == 10 && collector.active_layer_count == 2, "Incorrect window metadata");
-        check(collector.ib_layers == std::vector<double>({0, 1, 0}), "Incorrect layer imbalance");
-        check(collector.ib_layer_mean == 0.5, "Empty layers must not dilute layer-mean imbalance");
+        check(collector.ib_layers == std::vector<double>({1, 2, 0}), "Incorrect layer imbalance");
+        check(collector.ib_layer_mean == 1.5, "Empty layers must not dilute layer-mean imbalance");
         check(!collector.update_weights_qps, "Weight-update flag must default to false");
         rejects([&] { window.add(step); });
         window.reset();
@@ -67,7 +67,7 @@ int main() {
         check(collector.gpu_loads[0][0] == 200, "Independent source counts must be summed");
         ExpertStatsReportWindow::fillCollector(aggregated, 10, 2, collector);
         check(collector.gpu_loads[0][0] == 100, "Explicit verified TP replication was not removed");
-        check(collector.ib_layer_mean == 0.5, "TP normalization changed imbalance");
+        check(collector.ib_layer_mean == 1.5, "TP normalization changed imbalance");
         aggregated[0][0].add_(1);
         rejects([&] { ExpertStatsReportWindow::fillCollector(aggregated, 10, 2, collector); });
         window.reset();
@@ -91,7 +91,7 @@ int main() {
         rejects([&] { collector.setGpuLoads({{1, 1}}, 0); });
         rejects([&] { collector.setGpuLoads({{1, 1}}, 10, 0); });
         collector.setGpuLoads({{400, 0, 0, 0}}, 10);
-        check(collector.ib_layer_mean == 3, "Maximum imbalance should be EP size minus one");
+        check(collector.ib_layer_mean == 4, "Maximum imbalance should be EP size");
         const int64_t large = std::numeric_limits<int32_t>::max();
         ExpertStatsReportWindow large_window;
         auto large_step = at::full({1, 2}, large, at::kInt);

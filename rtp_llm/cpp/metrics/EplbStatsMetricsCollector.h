@@ -52,7 +52,8 @@ public:
                 maximum = std::max(maximum, count);
             }
             if (total > 0) {
-                imbalance[layer] = static_cast<double>(maximum * static_cast<long double>(ep_size) / total - 1);
+                // IB = maximum rank load / mean rank load; perfect balance is 1.
+                imbalance[layer] = static_cast<double>(maximum * static_cast<long double>(ep_size) / total);
                 imbalance_sum += imbalance[layer];
                 ++active;
             }
