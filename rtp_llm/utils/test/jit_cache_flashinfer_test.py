@@ -1,4 +1,6 @@
 import os
+import runpy
+import shutil
 import tempfile
 import types
 import unittest
@@ -162,6 +164,78 @@ class FlashInferCacheTest(unittest.TestCase):
         with mock.patch.object(flash, "FileLock", return_value=RefreshLock()):
             flash.evict_dangling_flashinfer_ops(self.workspace)
         self.assertTrue(stale.exists())
+
+    def test_package_copy_survives_runfiles_removal(self):
+        # Bazel exposes package files as links. FlashInfer resolves __file__
+        # before deriving its include roots, so retaining those links is unsafe.
+        source = self.root / "action.runfiles/pip_cuda/flashinfer"
+        source.mkdir(parents=True)
+        original = self.root / "previous.runfiles/flashinfer"
+        (original / "jit").mkdir(parents=True)
+        (original / "data/include/flashinfer").mkdir(parents=True)
+        (original / "jit/env.py").write_text(
+            "from pathlib import Path\n"
+            "PACKAGE_ROOT = Path(__file__).resolve().parents[1]\n"
+        )
+        (original / "data/include/flashinfer/activation.cuh").write_text("// header\n")
+        (source / "jit").mkdir()
+        (source / "jit/env.py").symlink_to(original / "jit/env.py")
+        (source / "data").symlink_to(original / "data", target_is_directory=True)
+        cache = self.root / "packages"
+        cache.mkdir()
+        with mock.patch.object(
+            wrapper, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            site = Path(wrapper.copy_package_with_lock("flashinfer", cache))
+        copied = site / "flashinfer"
+        self.assertEqual(
+            runpy.run_path(str(copied / "jit/env.py"))["PACKAGE_ROOT"], copied
+        )
+        self.assertFalse(any(p.is_symlink() for p in copied.rglob("*")))
+        shutil.rmtree(original)
+        self.assertEqual(
+            (copied / "data/include/flashinfer/activation.cuh").read_text(),
+            "// header\n",
+        )
+
+    def test_legacy_package_cache_is_not_reused_or_removed(self):
+        source = self.root / "action.runfiles/pip_cuda/flashinfer"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("# current package\n")
+        cache = self.root / "packages"
+        old = cache / "flashinfer_python-0.6.9__pip_cuda"
+        (old / "site-packages/flashinfer").mkdir(parents=True)
+        (old / ".copy_complete").write_text("flashinfer==0.6.9\n")
+        (old / "site-packages/flashinfer/__init__.py").symlink_to(
+            source / "__init__.py"
+        )
+        with mock.patch.object(
+            wrapper, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            site = Path(wrapper.copy_package_with_lock("flashinfer", cache))
+            self.assertNotEqual(site, old / "site-packages")
+            with mock.patch.object(
+                wrapper.shutil,
+                "copytree",
+                side_effect=AssertionError("unexpected recopy"),
+            ):
+                self.assertEqual(
+                    wrapper.copy_package_with_lock("flashinfer", cache), str(site)
+                )
+        self.assertTrue((old / "site-packages/flashinfer/__init__.py").is_symlink())
+        self.assertEqual(
+            (site / "flashinfer/__init__.py").read_text(), "# current package\n"
+        )
+
+    def test_other_package_cache_keys_unchanged(self):
+        self.assertEqual(
+            wrapper._cache_key("torch", "2.11", "/x/pip_cuda/torch"),
+            "torch_python-2.11__pip_cuda",
+        )
+        self.assertEqual(
+            wrapper._cache_key("deep_gemm", "2.8", "/opt/deep_gemm"),
+            "deep_gemm_python-2.8",
+        )
 
 
 if __name__ == "__main__":

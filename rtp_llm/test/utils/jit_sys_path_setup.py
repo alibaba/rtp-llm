@@ -89,9 +89,16 @@ def _build_variant(source_path):
 
 def _cache_key(package_name, version, source_path):
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s" % (package_name, version)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+    key = "%s_python-%s" % (package_name, version)
+    if variant is not None:
+        key += "__" + variant
+    # Older copies retained Bazel symlinks. FlashInfer derives include roots
+    # from __file__.resolve(), so even newly generated rules could point back
+    # into an expired action. Use a new immutable copy, leaving live users of
+    # the old cache untouched.
+    if package_name == "flashinfer":
+        key += "__materialized_v1"
+    return key
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -150,7 +157,11 @@ def copy_package_with_lock(package_name, cache_dir):
         # Copy the package
         try:
             if Path(source_path).is_dir():
-                shutil.copytree(source_path, target_package_path, symlinks=True)
+                shutil.copytree(
+                    source_path,
+                    target_package_path,
+                    symlinks=package_name != "flashinfer",
+                )
             else:
                 shutil.copy2(source_path, target_package_path)
 
@@ -165,7 +176,11 @@ def copy_package_with_lock(package_name, cache_dir):
                         logging.info(
                             f"[Package Copy] Copying {libs_dir_name} directory..."
                         )
-                        shutil.copytree(libs_source, libs_target, symlinks=True)
+                        shutil.copytree(
+                            libs_source,
+                            libs_target,
+                            symlinks=package_name != "flashinfer",
+                        )
 
             # Verify copy
             if not target_package_path.exists():
