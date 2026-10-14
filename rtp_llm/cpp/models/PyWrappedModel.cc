@@ -589,14 +589,20 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
-torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
+torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                                        const torch::Tensor&  prepared_position_ids) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     DevicePerfWrapper              wrapper(enable_device_perf_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids.defined()) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+        // forward() already submits this transfer on the current stream. Reuse
+        // that tensor instead of issuing a second blocking .cuda() transfer.
+        // Other callers retain the host owner until asynchronous use completes.
+        bert_embedding_inputs.combo_position_ids = prepared_position_ids.defined() ?
+                                                       prepared_position_ids :
+                                                       tensorHoldHostAndToCuda(inputs.combo_position_ids);
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
@@ -1136,7 +1142,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs, combo_position_ids);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }

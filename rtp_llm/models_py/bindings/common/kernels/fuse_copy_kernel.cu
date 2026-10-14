@@ -1,21 +1,38 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
 
 namespace rtp_llm {
 
-static constexpr int FUSED_COPY_BLOCKS_PER_TASK = 8;
-static constexpr int FUSED_COPY_THREADS         = 256;
+static constexpr int    FUSED_COPY_BLOCKS_PER_TASK = 8;
+static constexpr int    FUSED_COPY_THREADS         = 256;
+static constexpr size_t FUSED_COPY_BYTES_PER_BLOCK = 64 * 1024;
+static constexpr int    FUSED_COPY_MAX_BLOCKS      = 512;
 
+__host__ __device__ int fusedCopyBlocks(size_t bytes) {
+    const size_t blocks = bytes / FUSED_COPY_BYTES_PER_BLOCK + (bytes % FUSED_COPY_BYTES_PER_BLOCK != 0);
+    return blocks < FUSED_COPY_BLOCKS_PER_TASK ? FUSED_COPY_BLOCKS_PER_TASK :
+           blocks > FUSED_COPY_MAX_BLOCKS      ? FUSED_COPY_MAX_BLOCKS :
+                                                 static_cast<int>(blocks);
+}
+
+template<bool Bulk>
 __global__ void fusedCopyKernel(FusedD2DCopyParams params) {
     const int copy_idx = blockIdx.y;
     if (copy_idx >= params.num_copies)
         return;
 
-    const size_t total_bytes   = params.size[copy_idx];
+    const size_t total_bytes = params.size[copy_idx];
+    const int    task_blocks = Bulk ? fusedCopyBlocks(total_bytes) : FUSED_COPY_BLOCKS_PER_TASK;
+    if constexpr (Bulk) {
+        if (blockIdx.x >= task_blocks)
+            return;
+    }
     const size_t global_tid    = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t global_stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    const size_t global_stride = static_cast<size_t>(task_blocks) * blockDim.x;
 
     const auto src_addr = reinterpret_cast<uintptr_t>(params.src[copy_idx]);
     const auto dst_addr = reinterpret_cast<uintptr_t>(params.dst[copy_idx]);
@@ -51,8 +68,24 @@ __global__ void fusedCopyKernel(FusedD2DCopyParams params) {
 void invokeFusedCopy(const FusedD2DCopyParams& params, cudaStream_t stream) {
     if (params.num_copies <= 0)
         return;
-    dim3 grid(FUSED_COPY_BLOCKS_PER_TASK, params.num_copies);
-    fusedCopyKernel<<<grid, FUSED_COPY_THREADS, 0, stream>>>(params);
+    // Preserve the small-copy launch and per-task parallelism. Large MTP hidden
+    // tensors otherwise use just eight blocks for hundreds of MiB of payload.
+    static const bool bulk = []() {
+        const char* value = std::getenv("RTP_LLM_FUSED_COPY_BULK_EXPERIMENTAL");
+        return value && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
+    }();
+    int blocks = FUSED_COPY_BLOCKS_PER_TASK;
+    if (bulk) {
+        for (int i = 0; i < params.num_copies; ++i) {
+            const int task_blocks = fusedCopyBlocks(params.size[i]);
+            blocks                = task_blocks > blocks ? task_blocks : blocks;
+        }
+    }
+    if (blocks > FUSED_COPY_BLOCKS_PER_TASK) {
+        fusedCopyKernel<true><<<dim3(blocks, params.num_copies), FUSED_COPY_THREADS, 0, stream>>>(params);
+    } else {
+        fusedCopyKernel<false><<<dim3(blocks, params.num_copies), FUSED_COPY_THREADS, 0, stream>>>(params);
+    }
 }
 
 __global__ void fusedStridedCopyKernel(FusedStridedCopyParams params) {
