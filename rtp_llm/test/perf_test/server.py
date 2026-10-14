@@ -4,6 +4,7 @@ import os
 from typing import Dict, List, Optional
 
 from rtp_llm.test.perf_test.dataset import extract_arg
+from rtp_llm.test.utils.jit_sys_path_setup import fix_fmha_gen_jit_cache
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
@@ -23,6 +24,11 @@ class EngineServer:
         use_batch_decode_scheduler: Optional[bool] = True,
     ) -> None:
         """Assemble CLI args and start MagaServerManager."""
+        # Clear stale cross-job fmha_gen JIT cache entries before any
+        # initCapture can hit them (graph capture triggers the fmha_gen JIT
+        # cold compile; poisoned entries from a prior test on the same
+        # shared worker break the ninja build).
+        fix_fmha_gen_jit_cache()
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {

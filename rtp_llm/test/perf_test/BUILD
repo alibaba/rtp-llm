@@ -34,6 +34,7 @@ py_library(
         "//rtp_llm:testlib",
         "//rtp_llm/test/utils:maga_server_manager",
         "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:jit_sys_path_setup",
     ],
     visibility = ["//visibility:public"],
 )

@@ -9,7 +9,7 @@ Covers the adapt-model community-smoke reuse mandate (2026-10-14):
      dispatched concurrently (one engine batch); both must return
      token-identical outputs and the cached one must show reuse.
 
-Assertions use aux_info.reuse_len (block-aligned) and input/output token
+Assertions use aux_info.reuse_len (page-size dependent) and input/output token
 identity against per-scenario no-cache references, never text-only compare.
 """
 
@@ -23,6 +23,7 @@ from pathlib import Path
 
 import requests
 
+from rtp_llm.test.utils.jit_sys_path_setup import fix_fmha_gen_jit_cache
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 STAGED_D1_3B = (
@@ -51,64 +52,9 @@ def make_archive_prefix(tokenizer, min_tokens):
             return prefix
 
 
-def _fix_sm103_jit_cache():
-    """Clear stale cross-job fmha_gen JIT cache entries and verify the header.
-
-    On shared CI workers, two sm103 tests scheduled on the same node share
-    the JIT cache scope; the first test to compile fmha_gen bakes its own
-    runfiles' absolute include paths into build.ninja, and the second test
-    then reuses that entry with paths into a partially-cleaned runfiles
-    tree. Deleting the fmha_gen cache entry forces regeneration with THIS
-    test's own include paths. Also stage the flashInferMetaInfo.h header
-    if the pip extraction is partial on remote workers.
-    """
-    import shutil
-
-    # 1. clear stale fmha_gen cache entries (all scopes, all arch variants)
-    for cache_root in pathlib.Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer/.cache/flashinfer/*/10*a/cached_ops/fmha_gen"):
-        logging.info("clearing stale JIT cache entry: %s", cache_root)
-        shutil.rmtree(cache_root, ignore_errors=True)
-
-    # 2. verify the header in the flashinfer_cubin package
-    try:
-        import flashinfer_cubin
-
-        cubin_dir = pathlib.Path(flashinfer_cubin.get_cubin_dir())
-        header_rel = "55bba55929d4093682e32d817bd11ffb0441c749/fmha/trtllm-gen/include/flashInferMetaInfo.h"
-        header = cubin_dir / header_rel
-        if header.exists():
-            logging.info("flashInferMetaInfo.h present at %s", header)
-        else:
-            logging.warning("flashInferMetaInfo.h missing at %s", header)
-            # try to find and stage it from the flashinfer python package's data
-            import flashinfer
-
-            data_include = pathlib.Path(flashinfer.__file__).parent / "data" / "include"
-            # the header is generated per-cubin-hash; search for any copy
-            for candidate in data_include.rglob("flashInferMetaInfo.h"):
-                header.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(candidate, header)
-                logging.info("staged flashInferMetaInfo.h from %s to %s", candidate, header)
-                break
-            else:
-                # last resort: copy from any pip flashinfer_cubin on the system
-                import importlib.util
-
-                spec = importlib.util.find_spec("flashinfer_cubin")
-                if spec and spec.origin:
-                    pkg_dir = pathlib.Path(spec.origin).parent
-                    for candidate in pkg_dir.rglob("flashInferMetaInfo.h"):
-                        header.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(candidate, header)
-                        logging.info("staged flashInferMetaInfo.h from %s", candidate)
-                        break
-    except ImportError:
-        logging.info("flashinfer_cubin not importable; skipping header check")
-
-
 class Lfm2ReuseCacheTest(unittest.TestCase):
     def setUp(self):
-        _fix_sm103_jit_cache()
+        fix_fmha_gen_jit_cache()
         self.output_dir = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
         self.server = MagaServerManager(
             env_args={"LOAD_PYTHON_MODEL": "1", "FRONTEND_SERVER_COUNT": "1"},

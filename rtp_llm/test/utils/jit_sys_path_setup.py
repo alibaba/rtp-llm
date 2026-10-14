@@ -410,3 +410,67 @@ def setup_jit_cache(cache_dir=None, packages=None):
         return None
     logging.info(f"[Package Setup] Copied Bazel wrapper to: {bazel_wrapper_path_new}")
     sys.argv[1] = test_binary + suffix
+
+
+def fix_fmha_gen_jit_cache() -> None:
+    """Clear stale cross-job fmha_gen JIT cache entries and verify the header.
+
+    On shared CI workers, two tests scheduled on the same node can share the
+    JIT cache scope; the first test to compile fmha_gen bakes its own
+    runfiles' absolute include paths into build.ninja, and the second test
+    then reuses that entry with paths into a partially-cleaned runfiles
+    tree. Deleting the fmha_gen cache entry forces regeneration with THIS
+    test's own include paths. Also stage the flashInferMetaInfo.h header
+    when the flashinfer_cubin extraction is partial on remote workers
+    (known gap: the 103a trtllm-gen cubin variant ships without it).
+
+    No-op on non-Blackwell workers: the glob only matches 100a/103a cache
+    roots and the header staging only triggers when the cubin entry is
+    missing.
+    """
+    for cache_root in Path("/tmp/rtp-llm/.jit_cache/v2").glob(
+        "*/flashinfer/.cache/flashinfer/*/10*a/cached_ops/fmha_gen"
+    ):
+        logging.info(f"clearing stale JIT cache entry: {cache_root}")
+        shutil.rmtree(cache_root, ignore_errors=True)
+
+    try:
+        import flashinfer_cubin
+    except ImportError:
+        logging.info("flashinfer_cubin not importable; skipping header check")
+        return
+
+    cubin_dir = Path(flashinfer_cubin.get_cubin_dir())
+    header_rel = (
+        "55bba55929d4093682e32d817bd11ffb0441c749/fmha/trtllm-gen/"
+        "include/flashInferMetaInfo.h"
+    )
+    header = cubin_dir / header_rel
+    if header.exists():
+        logging.info(f"flashInferMetaInfo.h present at {header}")
+        return
+    logging.warning(f"flashInferMetaInfo.h missing at {header}")
+    # stage it from the flashinfer python package's data (generated per
+    # cubin hash; search for any copy)
+    try:
+        import flashinfer
+
+        data_include = Path(flashinfer.__file__).parent / "data" / "include"
+        for candidate in data_include.rglob("flashInferMetaInfo.h"):
+            header.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, header)
+            logging.info(f"staged flashInferMetaInfo.h from {candidate} to {header}")
+            return
+    except ImportError:
+        pass
+    # last resort: any flashinfer_cubin copy on the system
+    import importlib.util
+
+    spec = importlib.util.find_spec("flashinfer_cubin")
+    if spec and spec.origin:
+        pkg_dir = Path(spec.origin).parent
+        for candidate in pkg_dir.rglob("flashInferMetaInfo.h"):
+            header.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, header)
+            logging.info(f"staged flashInferMetaInfo.h from {candidate}")
+            return

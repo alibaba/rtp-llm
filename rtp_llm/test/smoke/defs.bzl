@@ -90,6 +90,7 @@ def get_aiter_envs(name, envs):
 
 SMOKE_FRAMEWORK_DEPS = [
     "//rtp_llm/test/utils:maga_server_manager",
+    "//rtp_llm/test/utils:jit_sys_path_setup",  # fix_fmha_gen_jit_cache for graph capture
     "//rtp_llm/test/utils:test_util",  # smoke srcs import port_util/coredump_util
     "//rtp_llm:uvicorn",
     "//rtp_llm:fastapi",
