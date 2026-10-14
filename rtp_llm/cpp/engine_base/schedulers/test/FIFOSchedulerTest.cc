@@ -264,9 +264,9 @@ struct ChunkSchedulerTestConfig {
 template<typename SchedulerType>
 class ChunkSchedulerTestEnv {
 public:
-    explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config):
+    explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config, const CacheConfig* cache_config = nullptr):
         cache_manager(std::make_shared<KVCacheManager>(
-            rtp_llm::test::makeSimpleMhaCacheConfig(
+            cache_config ? *cache_config : rtp_llm::test::makeSimpleMhaCacheConfig(
                 1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
         resource_context.cache_manager = cache_manager;
         resource_context.role_type     = config.role_type;
@@ -5812,6 +5812,177 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
 }
 
+static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse) {
+    auto config = test::makeSimpleMhaCacheConfig(1, 64, 256, DataType::TYPE_FP16, 1, 4);
+    GroupBase swa;
+    swa.tag       = "swa";
+    swa.spec      =
+        test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
+    swa.policy    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.policy.enable_prefix_reuse = prefix_reuse;
+    swa.block_num = 64;
+    // A 512-token native state block models CP=2 with a 256-token base block.
+    config.setTopology({config.groups().front(), swa}, {{0, {"default", "swa"}}});
+    return config;
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
+    struct TestCase {
+        const char* name;
+        size_t      group_block_size;
+        int         chunk_size;
+        bool        prefix_reuse;
+        bool        global_reuse;
+        bool        request_reuse;
+        bool        ignore_request_switches;
+        bool        reject;
+        int         step = 1;
+    };
+    const TestCase cases[] = {
+        {"larger_group_block", 512, 768, true, false, true, false, true},
+        {"aligned_chunk_budget", 512, 1024, true, false, true, false, true},
+        {"global_reuse", 512, 768, true, true, true, false, false},
+        {"request_reuse_off", 512, 768, true, true, false, false, true},
+        {"ignored_request_switch", 512, 768, true, true, false, true, false},
+        {"group_reuse_off", 512, 768, false, true, true, false, true},
+        {"equal_group_block", 256, 768, true, false, true, false, false},
+        {"smaller_group_block", 128, 768, true, false, true, false, false},
+        {"non_divisor_group_block", 192, 768, true, false, true, false, true},
+        {"sparse_swa_reuse", 256, 768, true, true, true, false, true, 2},
+        {"chunk_disabled", 512, 0, true, false, true, false, false},
+    };
+    const auto verify = [](auto& env, const TestCase& test_case, bool group_enqueue) {
+        env.model_config.max_seq_len                       = 4096;
+        env.resource_context.reuse_cache                   = test_case.global_reuse;
+        env.resource_context.ignore_request_cache_switches = test_case.ignore_request_switches;
+        ASSERT_TRUE(env.init());
+        auto stream = env.makeStream(std::vector<int>(1200, 1));
+        stream->generateConfig()->reuse_cache = test_case.request_reuse;
+        bool accepted;
+        if (group_enqueue) {
+            auto result = env.scheduler().enqueueGroup({stream});
+            ASSERT_EQ(result.first.size(), 1u);
+            accepted = result.first.front();
+        } else {
+            accepted = env.scheduler().enqueue(stream).ok();
+        }
+        ASSERT_EQ(accepted, !test_case.reject);
+        EXPECT_EQ(stream->hasError(), test_case.reject);
+        if (test_case.reject) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+        }
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto cache_config = makeChunkCpGroupCacheConfig(test_case.group_block_size, test_case.prefix_reuse);
+        cache_config.linear_step = test_case.step;
+        ChunkSchedulerTestConfig config;
+        config.seq_size_per_block = 256;
+        config.prefill_chunk_size = test_case.chunk_size;
+        for (bool group_enqueue : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "group_enqueue=" << group_enqueue);
+            config.role_type = RoleType::PREFILL;
+            ChunkSchedulerTestEnv<FIFOScheduler> fifo(config, &cache_config);
+            verify(fifo, test_case, group_enqueue);
+            config.role_type = RoleType::PDFUSION;
+            ChunkSchedulerTestEnv<PDFusionRatioScheduler> pdfusion(config, &cache_config);
+            verify(pdfusion, test_case, group_enqueue);
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
+    struct TestCase {
+        const char* name;
+        bool        has_linear;
+        int         step;
+        int         chunk_size;
+        bool        global_reuse;
+        bool        request_reuse;
+        bool        ignore_request_switches;
+        bool        reject;
+        size_t      block_size       = 64;
+        size_t      group_block_size = 0;
+        bool        group_reuse      = true;
+    };
+    const TestCase cases[] = {
+        {"step_one", true, 1, 192, true, true, false, false},
+        {"global_reuse_off", true, 2, 192, false, true, false, true},
+        {"request_reuse_off", true, 2, 192, true, false, false, true},
+        {"sparse_linear_reuse", true, 2, 192, true, true, false, true},
+        {"ignored_request_switch", true, 2, 192, true, false, true, true},
+        {"full_attention", false, 2, 192, true, true, false, true},
+        {"chunk_disabled", true, 2, 0, true, true, false, false},
+        {"linear_block_32", true, 1, 96, true, true, false, true, 32},
+        {"linear_block_96", true, 1, 192, true, true, false, true, 96},
+        {"linear_block_128", true, 1, 384, true, true, false, false, 128},
+        {"linear_block_256", true, 1, 768, true, true, false, false, 256},
+        {"smaller_linear_group", true, 1, 192, true, true, false, true, 64, 32},
+        {"larger_linear_group", true, 1, 192, true, true, false, true, 64, 128},
+        {"compatible_linear_group", true, 1, 384, true, true, false, false, 128, 64},
+        {"small_block_global_reuse_off", true, 1, 96, false, true, false, false, 32},
+        {"small_block_request_reuse_off", true, 1, 96, true, false, false, false, 32},
+        {"small_block_ignored_request_switch", true, 1, 96, true, false, true, true, 32},
+        {"small_block_group_reuse_off", true, 1, 96, true, true, false, false, 32, 32, false},
+        {"small_block_full_attention", false, 1, 96, true, true, false, false, 32},
+        {"small_block_chunk_disabled", true, 1, 0, true, true, false, false, 32},
+    };
+    const auto verify = [](auto& env, const TestCase& test_case, bool group_enqueue) {
+        env.model_config.max_seq_len                       = 4096;
+        env.resource_context.reuse_cache                   = test_case.global_reuse;
+        env.resource_context.ignore_request_cache_switches = test_case.ignore_request_switches;
+        ASSERT_TRUE(env.init());
+        auto stream = env.makeStream(std::vector<int>(641, 1));
+        stream->generateConfig()->reuse_cache = test_case.request_reuse;
+        bool accepted;
+        if (group_enqueue) {
+            auto result = env.scheduler().enqueueGroup({stream});
+            ASSERT_EQ(result.first.size(), 1u);
+            accepted = result.first.front();
+        } else {
+            accepted = env.scheduler().enqueue(stream).ok();
+        }
+        ASSERT_EQ(accepted, !test_case.reject);
+        EXPECT_EQ(stream->hasError(), test_case.reject);
+        if (test_case.reject) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+        }
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto cache_config = test_case.has_linear ?
+                                test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
+                                test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
+        cache_config.linear_step = test_case.step;
+        if (test_case.group_block_size > 0) {
+            auto groups = cache_config.groups();
+            for (auto& group : groups) {
+                if (group.policy.group_type == CacheGroupType::LINEAR) {
+                    auto spec = group.spec->clone();
+                    spec->seq_size_per_block = spec->kernel_seq_size_per_block = test_case.group_block_size;
+                    group.spec                      = std::move(spec);
+                    group.policy.enable_prefix_reuse = test_case.group_reuse;
+                }
+            }
+            cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+        }
+        ChunkSchedulerTestConfig config;
+        config.seq_size_per_block = test_case.block_size;
+        config.prefill_chunk_size = test_case.chunk_size;
+        for (bool group_enqueue : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "group_enqueue=" << group_enqueue);
+            config.role_type = RoleType::PREFILL;
+            ChunkSchedulerTestEnv<FIFOScheduler> fifo(config, &cache_config);
+            verify(fifo, test_case, group_enqueue);
+            config.role_type = RoleType::PDFUSION;
+            ChunkSchedulerTestEnv<PDFusionRatioScheduler> pdfusion(config, &cache_config);
+            verify(pdfusion, test_case, group_enqueue);
+        }
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetDefersFanoutProgressCheckUntilReuseIsKnown) {
     ChunkSchedulerTestConfig             config;
     ChunkSchedulerTestEnv<FIFOScheduler> env(config);
@@ -5849,6 +6020,11 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_TRUE(rejected_batch->empty());
     ASSERT_TRUE(long_stream->hasError());
     ASSERT_TRUE(long_stream->isFinished());
+    EXPECT_EQ(long_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    const auto error_msg = long_stream->statusInfo().ToString();
+    EXPECT_NE(error_msg.find("budget=16, rows=8, block_size=4, remaining=5"), std::string::npos);
+    EXPECT_NE(error_msg.find("increase prefill_chunk_size"), std::string::npos);
+    EXPECT_NE(error_msg.find("reduce num_return_sequences"), std::string::npos);
     ASSERT_EQ(env.cache_manager->freeBlocksNum(), free_blocks_before);
 
     auto unaligned_stream = env.makeStream({6, 7, 8, 9, 10, 11, 12, 13, 14});

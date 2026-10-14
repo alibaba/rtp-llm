@@ -129,10 +129,34 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
         return absl::OkStatus();
     }
 
+    const auto& cache_config = cache_manager_->cacheConfig();
+    const bool  reuse_cache  = stream->streamCacheResource().reuseCache();
     const int64_t seq_length = stream->seqLength();
     const int64_t rows       = stream->currentBatchSize();
     const int64_t block_size = stream->seqSizePerBlock();
     if (seq_length > 0 && rows > 0 && block_size > 0) {
+        for (const auto& group : cache_config.groups()) {
+            const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
+                                      && group.policy.group_type == CacheGroupType::LINEAR;
+            std::string error_msg;
+            if (cache_config.linear_step != 1) {
+                error_msg = "[chunked_prefill] requires linear_step=1, got "
+                            + std::to_string(cache_config.linear_step);
+            } else if (linear_reuse && group.seqSizePerBlock() % 64 != 0) {
+                error_msg = "[chunked_prefill] LINEAR cache reuse requires 64-token aligned group blocks, got "
+                            + std::to_string(group.seqSizePerBlock());
+            } else if (block_size % group.seqSizePerBlock() != 0
+                       && (linear_reuse
+                           || group.chunkCacheBlockCount(seq_length, stream->maxChunkSize(), reuse_cache) > 0)) {
+                error_msg = "[chunked_prefill] cache group [" + group.tag
+                            + "] requires base block size to be a multiple of group block size (base="
+                            + std::to_string(block_size) + ", group=" + std::to_string(group.seqSizePerBlock()) + ")";
+            } else {
+                continue;
+            }
+            stream->reportError(ErrorCode::INVALID_PARAMS, error_msg);
+            return absl::InvalidArgumentError(error_msg);
+        }
         return absl::OkStatus();
     }
 
@@ -246,7 +270,11 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             }
             it = finish_invalid_stream(it,
                                        ErrorCode::INVALID_PARAMS,
-                                       "full prefill budget cannot produce a positive aligned grant");
+                                       "full prefill budget cannot produce a positive aligned grant (budget="
+                                           + std::to_string(prefill_chunk_size_) + ", rows=" + std::to_string(rows)
+                                           + ", block_size=" + std::to_string(block_size)
+                                           + ", remaining=" + std::to_string(remaining)
+                                           + "); increase prefill_chunk_size or reduce num_return_sequences");
             continue;
         }
 
