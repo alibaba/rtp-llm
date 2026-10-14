@@ -1063,6 +1063,42 @@ py_test(
     ],
 )
 
+# Clean-timing twin of lfm2_longctx_clean_ci without the profiler: the
+# profiled run distorts wall-clock numbers (CUPTI inflates the first-request
+# cold module loads by seconds; per-step launch costs are also inflated), so
+# TPOT/TTFT delivery numbers come from this target while the profiled twin
+# remains the trace source for gates_calc manifests.
+py_test(
+    name = "lfm2_longctx_timing_ci",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["manual", "SM103_CU13"],
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/LiquidAI--d1-3B--051bcc464b01b9f92942b364d9586b0ef5912432",
+        "--model_type", "lfm2_vl",
+        "--input_len_min", "30000",
+        "--input_len_max", "31000",
+        "--output_len_min", "96",
+        "--output_len_max", "96",
+        "--concurrency_limit", "2",
+        "--total_requests", "2",
+        "--seq_size_per_block", "64",
+        "--enable_cuda_graph", "1",
+        "--enable_fp32_lm_head", "false",
+    ],
+)
+
 # sm12x (RTX 5000 Pro) pool variants for the three-arch delivery.
 py_test(
     name = "lfm2_shortctx_clean_ci_sm12x",
@@ -1125,5 +1161,38 @@ py_test(
         "--enable_fp32_lm_head", "false",
         "--profile",
         "--profile_steps", "5",
+    ],
+)
+
+# Clean-timing twin of lfm2_longctx_clean_ci_sm12x (no profiler); see the
+# sm103 timing target comment for the caliber rationale.
+py_test(
+    name = "lfm2_longctx_timing_ci_sm12x",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/LiquidAI--d1-3B--051bcc464b01b9f92942b364d9586b0ef5912432",
+        "--model_type", "lfm2_vl",
+        "--input_len_min", "30000",
+        "--input_len_max", "31000",
+        "--output_len_min", "96",
+        "--output_len_max", "96",
+        "--concurrency_limit", "2",
+        "--total_requests", "2",
+        "--seq_size_per_block", "2048",
+        "--enable_cuda_graph", "1",
+        "--enable_fp32_lm_head", "false",
     ],
 )
