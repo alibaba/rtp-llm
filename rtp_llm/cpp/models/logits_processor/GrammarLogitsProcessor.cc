@@ -256,7 +256,7 @@ private:
         const size_t mask_vocab_size = static_cast<size_t>(state.grammar_vocab_size);
         if (state.mask_required) {
             auto mask = state.packed_allow_mask_cpu;
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
             if (logits.is_cuda()) {
                 const int64_t words = state.packed_allow_mask_cpu.size(1);
                 if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.device() != logits.device()
