@@ -65,6 +65,8 @@ TEST_F(QueryConverterTest, testMtpProposalWireModesAndReceiverMatrix) {
     request.set_proposal_is_point_mass(false);
     request.clear_propose_probs();
     EXPECT_THROW(QueryConverter::transMtpProposalProbs(request), std::runtime_error);
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);
