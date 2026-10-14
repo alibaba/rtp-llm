@@ -133,7 +133,7 @@ class HCNormGraphTest(unittest.TestCase):
         for tp_size in (2, 8):
             for tp_rank in range(tp_size):
                 with self.subTest(constructed_tp_size=tp_size, tp_rank=tp_rank):
-                    wide = self.unit(tp_size=tp_size, tp_rank=tp_rank)
+                    wide = self.unit(zero=True, tp_size=tp_size, tp_rank=tp_rank)
                     actual = wide.pre_norm(x, norm, tp_size=tp_size, tp_rank=tp_rank)
                     for value, reference in zip(actual, (y, post, comb)):
                         torch.testing.assert_close(value, reference, rtol=0, atol=0)
