@@ -5,15 +5,18 @@
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
 Keep PyTorch's candidate selection algorithm: tied block scores can select
 different tokens downstream. Only the unused ordering of the selected blocks
-is removed. Token selection uses RTP's existing exact radix-select kernel.
+is removed. Token K512 uses native DeepSelect when supported, with radix-select fallback.
 """
 
 from __future__ import annotations
+
+import os
 
 import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -22,7 +25,7 @@ def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool
     return (
         _TOPK_V3_OK
         and logits.is_cuda
-        and logits.dtype == torch.float32
+        and logits.dtype in (torch.float32, torch.bfloat16)
         and logits.ndim == 2
         and logits.stride(1) == 1
         and logits.stride(0) >= logits.shape[1]
@@ -64,7 +67,7 @@ def _candidate_pool_kernel(
         & (columns < WIDTH)
         & (columns < visible),
         other=-float("inf"),
-    )
+    ).to(tl.float32)
     pooled = tl.reduce(values, 1, _max_with_nan)
     pooled = tl.where(
         (visible > 0) & (blocks == (visible - 1) // BLOCK_SIZE),
@@ -154,7 +157,8 @@ def select_candidates(
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
-    scores = torch.empty((rows, nblocks), dtype=logits.dtype, device=logits.device)
+    # Keep candidate-block topk on its original FP32 path, including tie selection.
+    scores = torch.empty((rows, nblocks), dtype=torch.float32, device=logits.device)
     _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
         logits, lengths, scores, width, logits.stride(0), block_size, nblocks, 128
     )
@@ -179,9 +183,21 @@ def select_tokens(
 ) -> torch.Tensor:
     rows, width = logits.shape
     output = torch.empty((rows, topk), dtype=torch.int32, device=logits.device)
-    rtp_llm_ops.topk_v3(
-        logits, lengths, output, _get_topk_workspace(logits.device), topk, width
-    )
+    selected = None
+    if topk == 512:
+        selected = deepselect.try_select_tokens(
+            logits,
+            lengths,
+            out=output,
+            filter_finite=False,
+            enabled=os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1",
+        )
+    if selected is None:
+        rtp_llm_ops.topk_v3(
+            logits, lengths, output, _get_topk_workspace(logits.device), topk, width
+        )
+    # Decode retains all visible indices on short rows, even candidate-mask holes.
+    # Native selection must not filter them before this shared publication step.
     _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
         logits, lengths, output, width, logits.stride(0), topk, 256
     )

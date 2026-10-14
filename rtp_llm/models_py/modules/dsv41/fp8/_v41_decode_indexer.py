@@ -193,8 +193,12 @@ def score_decode_indexer(
     rope_head_dim: int = 64,
     logical_entries_per_block: int | None = None,
     positions: torch.Tensor | None = None,
+    preserve_score_dtype: bool = False,
 ) -> torch.Tensor | None:
-    """Return FP32 [B*S,max_ctx_len], or None for an unsupported fast path.
+    """Return [B*S,max_ctx_len], or None for an unsupported fast path.
+
+    Default output is FP32. ``preserve_score_dtype`` retains DeepGEMM's native
+    BF16/FP32 scores for decode selectors, with no additional rounding.
 
     Pool and block table must come from the same KV source layer. Pool is the
     contiguous, unpadded uint8 [blocks,typed_entries_per_block,68] view over
@@ -275,7 +279,12 @@ def score_decode_indexer(
         physical_capacity,
         return_bf16=True,
     )
-    compact = torch.empty(b * s, max_ctx_len, dtype=torch.float32, device=q.device)
+    compact = torch.empty(
+        b * s,
+        max_ctx_len,
+        dtype=logits.dtype if preserve_score_dtype else torch.float32,
+        device=q.device,
+    )
     _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](
         logits,
         compact,
