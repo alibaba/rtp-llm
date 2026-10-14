@@ -1,5 +1,8 @@
 #pragma once
 
+#include <numeric>
+#include <optional>
+
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 
@@ -41,10 +44,14 @@ inline std::vector<CacheStoreTransferSegment> cacheStoreTransferSegments(const G
                                 offset,
                                 group.spec->block_size_bytes(),
                                 group.kv_block_stride_bytes);
-    } else if (has_linear_cache && group.spec->type == KVCacheSpecType::MultiHeadAttention) {
+    } else if (group.spec->type == KVCacheSpecType::MultiHeadAttention
+               && (has_linear_cache
+                   || (group.kernel_seq_size_per_block > 0
+                       && group.seq_size_per_block != group.kernel_seq_size_per_block))) {
         // LayerKVCache presents HND kernel pages, each with its own K and V.
         // A physical 2048-token block with 64-token pages contains 32 [K,V]
         // pairs; slicing one opaque physical block cannot preserve these axes.
+        // This also applies to a full-only MTP cache with no linear group.
         size_t pages = 1;
         if (group.policy.group_type == CacheGroupType::FULL) {
             RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
@@ -73,6 +80,33 @@ inline std::vector<CacheStoreTransferSegment> cacheStoreTransferSegments(const G
         }
     }
     return segments;
+}
+
+struct CacheStorePeerPartition {
+    int count;
+    int id;
+};
+
+// P>=D: the peer list covers one decode TP rank's attention heads.
+// MHA weights use contiguous replica groups (see sp_head / _kv_rank), while
+// linear state is sharded across every TP rank. Select one source per MHA
+// replica group without dropping the other peers' linear segments.
+inline std::optional<CacheStorePeerPartition>
+cacheStorePeerPartition(const GroupBase& group, int peer_count, int peer_index) {
+    RTP_LLM_CHECK_WITH_INFO(peer_count > 0 && peer_index >= 0 && peer_index < peer_count,
+                            "invalid cache-store peer %d/%d",
+                            peer_index,
+                            peer_count);
+    if (group.spec->type == KVCacheSpecType::MultiHeadAttention) {
+        RTP_LLM_CHECK_WITH_INFO(group.local_kv_head_num > 0, "MHA cache tag=%s has no heads", group.tag.c_str());
+        const int unique_peers = std::gcd(static_cast<uint32_t>(peer_count), group.local_kv_head_num);
+        const int replicas     = peer_count / unique_peers;
+        if (peer_index % replicas != 0) {
+            return std::nullopt;
+        }
+        return CacheStorePeerPartition{unique_peers, peer_index / replicas};
+    }
+    return CacheStorePeerPartition{peer_count, peer_index};
 }
 
 inline std::vector<BlockInfo> cacheStoreDestinationSegments(const GroupBase&                              group,

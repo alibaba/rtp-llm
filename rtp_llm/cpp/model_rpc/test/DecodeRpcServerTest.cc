@@ -84,6 +84,38 @@ std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
 
 }  // namespace
 
+TEST(DecodeRpcServerTest, Tp4PrefillToDp8DecodeKeepsAllLinearSources) {
+    const std::vector<std::string>  peer_addrs{"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::string               request_key = "tp4-to-dp8";
+    const std::vector<CacheKeyType> cache_keys{11, 22};
+    const GroupBlockIds             block_ids;
+    for (int dp_rank = 0; dp_rank < 8; ++dp_rank) {
+        SCOPED_TRACE(testing::Message() << "dp_rank=" << dp_rank);
+        DecodeRpcServer server;
+        server.maga_init_params_.parallelism_config.tp_size = 1;
+        server.maga_init_params_.parallelism_config.dp_size = 8;
+        server.maga_init_params_.parallelism_config.dp_rank = dp_rank;
+        server.resource_.workers                            = {"decode-" + std::to_string(dp_rank)};
+        const auto context                                  = makeLoadContext(request_key,
+                                             peer_addrs,
+                                             cache_keys,
+                                             block_ids,
+                                             /*prefill_cp_size=*/1,
+                                             /*reuse_block_size=*/1);
+        const auto request = server.constructRemoteLoadRequest(context, /*index=*/0, peer_addrs);
+        EXPECT_EQ(request.request_id(), 42);
+        EXPECT_EQ(request.request_key(), request_key);
+        EXPECT_EQ(request.dp_rank(), dp_rank);
+        EXPECT_EQ(request.prefill_cp_size(), 1);
+        EXPECT_EQ(request.reuse_block_size(), 1);
+        EXPECT_EQ(request.timeout_ms(), 1000);
+        EXPECT_EQ(std::vector<CacheKeyType>(request.cache_keys().begin(), request.cache_keys().end()), cache_keys);
+        EXPECT_EQ(request.partition_count(), 1);
+        EXPECT_EQ(request.partition_id(), 0);
+        EXPECT_EQ(std::vector<std::string>(request.peer_addrs().begin(), request.peer_addrs().end()), peer_addrs);
+    }
+}
+
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
     DecodeRpcContext             rpc_context{nullptr};
     kmonitor::MetricsReporterPtr metrics_reporter;
@@ -275,7 +307,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
-                                          {{0, {"linear"}}, {1, {"full"}}});
+                                                            {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");

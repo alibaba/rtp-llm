@@ -1123,6 +1123,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
                     continue;
                 }
+                const auto peer_partition =
+                    cacheStorePeerPartition(transfer_group, is_page_level_rr ? 1 : peer_cnt, is_page_level_rr ? 0 : i);
+                if (!peer_partition) {
+                    continue;
+                }
                 for (const auto& plan_pair : load_plan) {
                     const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                     const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
@@ -1146,12 +1151,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             transfer_group,
                             transfer_segments,
                             cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag),
-                            is_page_level_rr ? 1 : peer_cnt,
-                            is_page_level_rr ? 0 : i);
+                            peer_partition->count,
+                            peer_partition->id);
                     } else if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
                     } else {
-                        parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
+                        parts = cache_manager->convertIndexToBufferByTag(
+                            block_id, layer_id, tag, peer_partition->count, peer_partition->id);
                     }
 
                     parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
@@ -1276,6 +1282,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;
                             }
+                            const auto peer_partition = cacheStorePeerPartition(
+                                transfer_group, is_page_level_rr ? 1 : peer_cnt, is_page_level_rr ? 0 : i);
+                            if (!peer_partition) {
+                                continue;
+                            }
                             for (const auto& plan_pair : load_plan) {
                                 const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                                 const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
@@ -1302,13 +1313,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                         transfer_group,
                                         transfer_segments,
                                         cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag),
-                                        is_page_level_rr ? 1 : peer_cnt,
-                                        is_page_level_rr ? 0 : i);
+                                        peer_partition->count,
+                                        peer_partition->id);
                                 } else if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
                                 } else {
                                     parts = cache_manager->convertIndexToBufferByTag(
-                                        block_id, global_layer_id, tag, peer_cnt, i);
+                                        block_id, global_layer_id, tag, peer_partition->count, peer_partition->id);
                                 }
 
                                 parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
@@ -1377,6 +1388,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             }
         }
 
+        // A full-only cache may have no unique heads on this replica peer.
+        if (layer_caches.empty()) {
+            continue;
+        }
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
             logReadFailures(load_context.request_id,
