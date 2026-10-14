@@ -59,7 +59,7 @@ public class VitCacheSelector {
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
-        if (keys == null || keys.isEmpty() || keys.size() > 256
+        if (keys == null || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
