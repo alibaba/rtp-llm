@@ -12,9 +12,16 @@ _COMPONENTS = [
     "nvidia-cutlass-dsl-libs-cu13",
 ]
 
+_CUDA13_ONLY = select({
+    "//:using_cuda13_x86": [],
+    "//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 cutlass_install(
     name = "cutlass_site",
     version = "4.7.1",
+    target_compatible_with = _CUDA13_ONLY,
     wheels = select({
         "//:using_cuda13_x86": [x86_wheel(name) for name in _COMPONENTS],
         "//:using_cuda13_arm": [arm_wheel(name) for name in _COMPONENTS],
@@ -24,6 +31,7 @@ cutlass_install(
 
 py_library(
     name = "cutlass_dsl",
+    target_compatible_with = _CUDA13_ONLY,
     data = [":cutlass_site"],
     imports = [
         "cutlass_site",
@@ -38,6 +46,7 @@ py_library(
 
 py_test(
     name = "import_test",
+    target_compatible_with = _CUDA13_ONLY,
     srcs = ["import_test.py"],
     data = ["//rtp_llm/models_py:utils"],
     deps = [":cutlass_dsl"],
