@@ -261,6 +261,7 @@ filegroup(
         "modules/dsv4/fp8/decode/decode_attn_metadata.py",
         "modules/dsv4/fp8/decode/attention_kernels.py",
         "modules/dsv4/fp8/decode/fp8_sparse_attn_decode_op.py",
+        "utils/flash_mla_legacy.py",
     ],
     visibility = ["//visibility:public"],
 )
