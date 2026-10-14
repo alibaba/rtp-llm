@@ -8,8 +8,6 @@ case 和报告共用 `metrics.json` 中的稳定 `metric_id`。exporter 的物�
 
 Whale / ASI FlexLB 大盘的 CPU 面板查询 `pod_cpu_user_limit_percent`，按 `hippo_app`、Master `hippo_role`、`instance` 与 `ip` 区分容器，并使用平均聚合。该指标由基础设施采集，名称和面板表明 user/limit 及百分比口径；仓库不包含 ASI 采集器实现，不能据此认定其包含 JVM 内核态或等同于进程 CPU load。开发机进程与生产容器的百分比仅在测量范围、CPU 分母和时间窗口一致时才可比较。报告保留 JVM、系统两条曲线与可见 CPU 数，CPU 不参与业务门禁。
 
-耗时较高的辅助测量使用 `FlexMonitor.reportLazy` 在监控消费者判定之后求值。Micrometer 先检查指标白名单，NoOp 不执行测量函数；其他监控实现沿用正常求值与上报语义。gRPC 响应大小按需计算，避免为未选中的指标遍历完整 protobuf map。该机制不改变选中指标的名称、单位和数值含义。
-
 ## 名称与身份
 
 | 名称 | 所属位置 | 用途 |

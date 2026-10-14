@@ -52,8 +52,6 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 ## 编译与执行边界
 
-Master discovery pass 对缺失引擎的退役锁只做非阻塞尝试；锁忙时由下一轮重试相同 generation。同一 Master 只有一轮 discovery 拥有缺失引擎的退役批次，其他轮次跳过这批清理，继续提交存活引擎的状态轮询，防止批量索引清理占满同步执行池。批次结束后释放所有权，过期判断、generation 校验和正式退役仍在持锁后执行。
-
 编译按 document、variant、profile 三层展开，读取声明、preset 和实现源码，但不启动服务。环境声明与标量合同由 `environment_declaration` 维护，Master patch 由 `master_patch` 校验，preset、profile 渲染、偏离检查和快照冻结由 `environment_resolver` 负责。
 
 内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
@@ -84,14 +82,6 @@ Master discovery pass 对缺失引擎的退役锁只做非阻塞尝试；锁忙�
 运行底座只依赖标准库和包内机制。`runtime.network` 提供通用 HTTP 传输和端口探测，Master 的 info、inflight 控制路由由 `adapters.master_control.master_url` 统一定义。具体客户端等待调用 `runtime.startup.wait_ready`，协议状态与进程退出码由 `adapters.flow_control.wait_flow_started` 解释；`artifacts.startup.startup_phase` 使用同一 deadline 保存启动耗时。`runtime.resource_plan` 检查通用端口区间，`adapters.java_mock_resources` 定义 Java mock 的保留端口、累计扩容容量、子进程环境及租约投影。
 
 集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。
-
-## Mock RPC 与缓存同步
-
-Mock cluster 的 Netty 线程只处理传输，RPC 方法由同一 cluster 所有的有界执行器运行。缓存 RPC 与普通、状态 RPC 使用独立队列；队列饱和时拒绝执行，不让调用方或 Netty 线程代跑。动态引擎复用所属 cluster 的执行器，单引擎移除不关闭共享线程池；传输线程组结束后回收执行器。
-
-Device 与 Memory 缓存维护不可变的 keys 成员快照，仅成员增删和清空使其失效，引用计数和 LRU 访问不重建集合。Memory 快照只用于遍历发布，以不可变列表保存唯一成员，避免在缓存锁内再构建 HashSet。缓存 RPC 仍返回完整 keys，包括请求方已经持有同一版本的情况；响应字段及 keys 快照不变时复用 protobuf 和编码字节，每次发送使用独立读取游标，保留 gRPC 的 KnownLength / Drainable 快速 framing 接口。容量或 keys 变化使响应缓存失效，不能以响应复用为由隐藏容量变化。
-
-Master 在所属 worker 代次与索引版本检查后，才在回调执行器中复制 keys 并更新索引。成功取得同版本、已经索引的 Prefill 响应时，向动态缓存刷新间隔反馈零差异；旧版本、失效代次、尚未成功索引的响应和 RPC 失败不产生零差异反馈。刷新策略沿用配置的上下限，不能只以出现变化的样本估计刷新频率。
 
 ## 执行与资源契约
 
@@ -179,3 +169,9 @@ lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，�
 session 监管只覆盖留在该进程组的后代；主动另建 session 的后代、内核不可中断状态及监管进程自身被同时杀死，需要 CI executor 的任务容器或 cgroup 生命周期兜底。禁止将 Python finally、JVM shutdown hook 或进程名扫描当作覆盖这些故障的保证。
 
 监控关闭失败后继续保留 server/线程所有权，只有验证退出后才设置 closed。查询归档失败不能跳过进程回收。结果判定、清理状态与 evidence/report/archive 交付状态独立保留。
+
+## Mock RPC 执行边界
+
+Mock cluster 的 RPC 方法由 cluster 所有的有界公共执行器运行，避免模拟引擎占用共享 Netty I/O 线程。所有 RPC 共用执行器，不按方法隔离缓存与状态请求；队列满时拒绝执行，不回到 Netty 线程代跑。动态引擎复用执行器，单引擎移除不关闭共享线程池，传输线程组结束后回收执行器。该机制消除集中部署的传输耦合，不模拟真实 Pod 的 CPU、线程配额或过载队列。
+
+缓存 RPC 每次复制当前 keys、重新构造完整 protobuf，并使用生成代码的标准序列化。相同版本仍返回完整 keys；不复用成员快照、protobuf 或编码字节。真实引擎的可选缓存状态快照不作为默认行为。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。

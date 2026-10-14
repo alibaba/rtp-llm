@@ -208,29 +208,6 @@ class GrpcCacheStatusCheckRunnerTest {
                 20, new LongAdder(), 50L, debug, Runnable::run).run();
     }
 
-    @Test
-    void unchangedIndexedSnapshotFeedsZeroDiffButOlderResponseDoesNot() {
-        var status = workerStatus();
-        var directory = directory(status);
-        var response = EngineRpcService.CacheStatusPB.newBuilder().setVersion(2)
-                .setAvailableKvCache(100).setTotalKvCache(200).setBlockSize(128)
-                .putCacheKeys(10L, true).build();
-        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(),
-                anyLong(), anyLong(), eq(RoleType.PREFILL)))
-                .thenReturn(CompletableFuture.completedFuture(response),
-                        CompletableFuture.completedFuture(response),
-                        CompletableFuture.completedFuture(response.toBuilder().setVersion(1).build()));
-        when(localKvCacheAwareManager.updateEngineBlockCache(status))
-                .thenReturn(WorkerCacheUpdateResult.builder().success(true).cacheVersion(2).build());
-        runCachePoll(status.getIpPort(), status, directory, false);
-        var original = status.getCacheStatus();
-        runCachePoll(status.getIpPort(), status, directory, false);
-        runCachePoll(status.getIpPort(), status, directory, false);
-        org.junit.jupiter.api.Assertions.assertSame(original, status.getCacheStatus());
-        verify(localKvCacheAwareManager, times(1)).updateEngineBlockCache(status);
-        verify(cacheIntervalService, times(1)).updateDiffStatistics(0);
-    }
-
     private static WorkerStatus workerStatus() {
         return RunnerTestSupport.discovered(
                 RoleType.PREFILL, null, "127.0.0.1",

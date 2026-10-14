@@ -97,13 +97,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     @Override
-    public void reportLazy(String metricName, FlexMetricTags tags,
-                           java.util.function.DoubleSupplier value) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) return;
-        report(metricName, tags, value.getAsDouble());
-    }
-
-    @Override
     public void report(String metricName, FlexMetricTags metricsTags, double value) {
         if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
             return;

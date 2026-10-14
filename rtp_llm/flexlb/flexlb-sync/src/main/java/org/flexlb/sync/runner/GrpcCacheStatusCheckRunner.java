@@ -6,7 +6,6 @@ import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -113,11 +112,28 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
             engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
                             requestTimeoutMs, roleType)
+                    .thenApply(cacheStatusPB -> {
+                        logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
+                                        + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
+                                ipPort, roleType.name(), cacheStatusPB.getCacheKeysMap().size(), cacheStatusPB.getVersion(),
+                                cacheStatusPB.getAvailableKvCache(), cacheStatusPB.getTotalKvCache(), cacheStatusPB.getBlockSize());
+                        return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
+                    })
                     .handleAsync((cacheStatus, failure) -> {
                         try {
                             Throwable cause = unwrapCompletionFailure(failure);
                             if (cause != null) {
                                 handleException(cause);
+                                // Return a default CacheStatus with error information
+                                CacheStatus errorStatus = CacheStatus.builder()
+                                        .version(-1)
+                                        .availableKvCache(0)
+                                        .totalKvCache(0)
+                                        .blockSize(0)
+                                        .message("Cache Status gRPC call failed: "
+                                                + cause.getMessage())
+                                        .build();
+                                handleCacheStatusResponse(errorStatus, startTime);
                             } else {
                                 handleCacheStatusResponse(cacheStatus, startTime);
                             }
@@ -150,10 +166,15 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 ? failure.getCause() : failure;
     }
 
-    private void handleCacheStatusResponse(EngineRpcService.CacheStatusPB response, long startTime) {
+    private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
 
         try {
             logger.debug("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
+
+            if (newCacheStatus.getMessage() != null) {
+                logger.debug("gRPC Cache Status - {}, role:{}, message:{}", ipPort, roleType.name(), newCacheStatus.getMessage());
+                return;
+            }
 
             long successfulIntervalUs;
             workerStatus.lock.lock();
@@ -166,10 +187,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             ipPort, generationId, roleType);
                     return;
                 }
-                if (validateCacheStatusResponse(workerStatus, response.getVersion())) {
-                    // Validate before copying the full set, on the callback executor
-                    // rather than the gRPC response-completion thread.
-                    CacheStatus newCacheStatus = EngineStatusConverter.convertToCacheStatus(response);
+                if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
                     workerStatus.publishCacheStatus(newCacheStatus);
                     if (roleType.requiresCacheKeys()) {
                         // CacheAwareService is keyed by address, not generation.
@@ -201,7 +219,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         }
     }
 
-    private boolean validateCacheStatusResponse(WorkerStatus workerStatus, long responseVersion) {
+    private boolean validateCacheStatusResponse(WorkerStatus workerStatus, CacheStatus newCacheStatus) {
         if (debug) {
             return true;
         }
@@ -212,15 +230,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             return true;
         }
         long currentVersion = currentCacheStatus.getVersion();
+        long responseVersion = newCacheStatus.getVersion();
         boolean responseAlreadyIndexed = current.indexInitialized()
                 && current.indexedVersion() == responseVersion;
         if (responseVersion < currentVersion
                 || responseVersion == currentVersion && responseAlreadyIndexed) {
-            if (roleType.requiresCacheKeys() && responseVersion == currentVersion && responseAlreadyIndexed) {
-                // An unchanged indexed snapshot is a successful zero-diff observation.
-                // Without it the controller sees only changes and over-polls quiet caches.
-                cacheIntervalService.updateDiffStatistics(0);
-            }
             logger.debug("gRPC Cache Status - {}, role:{}, version not updated, current: {}, response: {}",
                     ipPort, roleType.name(), currentVersion, responseVersion);
             return false;

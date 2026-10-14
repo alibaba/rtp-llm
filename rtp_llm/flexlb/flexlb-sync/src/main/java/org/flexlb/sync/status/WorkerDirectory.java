@@ -33,30 +33,6 @@ public final class WorkerDirectory {
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
             statusesByRole = new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
-    private final java.util.concurrent.locks.ReentrantLock missingRetirementPass =
-            new java.util.concurrent.locks.ReentrantLock();
-
-    /** One discovery pass may clean missing generations; other passes keep polling. */
-    public MissingRetirementPass tryBeginMissingRetirementPass() {
-        return missingRetirementPass.tryLock() ? new MissingRetirementPass(missingRetirementPass) : null;
-    }
-
-    public static final class MissingRetirementPass implements AutoCloseable {
-        private final java.util.concurrent.locks.ReentrantLock lock;
-        private boolean closed;
-
-        private MissingRetirementPass(java.util.concurrent.locks.ReentrantLock lock) {
-            this.lock = lock;
-        }
-
-        @Override
-        public void close() {
-            if (!closed) {
-                closed = true;
-                lock.unlock();
-            }
-        }
-    }
 
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
         this.endpointRegistry = Objects.requireNonNull(

@@ -121,6 +121,23 @@ class KvTotalReportAlignmentTest {
                 observer));
     }
 
+    @Test
+    void cacheRpcRebuildsResponseAndReadsCapacityForSameVersion() throws Exception {
+        var service = startOne("prefill", 4, BASE_PORT + 6, 0);
+        var request = EngineRpcService.CacheVersionPB.newBuilder()
+                .setLatestCacheVersion(service.getCacheVersion()).setNeedCacheKeys(true).build();
+        EngineRpcService.CacheStatusPB first = unary(observer -> service.getCacheStatus(request, observer));
+        EngineRpcService.CacheStatusPB repeated = unary(observer -> service.getCacheStatus(request, observer));
+        org.junit.jupiter.api.Assertions.assertNotSame(first, repeated);
+        assertEquals(first, repeated);
+        service.setFaultConfig(FaultInjectionConfig.builder().kvPressureTokens(SPB).build());
+        EngineRpcService.CacheStatusPB pressured = unary(observer -> service.getCacheStatus(request, observer));
+        assertEquals(first.getVersion(), pressured.getVersion());
+        assertEquals(first.getCacheKeysMap(), pressured.getCacheKeysMap());
+        assertEquals(first.getAvailableKvCache() - SPB, pressured.getAvailableKvCache());
+        assertEquals(pressured, EngineRpcService.CacheStatusPB.parseFrom(pressured.toByteArray()));
+    }
+
     /** The master's KV gate math on the reported pair: used = total - available. */
     private static double usedRatio(long total, long available) {
         return total <= 0 ? 1.0 : (double) (total - available) / total;

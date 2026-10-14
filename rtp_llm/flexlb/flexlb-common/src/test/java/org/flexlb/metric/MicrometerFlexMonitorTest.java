@@ -12,22 +12,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class MicrometerFlexMonitorTest {
-    @Test
-    void lazyMeasurementsAreNotComputedForDisabledMetrics() {
-        var evaluations = new java.util.concurrent.atomic.AtomicInteger();
-        var registry = new SimpleMeterRegistry();
-        var monitor = new MicrometerFlexMonitor(registry);
-        try {
-            MicrometerFlexMonitor.setAllowedMetrics(java.util.Set.of("enabled"));
-            java.util.function.DoubleSupplier measurement = () -> evaluations.incrementAndGet();
-            monitor.reportLazy("disabled", null, measurement);
-            NoOpFlexMonitor.getInstance().reportLazy("enabled", null, measurement);
-            assertEquals(0, evaluations.get());
-            monitor.reportLazy("enabled", null, measurement);
-            assertEquals(1, evaluations.get());
-            assertEquals(1, registry.find("flexlb.enabled").gauge().value());
-        } finally { monitor.close(); registry.close(); }
-    }
 
     @AfterEach
     void resetAllowedMetrics() {

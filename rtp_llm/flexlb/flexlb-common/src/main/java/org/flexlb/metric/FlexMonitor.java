@@ -9,11 +9,6 @@ import org.flexlb.enums.FlexPriorityType;
  * @author saichen.sm
  */
 public interface FlexMonitor extends AutoCloseable {
-    /** Compute an expensive measurement only when the sink consumes it. */
-    default void reportLazy(String metricName, FlexMetricTags tags,
-                            java.util.function.DoubleSupplier value) {
-        report(metricName, tags, value.getAsDouble());
-    }
 
     /**
      * Register monitoring metric

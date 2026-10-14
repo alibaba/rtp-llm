@@ -375,11 +375,9 @@ public final class JavaMockEngineCluster {
                     .withOption(ChannelOption.SO_REUSEADDR, true)
                     // SO_REUSEADDR on accepted (child) sockets — defense in depth.
                     .withChildOption(ChannelOption.SO_REUSEADDR, true)
-                    .executor(config.rpcExecutors(workerGroup).executor(
-                            RpcServiceGrpc.getGetWorkerStatusMethod().getFullMethodName()))
-                    .callExecutor(config.rpcExecutors(workerGroup))
+                    .executor(config.rpcExecutors(workerGroup).executor())
                     .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(CacheStatusResponseCache.bind(service))
+                    .addService(service)
                     .build()
                     .start();
             serversByPort.put(grpcPort, server);
@@ -1412,7 +1410,6 @@ public final class JavaMockEngineCluster {
         private final LongAdder lifetimeContextRequests = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final CounterRateMetrics workerStatusRates = new CounterRateMetrics();
-        private final CacheStatusResponseCache cacheStatusResponses = new CacheStatusResponseCache();
         private final CounterRateMetrics.Reader prometheusWorkerStatus = new CounterRateMetrics.Reader();
         private final AtomicLong workerStatusRtUs = new AtomicLong();
         java.util.function.LongConsumer statusMetricReporter = ignored -> {};
@@ -5270,16 +5267,17 @@ public final class JavaMockEngineCluster {
             // WorkerStatus.availableKvCache and /snapshot available_kv_tokens
             // (previously getCacheStatus ignored kv_pressure while WorkerStatus
             // subtracted it).
-            // Mutations publish their version after the keys. Read the cursor
-            // first so a concurrent mutation cannot pair old keys with a newer
-            // cursor and make the Master skip the corrected snapshot.
-            long version = cacheVersion.get();
-            Set<Long> device = request.getNeedCacheKeys() ? cache.snapshotKeys() : null;
-            java.util.Collection<Long> memory = request.getNeedCacheKeys() && memoryCache != null
-                    ? memoryCache.keySnapshot() : Set.of();
-            var status = cacheStatusResponses.response(availableKvTokens(), totalKvTokens,
-                    performance.blockSize(), version, device, memory);
-            observer.onNext(status);
+            EngineRpcService.CacheStatusPB.Builder status = EngineRpcService.CacheStatusPB.newBuilder()
+                    .setAvailableKvCache(availableKvTokens())
+                    .setTotalKvCache(totalKvTokens)
+                    .setBlockSize(performance.blockSize())
+                    .setVersion(cacheVersion.get());
+            if (request.getNeedCacheKeys()) {
+                for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
+                if (memoryCache != null)
+                    for (Long key : memoryCache.keys()) status.putCacheKeys(key, true);
+            }
+            observer.onNext(status.build());
             observer.onCompleted();
         }
 
