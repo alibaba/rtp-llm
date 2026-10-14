@@ -50,6 +50,11 @@ public:
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
+    void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
+        before_model_forward_ = std::move(before);
+        after_model_forward_  = std::move(after);
+    }
+
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
     }
@@ -93,7 +98,7 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -135,6 +140,7 @@ protected:
     void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
+    void beginProfiledWork();
 
     absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,
                              MtpMetricsCollector&                metrics_collector,
@@ -337,5 +343,8 @@ private:
     // rollback, and finalize phases of a target side-state transaction.
     torch::Tensor             speculative_target_prepare_status_;
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
+    std::function<void()>     before_model_forward_;
+    std::function<void()>     after_model_forward_;
+    bool                      profile_work_started_ = false;
 };
 }  // namespace rtp_llm
