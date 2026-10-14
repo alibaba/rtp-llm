@@ -11,6 +11,10 @@ py_library(
 
 # flashinfer-python ships in the cuda12 and cuda13 locks
 flashinfer = ["flashinfer-python"]
+flashinfer_cuda13 = flashinfer + [
+    "//rtp_llm:flashinfer-cubin",
+    "//rtp_llm:flashinfer-jit-cache",
+]
 deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
@@ -68,8 +72,8 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
-        "@//:using_cuda13_x86": flashinfer + deep,
-        "@//:using_cuda13_arm": flashinfer + ["deep_gemm"],
+        "@//:using_cuda13_x86": flashinfer_cuda13 + deep + ["//rtp_llm:nvshmem4py-cu13"],
+        "@//:using_cuda13_arm": flashinfer_cuda13 + ["deep_gemm", "//rtp_llm:nvshmem4py-cu13"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [

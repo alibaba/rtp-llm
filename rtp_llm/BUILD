@@ -34,6 +34,14 @@ flashinfer_with_cache = [
     "flashinfer-jit-cache"
 ]
 
+flashinfer_cuda13 = flashinfer_with_cache + [
+    "flashinfer-jit-cache-sm80",
+    "flashinfer-jit-cache-sm90a",
+    "flashinfer-jit-cache-sm100a",
+    "flashinfer-jit-cache-sm103a",
+    "flashinfer-jit-cache-sm120f",
+]
+
 flashmla = [
     "fast-hadamard-transform",
     "flash-mla",
@@ -145,7 +153,8 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+    "nvshmem4py-cu13",
+] + deep + flashinfer_cuda13 + flashmla + rtp_kernel + flashattn)
 
 
 py_library(
@@ -322,10 +331,9 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # CUDA 13 x86 ships matching FlashInfer Python/cubin and hadamard wheels.
-        # ARM keeps its existing dependencies; the cu129 JIT cache is not reused.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform"],
-        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
+        # CUDA 13 ships matching Python, cubin, shim and five architecture providers.
+        "@//:using_cuda13_x86": flashinfer_cuda13 + ["nvshmem4py-cu13", "flash-mla", "fast-hadamard-transform"],
+        "@//:using_cuda13_arm": flashinfer_cuda13 + ["nvshmem4py-cu13", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,

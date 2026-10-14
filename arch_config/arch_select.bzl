@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
@@ -23,8 +24,27 @@ _CUDA13_DEFERRED = ["flash_attn", "flash-attn-3"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+_FLASHINFER_CUDA13_PROVIDERS = [
+    "flashinfer-jit-cache-sm80",
+    "flashinfer-jit-cache-sm90a",
+    "flashinfer-jit-cache-sm100a",
+    "flashinfer-jit-cache-sm103a",
+    "flashinfer-jit-cache-sm120f",
+]
+
 def requirement(names):
     for name in names:
+        if name == "nvshmem4py-cu13" or name in _FLASHINFER_CUDA13_PROVIDERS:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name in ("flash-attn-4", "pynvvideocodec"):
             native.py_library(
                 name = name,
@@ -115,18 +135,25 @@ def whl_deps():
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl",
             "triton==3.6.0",
             "pynvvideocodec@https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "flashinfer-python[cu13]==0.6.18",
-            "flashinfer-cubin@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_cubin-0.6.18-py3-none-any.whl",
-            "flashinfer-jit-cache@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-python[cu13]@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
+            "nvshmem4py-cu13==0.3.1",
+            "flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_cubin-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
+            "flashinfer-jit-cache@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache/flashinfer_jit_cache-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-jit-cache-sm80@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm80/flashinfer_jit_cache_sm80-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-jit-cache-sm90a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm90a/flashinfer_jit_cache_sm90a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-jit-cache-sm100a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm100a/flashinfer_jit_cache_sm100a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-jit-cache-sm103a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm103a/flashinfer_jit_cache_sm103a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
+            "flashinfer-jit-cache-sm120f@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm120f/flashinfer_jit_cache_sm120f-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_x86_64.whl",
             "nvidia-cutlass-dsl[cu13]==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "quack-kernels[cu13]==0.6.5",
-            "nvidia-cudnn-frontend==1.26.0",
+            "nvidia-cudnn-frontend==1.31.0",
             "cuda-tile==1.4.0",
-            "nccl4py==0.3.1",
+            "nccl4py==0.4.1",
+            "nccl-extensions==0.1.0",
             "cuda-core==1.0.1",
             "cuda-pathfinder==1.6.0",
-            "apache-tvm-ffi==0.1.12",
+            "apache-tvm-ffi==0.1.11",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
@@ -158,18 +185,25 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_arm": [
             "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
-            "flashinfer-python[cu13]==0.6.18",
-            "flashinfer-cubin@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_cubin-0.6.18-py3-none-any.whl",
-            "flashinfer-jit-cache@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-python[cu13]@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
+            "nvshmem4py-cu13==0.3.1",
+            "flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_cubin-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
+            "flashinfer-jit-cache@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache/flashinfer_jit_cache-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-jit-cache-sm80@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm80/flashinfer_jit_cache_sm80-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-jit-cache-sm90a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm90a/flashinfer_jit_cache_sm90a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-jit-cache-sm100a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm100a/flashinfer_jit_cache_sm100a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-jit-cache-sm103a@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm103a/flashinfer_jit_cache_sm103a-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "flashinfer-jit-cache-sm120f@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-jit-cache-sm120f/flashinfer_jit_cache_sm120f-0.7.2%2B36684fe4.cu132-cp39-abi3-manylinux_2_28_aarch64.whl",
             "nvidia-cutlass-dsl[cu13]==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "quack-kernels[cu13]==0.6.5",
-            "nvidia-cudnn-frontend==1.26.0",
+            "nvidia-cudnn-frontend==1.31.0",
             "cuda-tile==1.5.0",
-            "nccl4py==0.3.1",
+            "nccl4py==0.4.1",
+            "nccl-extensions==0.1.0",
             "cuda-core==1.0.1",
             "cuda-pathfinder==1.6.0",
-            "apache-tvm-ffi==0.1.10",
+            "apache-tvm-ffi==0.1.11",
         ],
         "//conditions:default": ["torch==2.1.2"],
     })
