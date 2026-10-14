@@ -177,7 +177,28 @@ def _signature_has(callable_obj, required: tuple[str, ...]) -> str | None:
     return None
 
 
-def _mega_moe_se_unavailable_reason() -> str | None:
+def mega_moe_se_shared_recipe_kwargs(
+    kernel, shared_recipe: tuple[int, int, int]
+) -> dict:
+    """Resolve the shared-weight API once, before warmup or graph capture.
+
+    DeepGEMM's standard API uses fixed per-row K32 shared-weight scales. The
+    extended API also accepts block-128 scales through ``shared_recipe``.
+    Omitting that argument is valid only for the native K32 layout.
+    """
+    if shared_recipe not in ((1, 1, 32), (1, 128, 128)):
+        raise ValueError(f"Unsupported MegaMoE-SE shared recipe {shared_recipe}")
+    if "shared_recipe" in inspect.signature(kernel).parameters:
+        return {"shared_recipe": shared_recipe}
+    if shared_recipe == (1, 1, 32):
+        return {}
+    raise RuntimeError(
+        "MegaMoE-SE shared block-128 weights require the DeepGEMM "
+        "shared_recipe parameter; the installed API only supports K32"
+    )
+
+
+def _mega_moe_se_unavailable_reason(shared_fp8_block_size: int = 128) -> str | None:
     """Return ``None`` only when the installed Mega API supports fused SE."""
     base = _mega_moe_unavailable_reason()
     if base is not None:
@@ -189,10 +210,17 @@ def _mega_moe_se_unavailable_reason() -> str | None:
 
         reason = _signature_has(
             deep_gemm.fp8_fp4_mega_moe,
-            ("shared_l1_weights", "shared_l2_weights", "shared_recipe"),
+            ("shared_l1_weights", "shared_l2_weights"),
         )
         if reason is not None:
             return reason
+        shared_recipe = {
+            32: (1, 1, 32),
+            128: (1, 128, 128),
+        }.get(shared_fp8_block_size)
+        if shared_recipe is None:
+            return f"Unsupported MegaMoE-SE shared block size {shared_fp8_block_size}"
+        mega_moe_se_shared_recipe_kwargs(deep_gemm.fp8_fp4_mega_moe, shared_recipe)
         reason = _signature_has(
             deep_gemm.get_symm_buffer_for_mega_moe, ("num_shared_experts",)
         )
@@ -209,18 +237,20 @@ def _mega_moe_se_unavailable_reason() -> str | None:
     return None
 
 
-def _mega_moe_se_available() -> bool:
-    return _mega_moe_se_unavailable_reason() is None
+def _mega_moe_se_available(shared_fp8_block_size: int = 128) -> bool:
+    return _mega_moe_se_unavailable_reason(shared_fp8_block_size) is None
 
 
-def _mega_moe_se_enabled() -> bool:
-    return mega_moe_se_requested() and _mega_moe_se_available()
+def _mega_moe_se_enabled(shared_fp8_block_size: int = 128) -> bool:
+    return mega_moe_se_requested() and _mega_moe_se_available(shared_fp8_block_size)
 
 
-def _mega_moe_se_disabled_or_unavailable_reason() -> str:
+def _mega_moe_se_disabled_or_unavailable_reason(
+    shared_fp8_block_size: int = 128,
+) -> str:
     if not mega_moe_se_requested():
         return f"{_USE_MEGA_MOE_SE_ENV} is not set to 1"
     return (
-        _mega_moe_se_unavailable_reason()
+        _mega_moe_se_unavailable_reason(shared_fp8_block_size)
         or "unknown Mega MoE fused-SE availability failure"
     )

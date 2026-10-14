@@ -75,6 +75,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 warmup.warmup_v41_prefill_jit(object(), device="cuda:0")
                 warmup.warmup_v41_decode_jit(object(), device="cuda:0")
                 warmup.warmup_v41_decode_query_jit(object(), max_m=8, device="cuda:0")
+                warmup.warmup_v41_mega_jit(
+                    object(), max_m=8, device="cuda:0", decode=False
+                )
         self.assertFalse(warmup._DENSE_WARMED)
         self.assertFalse(warmup._SHARED_WARMED)
         self.assertFalse(warmup._ENGRAM_WARMED)
@@ -102,9 +105,6 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                     cache_name: cache_utils,
                 },
             )
-        )
-        self.stack.enter_context(
-            mock.patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "1"})
         )
         self.stack.enter_context(
             mock.patch.object(warmup.common, "_assert_not_capturing")
@@ -168,12 +168,11 @@ class V41KernelJitWarmupTest(unittest.TestCase):
 
     def test_mega_gate_skips_before_cuda_or_private_warmup(self):
         for env, device, max_m in (
-            ({}, "cuda:0", 8),
             ({"DSV41_MEGA_ATTENTION": "0"}, "cuda:0", 8),
             ({"DSV41_MEGA_ATTENTION": "1", "MODEL_WARM_UP": "0"}, "cuda:0", 8),
             ({"DSV41_MEGA_ATTENTION": "1", "WARM_UP": "0"}, "cuda:0", 8),
-            ({"DSV41_MEGA_ATTENTION": "1"}, "cpu", 8),
-            ({"DSV41_MEGA_ATTENTION": "1"}, "cuda:0", 0),
+            ({}, "cpu", 8),
+            ({}, "cuda:0", 0),
         ):
             with self.subTest(env=env, device=device, max_m=max_m), mock.patch.dict(
                 os.environ, env, clear=True
@@ -183,7 +182,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 )
         self.assertFalse(warmup._MEGA_WARMED)
 
-    def test_mega_deduplicates_shapes_per_stream_and_actual_swa_page_entries(self):
+    def test_default_mega_deduplicates_shapes_per_stream_and_actual_swa_page_entries(
+        self,
+    ):
         model, layers, operation, stream, _, _ = self.mega_fixture()
         warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
         self.assertEqual(
@@ -521,6 +522,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             "warmup_v41_dense_jit",
             "warmup_v41_shared_expert_jit",
             "warmup_v41_engram_jit",
+            "warmup_v41_mega_jit",
         ):
             calls[name] = self.stack.enter_context(mock.patch.object(warmup, name))
         calls["attention"] = mock.Mock()
@@ -613,6 +615,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             "warmup_v41_dense_jit",
             "warmup_v41_shared_expert_jit",
             "warmup_v41_engram_jit",
+            "warmup_v41_mega_jit",
             "hc",
             "attention",
         ):
@@ -747,7 +750,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             name, PREFETCH_LOOKUP_CONFIG=(4, 4), PREFETCH_LOOKUP_CARVEOUT=100
         )
         with (
-            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(
+                os.environ,
+                {"DSV41_ASYNC_ENGRAM_LOOKUP": "1", "DSV41_CPU_ENGRAM_LOOKUP": "0"},
+            ),
             mock.patch.dict(sys.modules, {name: kernel}),
         ):
             warmup.warmup_v41_engram_jit(model, max_m=32768, device="cuda:0")
@@ -781,7 +787,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         embed.warmup_prefetch.side_effect = RuntimeError("prefetch compile failed")
         name = "rtp_llm.models_py.modules.dsv41._engram_triton"
         with (
-            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(
+                os.environ,
+                {"DSV41_ASYNC_ENGRAM_LOOKUP": "1", "DSV41_CPU_ENGRAM_LOOKUP": "0"},
+            ),
             mock.patch.dict(
                 sys.modules,
                 {
@@ -808,7 +817,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         )
         name = "rtp_llm.models_py.modules.dsv41._engram_triton"
         with (
-            mock.patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}),
+            mock.patch.dict(
+                os.environ,
+                {"DSV41_ASYNC_ENGRAM_LOOKUP": "1", "DSV41_CPU_ENGRAM_LOOKUP": "0"},
+            ),
             mock.patch.dict(
                 sys.modules,
                 {
@@ -913,6 +925,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         for name in (
             "warmup_v41_dense_jit",
             "warmup_v41_shared_expert_jit",
+            "warmup_v41_mega_jit",
             "hc",
             "query",
         ):

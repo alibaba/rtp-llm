@@ -15,6 +15,10 @@ from contextlib import contextmanager
 from dataclasses import replace
 from unittest import mock
 
+from rtp_llm.models_py.modules.dsv41.moe.mega_se_buf import (
+    _mega_moe_se_unavailable_reason,
+)
+
 # Importing strategies populates the registry via ``register_strategy``.
 from rtp_llm.models_py.modules.dsv41.moe.strategies import (
     DeepEPStrategy,
@@ -68,17 +72,24 @@ def _env(**kw):
 
 
 @contextmanager
-def _mega_runtime(*, shared_available=True):
+def _mega_runtime(*, shared_available=True, shared_recipe=True):
     """Supply hardware/API probes while retaining the real strategy gates."""
 
     def mega(*, shared_l1_weights=None, shared_l2_weights=None, shared_recipe=None):
+        pass
+
+    def fixed_k32_mega(*, shared_l1_weights=None, shared_l2_weights=None):
         pass
 
     def buffer(*, num_shared_experts=0):
         pass
 
     deep_gemm = types.SimpleNamespace(
-        fp8_fp4_mega_moe=mega if shared_available else lambda: None,
+        fp8_fp4_mega_moe=(
+            (mega if shared_recipe else fixed_k32_mega)
+            if shared_available
+            else lambda: None
+        ),
         get_symm_buffer_for_mega_moe=buffer,
         get_block_m_for_mega_moe=object(),
         transform_weights_for_mega_moe=object(),
@@ -91,7 +102,7 @@ def _mega_runtime(*, shared_available=True):
     ), mock.patch(
         "torch.cuda.get_device_capability", return_value=(10, 3)
     ):
-        yield
+        yield deep_gemm
 
 
 class StrategySelectTest(unittest.TestCase):
@@ -176,7 +187,7 @@ class StrategySelectTest(unittest.TestCase):
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
 
-    def test_v41_shared_mxfp8_keeps_routed_mega_separate(self):
+    def test_v41_shared_mxfp8_defaults_to_mega_se(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
@@ -184,12 +195,11 @@ class StrategySelectTest(unittest.TestCase):
             with self.subTest(decode=decode), _env(
                 DSV4_USE_MEGA_MOE_SE=None
             ), _mega_runtime():
-                self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
-                self.assertIs(select_strategy(cfg), MegaMoEStrategy)
-                with self.assertRaisesRegex(ValueError, "DSV41_MEGA_SHARED_EXPERT"):
-                    select_strategy(cfg, forced="mega_se")
+                self.assertTrue(MegaMoEStrategySE.can_handle(cfg))
+                self.assertIs(select_strategy(cfg), MegaMoEStrategySE)
+                self.assertIs(select_strategy(cfg, forced="mega_se"), MegaMoEStrategySE)
 
-    def test_v41_shared_opt_in_selects_se_for_prefill_and_decode(self):
+    def test_v41_shared_explicit_enable_selects_se_for_prefill_and_decode(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
@@ -206,13 +216,84 @@ class StrategySelectTest(unittest.TestCase):
                         select_strategy(cfg, forced, strict), MegaMoEStrategySE
                     )
 
+    def test_fixed_k32_api_selects_native_shared_for_prefill_and_decode(self):
+        for decode in (False, True):
+            cfg = replace(
+                _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
+            )
+            with self.subTest(decode=decode), _env(
+                DSV4_USE_MEGA_MOE_SE=None
+            ), _mega_runtime(shared_recipe=False):
+                self.assertTrue(MegaMoEStrategySE.can_handle(cfg))
+                self.assertIsNone(_mega_moe_se_unavailable_reason(32))
+                self.assertIs(select_strategy(cfg), MegaMoEStrategySE)
+
+    def test_fixed_k32_api_rejects_block128_shared_weights(self):
+        cfg = _cfg(ep_size=4)
+        with _env(DSV4_USE_MEGA_MOE_SE=None), _mega_runtime(shared_recipe=False):
+            self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
+            self.assertIn("block-128", _mega_moe_se_unavailable_reason(128))
+            with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
+                select_strategy(cfg, forced="mega_se")
+            with self.assertRaisesRegex(RuntimeError, "block-128.*shared_recipe"):
+                MegaMoEStrategySE(cfg)
+
+    def test_shared_launch_preserves_each_api_recipe_contract(self):
+        for has_recipe, block_size in ((True, 32), (True, 128), (False, 32)):
+            cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=block_size)
+            with self.subTest(
+                has_recipe=has_recipe, block_size=block_size
+            ), _mega_runtime(shared_recipe=has_recipe) as deep_gemm:
+                strategy = MegaMoEStrategySE(cfg)
+                strategy._maybe_pre_kernel_barrier = mock.Mock()
+                for name in (
+                    "_mega_l1_w",
+                    "_mega_l1_sf",
+                    "_mega_l2_w",
+                    "_mega_l2_sf",
+                    "_mega_buf",
+                    "_se_l1_w",
+                    "_se_l1_sf",
+                    "_se_l2_w",
+                    "_se_l2_sf",
+                ):
+                    setattr(strategy, name, object())
+                with mock.patch.object(
+                    deep_gemm, "fp8_fp4_mega_moe"
+                ) as launch, mock.patch(
+                    "rtp_llm.models_py.modules.dsv41.moe.strategies.mega_se."
+                    "sync_cuda_graph_warmup_ranks"
+                ), mock.patch(
+                    "inspect.signature",
+                    side_effect=AssertionError(
+                        "API inspection belongs outside forward"
+                    ),
+                ):
+                    strategy._launch(object(), 16, "cpu")
+                launch.assert_called_once()
+                kwargs = launch.call_args.kwargs
+                self.assertEqual(kwargs["recipe"], (1, 1, 32))
+                self.assertEqual(
+                    kwargs["shared_l1_weights"],
+                    (strategy._se_l1_w, strategy._se_l1_sf),
+                )
+                self.assertEqual(
+                    kwargs["shared_l2_weights"],
+                    (strategy._se_l2_w, strategy._se_l2_sf),
+                )
+                if has_recipe:
+                    expected = (1, 1, 32) if block_size == 32 else (1, 128, 128)
+                    self.assertEqual(kwargs["shared_recipe"], expected)
+                else:
+                    self.assertNotIn("shared_recipe", kwargs)
+
     def test_v41_shared_rollback_switches_keep_routed_mega(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
             )
             for native_switch, legacy_switch in (
-                (None, None),
+                (None, "0"),
                 ("0", None),
                 ("1", "0"),
             ):
@@ -230,20 +311,34 @@ class StrategySelectTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "DSV41_MEGA_SHARED_EXPERT"):
                         select_strategy(cfg, forced="mega_se")
 
-    def test_v41_shared_opt_in_requires_shared_kernel(self):
+    def test_v41_shared_default_requires_shared_kernel(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
             )
             with self.subTest(decode=decode), _env(
-                DSV4_USE_MEGA_MOE_SE=None, DSV41_MEGA_SHARED_EXPERT="1"
+                DSV4_USE_MEGA_MOE_SE=None
             ), _mega_runtime(shared_available=False):
                 self.assertTrue(MegaMoEStrategy.can_handle(cfg))
                 self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
                 with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
                     select_strategy(cfg, strict=False)
 
-    def test_v41_shared_opt_in_preserves_mega_family_disable(self):
+    def test_v41_shared_default_preserves_hardware_and_process_group_guards(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
+        for probe, value in (
+            ("torch.cuda.is_available", False),
+            ("torch.cuda.get_device_capability", (9, 0)),
+            ("torch.distributed.is_initialized", False),
+        ):
+            with self.subTest(probe=probe), _env(
+                DSV4_USE_MEGA_MOE_SE=None
+            ), _mega_runtime(), mock.patch(probe, return_value=value):
+                self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
+                with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
+                    select_strategy(cfg)
+
+    def test_v41_shared_default_preserves_mega_family_disable(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
@@ -251,21 +346,18 @@ class StrategySelectTest(unittest.TestCase):
             with self.subTest(decode=decode), _env(
                 DSV4_USE_MEGA_MOE="0",
                 DSV4_USE_MEGA_MOE_SE=None,
-                DSV41_MEGA_SHARED_EXPERT="1",
             ), _mega_runtime():
                 self.assertFalse(MegaMoEStrategy.can_handle(cfg))
                 self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
                 with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
                     select_strategy(cfg, forced="mega")
 
-    def test_v41_shared_rejects_old_fused_recipe_even_when_opted_in(self):
+    def test_v41_shared_default_rejects_old_fused_recipe(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
             )
-            with self.subTest(decode=decode), _env(
-                DSV41_MEGA_SHARED_EXPERT="1", DSV4_USE_MEGA_MOE_SE=None
-            ):
+            with self.subTest(decode=decode), _env(DSV4_USE_MEGA_MOE_SE=None):
                 with self.assertRaisesRegex(ValueError, "block-128"):
                     select_strategy(cfg, forced="mega_fused")
 
@@ -275,7 +367,6 @@ class StrategySelectTest(unittest.TestCase):
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
             )
             with self.subTest(decode=decode), _env(
-                DSV41_MEGA_SHARED_EXPERT="1",
                 DSV4_USE_MEGA_MOE_SE=None,
                 DSV4_USE_MEGA_MOE_FUSED="1",
             ):

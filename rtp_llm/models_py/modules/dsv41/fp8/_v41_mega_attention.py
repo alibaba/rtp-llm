@@ -49,14 +49,16 @@ def _backend():
 
 
 def is_supported(attn) -> bool:
-    """Startup-only capability gate; unsupported configurations keep split ops.
+    """Enabled by default; unsupported configurations keep split ops.
+
+    Set ``DSV41_MEGA_ATTENTION=0`` to retain the ordinary attention path.
 
     Native mega attention takes 64 or 128 query heads and eight heads per wo_a
     group. Smaller TP shards pad only the projected Q activation; the GEMM
     keeps its local head count. CP partitions query tokens without changing
     the sparse KV slot/length contract.
     """
-    if os.environ.get("DSV41_MEGA_ATTENTION", "0") != "1":
+    if os.environ.get("DSV41_MEGA_ATTENTION", "1") != "1":
         return False
     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -142,7 +144,7 @@ class MegaAttention(torch.nn.Module):
     def reload_weights(self, attn):
         """Refresh derived weights in place without replacing captured buffers.
 
-        Explicit refresh ignores the experiment env because already captured
+        Explicit refresh ignores the feature env because already captured
         graphs may still reference these prepared tensors.
         """
         qw, qs, ow, oscale = _permuted_weights(attn, self.backend)

@@ -54,6 +54,10 @@ class Tensor:
 
 class EngramPrefetchTest(unittest.TestCase):
     def setUp(self):
+        # These tests explicitly exercise the optional GPU prefetch path.
+        context = patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "0"})
+        context.start()
+        self.addCleanup(context.stop)
         self.current, self.side, self.event = Mock(), Mock(), Mock()
         self.rows = Tensor()
         self.embedding = Mock(return_value=self.rows)
@@ -432,6 +436,7 @@ class EngramPrefetchTest(unittest.TestCase):
         )
         model.kv_cache = object()
         model._engram_forward_active = False
+        model._is_decode_role = False
         model._engram_layers = ((1, 0),)
         model._image_plan = object()
         model._prepare_engram = Mock()
@@ -578,6 +583,98 @@ class EngramPrefetchTest(unittest.TestCase):
         plan.clear.assert_called_once()
         self.assertFalse(model._engram_forward_active)
         self.assertIsNone(self.layer.engram_hashes)
+
+    def test_default_cpu_mode_only_runs_for_ordinary_prefill(self):
+        model, inputs = self._model()
+        model._v4_args = SimpleNamespace(v41_config={})
+        inputs.engram_token_windows_host = torch.zeros(16, 4, dtype=torch.int32)
+        for case in ("prefill", "decode_role", "decode", "verify", "fmha", "capture"):
+            with self.subTest(case=case):
+                model._is_decode_role = case == "decode_role"
+                inputs.attention_inputs.is_prefill = case != "decode"
+                inputs.attention_inputs.is_target_verify = case == "verify"
+                plan = Mock()
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(
+                        torch.cuda,
+                        "is_current_stream_capturing",
+                        return_value=case == "capture",
+                    ),
+                    patch.object(
+                        engram, "EngramCPULookupPrefetch", return_value=plan
+                    ) as prepare,
+                ):
+                    self.assertEqual(
+                        model(inputs, "decode" if case == "fmha" else None),
+                        "output",
+                    )
+                if case == "prefill":
+                    prepare.assert_called_once_with(
+                        model, inputs.engram_token_windows_host, 129264
+                    )
+                    plan.clear.assert_called_once()
+                else:
+                    prepare.assert_not_called()
+
+    def test_explicit_cpu_flag_cannot_enable_decode_role_prefetch(self):
+        model, inputs = self._model()
+        model._is_decode_role = True
+        with (
+            patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}),
+            patch.object(engram, "EngramCPULookupPrefetch") as prepare,
+        ):
+            self.assertEqual(model(inputs), "output")
+        prepare.assert_not_called()
+
+
+class EngramLookupDefaultsTest(unittest.TestCase):
+    def test_role_defaults_and_explicit_overrides_do_not_mutate_environment(self):
+        for decode in (False, True):
+            for override in (None, "0", "1"):
+                with self.subTest(decode=decode, override=override):
+                    env = (
+                        {}
+                        if override is None
+                        else {"DSV41_CPU_ENGRAM_LOOKUP": override}
+                    )
+                    with patch.dict(os.environ, env, clear=True):
+                        self.assertEqual(
+                            engram.engram_cpu_lookup_enabled(is_decode_role=decode),
+                            not decode if override is None else override == "1",
+                        )
+                        self.assertFalse(
+                            engram.engram_lookup_prefetch_enabled(is_decode_role=decode)
+                        )
+                        self.assertEqual(dict(os.environ), env)
+
+    def test_cpu_runtime_initializes_once_for_prefill_and_never_for_decode(self):
+        for decode in (False, True):
+            for override in (None, "0", "1"):
+                with self.subTest(decode=decode, override=override):
+                    env = (
+                        {}
+                        if override is None
+                        else {"DSV41_CPU_ENGRAM_LOOKUP": override}
+                    )
+                    model = SimpleNamespace(
+                        _is_decode_role=decode, _engram_cpu_runtime=None
+                    )
+                    runtime = SimpleNamespace(capacity=16, slots={})
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch.object(
+                            engram, "EngramCPULookupRuntime", return_value=runtime
+                        ) as create,
+                    ):
+                        engram.prepare_engram_cpu_lookup(model, max_m=16)
+                        engram.prepare_engram_cpu_lookup(model, max_m=16)
+                    if not decode and override != "0":
+                        create.assert_called_once_with(model, 16)
+                        self.assertIs(model._engram_cpu_runtime, runtime)
+                    else:
+                        create.assert_not_called()
+                        self.assertIsNone(model._engram_cpu_runtime)
 
 
 class EngramCPUPrefetchTest(unittest.TestCase):
@@ -1010,9 +1107,10 @@ class EngramCPUPrefetchTest(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "DSV41_CPU_ENGRAM_LOOKUP_THREADS": "16",
+                    "OMP_NUM_THREADS": "8",
                     "DSV41_CPU_ENGRAM_LOOKUP_TIMING": "0",
                 },
+                clear=True,
             ),
             patch.dict(
                 sys.modules,
@@ -1039,6 +1137,7 @@ class EngramCPUPrefetchTest(unittest.TestCase):
             ((16384, 6336), dict(dtype=torch.uint8, device=torch.device("cuda:0"))),
         )
         self.assertTrue(all(slot.packed for slot in slots))
+        self.assertTrue(all(slot.num_threads == 16 for slot in slots))
         self.assertEqual(
             sum(slot.host.numel() * slot.host.element_size() for slot in slots),
             396 * 1024**2,
