@@ -172,7 +172,7 @@ class CacheGateTest(unittest.TestCase):
                 step_s=1,
                 sustain_s=15,
             ),
-            baseline_start=0,
+            baseline_start=10,
             baseline_end=20,
             initial_engines=["p0", "p1"],
             survivors=["p0"],

@@ -6,6 +6,7 @@ import math
 from bisect import bisect_right
 
 from analysis.statistics import counter_delta, select_window
+from cases.cache_scale_in.status_reporting import summarize as status_reporting
 
 
 COUNTERS = (
@@ -244,39 +245,6 @@ def window(rows, start, end, names, max_gap_s):
     return result
 
 
-def status_reporting(evidence):
-    """Sampled per-engine minima/maxima, keeping withdrawn workers out of survivor gates."""
-    transition = [event['t'] for event in evidence.get('events', [])
-                  if event['id'] in {'withdraw_start', 'intermediate_withdraw_start'}]
-    bounds = {'baseline': (evidence['baseline_start'], evidence['baseline_end']),
-              'transition': (min(transition) if transition else evidence['baseline_end'], evidence['post_start']),
-              'post': (evidence['post_start'], evidence['post_end'])}
-    measurements, errors = {}, ([] if transition else ['missing withdrawal event for status reporting'])
-    for phase, (start, end) in bounds.items():
-        rows = [row for row in evidence['samples'] if start <= row['t'] <= end]
-        names = evidence['initial_engines'] if phase == 'baseline' else evidence['survivors']
-        rates, latencies = [], []
-        if not rows or not names or end < start:
-            errors.append('missing status reporting window: ' + phase)
-        if rows and (rows[0]['t'] - start > evidence['criteria']['max_gap_s']
-                     or end - rows[-1]['t'] > evidence['criteria']['max_gap_s']
-                     or any(b['t'] - a['t'] > evidence['criteria']['max_gap_s'] for a, b in zip(rows, rows[1:]))):
-            errors.append('status reporting sample gap: ' + phase)
-        for row in rows:
-            for name in names:
-                engine = row['engines'].get(name, {})
-                values = [engine.get('worker_status_qps'), engine.get('worker_status_rt_us')]
-                if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in values):
-                    errors.append('missing or invalid WorkerStatus metrics: ' + phase + '/' + name)
-                else:
-                    rates.append(values[0]); latencies.append(values[1])
-        measurements[phase] = dict(start=start, end=end, engines=list(names), samples=len(rows),
-                                   min_qps=min(rates) if rates else None,
-                                   max_rt_us=max(latencies) if latencies else None)
-    valid = not errors
-    return measurements, (min(m['min_qps'] for m in measurements.values()) if valid else None), \
-        (max(m['max_rt_us'] for m in measurements.values()) if valid else None), errors
-
 
 def analyze(evidence):
     p, rows = evidence["criteria"], evidence["samples"]
@@ -356,8 +324,8 @@ def analyze(evidence):
     status_windows, status_qps, status_latency, status_errors = status_reporting(evidence)
     errors.extend(status_errors)
     verdict, checks = gate_checks([
-        evaluate('status_min_qps', status_qps, 'ge', p['status_min_qps']) if status_qps is not None else invalid_check('status_min_qps'),
-        evaluate('status_max_rt_us', status_latency, 'le', p['status_max_rt_us']) if status_latency is not None else invalid_check('status_max_rt_us'),
+        evaluate('status_min_rolling_qps', status_qps, 'ge', p['status_min_qps']) if status_qps is not None else invalid_check('status_min_rolling_qps'),
+        evaluate('status_p99_rt_us', status_latency, 'le', p['status_max_rt_us']) if status_latency is not None else invalid_check('status_p99_rt_us'),
         evaluate("collapse_detected", int(first_collapse is not None), "eq", int(expected == "collapse"),
                  evidence=dict(op="eq", threshold=threshold, sustain_s=p["sustain_s"],
                                first_collapse_s=first_collapse)),
@@ -368,7 +336,8 @@ def analyze(evidence):
     hits = [w["hit"] for w in halves]
     measured = [*halves, *windows]
     rates = [abs(w["sent_qps"] / p["qps"] - 1) if w["sent_qps"] is not None else None for w in measured]
-    gate_metrics = dict(status_min_qps=status_qps, status_max_rt_us=status_latency,
+    gate_metrics = dict(status_min_rolling_qps=status_qps, status_p99_rt_us=status_latency,
+        status_max_rt_us=max((w["max_rt_us"] for w in status_windows.values() if w["max_rt_us"] is not None), default=None),
         baseline_min_half_hit=min(hits) if all(v is not None for v in hits) else None,
         baseline_half_spread=abs(hits[0]-hits[1]) if all(v is not None for v in hits) else None,
         min_window_completed=min(w["completed"] for w in measured),
@@ -376,7 +345,7 @@ def analyze(evidence):
         collapse_detected=int(first_collapse is not None),
     )
     return dict(
-        cache_scale_in_analysis_schema_version=2,
+        cache_scale_in_analysis_schema_version=3,
         gate_metrics=gate_metrics,
         status_reporting=status_windows,
         measurement_scope=scope_contract(evidence) if scoped else {

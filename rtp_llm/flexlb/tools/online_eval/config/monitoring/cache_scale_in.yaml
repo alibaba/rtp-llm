@@ -325,7 +325,7 @@ produced:
     unit: boolean
     value_kind: scalar
     labels: []
-  cache_gate/status_min_qps:
+  cache_gate/status_min_rolling_qps:
     producer: cache_windows
     source_type: prometheus
     unit: requests/s
@@ -337,3 +337,22 @@ produced:
     unit: us
     value_kind: scalar
     labels: []
+  cache_gate/status_p99_rt_us:
+    producer: cache_windows
+    source_type: prometheus
+    unit: us
+    value_kind: scalar
+    labels: []
+  derived/status_min_rolling_qps:
+    producer: cache_windows
+    source_type: prometheus
+    unit: requests/s
+    value_kind: gauge
+    labels: []
+  derived/status_p99_rt_us:
+    producer: cache_windows
+    source_type: prometheus
+    unit: us
+    value_kind: gauge
+    labels:
+    - phase

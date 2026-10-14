@@ -105,14 +105,15 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
-    survivor_style = presentation.charts.curves["derived/survivor_hit_ratio"]
     store = MetricStore.read(directory)
-    for observation in store.document["metrics"].get("derived/survivor_hit_ratio", []):
-        curves.append(materialize(
-            "derived/survivor_hit_ratio", survivor_style, observation["points"],
-            origin=evidence_origin(evidence), provenance=observation["provenance"],
-            description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
-        ))
+    for identity in ('derived/survivor_hit_ratio', 'derived/status_min_rolling_qps', 'derived/status_p99_rt_us'):
+        style = presentation.charts.curves[identity]
+        for observation in store.document['metrics'].get(identity, []):
+            phase = observation['labels'].get('phase')
+            curves.append(materialize(identity, style, observation['points'],
+                name=style.name + (' · ' + phase if phase else ''),
+                origin=evidence_origin(evidence), provenance=observation['provenance'],
+                description=observation['provenance'].get('calculation', 'frozen case measurement')))
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]

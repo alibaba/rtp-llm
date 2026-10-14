@@ -206,7 +206,7 @@ parameters:
       op: eq
       expected: 0
     status_qps:
-      metric: cache_gate/status_min_qps
+      metric: cache_gate/status_min_rolling_qps
       unit: requests/s
       windows:
       - baseline
@@ -215,7 +215,7 @@ parameters:
       op: ge
       expected: 10
     status_latency:
-      metric: cache_gate/status_max_rt_us
+      metric: cache_gate/status_p99_rt_us
       unit: us
       windows:
       - baseline

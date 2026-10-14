@@ -16,7 +16,8 @@ def metric_contract(producer, identity, calculation):
         source, population, accuracy = 'prometheus', 'surviving_prefill_engines', 'counter_delta'
     elif identity == 'cache_gate/offered_qps_deviation':
         source, population, accuracy = 'client_journal', 'baseline_initial_fleet_and_post_survivors', 'request_ledger'
-    elif identity in {'cache_gate/status_min_qps', 'cache_gate/status_max_rt_us'}:
+    elif identity in {'cache_gate/status_min_rolling_qps', 'cache_gate/status_p99_rt_us',
+                       'cache_gate/status_max_rt_us', 'derived/status_min_rolling_qps', 'derived/status_p99_rt_us'}:
         source, population, accuracy = 'prometheus', 'baseline_fleet_and_transition_post_survivors', 'sampled'
     elif identity in {'cache_gate/' + key for key in ('baseline_min_half_hit', 'baseline_half_spread',
                                                     'min_window_completed', 'collapse_detected')}:
@@ -43,6 +44,23 @@ def produce(directory, evidence, result):
                               calculation="survivor hit/context counter delta; timestamp is window end",
                               survivors=evidence.get("survivors", []),
                               measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID"))
+
+    status = result['status_reporting']
+    rolling = [[anchor+point['t'], point['min_rolling_qps']]
+               for phase in status.values() for point in phase['rolling_qps']]
+    percentile = [series_row([[anchor+phase['start'], phase['p99_rt_us']],
+                              [anchor+phase['end'], phase['p99_rt_us']]],
+                             epoch=epoch, source='cache_gate', labels={'phase': name})
+                  for name, phase in status.items() if phase['samples']]
+    for metric, series in (('derived/status_min_rolling_qps', [series_row(rolling, epoch=epoch, source='cache_gate', labels={})]),
+                           ('derived/status_p99_rt_us', percentile)):
+        if metric in store.document['definitions']:
+            publish(store, metric, store.document['definitions'][metric],
+                    series, producer='cache_windows',
+                    evidence=dict(path=str(directory) + '/cache-gate-evidence.json',
+                                  calculation='per-engine trailing 10s QPS mean / phase sampled p99; worst engine',
+                                  scope='baseline initial population; transition and post survivors',
+                                  measurement_validity='INVALID' if result['verdict'] == 'INVALID' else 'VALID'))
 
     for metric, value in result["gate_metrics"].items():
         identity = "cache_gate/" + metric

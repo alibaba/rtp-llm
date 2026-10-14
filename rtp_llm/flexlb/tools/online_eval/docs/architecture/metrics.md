@@ -2,6 +2,12 @@
 
 case 和报告共用 `metrics.json` 中的稳定 `metric_id`。exporter 的物理指标名、查询 ID、曲线 ID 和展示名承担不同职责；只有指标定义决定取数口径，不能通过展示名反推查询。
 
+## Gauge 的时间聚合与采样分位数
+
+多引擎门禁先分别计算每个引擎的统计量，再跨引擎取最差值，不能用全体引擎的均值掩盖单个引擎的异常。滚动 QPS 使用左保持的 Gauge 序列按实际时间积分；短阶段沿用同一引擎的前序观测，缺少完整回看、身份变化或超过允许采样间隔时判 INVALID，不缩短窗口或补零。曲线在采样时刻及滚动窗口左边界越过采样点的时刻计算，避免不规则采样漏掉极值。
+
+最近一次服务端读取耗时是 Gauge。对它使用 nearest-rank 分位数只能称为采样 p99，不能解释为全部 RPC 的 p99。阶段分别取每引擎采样分位数后再取最差值，归档保存样本数、原始最大值和聚合方法；最大值可用于诊断展示而不参与分位数门禁。相邻阶段的共用边界归后一个阶段，最终阶段包含终点；零时长阶段不重复计入边界样本。报告中的阶段统计线是阶段结束后计算的结果。
+
 ## Master CPU 测量边界
 
 `master_cpu.yaml` 复用 Master 的 Spring Boot Actuator / Micrometer 指标，不在 Mock 引擎中模拟 CPU。`process_cpu_usage` 来自 JMX `getProcessCpuLoad`，包含 JVM 用户态与内核态 CPU；`system_cpu_usage` 来自系统 CPU load，包含同一可见环境中的其他进程。显示值乘 100；`system_cpu_count` 保留 `Runtime.availableProcessors` 作为容量上下文。测量范围受 cgroup、CPU affinity 和 JVM 参数影响，不能将该处理器数一律解释为独占配额，亦不据此换算精确使用核数。负值表示不可用，查询丢弃该值，不补零。
