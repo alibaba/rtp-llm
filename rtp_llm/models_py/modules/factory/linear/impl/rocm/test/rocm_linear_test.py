@@ -62,7 +62,11 @@ class FakeSharedExpert(nn.Module):
 
 class FakeSigmoidGateScaleAdd(nn.Module):
     def forward(self, gate_output, shared_expert_output, experts_output, topk_sum=None):
+        # Contract of the real base/rocm and base/cuda modules (ca9da5f87f):
+        # in-place add on experts_output AND return it — GenericMoeLayer's
+        # merge branches consume the return value.
         experts_output.add_(torch.sigmoid(gate_output) * shared_expert_output)
+        return experts_output
 
 
 class LinearTest(TestCase):
