@@ -1,4 +1,4 @@
-"""Native BF16/FP32 DeepSelect for V4.1 prefill token K512.
+"""Native BF16/FP32 DeepSelect for V4.1 dense token K512.
 
 Scores retain their input precision. The kernel canonicalizes NaN to +inf
 before ranking and optionally filters selected nonfinite values to -1, also
@@ -22,12 +22,16 @@ def _device_supported(device: torch.device) -> bool:
     return torch.cuda.get_device_capability(device) in ((10, 0), (10, 3))
 
 
-def is_available(device: torch.device, dtype: torch.dtype = torch.float32) -> bool:
-    if (
-        os.environ.get("DSV41_PREFILL_DEEPSELECT", "0") != "1"
-        or torch.version.hip is not None
-        or device.type != "cuda"
-    ):
+def is_available(
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+    *,
+    enabled: bool | None = None,
+) -> bool:
+    # Decode has its own rollout switch; omitted overrides preserve prefill policy.
+    if enabled is None:
+        enabled = os.environ.get("DSV41_PREFILL_DEEPSELECT", "0") == "1"
+    if not enabled or torch.version.hip is not None or device.type != "cuda":
         return False
     if dtype == torch.bfloat16:
         if not hasattr(rtp_llm_ops, "deepselect_bf16_dense"):
@@ -40,7 +44,7 @@ def is_available(device: torch.device, dtype: torch.dtype = torch.float32) -> bo
     return available is not None and available() and _device_supported(device)
 
 
-def is_supported(logits, ends, out=None, *, filter_finite=True) -> bool:
+def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) -> bool:
     """Metadata-only admission; no score or bound is read back to the host."""
     if not (
         logits.is_cuda
@@ -89,17 +93,19 @@ def is_supported(logits, ends, out=None, *, filter_finite=True) -> bool:
         storage = out.untyped_storage().data_ptr()
         if any(t.untyped_storage().data_ptr() == storage for t in (logits, ends)):
             return False
-    return is_available(logits.device, logits.dtype)
+    return is_available(logits.device, logits.dtype, enabled=enabled)
 
 
-def try_select_tokens(logits, ends, *, out=None, filter_finite=True):
+def try_select_tokens(logits, ends, *, out=None, filter_finite=True, enabled=None):
     """Return K512 int32 indices, or None before an unsupported launch.
 
     Bounds are clamped in the native kernel. A caller using
     ``filter_finite=False`` must filter in its publication epilogue. Once a
     native launch is selected, execution errors propagate without fallback.
     """
-    if not is_supported(logits, ends, out, filter_finite=filter_finite):
+    if not is_supported(
+        logits, ends, out, filter_finite=filter_finite, enabled=enabled
+    ):
         return None
     if out is None:
         out = torch.empty(
