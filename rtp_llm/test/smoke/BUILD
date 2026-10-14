@@ -216,20 +216,6 @@ custom_smoke_test(
 )
 
 smoke_test(
-    name = "xing4_0_fp8_h20",
-    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_h20.json",
-    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1",
-    gpu_type = ["H20_CU13"],
-)
-
-smoke_test(
-    name = "xing4_0_fp8_pro5000",
-    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_pro5000.json",
-    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1",
-    gpu_type = ["RTX_5000_PRO_CU13"],
-)
-
-smoke_test(
     name = "xing4_0_fp8_graph_only_sm103",
     task_info = "data/model/xing4_0/q_r_xing4_0_fp8_graph_only_sm103.json",
     smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1",

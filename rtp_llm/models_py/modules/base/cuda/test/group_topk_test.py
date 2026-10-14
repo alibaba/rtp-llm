@@ -186,7 +186,7 @@ class MLATest(TestCase):
 
     def _run_bf16_gate_tests(
         self, seq_length, num_experts, num_expert_group, topk_group, topk, seed,
-        bias_dtype,
+        bias_dtype, logit_range=(0.0, 1.0),
     ):
         # Xing4 call form (see model_desc/generic_moe.py): raw bf16 router
         # logits plus the e_score_correction_bias are handed to the GroupTopK
@@ -196,10 +196,12 @@ class MLATest(TestCase):
         # the real serving configuration; the bf16-bias variant covers
         # checkpoints that keep the bias in the model dtype.
         torch.manual_seed(seed)
-        gating_output = torch.rand(
-            (seq_length, num_experts), dtype=torch.bfloat16, device="cuda"
-        )
-        bias = torch.rand(num_experts, dtype=bias_dtype, device="cuda")
+        gating_output = (
+            torch.rand((seq_length, num_experts), device="cuda") * (logit_range[1] - logit_range[0]) + logit_range[0]
+        ).to(torch.bfloat16)
+        bias = (
+            torch.rand(num_experts, device="cuda") * 0.2 - 0.1
+        ).to(bias_dtype)
 
         # 1) Numerics gate (bitwise): with renormalize=False and
         #    routed_scaling_factor=1.0 the kernel writes the fp32 sigmoid
@@ -262,6 +264,19 @@ class MLATest(TestCase):
             ):
                 self._run_bf16_gate_tests(
                     *params, seed=100 + params[0], bias_dtype=torch.float32
+                )
+
+    def test_bf16_sigmoid_gate_xing4_shape(self):
+        # Xing4.0-29B-A4B production shape: 64 routed experts, n_group=1,
+        # top-4 — this exercises the >WARP_SIZE per-lane top-2 branch (the
+        # group-select degenerates with a single group), unlike the 256/8
+        # DeepSeek shape above which takes the group loop. Logits span
+        # negative and large values (real router scores are signed).
+        for seq_length, seed in ((7, 11), (129, 12)):
+            with self.subTest(seq_length=seq_length):
+                self._run_bf16_gate_tests(
+                    seq_length, 64, 1, 1, 4, seed=seed, bias_dtype=torch.float32,
+                    logit_range=(-8.0, 8.0),
                 )
 
     def test_bf16_sigmoid_gate_same_dtype_bias(self):
