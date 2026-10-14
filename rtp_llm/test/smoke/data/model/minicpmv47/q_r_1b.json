@@ -1,6 +1,6 @@
 {
     "model_type": "minicpmv4_7",
-    "model_path": "/data0/liukan.lk/models/MiniCPM-V-4.7-1B",
+    "model_path": "/mnt/fuse/smoke-test/hf/openbmb--MiniCPM-V-4.7-1B--6fde9ecee3e59c4b0ce555a9c774e179d46d19cc",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",

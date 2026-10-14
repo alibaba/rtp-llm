@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
-MODEL_PATH = "/data0/liukan.lk/models/MiniCPM-V-4.7-1B"
+MODEL_PATH = "/mnt/fuse/smoke-test/hf/openbmb--MiniCPM-V-4.7-1B--6fde9ecee3e59c4b0ce555a9c774e179d46d19cc"
 BLOCK_SIZE = 2048
 # Resolve the smoke image from the test runfiles so the URL works regardless
 # of the server process cwd (custom tests do not inherit the entry.py cwd).
