@@ -212,7 +212,15 @@ def _use_clean_logits_only(device: torch.device) -> bool:
 
 
 def score_indexer_chunk(
-    q_payload, q_sf, k_payload, k_sf, weights, visible, *, bounds=None
+    q_payload,
+    q_sf,
+    k_payload,
+    k_sf,
+    weights,
+    visible,
+    *,
+    bounds=None,
+    return_bf16=False,
 ):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
     from ._indexer_score import fp8_fp4_mqa_indexer_score
@@ -220,7 +228,10 @@ def score_indexer_chunk(
     count = k_payload.shape[0]
     if q_payload.shape[0] == 0 or count == 0:
         return torch.empty(
-            q_payload.shape[0], count, dtype=torch.float32, device=q_payload.device
+            q_payload.shape[0],
+            count,
+            dtype=torch.bfloat16 if return_bf16 else torch.float32,
+            device=q_payload.device,
         )
     if bounds is None:
         ends = visible.to(torch.int32).clamp(0, count).contiguous()
@@ -240,11 +251,12 @@ def score_indexer_chunk(
         starts,
         ends,
         clean_logits=True,
-        # Wrapper restores the ordinary [M,K] layout and masks causal tails
-        # from upstream's request-relative BF16 score output.
-        max_seqlen_k=0,
+        # Direct consumers use request-local columns and explicit row bounds.
+        # Preserve the masked FP32 compatibility result for other callers.
+        max_seqlen_k=count if return_bf16 else 0,
+        return_bf16=return_bf16,
     )
-    if not _use_clean_logits_only(q_payload.device):
+    if not return_bf16 and not _use_clean_logits_only(q_payload.device):
         logits.masked_fill_(
             torch.arange(count, device=logits.device)[None] >= ends[:, None],
             -torch.inf,

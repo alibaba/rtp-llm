@@ -927,6 +927,26 @@ public:
     static constexpr uint16_t PLACEHOLDER     = 0xff80;  // -INF
     static constexpr uint32_t NEG_INF_X2_BITS = 0xFF80FF80u;
 
+    // RTP dense token selection ranks both signs of NaN like +inf. Transform
+    // only loaded registers; sparse instantiations compile this out entirely.
+    static __device__ __forceinline__ uint32_t canonicalize_nan(uint32_t bits) {
+        if constexpr (Config::canonicalize_nan) {
+            return (bits & 0x7fffu) > 0x7f80u ? 0x7f80u : bits;
+        } else {
+            return bits;
+        }
+    }
+
+    static __device__ __forceinline__ nv_bfloat162 canonicalize_nan_pair(nv_bfloat162 value) {
+        if constexpr (Config::canonicalize_nan) {
+            uint32_t bits = *reinterpret_cast<const uint32_t*>(&value);
+            bits          = canonicalize_nan(bits & 0xffffu) | (canonicalize_nan(bits >> 16) << 16);
+            return u32_to_bf16x2(bits);
+        } else {
+            return value;
+        }
+    }
+
     // Histogram pass 1 (MSB radix): for each distorted bf16x2 value, retrieve the upper 8 bits and performs atomicAdd
     // on the bucket counter `num_packed_values` should be guaranteed to be aligned by `NUM_PACKED_VALUES_ALIGNMENT`
     template<uint32_t N, uint32_t NUM_PACKED_VALUES_ALIGNMENT = 1>
@@ -1022,19 +1042,34 @@ public:
             if (i % NUM_PACKED_VALUES_ALIGNMENT == 0 && i == num_packed_values)
                 break;
             uint32_t raw = bf16x2_to_u32(values[i]);
-            asm volatile("{\n"
-                         ".reg .b32 gt_result, eq_result;\n"
-                         "set.gt.bf16x2.bf16x2 gt_result, %3, %4;\n"
-                         "add.rn.bf16x2 %0, gt_result, %0;\n"
-                         "set.eq.bf16x2.bf16x2 eq_result, %3, %4;\n"
-                         "add.rn.bf16x2 %1, eq_result, %1;\n"
-                         "min.NaN.bf16x2 %2, %2, %3;\n"  // We use `min.NaN` for NaN detection
-                         "}\n"
-                         : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum), "+r"(*(uint32_t*)&nan_accum)
-                         : "r"(raw), "r"(pivot_value_x2_bits));
+            if constexpr (Config::canonicalize_nan) {
+                asm volatile("{\n"
+                             ".reg .b32 gt_result, eq_result;\n"
+                             "set.gt.bf16x2.bf16x2 gt_result, %2, %3;\n"
+                             "add.rn.bf16x2 %0, gt_result, %0;\n"
+                             "set.eq.bf16x2.bf16x2 eq_result, %2, %3;\n"
+                             "add.rn.bf16x2 %1, eq_result, %1;\n"
+                             "}\n"
+                             : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum)
+                             : "r"(raw), "r"(pivot_value_x2_bits));
+            } else {
+                asm volatile("{\n"
+                             ".reg .b32 gt_result, eq_result;\n"
+                             "set.gt.bf16x2.bf16x2 gt_result, %3, %4;\n"
+                             "add.rn.bf16x2 %0, gt_result, %0;\n"
+                             "set.eq.bf16x2.bf16x2 eq_result, %3, %4;\n"
+                             "add.rn.bf16x2 %1, eq_result, %1;\n"
+                             "min.NaN.bf16x2 %2, %2, %3;\n"  // We use `min.NaN` for NaN detection
+                             "}\n"
+                             : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum), "+r"(*(uint32_t*)&nan_accum)
+                             : "r"(raw), "r"(pivot_value_x2_bits));
+            }
         }
         uint32_t cnt_gt = (uint32_t)(float)(gt_accum.x + gt_accum.y);
         uint32_t cnt_eq = (uint32_t)(float)(eq_accum.x + eq_accum.y);
+        if constexpr (Config::canonicalize_nan) {
+            return {cnt_gt, cnt_eq, 0};
+        }
         uint32_t nan_flag;
         asm("set.nan.bf16x2.bf16x2 %0, %1, %1;" : "=r"(nan_flag) : "r"(*(uint32_t*)&nan_accum));
         uint32_t cnt_nan = nan_flag != 0 ? 1u : 0u;
@@ -1302,6 +1337,10 @@ public:
                         ld_shared<4>(
                             my_values + k * 4,
                             reinterpret_cast<const nv_bfloat162*>(init_buf + Base::sw_b128(pos) * NUM_ELEMS_PER_128b));
+                        CUTE_UNROLL
+                        for (uint32_t v = 0; v < 4; ++v) {
+                            my_values[k * 4 + v] = canonicalize_nan_pair(my_values[k * 4 + v]);
+                        }
                         num_my_values = 4 * (k + 1);
                     }
                 }
@@ -1317,6 +1356,11 @@ public:
                 uint32_t u0 = my_elem_start_idx / NUM_ELEMS_PER_128b + j;
                 ld_shared<4>(init_values + j * NUM_UINT32_PER_128b,
                              reinterpret_cast<const nv_bfloat162*>(init_buf + Base::sw_b128(u0) * NUM_ELEMS_PER_128b));
+                CUTE_UNROLL
+                for (uint32_t v = 0; v < NUM_UINT32_PER_128b; ++v) {
+                    init_values[j * NUM_UINT32_PER_128b + v] =
+                        canonicalize_nan_pair(init_values[j * NUM_UINT32_PER_128b + v]);
+                }
             }
 
             __syncthreads();  // publish the round-1 histogram
@@ -1477,6 +1521,13 @@ public:
                 ValueT values[NUM_ELEMS_PER_THREAD_PER_ROUND];
                 Base::template load_swizzled_slice<NUM_128b_PER_THREAD_PER_ROUND>(
                     values, buf, smem_read_offset, chunk_swizzle_mask);
+                if constexpr (Config::canonicalize_nan) {
+                    CUTE_UNROLL
+                    for (uint32_t j = 0; j < NUM_ELEMS_PER_THREAD_PER_ROUND; j += 2) {
+                        auto* pair = reinterpret_cast<nv_bfloat162*>(values + j);
+                        *pair      = canonicalize_nan_pair(*pair);
+                    }
+                }
                 CUTE_UNROLL
                 for (int32_t j = NUM_ELEMS_PER_THREAD_PER_ROUND - 4; j >= 0; j -= 4) {
                     asm volatile(
@@ -1523,6 +1574,7 @@ public:
                 asm volatile("ld.shared.u16 %0, [%1];"
                              : "=r"(first_hit_val)
                              : "r"(elem_addr_base + ((first_hit_e ^ chunk_swizzle_mask) << 1)));
+                first_hit_val = canonicalize_nan(first_hit_val);
             }
 
             // Lane prefix via one ballot per bit of the (<= 16) hit count: the ballots are independent,
@@ -1556,6 +1608,7 @@ public:
                     asm volatile("ld.shared.u16 %0, [%1];"
                                  : "=r"(val_word)
                                  : "r"(elem_addr_base + ((e ^ chunk_swizzle_mask) << 1)));
+                    val_word = canonicalize_nan(val_word);
                     asm volatile(
                         "st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr), "r"(seg_elem_base + e), "r"(val_word)
                         : "memory");

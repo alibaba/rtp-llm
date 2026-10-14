@@ -6,8 +6,10 @@ Adapted from vLLM's model_executor/kernels/attention/dsa/candidate_blocks.py
 and RTP's _v41_decode_topk.py. Bitmap publication retains torch.topk(sorted=True).
 Candidate-only publication skips the final score sort: sparse plans sort and
 deduplicate block IDs before scoring, so they only consume the selected set.
-The caller has already applied causal masking to logits, as in the old
-select_candidate_blocks path. Only newest-block overwrite is done here.
+BF16 logits are promoted in registers before the FP32 block reduction and
+selection, preserving the old BF16-to-FP32 normalization semantics without
+materializing a full FP32 score tensor. The caller either applies causal
+masking or requests it at the pooling load with ``mask_tail=True``.
 
 The reusable flags are int32 bitmaps, with 32 candidate blocks per word.
 Rows may be slices of a larger cache, and that cache may have extra words
@@ -55,7 +57,7 @@ def is_supported(
 ) -> bool:
     return (
         logits.is_cuda
-        and logits.dtype == torch.float32
+        and logits.dtype in (torch.float32, torch.bfloat16)
         and logits.ndim == 2
         and logits.shape[0] > 0
         and 0 < logits.shape[1] <= 1 << 20
@@ -133,7 +135,7 @@ def _prefill_candidate_pool_kernel(
         logits + row * STRIDE + columns,
         mask,
         other=-float("inf"),
-    )
+    ).to(tl.float32)
     pooled = _torch_amax(values, BLOCK_SIZE)
     if not MASK_TAIL:
         length = tl.load(visible + row * VISIBLE_STRIDE)
@@ -160,7 +162,7 @@ def _prefill_candidate_pool_kernel(
             in_range = (index >= 0) & (index < end)
             value = tl.load(
                 logits + row * STRIDE + index, in_range, other=-float("inf")
-            )
+            ).to(tl.float32)
             keep = in_range & (tl.abs(value) < float("inf"))
             tl.store(token_indices + row * 512 + slot, tl.where(keep, index, -1))
 
@@ -382,7 +384,9 @@ def select_candidates(
                 token_indices is not None,
             )
             return out, None
-    scores = torch.empty((rows, nblocks), dtype=logits.dtype, device=logits.device)
+    # Keep the pooled TopK input FP32 even for raw BF16 logits: narrowing the
+    # reduction output would change the existing selection/tie contract.
+    scores = torch.empty((rows, nblocks), dtype=torch.float32, device=logits.device)
     _prefill_candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
         logits,
         visible,
@@ -471,7 +475,7 @@ def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) 
     """Apply a previously built bitmap in place; False means no work launched."""
     if not (
         logits.is_cuda
-        and logits.dtype == torch.float32
+        and logits.dtype in (torch.float32, torch.bfloat16)
         and logits.ndim == 2
         and logits.shape[0] > 0
         and 0 < logits.shape[1] <= 1 << 20

@@ -221,12 +221,15 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             token_indices=None,
             token_ends=None,
         ):
-            if mask_tail:
+            if mask_tail and token_indices is not None:
                 self.assertEqual(token_indices.shape, (len(logits), 512))
                 self.assertEqual(token_indices.dtype, torch.int32)
                 self.assertTrue(token_indices.is_contiguous())
                 self.assertIs(token_ends, visible)
                 self.assertTrue(token_ends.is_contiguous())
+            elif mask_tail:
+                self.assertEqual(logits.dtype, torch.bfloat16)
+                self.assertIsNone(token_ends)
             ids = torch.zeros(
                 (len(logits), min(count, (logits.shape[1] + block - 1) // block)),
                 dtype=torch.int32,
@@ -261,7 +264,18 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                         )
                         all_calls = candidates.select_candidates.call_args_list
                         calls = [c for c in all_calls if not c.kwargs.get("mask_tail")]
-                        fused = [c for c in all_calls if c.kwargs.get("mask_tail")]
+                        fused = [
+                            c
+                            for c in all_calls
+                            if c.kwargs.get("mask_tail")
+                            and c.kwargs.get("token_indices") is not None
+                        ]
+                        masked = [
+                            c
+                            for c in all_calls
+                            if c.kwargs.get("mask_tail")
+                            and c.kwargs.get("token_indices") is None
+                        ]
                         direct = [
                             c for c in calls if c.kwargs.get("build_bitmap") is False
                         ]
@@ -271,8 +285,28 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                         widths = set(warmup._candidate_widths(length, 8, 2048)) | {
                             min(length, 16384)
                         }
+                        self.assertEqual(len(masked), 4 * len(widths))
                         self.assertEqual(
-                            len(fused), 2 * len(widths) if stride == 1 else 0
+                            {
+                                (
+                                    c.args[0].shape[1],
+                                    c.args[0].dtype,
+                                    c.args[1].dtype,
+                                    c.args[1].stride(0),
+                                    c.args[1].storage_offset(),
+                                    c.kwargs["build_bitmap"],
+                                )
+                                for c in masked
+                            },
+                            {
+                                (width, torch.bfloat16, dtype, stride, offset, bitmap)
+                                for width in widths
+                                for dtype in (torch.int32, torch.int64)
+                                for bitmap in (False, True)
+                            },
+                        )
+                        self.assertEqual(
+                            len(fused), 4 * len(widths) if stride == 1 else 0
                         )
                         if stride == 1:
                             self.assertEqual(
@@ -287,12 +321,21 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                                 },
                             )
                         self.assertEqual({c.args[0].shape[1] for c in direct}, widths)
-                        self.assertEqual(len(direct), 2 * len(widths))
+                        self.assertEqual(len(direct), 4 * len(widths))
                         self.assertEqual(len(bitmap), len(direct))
                         self.assertEqual(
-                            {c.args[1].dtype for c in direct},
-                            {torch.int32, torch.int64},
+                            {(c.args[0].dtype, c.args[1].dtype) for c in direct},
+                            {
+                                (score_dtype, visible_dtype)
+                                for score_dtype in (torch.float32, torch.bfloat16)
+                                for visible_dtype in (torch.int32, torch.int64)
+                            },
                         )
+                        if stride == 1:
+                            self.assertEqual(
+                                {c.args[0].dtype for c in fused},
+                                {torch.float32, torch.bfloat16},
+                            )
                         self.assertTrue(
                             any((c.args[0].shape[1] + 7) // 8 <= 2048 for c in direct)
                         )
@@ -365,6 +408,12 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             score=Mock(return_value=torch.zeros(1, 16392, dtype=torch.bfloat16)),
             remap=Mock(return_value=selected),
         )
+
+        def native_scores(*args, return_bf16=False, **kwargs):
+            # Direct scores keep native padded stride; compatibility scores are FP32.
+            dtype = torch.bfloat16 if return_bf16 else torch.float32
+            return torch.zeros(1, 1152, dtype=dtype)[:, :1024]
+
         indexer = SimpleNamespace(
             is_supported=lambda *args: True,
             quantize_indexer_q=Mock(
@@ -373,7 +422,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             PrefillIndexerKeys=lambda quant, scale: SimpleNamespace(
                 quant=quant, scale=scale
             ),
-            score_indexer_chunk=Mock(return_value=torch.zeros(1, 1024)),
+            score_indexer_chunk=Mock(side_effect=native_scores),
         )
         package = SimpleNamespace(
             _v41_deepselect=SimpleNamespace(
@@ -394,6 +443,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             _v41_prefill_indexer=indexer,
             _v41_prefill_metadata=meta,
             _v41_prefill_topk=SimpleNamespace(
+                supports_bf16=lambda: True,
                 is_supported=lambda *args: True,
                 try_select_tokens=Mock(return_value=selected),
                 finish_tokens=Mock(),
@@ -409,7 +459,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 return self.launch
 
         grouped_bounds, mask_tail = Kernel(), Kernel()
-        grouped_score = Mock(return_value=torch.zeros(1, 1024))
+        grouped_score = Mock(side_effect=native_scores)
         package_name = "rtp_llm.models_py.modules.dsv41.fp8"
         modules = {
             package_name: package,
@@ -452,23 +502,40 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 [torch.float32, torch.bfloat16],
             )
             self.assertEqual(
-                indexer.score_indexer_chunk.call_args.args[4].dtype, torch.float32
+                [
+                    c.kwargs["return_bf16"]
+                    for c in indexer.score_indexer_chunk.call_args_list
+                ],
+                [False, True],
             )
+            for call in indexer.score_indexer_chunk.call_args_list:
+                self.assertEqual(call.args[4].dtype, torch.bfloat16)
+            for call in grouped_score.call_args_list:
+                self.assertEqual(call.args[4].dtype, torch.bfloat16)
             for call in sparse.score.call_args_list:
                 self.assertEqual(call.args[3].dtype, torch.bfloat16)
-            capability.assert_called_once_with("cpu")
-            grouped_bounds.launch.assert_called_once()
-            grouped_score.assert_called_once()
-            mask_tail.launch.assert_called_once()
+            self.assertEqual(capability.call_count, 2)
+            self.assertEqual(grouped_bounds.launch.call_count, 2)
+            self.assertEqual(
+                [c.kwargs["return_bf16"] for c in grouped_score.call_args_list],
+                [False, True],
+            )
+            self.assertEqual(mask_tail.launch.call_count, 2)
             topk = package._v41_prefill_topk
-            self.assertEqual(topk.try_select_tokens.call_count, 6)
+            self.assertEqual(topk.try_select_tokens.call_count, 12)
+            self.assertEqual(
+                {c.args[0].dtype for c in topk.try_select_tokens.call_args_list},
+                {torch.float32, torch.bfloat16},
+            )
+            for call in topk.try_select_tokens.call_args_list:
+                self.assertEqual(call.args[0].stride(), (1152, 1))
             raw_calls = [
                 c
                 for c in topk.try_select_tokens.call_args_list
                 if c.kwargs.get("filter_finite") is False
             ]
-            self.assertEqual(len(raw_calls), 2)
-            self.assertEqual(topk.finish_tokens.call_count, 2)
+            self.assertEqual(len(raw_calls), 4)
+            self.assertEqual(topk.finish_tokens.call_count, 4)
             for call in raw_calls:
                 self.assertIs(call.kwargs["bounds"], meta.try_score_bounds.return_value)
                 self.assertEqual(call.kwargs["out"].shape, selected.shape)
@@ -502,6 +569,24 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 self.assertEqual(counts.dtype, torch.int32)
                 self.assertEqual(counts.tolist(), [16392, 16392])
                 self.assertEqual(lookup.args[2], 16640 + 16392)
+            package._v41_prefill_topk.supports_bf16 = lambda: False
+            indexer.score_indexer_chunk.reset_mock()
+            grouped_score.reset_mock()
+            topk.try_select_tokens.reset_mock()
+            warmup._warm_indexer_layout(
+                attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
+            )
+            self.assertEqual(indexer.score_indexer_chunk.call_count, 1)
+            self.assertFalse(
+                indexer.score_indexer_chunk.call_args.kwargs["return_bf16"]
+            )
+            self.assertEqual(grouped_score.call_count, 1)
+            self.assertFalse(grouped_score.call_args.kwargs["return_bf16"])
+            self.assertEqual(topk.try_select_tokens.call_count, 6)
+            self.assertEqual(
+                {c.args[0].dtype for c in topk.try_select_tokens.call_args_list},
+                {torch.float32},
+            )
             # Supported warmup work must fail loudly if a helper stops launching.
             meta.try_score_bounds.return_value = None
             with self.assertRaisesRegex(RuntimeError, "score bounds"):
