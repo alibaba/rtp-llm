@@ -124,7 +124,6 @@ def _ha_start(ctx, params, deadline):
             errors=() if snapshot["complete"] else tuple(snapshot["errors"] or ["incomplete HA client"]))
     handle = ctx.register_resource("ha_client", client, client.cleanup, evidence=export_client)
     deadline.check()
-    client.gate_window_start = ctx.record_event('ha_started')['epoch_s']
     client.start(deadline)
     deadline.check()
     return StageOutput({"client": handle})
@@ -144,10 +143,7 @@ def _ha_finish(ctx, params, deadline):
     rows, path = client.finish(deadline, stop_sending=params.get("stop_sending", False))
     sampler = getattr(client, "state_sampler", None)
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", rows, historical=True),
-         "window": ctx.register_resource('ha_window', dict(name='full_run',
-             start_epoch_s=getattr(client, 'gate_window_start', None),
-             end_epoch_s=ctx.record_event('ha_finished')['epoch_s']), historical=True)},
+        {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
         artifacts=[str(path)] + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
     )
 
@@ -171,7 +167,7 @@ def _window_validate(params, plan):
         params,
         plan,
         {
-            "rows", "scope", "window_name",
+            "rows",
             "from",
             "until",
             "route",
@@ -184,10 +180,6 @@ def _window_validate(params, plan):
         {"rows"},
     )
     plan.reference(p["rows"], "ha_rows")
-    if 'scope' in p:
-        plan.reference(p['scope'], 'ha_window')
-    if 'window_name' in p and (type(p['window_name']) is not str or not p['window_name']):
-        raise ValueError('window_name must be a nonempty string')
     for key in ("from", "until"):
         if key in p:
             plan.reference(p[key], "number")
@@ -224,15 +216,9 @@ def _window(ctx, params, deadline):
     rows = ctx.resource(params["rows"], "ha_rows")
     lower = ctx.resolve(params["from"]) if "from" in params else None
     upper = ctx.resolve(params["until"]) if "until" in params else None
-    for key, value in (('from', lower), ('until', upper)):
-        if key in params and (type(value) not in (int, float) or not math.isfinite(value)):
-            raise ValueError('declared HA window boundary did not resolve: ' + key)
     from case_api.windows import resolve_window
     lower, upper = resolve_window(lower, upper,
         lower_offset_s=params.get("from_offset_s", 0), upper_offset_s=params.get("until_offset_s", 0))
-    scope = ctx.resource(params['scope'], 'ha_window') if 'scope' in params else {}
-    lower = scope.get('start_epoch_s') if 'from' not in params else lower
-    upper = scope.get('end_epoch_s') if 'until' not in params else upper
     selected = select_window(rows, -math.inf if lower is None else lower,
                              math.inf if upper is None else upper, time=lambda row: row_ts_ms(row) / 1000)
     for param, field in (
@@ -244,9 +230,7 @@ def _window(ctx, params, deadline):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", selected, historical=True),
-         "window": ctx.register_resource('ha_window', dict(name=params.get('window_name', 'request_window'),
-             start_epoch_s=lower, end_epoch_s=upper), historical=True)}
+        {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
     )
 
 
@@ -262,50 +246,25 @@ def _client_check_validate(params, plan):
             "target",
             "route",
             "min_samples",
-            "warning_profiles", "scope", "check_id", "unit",
+            "warning_profiles",
         },
         {"rows", "metric", "op", "expected"},
     )
     plan.reference(p["rows"], "ha_rows")
-    metadata = {k: p[k] for k in ('scope', 'check_id', 'unit') if k in p}
-    if 'scope' in metadata:
-        plan.reference(metadata['scope'], 'ha_window')
-    if 'check_id' in metadata and (type(metadata['check_id']) is not str or not metadata['check_id']):
-        raise ValueError('check_id must be a nonempty string')
-    from cases.master_ha_failover.analysis import GATE_REFERENCES
-    definition = next((d for d in GATE_REFERENCES if d['check'] == metadata.get('check_id')), None)
-    if definition is not None and (p['metric'] != definition['metric_id']
-                                   or metadata.get('unit') != definition['unit']):
-        raise ValueError('HA gate reference must match the declared measurement and unit')
-    if 'unit' in metadata and metadata['unit'] not in {'ratio', 'requests'}:
-        raise ValueError('invalid HA check unit')
-    criterion = validate_client_criterion({key: value for key, value in p.items()
-                                          if key not in {'rows', *metadata}})
-    return dict(criterion, rows=p["rows"], **metadata)
+    criterion = validate_client_criterion({key: value for key, value in p.items() if key != "rows"})
+    return dict(criterion, rows=p["rows"])
 
 
 def _client_check(ctx, params, deadline):
     deadline.check()
     rows = ctx.resource(params["rows"], "ha_rows")
     n = len(rows)
-    from analysis.gate_references import freeze_reference
-    from cases.master_ha_failover.analysis import GATE_REFERENCES
-    definition = next((d for d in GATE_REFERENCES if d['check'] == params.get('check_id')), None)
-    references = []
-    if definition is not None:
-        scope = ctx.resource(params['scope'], 'ha_window') if 'scope' in params else {}
-        valid_scope = (all(type(scope.get(k)) in (int, float) and math.isfinite(scope[k])
-                           for k in ('start_epoch_s', 'end_epoch_s'))
-                       and scope['start_epoch_s'] < scope['end_epoch_s'])
-        references = [freeze_reference(definition, params['expected'], [scope] if valid_scope else [],
-            op=params['op'], status='AVAILABLE' if valid_scope else 'UNAVAILABLE',
-            reason='' if valid_scope else '声明窗口未解析；不以请求首末时间代替')]
     metric = params["metric"].split("/", 1)[1]
     if n < params["min_samples"]:
         from analysis.checks import invalid_check
         return StageOutput({"actual": None}, checks=[invalid_check("criterion", detail="insufficient request samples",
             expected=params["expected"], evidence=dict(metric=params["metric"],
-                sample_count=n, min_samples=params["min_samples"], gate_references=references))])
+                sample_count=n, min_samples=params["min_samples"]))])
 
     target = None
     prefill_pool = ()
@@ -325,8 +284,7 @@ def _client_check(ctx, params, deadline):
         evidence=dict(metric=params["metric"], op=params["op"], env_epoch=ctx.env_epoch,
             input_resource=params["rows"], labels=gate_labels(params),
             sample_count=n, min_samples=params["min_samples"],
-            observed_request_bounds=[min(stamps), max(stamps)] if stamps else None,
-            gate_references=references))
+            observed_request_bounds=[min(stamps), max(stamps)] if stamps else None))
     if result.status == "WARNING":
         import logging
         logging.getLogger(__name__).warning(
@@ -345,11 +303,11 @@ HANDLERS = [
                 "master_client_start", _ha_validate, _ha_start, {"client": "ha_client"}
             ),
     StageHandler(
-                "master_client_finish", _ha_finish_validate, _ha_finish, {"rows": "ha_rows", "window": "ha_window"}
+                "master_client_finish", _ha_finish_validate, _ha_finish, {"rows": "ha_rows"}
             ),
     StageHandler("master_mark", _mark_validate, _mark, {"epoch_s": "number"}),
     StageHandler(
-                "master_client_window", _window_validate, _window, {"rows": "ha_rows", "window": "ha_window"}
+                "master_client_window", _window_validate, _window, {"rows": "ha_rows"}
             ),
     StageHandler(
                 "master_client_check",

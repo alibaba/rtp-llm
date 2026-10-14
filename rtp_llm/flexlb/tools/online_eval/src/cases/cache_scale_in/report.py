@@ -105,18 +105,14 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
+    survivor_style = presentation.charts.curves["derived/survivor_hit_ratio"]
     store = MetricStore.read(directory)
-    for identity in presentation.charts.curves:
-        if not identity.startswith(('derived/', 'cache_gate/')):
-            continue
-        style = presentation.charts.curves[identity]
-        for observation in store.document['metrics'].get(identity, []):
-            curve = materialize(identity, style, observation['points'], origin=evidence_origin(evidence),
-                provenance=observation['provenance'],
-                description='冻结门禁统计；统计对象和聚合口径见指标来源；x 为发布统计的窗口结束')
-            if len(curve['points']) <= 2:
-                curve['marker_count'] = len(curve['points'])
-            curves.append(curve)
+    for observation in store.document["metrics"].get("derived/survivor_hit_ratio", []):
+        curves.append(materialize(
+            "derived/survivor_hit_ratio", survivor_style, observation["points"],
+            origin=evidence_origin(evidence), provenance=observation["provenance"],
+            description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
+        ))
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
@@ -150,9 +146,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     )
     from reporting.events import attach_events
     origin = evidence_origin(evidence)
-    attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
-    from reporting.gate_lines import apply_gate_lines
-    return apply_gate_lines(spec, presentation, result.get('gate_references', []))
+    return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
 
 def write_report(directory, evidence, result, prepared=None, *, run=None, presentation=None):
@@ -192,9 +186,6 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    from reporting.gate_lines import validate_bindings
-    from cases.cache_scale_in.analysis import GATE_REFERENCES
-    validate_bindings(data, GATE_REFERENCES)
     validate_section_contract(path, data, {
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,

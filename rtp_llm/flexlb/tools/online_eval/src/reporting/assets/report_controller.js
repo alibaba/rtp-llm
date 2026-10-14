@@ -102,7 +102,7 @@ SPEC.panels.forEach(p=>{
         data: s.points,
         yAxisID:s.axis, hidden:s.hidden, borderDash:s.dash,
         borderColor:s.color, backgroundColor:s.color+'33',
-        borderWidth:1.5, pointRadius:s.points.length === 1 ? 3 : 0, tension:0.15, fill:false,
+        borderWidth:1.5, pointRadius:0, tension:0.15, fill:false,
       }))
     },
     options:{

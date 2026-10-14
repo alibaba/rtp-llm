@@ -59,7 +59,6 @@ charts:
       axis: forward
       color: '#1677ff'
       hidden: false
-      source_unit: tokens/s
     mock/rtp_llm_context_tps_with_cache_engine_mean/P:
       metric_id: mock/rtp_llm_context_tps_with_cache_engine_mean
       labels:
@@ -70,7 +69,6 @@ charts:
       axis: forward
       color: '#13c2c2'
       hidden: false
-      source_unit: tokens/s
     mock/mock_decode_wall_tps_engine_mean/D:
       metric_id: mock/mock_decode_wall_tps_engine_mean
       labels:
@@ -81,7 +79,6 @@ charts:
       axis: forward
       color: '#fa541c'
       hidden: false
-      source_unit: tokens/s
     mock/cache_hit_ratio/P:
       metric_id: mock/cache_hit_ratio
       labels:
@@ -231,19 +228,8 @@ charts:
       axis: ms
       color: '#13c2c2'
       hidden: false
-      source_unit: ms
   panels:
   - id: engine-tps
-    gate_lines:
-    - check: engine_tps.rtp_llm_context_tps
-      curve_id: mock/rtp_llm_context_tps_engine_mean/P
-      name: P 执行 TPS 整窗均值下界
-    - check: engine_tps.rtp_llm_context_tps_with_cache
-      curve_id: mock/rtp_llm_context_tps_with_cache_engine_mean/P
-      name: P 含缓存 TPS 整窗均值下界
-    - check: engine_tps.mock_decode_wall_tps
-      curve_id: mock/mock_decode_wall_tps_engine_mean/D
-      name: D TPS 整窗均值下界
     title: 三项引擎 TPS 与门禁线
     curve_ids:
     - mock/rtp_llm_context_tps_engine_mean/P
@@ -268,10 +254,6 @@ charts:
     caption: 发送、成功和失败均来自客户端 Prometheus counter 的 rate 采样窗口（实际窗口见曲线来源）；展示采样趋势，不代表逐秒精确计数，也不用于整窗门禁。
     empty_caption: 缺少客户端 Prometheus 采样，无法绘制 QPS；不以请求流水补曲线，也不补零。
   - id: latency
-    gate_lines:
-    - check: ttft
-      curve_id: request/ttft_p99_ms
-      name: 整窗 TTFT p99 上界
     title: TTFT / 调度等待 / Model forward
     curve_ids:
     - request/ttft_p99_ms

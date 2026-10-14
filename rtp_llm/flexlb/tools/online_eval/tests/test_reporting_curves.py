@@ -51,9 +51,8 @@ def test_configuration_gate_lines_do_not_hide_missing_measurements():
     config = view('master_performance.yaml')
     raw = config.to_dict()
     raw['charts']['curves']['mock/rtp_llm_context_tps_engine_mean/P'].pop('color')
-    next(p for p in raw['charts']['panels'] if p['id'] == 'engine-tps')['gate_lines'] = next(p for p in raw['charts']['panels'] if p['id'] == 'engine-tps')['gate_lines'][:1]
     config = ViewDefinition.read(raw)
-    panels = report_panels([], {'gate_references': performance_reference()}, config)
+    panels = report_panels([], {'engine_tps': {'mock/rtp_llm_context_tps':10}}, config)
     panel = next(p for p in panels if p['id'] == 'engine-tps')
     descriptor = next(p for p in config.charts.panels if p.id == 'engine-tps')
     assert panel['caption'] == descriptor.empty_caption
@@ -182,12 +181,11 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 
     config = view('master_performance.yaml').to_dict()
     descriptor = next(p for p in config['charts']['panels'] if p['id'] == 'engine-tps')
-    descriptor['gate_lines'] = descriptor['gate_lines'][:1]
-    descriptor['presets'] = {'Floors': {'groups': ['门禁参考线']}}
+    descriptor['presets'] = {'Floors': {'groups': ['门禁']}}
     config = ViewDefinition.read(config)
     descriptor = next(p for p in config.charts.panels if p.id == 'engine-tps')
     panel = next(p for p in report_panels([], {
-        'gate_references': performance_reference()}, config) if p['id'] == 'engine-tps')
+        'engine_tps': {'mock/rtp_llm_context_tps': 10}}, config) if p['id'] == 'engine-tps')
     assert panel['presets']['Floors'] == [panel['series'][0]['name']]
     assert panel['caption'] == descriptor.empty_caption
 
@@ -210,9 +208,3 @@ def test_unused_produced_capability_is_omitted_and_frozen_unclassified_output_re
     store.document["definitions"]["unbound/series"] = definition
     with pytest.raises(ValueError, match="unclassified monitoring metric unbound/series"):
         monitoring_audit(store, view(name + ".yaml"))
-
-
-def performance_reference():
-    from cases.master_performance.analysis import gate_references
-    return gate_references({'engine_tps': {'mock/rtp_llm_context_tps': 10}, 'max_ttft_p99_ms': 20},
-                           {'start_epoch_ms': 1000, 'end_epoch_ms': 2000})[:1]
