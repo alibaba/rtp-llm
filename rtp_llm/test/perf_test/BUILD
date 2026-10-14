@@ -991,3 +991,118 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+# ---------------------------------------------------------------------------
+# Pool-routed copies of offline_bench_test (local, uncommitted evidence runs
+# per the 2026-10-15 directive): TPOT+TTFT collection on RTX_5000 and SM103
+# pools via remote execution; the H20 baseline runs the base target locally.
+# ---------------------------------------------------------------------------
+
+py_test(
+    name = "offline_bench_test_rtx5000",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    args = [
+        "--checkpoint_path", "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+        "--model_type", "qwen35_moe",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "256",
+        "--seq_size_per_block", "1024",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "offline_bench_test_sm103",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    args = [
+        "--checkpoint_path", "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+        "--model_type", "qwen35_moe",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "256",
+        "--seq_size_per_block", "1024",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "minicpmv47_1b_offline_bench_h20",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    args = [
+        "--checkpoint_path", "/data0/liukan.lk/models/MiniCPM-V-4.7-1B",
+        "--model_type", "minicpmv4_7",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "256",
+        "--seq_size_per_block", "1024",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "minicpmv47_35b_offline_bench_tp2_h20",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+    ],
+    args = [
+        "--checkpoint_path", "/data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B",
+        "--model_type", "minicpmv4_7",
+        "--tp_size", "2",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "32",
+        "--seq_size_per_block", "2048",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+)

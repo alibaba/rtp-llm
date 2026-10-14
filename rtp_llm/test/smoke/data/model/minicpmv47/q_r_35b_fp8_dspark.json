@@ -68,7 +68,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "So, let me analyze the image. There's a woman sitting on the beach, and a dog (maybe a Labrador) is sitting next to her, giving a high-five or pawing at her hand. The setting is a beach with",
+                            "content": "So, let me analyze the image. There's a woman sitting on the beach, and a dog (maybe a Labrador) is sitting next to her. The dog is giving the woman a high-five or paw touch. The setting is a",
                             "partial": false
                         },
                         "finish_reason": "length"
