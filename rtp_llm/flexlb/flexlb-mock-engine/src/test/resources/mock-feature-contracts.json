@@ -1,6 +1,30 @@
 {
   "schema_version": 1,
   "features": {
+    "rpc_execution": {
+      "fidelity": "harness",
+      "scope": "Cluster-owned bounded RPC execution; cache work cannot occupy status or Netty threads; no per-Pod CPU or GC simulation claim",
+      "implementation": [
+        "MockRpcExecutors.java"
+      ],
+      "tests": [
+        "CacheStatusResponseCacheTest.java"
+      ],
+      "real": {}
+    },
+    "cache_status_snapshot": {
+      "fidelity": "contract",
+      "scope": "Full keys for same-version requests, fresh capacity and immutable membership; reused protobuf encoding has independent known-length drainable cursors",
+      "implementation": [
+        "CacheStatusResponseCache.java"
+      ],
+      "tests": [
+        "CacheStatusResponseCacheTest.java"
+      ],
+      "real": {
+        "rtp_llm/cpp/cache/KVCacheManager.cc": "b80d7803382d22467b70e5e85c83a1ba74b24274e6a4c32ae33bf2fe9e3f6d0a"
+      }
+    },
     "prefill": {
       "fidelity": "contract",
       "scope": "FIFO token rectangle CP and lifecycle contracts; single-sequence output",
