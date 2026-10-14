@@ -1041,6 +1041,7 @@ py_test(
     args = [
         "--checkpoint_path", "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
         "--model_type", "qwen35_moe",
+        "--act_type", "BF16",
         "--input_len_min", "128",
         "--input_len_max", "512",
         "--output_len_min", "64",
