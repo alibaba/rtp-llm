@@ -1,0 +1,40 @@
+metric_plan_schema_version: 5
+sources:
+  master:
+    cpu_usage_percent:
+      promql: 100 * (process_cpu_usage${selector} >= 0)
+      unit: percent
+      value_kind: gauge
+      labels: [application]
+      required: true
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics: [process_cpu_usage]
+    system_cpu_usage_percent:
+      promql: 100 * (system_cpu_usage${selector} >= 0)
+      unit: percent
+      value_kind: gauge
+      labels: [application]
+      required: true
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics: [system_cpu_usage]
+    cpu_available_processors:
+      promql: system_cpu_count${selector}
+      mode: scrape
+      unit: processors
+      value_kind: gauge
+      labels: [application]
+      required: true
+      measurement:
+        method: raw_scrape
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics: [system_cpu_count]

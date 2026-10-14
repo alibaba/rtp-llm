@@ -97,6 +97,33 @@ charts:
   - observation_end
   - sending_stopped
   curves:
+    master/cpu_usage_percent:
+      metric_id: master/cpu_usage_percent
+      labels: {}
+      name: Master JVM CPU 利用率
+      group: Master CPU
+      unit: '%'
+      axis: percent
+      color: '#722ed1'
+      hidden: false
+    master/system_cpu_usage_percent:
+      metric_id: master/system_cpu_usage_percent
+      labels: {}
+      name: 系统 CPU 利用率（共享资源）
+      group: Master CPU
+      unit: '%'
+      axis: percent
+      color: '#8c8c8c'
+      hidden: false
+    master/cpu_available_processors:
+      metric_id: master/cpu_available_processors
+      labels: {}
+      name: JVM 可见 CPU 数
+      group: Master CPU
+      unit: processors
+      axis: processors
+      color: '#13c2c2'
+      hidden: false
     mock/running_avg:
       metric_id: mock/running_avg
       labels: {}
@@ -388,6 +415,24 @@ charts:
     curve_ids:
     - mock/worker_status_qps_fleet
     - mock/worker_status_rt_us_fleet
+  - id: master-cpu
+    title: Master JVM / 系统 CPU 利用率 · 可见 CPU 数
+    axes:
+      percent:
+        title: CPU 利用率 / %
+        position: left
+      processors:
+        title: JVM 可见 CPU 数
+        position: right
+    caption: Master 曲线复用 Micrometer process_cpu_usage（JMX getProcessCpuLoad，包含用户态与内核态），乘
+      100。 系统曲线包含共享环境的其他进程；右轴为 Runtime.availableProcessors。百分比分母受 cgroup、CPU affinity
+      和 JVM 设置影响， 不将可见 CPU 数解释为独占配额，也不据此换算精确使用核数。生产大盘使用 ASI pod_cpu_user_limit_percent；
+      这里的 JVM 指标不能直接当成生产容器指标。CPU 仅作诊断，不改变门禁。
+    empty_caption: CPU 指标缺失或 JVM 返回负值时保留缺采，不补零。
+    curve_ids:
+    - master/cpu_usage_percent
+    - master/system_cpu_usage_percent
+    - master/cpu_available_processors
 sections:
   audit:
     title: 监控曲线审计

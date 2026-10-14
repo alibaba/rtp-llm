@@ -1,6 +1,7 @@
 metric_plan_schema_version: 5
 include:
 - default.yaml
+- master_cpu.yaml
 sources:
   mock:
     running:

@@ -2,6 +2,12 @@
 
 case 和报告共用 `metrics.json` 中的稳定 `metric_id`。exporter 的物理指标名、查询 ID、曲线 ID 和展示名承担不同职责；只有指标定义决定取数口径，不能通过展示名反推查询。
 
+## Master CPU 测量边界
+
+`master_cpu.yaml` 复用 Master 的 Spring Boot Actuator / Micrometer 指标，不在 Mock 引擎中模拟 CPU。`process_cpu_usage` 来自 JMX `getProcessCpuLoad`，包含 JVM 用户态与内核态 CPU；`system_cpu_usage` 来自系统 CPU load，包含同一可见环境中的其他进程。显示值乘 100；`system_cpu_count` 保留 `Runtime.availableProcessors` 作为容量上下文。测量范围受 cgroup、CPU affinity 和 JVM 参数影响，不能将该处理器数一律解释为独占配额，亦不据此换算精确使用核数。负值表示不可用，查询丢弃该值，不补零。
+
+Whale / ASI FlexLB 大盘的 CPU 面板查询 `pod_cpu_user_limit_percent`，按 `hippo_app`、Master `hippo_role`、`instance` 与 `ip` 区分容器，并使用平均聚合。该指标由基础设施采集，名称和面板表明 user/limit 及百分比口径；仓库不包含 ASI 采集器实现，不能据此认定其包含 JVM 内核态或等同于进程 CPU load。开发机进程与生产容器的百分比仅在测量范围、CPU 分母和时间窗口一致时才可比较。报告保留 JVM、系统两条曲线与可见 CPU 数，CPU 不参与业务门禁。
+
 ## 名称与身份
 
 | 名称 | 所属位置 | 用途 |
