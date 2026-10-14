@@ -926,9 +926,31 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // The sampler already needs token history on device. Fill every proposal
     // slot once for all score rows, then let each row's sequence length expose
     // exactly proposals [0, score_position).
+#if USING_CUDA
+    const auto main_stream = cuda_graph::graphGetCurrentStream();
+    if (!sampler_input_copy_stream_ || sampler_input_copy_stream_->device_index() != main_stream.device_index()
+        || *sampler_input_copy_stream_ == main_stream) {
+        do {
+            sampler_input_copy_stream_ = cuda_graph::graphGetStreamFromPool(false);
+        } while (*sampler_input_copy_stream_ == main_stream);
+    }
+    const auto    copy_stream   = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
+    auto          history_ready = cuda_graph::makeGraphEvent();
+    torch::Tensor token_ids_gpu;
+    {
+        cuda_graph::GraphStreamGuard guard(copy_stream);
+        // This pinned CPU snapshot is independent of target/proposal GPU work.
+        // Upload it while target verify is still running on the main stream.
+        // PyTorch records the DMA use of the pinned allocation before it can
+        // be recycled; each round also owns a distinct device history.
+        token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+        history_ready.record(copy_stream);
+    }
+#else
     auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-    auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-    auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+#endif
+    auto histories = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+    auto proposals = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
                          .contiguous()
                          .view({batch_size, 1, gamma})
                          .expand({batch_size, rows, gamma});
@@ -940,6 +962,13 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
             .view({1, 1, gamma});
     auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+#if USING_CUDA
+    // Wait on the GPU at the first consumer, without blocking the host. The
+    // sampler/rejection sampler keep using this allocation on the main stream,
+    // so its copy-stream allocator must not recycle it until those uses finish.
+    history_ready.block(main_stream);
+    token_ids_gpu.record_stream(main_stream);
+#endif
     histories.scatter_(2, proposal_columns, proposals);
     sampler_inputs.token_ids = std::move(token_ids_gpu);
 

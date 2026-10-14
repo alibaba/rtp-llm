@@ -130,7 +130,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
 #else
     torch::Tensor inputs_token_ids_cuda;
-    {
+    if (inputs.token_ids.device() == all_success.device()) {
+        // MTP already uploads history and joins its copy event before filling
+        // proposal slots. No transfer or additional copy-stream event is needed.
+        inputs_token_ids_cuda = inputs.token_ids;
+        inputs_token_ids_cuda.record_stream(cuda_graph::graphGetCurrentStream());
+    } else {
         auto main_stream     = cuda_graph::graphGetCurrentStream();
         auto copy_done_event = cuda_graph::makeGraphEvent();
         {
