@@ -584,7 +584,7 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
 
 }  // namespace rtp_llm — close temporarily for torch_npu includes
 
-#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p_custom.h"
+#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p.h"
 
 namespace rtp_llm {  // reopen
 

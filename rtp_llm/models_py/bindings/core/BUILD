@@ -303,7 +303,6 @@ cc_library(
         "@//:using_ascend": [
             "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
             "//rtp_llm/models_py/bindings/ascend/ops:npu_bridge",
-            "//3rdparty/aclnn_custom_ops:aclnn_custom_ops",
             "@local_config_ascend//ascend:ascend_headers",
             "@local_config_ascend//ascend:ascend",
         ],
@@ -341,7 +340,6 @@ cc_library(
         "@//:using_ascend": [
             "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
             "//rtp_llm/models_py/bindings/ascend/ops:npu_bridge",
-            "//3rdparty/aclnn_custom_ops:aclnn_custom_ops",
             "@local_config_ascend//ascend:ascend_headers",
             "@local_config_ascend//ascend:ascend",
         ],

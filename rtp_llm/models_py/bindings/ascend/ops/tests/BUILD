@@ -11,7 +11,6 @@ cc_test(
     srcs = [
         "SamplerTest.cc",
     ],
-    data = ["//3rdparty/aclnn_custom_ops:aclnn_custom_ops"],
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ctx_state",
@@ -59,7 +58,6 @@ py_test(
     srcs = ["test_ascend_sampler.py"],
     data = [
         ":sampler_test_module.so",
-        "//3rdparty/aclnn_custom_ops:aclnn_custom_ops",
     ],
     deps = [
         "//rtp_llm:torch",

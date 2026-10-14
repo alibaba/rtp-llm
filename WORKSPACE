@@ -24,7 +24,6 @@ load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/gpus:ascend_configure.bzl", "ascend_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 cuda_configure(name = "local_config_cuda")
 
@@ -42,12 +41,6 @@ local_repository(
 local_repository(
     name = "arch_config",
     path = "arch_config",
-)
-
-git_repository(
-    name = "aclnn_custom_ops_src",
-    remote = "https://gitcode.com/skywang2/rtp-llm-AscendC.git",
-    commit = "b4d309d99434c2331a5868494da9e7f3f3bf78e7",
 )
 
 load("@rtp_deps//:http.bzl", "http_deps")

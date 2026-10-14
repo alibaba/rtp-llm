@@ -4,8 +4,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 cc_library(
     name = "npu_bridge",
     hdrs = [
-        "aclnn_apply_top_k_top_p_custom.h",
-        "ascend_apply_top_k_top_p_custom.h",
+        "ascend_apply_top_k_top_p.h",
         "op_api_common.h",
     ],
     deps = torch_deps() + select({

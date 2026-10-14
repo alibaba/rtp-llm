@@ -8,7 +8,10 @@ They mirror the 7 C++ test cases from SamplerTest.cc.
 Prerequisites (set by .bazelrc test:ascend --test_env):
   LD_LIBRARY_PATH  must include torch/lib, torch_npu/lib, /opt/conda310/lib
   PYTHONHOME       must point to conda env (e.g. /opt/conda310)
-  ASCEND_CUSTOM_OPP_PATH  must point to aclnn_custom_ops/opp
+
+Note: since 2026-10 the top-k/top-p filter op is the CANN built-in
+ApplyTopKTopPWithSorted (aclnnApplyTopKTopP in libopapi.so), so no custom
+vendor/OPP environment is required anymore.
 
 Usage:
   cd rtp-llm

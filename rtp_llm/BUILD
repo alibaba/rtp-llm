@@ -616,10 +616,7 @@ py_library(
     ],
     data = [
         "//rtp_llm/libs:whl_package_libs",
-    ] + select({
-        "@//:using_ascend": ["//3rdparty/aclnn_custom_ops:build_aclnn_ops"],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 py_package(
@@ -641,9 +638,6 @@ py_package(
         "rtp_llm",
     ] + select({
         "@//:using_cuda12": deep,
-        "//conditions:default": [],
-    }) + select({
-        "@//:using_ascend": ["3rdparty/aclnn_custom_ops"],
         "//conditions:default": [],
     }),
 )
