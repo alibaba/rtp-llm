@@ -38,3 +38,10 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+# CPU tensors only; no model weights or GPU allocation required.
+cc_test(
+    name = "expert_stats_report_window_test",
+    srcs = ["ExpertStatsReportWindowTest.cc"],
+    deps = ["//rtp_llm/cpp/models:expert_stats_report_window"],
+    copts = copts(),
+)

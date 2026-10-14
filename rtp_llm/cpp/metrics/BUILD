@@ -4,7 +4,7 @@ cc_library(
     name = "metrics",
     hdrs = glob([
         "*.h",
-    ]),
+    ], exclude = ["EplbStatsMetricsCollector.h"]),
     srcs = glob(
         [
             "*.cc",
@@ -14,6 +14,7 @@ cc_library(
         ],
     ),
     deps = [
+        ":eplb_stats_collector",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
@@ -32,4 +33,11 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+# Pure data/IB calculation, independent of the kmonitor runtime.
+cc_library(
+    name = "eplb_stats_collector",
+    hdrs = ["EplbStatsMetricsCollector.h"],
+    visibility = ["//visibility:public"],
 )

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "autil/Log.h"
+#include "rtp_llm/cpp/metrics/EplbStatsMetricsCollector.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
@@ -1386,17 +1387,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLmEplbMetricsCollector final {
-public:
-    int64_t ep_rank;
-    int64_t update_layer_id;
-
-    int64_t update_weights_latency_ms;
-    bool    update_weights_qps;
-
-    std::vector<int64_t> gpu_loads;
-};
-
 class RtpLLmEplbMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
@@ -1407,6 +1397,11 @@ public:
     kmonitor::MutableMetric* update_layer_weights_qps_metric  = nullptr;
     kmonitor::MutableMetric* update_weights_latency_ms_metric = nullptr;
     kmonitor::MutableMetric* gpu_loads_metric                 = nullptr;
+    kmonitor::MutableMetric* ib_layer_metric                  = nullptr;
+    kmonitor::MutableMetric* ib_layer_mean_metric             = nullptr;
+    kmonitor::MutableMetric* window_steps_metric              = nullptr;
+    kmonitor::MutableMetric* active_layers_metric             = nullptr;
+    kmonitor::MutableMetric* has_load_metric                  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

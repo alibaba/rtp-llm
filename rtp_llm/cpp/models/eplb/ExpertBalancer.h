@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStatsReportWindow.h"
 
 namespace rtp_llm {
 
@@ -108,6 +109,11 @@ public:
 
     bool updateEplbConfig(const EPLBConfig& config);
 
+    // Configure before execution, identically on every rank. A replication factor > 1 is only
+    // valid after the caller proves identical final dispatches within each TP replica group.
+    // No automatic TP/DP/CP-size inference; producer-side deduplication requires factor 1.
+    void configureStatsReporting(int64_t interval = 10, int64_t tp_replication_size = 1);
+
 private:
     void syncController();
     void reportStats(OverallExpertStats& stats);
@@ -153,6 +159,8 @@ private:
     EplbController eplb_controller_;
     EPLBConfig     eplb_control_data_;
 
+    ExpertStatsReportWindow report_window_;
+    int64_t stats_tp_replication_size_ = 1;
     RtpLLmEplbMetricsCollector   executor_collector_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
     ExpertBalancerPythonWrapper  eplb_python_wrapper_;

@@ -953,21 +953,52 @@ bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
     REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
+    // New name: this is a global window count, not the legacy per-source single-column gauge.
+    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_moe_expert_activations");
+    REGISTER_GAUGE_MUTABLE_METRIC(ib_layer_metric, "rtp_llm_moe_ib_layer");
+    REGISTER_GAUGE_MUTABLE_METRIC(ib_layer_mean_metric, "rtp_llm_moe_ib_layer_mean");
+    REGISTER_GAUGE_MUTABLE_METRIC(window_steps_metric, "rtp_llm_moe_monitor_window_steps");
+    REGISTER_GAUGE_MUTABLE_METRIC(active_layers_metric, "rtp_llm_moe_monitor_active_layers");
+    REGISTER_GAUGE_MUTABLE_METRIC(has_load_metric, "rtp_llm_moe_monitor_has_load");
     return true;
 }
 
 void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector) {
-    // ep stats metrics
-    int  num_layer = collector->gpu_loads.size();
-    auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
-    tags->MergeTags(&ep_tag);
-    for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
-        ep_tag.MergeTags(&layer_tag);
-        if (gpu_loads_metric) {
-            gpu_loads_metric->Report(&layer_tag, collector->gpu_loads[i]);
+    // One WORLD-wide destination domain. Keep inherited tags and never mutate the caller's tags.
+    kmonitor::MetricsTags base_tags;
+    if (tags) {
+        tags->MergeTags(&base_tags);
+    }
+    base_tags.AddTag("ep_group", "0");
+    for (size_t layer = 0; layer < collector->gpu_loads.size(); ++layer) {
+        auto layer_tags = base_tags;
+        layer_tags.AddTag("layer", std::to_string(layer));
+        bool active = false;
+        for (size_t rank = 0; rank < collector->gpu_loads[layer].size(); ++rank) {
+            auto rank_tags = layer_tags;
+            rank_tags.AddTag("ep_rank", std::to_string(rank));
+            const auto count = collector->gpu_loads[layer][rank];
+            active |= count > 0;
+            if (gpu_loads_metric) {
+                gpu_loads_metric->Report(&rank_tags, count);  // Include zero-load destinations.
+            }
         }
+        if (active && ib_layer_metric && layer < collector->ib_layers.size()) {
+            ib_layer_metric->Report(&layer_tags, collector->ib_layers[layer]);
+        }
+    }
+    if (window_steps_metric) {
+        window_steps_metric->Report(&base_tags, collector->window_steps);
+    }
+    if (active_layers_metric) {
+        active_layers_metric->Report(&base_tags, collector->active_layer_count);
+    }
+    if (has_load_metric) {
+        has_load_metric->Report(&base_tags, collector->has_valid_load ? 1 : 0);
+    }
+    // Empty windows do not establish balance and must not emit a misleading zero IB.
+    if (collector->has_valid_load && ib_layer_mean_metric) {
+        ib_layer_mean_metric->Report(&base_tags, collector->ib_layer_mean);
     }
 
     // update weights metrics
@@ -977,7 +1008,7 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
 
         // report layer qps
         auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
-        tags->MergeTags(&layer_tag);
+        base_tags.MergeTags(&layer_tag);
         if (update_layer_weights_qps_metric) {
             update_layer_weights_qps_metric->Report(&layer_tag, 1);
         }

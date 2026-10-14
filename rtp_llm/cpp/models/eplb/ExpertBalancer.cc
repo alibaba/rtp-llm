@@ -194,17 +194,25 @@ ExpertBalancer::~ExpertBalancer() {}
 void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
     syncController();
 
-    if (eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::NONE)) {
+    OverallExpertStats& stats = model.overall_expert_stats_;
+    auto clear_step_stats = [&]() {
+        if (stats.stats_buf.log_stats_buf.defined()) {
+            stats.stats_buf.log_stats_buf.zero_();
+        }
+        if (stats.stats_buf.gpu_loads_buf.defined()) {
+            stats.stats_buf.gpu_loads_buf.zero_();
+        }
+    };
+    if (eplb_control_data_.eplb_mode == EplbMode::NONE) {
+        report_window_.reset();
+        clear_step_stats();
         return;
     }
 
-    OverallExpertStats& stats = model.overall_expert_stats_;
-
-    // report stats
+    // Report owns a separate window. Preserve the original step counts until ALL consumers finish.
     reportStats(stats);
-
-    // eplb plan
-    excuteEplbPlan(stats, model);
+    excuteEplbPlan(stats, model);  // Existing upstream planning path; unchanged by monitoring.
+    clear_step_stats();
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
@@ -218,28 +226,66 @@ void ExpertBalancer::syncController() {
         auto eplb_control_data = eplb_controller_.getAndSyncData(world_size_);
         if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode
             || eplb_control_data.eplb_update_time != eplb_control_data_.eplb_update_time) {
+            if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode) {
+                report_window_.reset();
+            }
             eplb_control_data_ = eplb_control_data;
             RTP_LLM_LOG_INFO("EPLB config changed to %s", eplb_control_data_.to_string().c_str());
         }
     }
 }
 
-void ExpertBalancer::reportStats(OverallExpertStats& stats) {
-    if (metrics_reporter_
-        && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
-        int layer_num = stats.layer_num;
-        executor_collector_.gpu_loads.resize(layer_num);
-        executor_collector_.ep_rank = ep_rank_;
-
-        auto gpu_loads_tensor = stats.stats_buf.gpu_loads_buf.cpu();
-        int* gpu_loads        = gpu_loads_tensor.data_ptr<int>();
-
-        for (int i = 0; i < layer_num; ++i) {
-            executor_collector_.gpu_loads[i] = gpu_loads[i * ep_size_ + ep_rank_];
-        }
-
-        metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
+void ExpertBalancer::configureStatsReporting(int64_t interval, int64_t tp_replication_size) {
+    if (tp_replication_size <= 0 || static_cast<size_t>(tp_replication_size) > world_size_
+        || world_size_ % tp_replication_size != 0) {
+        throw std::invalid_argument("Invalid verified TP replication factor for EPLB reporting");
     }
+    report_window_ = ExpertStatsReportWindow(interval);
+    stats_tp_replication_size_ = tp_replication_size;
+}
+
+void ExpertBalancer::reportStats(OverallExpertStats& stats) {
+    if (eplb_control_data_.eplb_mode == EplbMode::NONE) {
+        report_window_.reset();
+        return;
+    }
+    const auto& per_step_counts = stats.stats_buf.gpu_loads_buf;
+    if (!per_step_counts.defined()) {
+        report_window_.reset();
+        return;
+    }
+    // A column must identify the same destination on every participant. Independent EP groups
+    // require explicit group-scoped reporting; never merge equally numbered columns across them.
+    TORCH_CHECK(ep_size_ == world_size_, "EPLB reporting currently requires one WORLD-wide EP domain");
+    TORCH_CHECK(per_step_counts.dim() == 2 && per_step_counts.size(0) == static_cast<int64_t>(stats.layer_num)
+                    && per_step_counts.size(1) == static_cast<int64_t>(ep_size_),
+                "EPLB reporting expected [model layers, ep_size] counts");
+    TORCH_CHECK(world_size_ == 1 || isCommOpsRegistered(),
+                "Distributed EPLB reporting requires registered collective operations");
+    if (!report_window_.add(per_step_counts)) {
+        return;
+    }
+
+    auto aggregated = report_window_.snapshot();
+    if (world_size_ > 1) {
+        // ALL ranks participate before checking reporter availability / leadership. The current
+        // executor boundary must be shared by all EP peers; independent async DP is not supported.
+        execAllReduce({aggregated, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+    }
+    // EP is the WORLD-wide domain above, so ep_rank == 0 identifies exactly one reporter.
+    if (ep_rank_ == 0 && metrics_reporter_) {
+        try {
+            ExpertStatsReportWindow::fillCollector(
+                aggregated, report_window_.steps(), stats_tp_replication_size_, executor_collector_);
+            metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
+        } catch (const std::exception& e) {
+            // Do not retain/retry a partially published window or relabel 20 steps as 10.
+            RTP_LLM_LOG_WARNING("Discarding EPLB reporting window after report failure: %s", e.what());
+        }
+    } else if (ep_rank_ == 0) {
+        RTP_LLM_LOG_WARNING("Discarding EPLB reporting window: no metrics reporter on EP leader");
+    }
+    report_window_.reset();
 }
 
 void ExpertBalancer::setPlanStatus(EplbPlanStatus status) {

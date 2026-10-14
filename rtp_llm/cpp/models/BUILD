@@ -230,6 +230,7 @@ cc_library(
         "eplb/ExpertBalancerPythonWrapper.cc",
     ],
     deps = [
+        ":expert_stats_report_window",
         ":models",
         ":dfa_utils",
         "//rtp_llm/cpp/config:eplb_config",
@@ -237,5 +238,13 @@ cc_library(
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/cache:cache_types",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "expert_stats_report_window",
+    hdrs = ["eplb/stats/ExpertStatsReportWindow.h"],
+    deps = ["//rtp_llm/cpp/metrics:eplb_stats_collector"] + torch_deps(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
