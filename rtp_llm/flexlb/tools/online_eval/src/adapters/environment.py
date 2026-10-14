@@ -210,32 +210,22 @@ class EnvManager:
             # The injected owner retains partial and historical processes for
             # its own separately budgeted teardown; do not clear these refs.
             return
-        for mp in env.load_clients:
+        from runtime.cleanup import cleanup_all
+        owned = [*env.load_clients, *env.victims.values(), *env.masters.values(),
+                 env.zk_helper, env.master, env.mock]
+        def stop(mp):
+            try:
+                mp.unfreeze()
+            except ProcessLookupError:
+                pass
             mp.terminate()
+        cleanup_all([(str(mp.pid), lambda mp=mp: stop(mp)) for mp in owned if mp is not None])
+        # Retain references if any close failed, so an owner can retry.
         env.load_clients.clear()
-        for vic in env.victims.values():
-            vic.terminate()
         env.victims.clear()
-        # HA dual-master instances: SIGCONT first so a SIGSTOP-frozen JVM
-        # can drain on SIGTERM (terminate() would escalate to kill -9
-        # anyway — harmless, just noisier); then the ZK helper.
-        for name, mp in list(env.masters.items()):
-            if mp is not None:
-                try:
-                    mp.unfreeze()
-                except Exception:
-                    pass
-                mp.terminate()
+        for name in env.masters:
             env.masters[name] = None
-        self._stop_zk_helper(env)
-        if env.master is not None:
-            env.master.terminate()
-            env.master = None
-            time.sleep(2)  # mirror stop_master() settle wait
-        if env.mock is not None:
-            env.mock.terminate()
-            env.mock = None
-        time.sleep(1)
+        env.zk_helper = env.master = env.mock = None
 
     # -- env construction --------------------------------------------------
 

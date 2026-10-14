@@ -103,3 +103,14 @@ Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别�
 源码入口：真实协议在 `rtp_llm/cpp/model_rpc/`；Mock 状态机在
 `flexlb-mock-engine/src/main/java/org/flexlb/mockengine/` 的 `MockPrefillSession`、
 `JavaMockEngineCluster` 和 `MockLruBlockCache`。
+
+
+## Mock 支持范围与对齐合同
+
+Mock 的协议合同、近似模型和测试工具能力分别声明在 [feature contracts](../../../../flexlb-mock-engine/src/test/resources/mock-feature-contracts.json)。每个生产 Java 模块必须归属于一项能力，声明测试入口和支持范围。具有 real 参照的条目记录对应源码哈希；源码变化必须先核对语义及回归向量，再更新合同。哈希检查表示需要重新核对，不等于已经执行 real GPU 差分。
+
+取消 fence、已接受取消和已完成请求历史按单调时钟保留十分钟，与仅供诊断的限条数历史独立；诊断淘汰不能使有效 fence 提前消失。进程崩溃世代清空这些内存历史。
+
+公开入场路径仅支持单返回序列，不支持 beam 和多返回序列。相关输入在创建请求状态和 KV 租约前返回 UNIMPLEMENTED；Prefill 的形状计费工具可用于核对 real 的宽度公式，但不代表输出链路支持这些宽度。
+
+性能曲线、EOS 和 MTP 接受 token 数是近似模型，不模拟实际采样、stop words 或 draft/verify 推理。统一块池和 host cache 元数据不验证真实 KV tensor、DMA、hybrid/SWA 多池或磁盘数据正确性。新增测试必须声明验证的是模型内部不变量、协议路径还是跨进程行为，不能用测试数量替代支持范围。

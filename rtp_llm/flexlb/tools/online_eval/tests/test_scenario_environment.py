@@ -20,7 +20,7 @@ from scenario.actions.environment import (
 )
 from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
-from scenario.compiler import environment
+from scenario.environment_config import environment
 from scenario.contracts import PlanContext
 from scenario.runtime import (
     Deadline,

@@ -42,7 +42,7 @@ def _core_action(action, ctx, params, deadline):
             {"passed": result.status == "PASS"}, [result],
         )
     if action == "teardown":
-        results = ctx.cleanup(deadline.remaining())
+        results = ctx.cleanup(deadline.remaining(), retain_failed=True)
         if any(row["status"] != "PASS" for row in results):
             raise RuntimeError("explicit teardown cleanup failed")
         ctx.env_epoch += 1

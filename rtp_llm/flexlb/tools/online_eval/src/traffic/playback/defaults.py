@@ -1,5 +1,7 @@
 """Shared Python/Java launch defaults stored with the Java resources."""
-from runtime.paths import FLEXLB_DIR
+from pathlib import Path
+
+FLEXLB_DIR = Path(__file__).resolve().parents[5]
 
 def load_defaults():
     path = FLEXLB_DIR / 'flexlb-mock-engine/src/main/resources/load-client-defaults.properties'

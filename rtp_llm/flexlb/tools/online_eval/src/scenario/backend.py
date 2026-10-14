@@ -208,7 +208,8 @@ class JavaMockBackend:
         from adapters.resource_evidence import request_evidence
         batch = RequestBatch(ctx, params)
         handle = ctx.register_resource(
-            "requests", batch, batch.cleanup, historical=True, evidence=request_evidence
+            "requests", batch, batch.cleanup, historical=True, evidence=request_evidence,
+            request_stop=lambda: batch.cancel("cleanup")
         )
         batch.submit(deadline)
         return handle
@@ -221,8 +222,12 @@ class JavaMockBackend:
         return requests.cancel_server(deadline)
 
     def teardown(self, ctx, deadline):
+        errors = []
         if self.raw_ops is not None:
-            self.raw_ops.close()
+            try:
+                self.raw_ops.close()
+            except Exception as exc:
+                errors.append(("channels", exc))
         processes = list(self.owned_processes.values())
         for env in self.environments:
             processes.extend(env.load_clients)
@@ -238,6 +243,8 @@ class JavaMockBackend:
                     mp.proc.terminate()
                 except ProcessLookupError:
                     pass
+                except Exception as exc:
+                    errors.append((str(mp.pid) + " signal", exc))
         for mp in unique.values():
             if not mp.alive():
                 continue
@@ -245,13 +252,21 @@ class JavaMockBackend:
             try:
                 mp.proc.wait(timeout=min(2, remaining / max(1, len(unique))))
             except subprocess.TimeoutExpired:
-                mp.proc.kill()
+                try:
+                    mp.proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception as exc:
+                    errors.append((str(mp.pid) + " kill", exc))
+            except Exception as exc:
+                errors.append((str(mp.pid) + " wait", exc))
         remaining_pids = []
         for mp in unique.values():
             try:
                 mp.proc.wait(timeout=max(0, deadline.expires_at - ctx.clock()))
-            except subprocess.TimeoutExpired:
+            except Exception as exc:
                 remaining_pids.append(mp.pid)
+                errors.append((str(mp.pid) + " reap", exc))
         (ctx.artifact_dir / "process-cleanup.json").write_text(
             json.dumps(
                 dict(owned_pids=list(unique), remaining_pids=remaining_pids), indent=2
@@ -269,3 +284,8 @@ class JavaMockBackend:
             raise StageTimeout(f"owned processes not reaped: {remaining_pids}")
         if self.manager is not None:
             self.manager.current = None
+        if errors:
+            message = "; ".join(name + ": " + str(exc) for name, exc in errors)
+            error_type = StageTimeout if any(isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
+                                             for _, exc in errors) else RuntimeError
+            raise error_type(message) from errors[0][1]

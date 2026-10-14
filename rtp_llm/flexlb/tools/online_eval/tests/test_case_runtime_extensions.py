@@ -15,6 +15,8 @@ from runtime.deadline import Deadline
 class MemoryClient:
     def __init__(self, value):
         self.value, self.closed = value, False
+    def start(self, deadline):
+        deadline.check()
     def cleanup(self, deadline):
         deadline.check()
         self.closed = True
@@ -64,6 +66,25 @@ def test_undeclared_source_and_wrong_factory_signature_are_rejected(tmp_path):
     definition = CaseDefinition({'default': lambda case: None}, clients={'bad': ClientFactory(lambda x: x)})
     with pytest.raises(ValueError, match='3 positional'):
         CaseRegistry.build([RegisteredCase('bad', 'bad.program', tmp_path, definition)])
+
+
+def test_client_is_owned_before_partial_start_failure(tmp_path):
+    class Partial(MemoryClient):
+        def start(self, deadline):
+            self.acquired = True
+            raise RuntimeError('startup interrupted')
+    client = Partial(1)
+    definition = CaseDefinition({'default': lambda case: None}, clients={
+        'stream': ClientFactory(lambda services, params, deadline: client)})
+    owner = RegisteredCase('trial', 'trial.program', tmp_path / 'program.py', definition)
+    with patch('case_api.registry._snapshot', CaseRegistry.build([owner])):
+        ctx = RuntimeContext({'implementation': {'configuration': {'case': 'trial'}}}, None,
+                             tmp_path, time.monotonic, time.sleep)
+        with pytest.raises(RuntimeError, match='startup interrupted'):
+            ctx.services.client('stream', {}, Deadline(time.monotonic()+1))
+        assert client.acquired and ctx.resource_count == 1
+        assert ctx.cleanup(1)[0]['status'] == 'PASS'
+        assert client.closed
 
 
 def test_client_record_decoder_does_not_relabel_invalid_or_stale_rows():

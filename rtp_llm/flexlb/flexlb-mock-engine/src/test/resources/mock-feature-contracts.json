@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "features": {
+    "prefill": {
+      "fidelity": "contract",
+      "scope": "FIFO token rectangle CP and lifecycle contracts; single-sequence output",
+      "implementation": [
+        "MockPrefillBatchPolicy.java",
+        "MockPrefillSession.java"
+      ],
+      "tests": [
+        "MockPrefillBatchPolicyTest.java",
+        "PrefillFetchLifecycleTest.java"
+      ],
+      "real": {
+        "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.cc": "281cfdf15e537701bd0e9e768f503324649f20df879db7ecdb349e6860484d04"
+      }
+    },
+    "rpc": {
+      "fidelity": "contract",
+      "scope": "Cancel TTL ownership and protocol; fault injection is test-only",
+      "implementation": [
+        "JavaMockEngineCluster.java",
+        "MockRemoteDecodeCall.java",
+        "MockRemoteDecodeStream.java",
+        "MockEngineCancelChannel.java",
+        "MockResponseQueue.java",
+        "StatusDeliveryFaults.java",
+        "FaultInjectionConfig.java",
+        "ExpiringRequestIds.java"
+      ],
+      "tests": [
+        "MockEngineCancelChannelTest.java",
+        "ExpiringRequestIdsTest.java",
+        "MockRemoteDecodeProtocolTest.java",
+        "WhaleIndependentProcessTest.java"
+      ],
+      "real": {
+        "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.cc": "4b05bbad769a5697734938e80adc71b6e5480aeeb9f2fe1cf381331bcd9a59ba",
+        "rtp_llm/cpp/model_rpc/DecodeRpcServer.cc": "f8ddaf0ed9074be8ed4c32081038ddd59286cab7650fd5da7d7e597e609dd968"
+      }
+    },
+    "cache": {
+      "fidelity": "model",
+      "scope": "Unified block and host metadata; no tensor DMA hybrid SWA or disk correctness claim",
+      "implementation": [
+        "MockLruBlockCache.java",
+        "MockMemoryBlockCache.java",
+        "MockCacheDiagnostics.java"
+      ],
+      "tests": [
+        "CacheReferenceAccountingTest.java",
+        "MockMemoryBlockCacheTest.java",
+        "TreeEvictionTest.java"
+      ],
+      "real": {
+        "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc": "7156140215a46481a7bd06a7be14b2e54edf45cbbd7ab2e29ba9471cdeef3ddc"
+      }
+    },
+    "performance": {
+      "fidelity": "model",
+      "scope": "Calibrated timing and synthetic EOS/MTP; no inference beam stop-word or draft verification",
+      "implementation": [
+        "MockPerformanceModel.java",
+        "MockEosModel.java",
+        "MockDecodeStepMetrics.java"
+      ],
+      "tests": [
+        "ProductionCaliberDecodeTest.java",
+        "WhaleEosModelTest.java",
+        "MockDecodeStepMetricsTest.java"
+      ],
+      "real": {}
+    },
+    "metrics": {
+      "fidelity": "contract",
+      "scope": "Registered metric names and explicitly tested accounting; not every real metric",
+      "implementation": [
+        "CacheHitMetrics.java",
+        "CounterRateMetrics.java",
+        "MockMetricContract.java",
+        "PrefillTpsMetrics.java",
+        "WhaleMockMonitor.java",
+        "WhalePrefillMatchMetrics.java"
+      ],
+      "tests": [
+        "MetricAlignmentTest.java",
+        "TpsMetricsAccountingTest.java",
+        "WhaleMonitorLockOrderTest.java"
+      ],
+      "real": {
+        "rtp_llm/cpp/metrics/RtpLLMMetrics.cc": "34223094c058e15af0dcae46d73ab775109394e021377f74d36747fbd43e27c6",
+        "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.cc": "d9a547d94288ab5c27ad9ea9dd4e8e495b003c5831a0b1b2ad5324cfca7ab953"
+      }
+    },
+    "lifecycle": {
+      "fidelity": "harness",
+      "scope": "Owned transport drain forced close and executor termination",
+      "implementation": [
+        "DynamicEngineManager.java",
+        "ShutdownTasks.java"
+      ],
+      "tests": [
+        "DynamicEngineScaleTest.java",
+        "ShutdownDrainTest.java",
+        "ShutdownTasksTest.java"
+      ],
+      "real": {}
+    },
+    "client": {
+      "fidelity": "harness",
+      "scope": "Traffic producer shared defaults and bounded lifecycle evidence",
+      "implementation": [
+        "JavaLoadClient.java",
+        "ClientEventJournal.java",
+        "FlowControl.java",
+        "ClientEnvironment.java"
+      ],
+      "tests": [
+        "JavaLoadClientParityTest.java",
+        "ClientEventJournalTest.java",
+        "FlowControlTest.java",
+        "ClientEnvironmentTest.java"
+      ],
+      "real": {}
+    },
+    "playback": {
+      "fidelity": "harness",
+      "scope": "Deterministic replay planning not real engine behavior",
+      "implementation": [
+        "Playback.java",
+        "PlaybackPlan.java"
+      ],
+      "tests": [
+        "PlaybackPlanTest.java",
+        "PlaybackIntegrationTest.java"
+      ],
+      "real": {}
+    },
+    "routing": {
+      "fidelity": "harness",
+      "scope": "Test deployment discovery and client failover",
+      "implementation": [
+        "MasterTargetRouter.java",
+        "MasterRouteDiscovery.java",
+        "DiscoveryFileStore.java"
+      ],
+      "tests": [
+        "MasterTargetRouterTest.java",
+        "DynamicEngineScaleTest.java"
+      ],
+      "real": {}
+    },
+    "control": {
+      "fidelity": "harness",
+      "scope": "Test-only configuration and fault control",
+      "implementation": [
+        "MockControlServer.java"
+      ],
+      "tests": [
+        "PythonCompatControlApiTest.java",
+        "ConfigSchemaGuardTest.java"
+      ],
+      "real": {}
+    }
+  }
+}

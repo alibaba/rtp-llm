@@ -86,7 +86,7 @@ def _start(ctx, p, deadline):
             flow.drain(d)
 
     from adapters.resource_evidence import flow_evidence
-    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
+    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence, request_stop=flow.request_stop)
     flow.start(trace, environment, deadline,
                target=f"127.0.0.1:{ctx.env.master_http_port + 2}",
                priority=source_priority(p["source"]))

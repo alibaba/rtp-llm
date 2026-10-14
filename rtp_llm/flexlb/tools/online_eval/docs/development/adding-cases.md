@@ -140,7 +140,7 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 `traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`parameters.analysis` 保存 SLO、持续异常等证据解释规则；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
-program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
+program 用 `InputContract.from_fields(...)` 声明输入分组和字段，再通过 `case.bind(INPUTS)` 获取只读输入。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
 `observation.windows` 是取证边界的权威声明，支持两种锚点：
 
@@ -151,7 +151,7 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
-program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `case_api.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
+输入合同从 `from_fields` 的字段声明派生数值规则，将 dotted path 绑定到 `case_api.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
 
 `parameter_schema` 可省略，只声明场景自己的 `minimum`、`maximum`，不能改变整数类型或放宽 program 契约。variant 的范围只能在场景范围上继续收紧。所有字段在 program 构建前校验，包括 variant 合并后的值；未绑定字段、缺字段、错误类型、非有限或越界值失败。展开后的每个 variant 数值契约写入 `implementation.numeric_parameters`，供编译结果与运行证据核对。
 
@@ -159,7 +159,7 @@ program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `case_api
 
 观测输入统一使用 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`；输入组只绑定指标，不声明固定的存储后端。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。读取能力由 Python program 提供，实时观测可通过 monitoring session 读取 Prometheus，离线分析消费冻结证据；运行时来源实例由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
 
-字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。五组是公开输入语义，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
+字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。分组由 case 的输入合同声明，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
 固定测量能力在 Python 声明指标、单位、窗口和方向，YAML 提供阈值；通用指标检查可由 YAML 选择指标与窗口，但仍验证定义与允许选择。前者保障持续性、cohort 等算法的前提，后者用于无专属测量流程的标量比较。两者复用比较与依赖绑定，不把测量算法复制成 YAML 规则。消费方单位是算法要求，query plan 单位是生产声明；必须相等，不能直接抄生产单位代替消费断言。
 
@@ -234,7 +234,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 - 协议访问复用 `runtime/`，参数校验复用 `scenario.parameters.validate_fields`；不导入其他 action 的私有函数共享工具。
 - 多操作的流程与编译时分支放在 program；单操作的现场判断与有界重试放在 handler。跨阶段动态跳转没有现成契约，不能通过 YAML 表达式或隐式跳步实现。
 
-handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。需要导出证据的资源在 `register_resource(..., evidence=exporter)` 显式登记适配器；`exporter(value, collection_profile)` 返回 `ResourceEvidence`，声明请求记录、完整性错误、生产者身份和预期中断。公共策略通过 `export_evidence` 枚举声明，不猜测资源方法或 case 名。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
+handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。需要导出证据的资源在 `register_resource(..., evidence=exporter)` 显式登记适配器；`exporter(value, collection_profile, deadline)` 返回 `ResourceEvidence`，声明请求记录、完整性错误、生产者身份和预期中断。公共策略通过 `export_evidence` 枚举声明，不猜测资源方法或 case 名。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
 
 基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`analysis.metric_checks.check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查桥接通过 `MetricStore.reduce_with_evidence` 一次选择并归约，取得独立的定义与观察证据，不直接访问 store 的文档结构。检查结果保留定义、来源、实际窗口和样本信息；观测不足统一通过 `invalid_check` 返回 ERROR，并将 `validity: INVALID` 放在 `evidence`，不当作实际测量值；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
 
@@ -304,3 +304,10 @@ INPUTS = InputContract.from_fields(
 自定义客户端或采样器在 case 的实现文件编写协议，并在 program 的 `CASE` 注册；不修改公共 source 白名单或执行器分支。注册与实现可以同处一个小型 program，也可以拆成两个文件。调用客户端必须保存返回的真实资源句柄，采样器必须使用传入 deadline 限制 I/O；不要自建脱离 scope 的后台线程。接口职责与签名只在[case 插件结构](../architecture/case-plugins.md)维护。
 
 扩展验证应记录实际 diff 涉及的作者文件、重复合同声明与公共层修改数，测试文件单列。至少验证正向执行、错签名、未声明能力、缺失与非法输入、过期 epoch、超时与清理，以及冻结检查的投影不重新判定。新增能力不能改变原 case 的窗口、阈值、cohort、缺采处理或运行判定。
+
+
+## 扩展资源的所有权
+
+客户端 factory 只构造未启动的 owner，不创建进程、线程或网络会话。返回对象必须实现 `start(deadline)` 和幂等的 `cleanup(deadline)`；框架先登记 owner，再调用 start，因此启动失败仍进入最终清理。可选的 `request_stop()` 只发送停止请求，不等待退出。snapshot factory 构造惰性 reader，资源申请放在已登记 close 后的 `read(deadline)` 中。构造器不得隐藏资源申请。
+
+清理回调只有在验证退出或释放后才算成功；开始关闭不等于已经关闭。部分失败后保留 owner 和已完成步骤，重复 cleanup 继续尚未完成的回收。停止发流、取消请求、等待退出、最终快照和交付是不同职责，不能在 request_stop 中执行归档或长等待。注册接口及进程监管规则见[框架结构](../architecture/framework.md)。

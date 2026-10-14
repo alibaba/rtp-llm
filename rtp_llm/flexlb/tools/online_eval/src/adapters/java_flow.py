@@ -170,6 +170,12 @@ class JavaFlowGroup:
             deadline.check()
             time.sleep(min(self.poll_s, deadline.remaining()))
 
+    def request_stop(self):
+        """Publish cancellation without waiting for the Java producer."""
+        if self.proc is not None and self.proc.alive() and self.control.exists():
+            from adapters.flow_control import stop_sending
+            self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
+
     def stop_sending(self, deadline):
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
