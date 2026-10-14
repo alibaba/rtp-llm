@@ -100,9 +100,9 @@ py_test(
     name = "weight_memory_saver_gpu_test",
     srcs = ["weight_memory_saver_gpu_test.py"],
     deps = py_test_deps,
-    tags = ["H20"],
+    tags = ["L20_CU13"],
     exec_properties = {
-        'gpu': 'H20',
+        'gpu': 'L20_CU13',
     },
 )
 
@@ -110,9 +110,10 @@ py_test(
     name = "pausable_scratch_gpu_test",
     srcs = ["pausable_scratch_gpu_test.py"],
     deps = py_test_deps,
-    tags = ["H20"],
+    env = {"RTP_TEST_TMS_PRELOAD": "1"},
+    tags = ["L20_CU13"],
     exec_properties = {
-        'gpu': 'H20',
+        'gpu': 'L20_CU13',
     },
 )
 

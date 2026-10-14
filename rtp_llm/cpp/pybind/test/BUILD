@@ -4,6 +4,8 @@ cc_test_wrapper(
     name = "rtp_llm_op_shutdown_test",
     srcs = ["RtpLLMOpShutdownTest.cc"],
     copts = copts(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
     # th_transformer_lib resolves runtime and autil symbols from this shared
     # library. Keep it after the test objects so --as-needed does not drop it,
     # and declare it as a linker input for remote execution.

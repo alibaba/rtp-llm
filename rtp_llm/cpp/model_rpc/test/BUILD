@@ -133,6 +133,8 @@ cc_test(
         "//rtp_llm/cpp/engine_base/sleep/test:bound_sleep_controller",
     ],
     env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -145,6 +147,8 @@ cc_test(
         "//rtp_llm/cpp/disaggregate/cache_store/test:cache_store_test_base",
     ],
     env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(

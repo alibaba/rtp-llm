@@ -1280,11 +1280,17 @@ class BackendTest(JitCacheTestBase):
         return stack
 
     def test_no_remote_sets_up_local_jit_env(self):
+        scope = jit.Scope("local", self.root, ())
         with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=mock.Mock()
-        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
+            jit, "setup_jit_cache_env", return_value=scope
+        ) as setup, mock.patch.object(
+            jit, "JitCacheManager"
+        ) as manager, mock.patch.object(
+            jit, "_validate_flashinfer_cache", wraps=jit._validate_flashinfer_cache
+        ) as validate:
             self.assertIsNone(jit.start_from_config(self.make_configs().jit_config))
         setup.assert_called_once_with()
+        validate.assert_called_once_with(scope)
         manager.assert_not_called()
 
     def test_manage_jit_cache_false_skips_all_setup(self):
@@ -1454,7 +1460,9 @@ class BackendTest(JitCacheTestBase):
             ):
                 stack.enter_context(
                     mock.patch.object(
-                        backend, name, side_effect=lambda *args, e=event: events.append(e)
+                        backend,
+                        name,
+                        side_effect=lambda *args, e=event: events.append(e),
                     )
                 )
             backend.local_rank_start(None, configs)

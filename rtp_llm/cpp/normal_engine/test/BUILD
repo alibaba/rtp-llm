@@ -117,8 +117,16 @@ cc_test(
         ":mock_engine",
         "//rtp_llm/cpp/engine_base/sleep:admission_gate",
     ] + cuda13_torch_link_deps,
-    env = device_test_envs(),
-    exec_properties = {"gpu": "A10"},
+    env = select({
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {
+            "TEST_USING_DEVICE": "CUDA",
+            "LD_PRELOAD": "libtorch_cpu.so",
+            "RTP_TEST_TMS_PRELOAD": "1",
+        },
+    }),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
