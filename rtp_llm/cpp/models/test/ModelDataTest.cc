@@ -138,6 +138,44 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
+TEST_F(ModelDataTest, testShapeHintsInlineSmallCpuGroupTypes) {
+    GptModelInputs inputs;
+    inputs.kv_cache_group_tags  = {"z_group", "a_group"};
+    inputs.kv_cache_group_types = torch::tensor({1, 0}, torch::kInt32);
+    const auto is_inline        = [](const GptModelInputShapeHints& hints) {
+        return (hints[GptModelInputIndex::modelControlFlags] & kControlInlineKvGroupTypes) != 0;
+    };
+    auto hints = getModelInputShapeHints(inputs);
+    EXPECT_TRUE(is_inline(hints));
+    EXPECT_EQ(hints[GptModelInputIndex::kvCacheGroupTypesLen], 2);
+    EXPECT_EQ(hints[GptModelInputIndex::inlineKvCacheGroupTypes0], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::inlineKvCacheGroupTypes1], 1);
+
+    // Read this round's values in canonical tag order, including strided CPU inputs.
+    inputs.kv_cache_group_types = torch::tensor({2, 99, 1, 99}, torch::kInt32).slice(0, 0, 4, 2);
+    hints                       = getModelInputShapeHints(inputs);
+    EXPECT_TRUE(is_inline(hints));
+    EXPECT_EQ(hints[GptModelInputIndex::inlineKvCacheGroupTypes0], 1);
+    EXPECT_EQ(hints[GptModelInputIndex::inlineKvCacheGroupTypes1], 2);
+
+    inputs.kv_cache_group_types = inputs.kv_cache_group_types.to(torch::kCUDA);
+    hints                       = getModelInputShapeHints(inputs);
+    EXPECT_FALSE(is_inline(hints));
+    EXPECT_NE(hints[GptModelInputIndex::tensorDeviceMap] & kDeviceBitCacheGroupTypes, 0);
+
+    inputs.kv_cache_group_tags  = {"z_group", "a_group", "m_group"};
+    inputs.kv_cache_group_types = torch::tensor({1, 0, 2}, torch::kInt32);
+    EXPECT_FALSE(is_inline(getModelInputShapeHints(inputs)));
+    inputs.kv_cache_group_tags.clear();
+    inputs.kv_cache_group_types = torch::empty({0}, torch::kInt32);
+    EXPECT_FALSE(is_inline(getModelInputShapeHints(inputs)));
+
+    inputs.kv_cache_group_tags  = {"z_group", "a_group"};
+    inputs.kv_cache_group_types = torch::tensor({1, 0}, torch::kInt32);
+    inputs.skip_run             = true;
+    EXPECT_FALSE(is_inline(getModelInputShapeHints(inputs)));
+}
+
 TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     GptModelInputs inputs;
     inputs.combo_tokens             = torch::zeros({8}, torch::kInt32).cuda();
@@ -310,7 +348,10 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     ParallelismConfig config;
     config.tp_size = 2;
     config.tp_rank = rank;
+    const auto sequence = CpuTpBroadcaster::instance().next_sequence_;
     tpSyncModelInputs(inputs, config);
+    // Other CPU fields still use one packed payload after the shape frame.
+    EXPECT_EQ(CpuTpBroadcaster::instance().next_sequence_, sequence + 2);
 
     EXPECT_EQ(inputs.kv_cache_group_tags, local_tags);
     std::vector<int64_t> local_to_root;
@@ -346,6 +387,43 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
 }
 
+void checkGroupTypesOnlyTpRound(GptModelInputs&                 inputs,
+                                int                             rank,
+                                const std::vector<std::string>& root_tags,
+                                const std::vector<int32_t>&     types,
+                                bool                            skip_run = false) {
+    inputs          = GptModelInputs{};
+    auto local_tags = root_tags;
+    if (rank != 0 && local_tags.size() > 1) {
+        std::rotate(local_tags.begin(), local_tags.begin() + 1, local_tags.end());
+    }
+    inputs.kv_cache_group_tags = local_tags;
+    if (rank == 0) {
+        if (!types.empty()) {
+            inputs.kv_cache_group_types = torch::tensor(types, torch::kInt32);
+        }
+        inputs.skip_run = skip_run;
+    }
+    ParallelismConfig config;
+    config.tp_size      = 2;
+    config.tp_rank      = rank;
+    const auto sequence = CpuTpBroadcaster::instance().next_sequence_;
+    tpSyncModelInputs(inputs, config);
+    const auto frames = skip_run || types.size() <= kModelInputInlineGroupTypes ? 1 : 2;
+    EXPECT_EQ(CpuTpBroadcaster::instance().next_sequence_, sequence + frames);
+    if (skip_run || types.empty()) {
+        EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
+        EXPECT_FALSE(inputs.kv_cache_group_types.defined());
+        return;
+    }
+    std::vector<int32_t> expected;
+    for (const auto& tag : local_tags) {
+        expected.push_back(types[std::find(root_tags.begin(), root_tags.end(), tag) - root_tags.begin()]);
+    }
+    EXPECT_EQ(inputs.kv_cache_group_tags, local_tags);
+    expectIntTensor(inputs.kv_cache_group_types, torch::tensor(expected, torch::kInt32));
+}
+
 void checkLegacyUntaggedTpRound(GptModelInputs& inputs, int rank) {
     const auto physical = torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({2, 2});
     const auto kernel   = torch::tensor({5, 6, 7, 8, 9, 10}, torch::kInt32).reshape({2, 3});
@@ -355,6 +433,7 @@ void checkLegacyUntaggedTpRound(GptModelInputs& inputs, int rank) {
         inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
         inputs.kv_cache_block_id        = physical.clone();
         inputs.kv_cache_kernel_block_id = kernel.clone();
+        inputs.kv_cache_group_types     = torch::tensor({2}, torch::kInt32);
     }
     ParallelismConfig config;
     config.tp_size = 2;
@@ -362,6 +441,7 @@ void checkLegacyUntaggedTpRound(GptModelInputs& inputs, int rank) {
     tpSyncModelInputs(inputs, config);
 
     EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
+    expectIntTensor(inputs.kv_cache_group_types, torch::tensor({2}, torch::kInt32));
     expectIntTensor(inputs.kv_cache_block_id, physical);
     expectIntTensor(inputs.kv_cache_kernel_block_id, kernel);
     EXPECT_FALSE(inputs.kv_cache_update_mapping.defined());
@@ -383,6 +463,12 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group", std::string("\x80") + "_group"}, false);
     checkGroupedTpRound(inputs, rank, {"single_group"}, false);
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group"}, true);
+    checkGroupTypesOnlyTpRound(inputs, rank, {"z_group", "a_group"}, {1, 0});
+    checkGroupTypesOnlyTpRound(inputs, rank, {"z_group", "a_group"}, {2, 1});
+    checkGroupTypesOnlyTpRound(inputs, rank, {"single_group"}, {2});
+    checkGroupTypesOnlyTpRound(inputs, rank, {"z_group", "a_group", "m_group"}, {1, 0, 2});
+    checkGroupTypesOnlyTpRound(inputs, rank, {"z_group", "a_group"}, {1, 0}, true);
+    checkGroupTypesOnlyTpRound(inputs, rank, {}, {});
     checkLegacyUntaggedTpRound(inputs, rank);
 
     if (rank == 0) {

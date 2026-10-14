@@ -16,6 +16,32 @@ namespace rtp_llm {
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
+    std::vector<at::Tensor> bindDecodeMetadataViews(const std::vector<at::Tensor>& sources,
+                                                    int64_t                        batch,
+                                                    int64_t                        physical_tokens,
+                                                    bool                           with_valid_mask,
+                                                    bool                           recapture) {
+        c10::InferenceMode inference_guard(true);
+        RTP_LLM_CHECK(sources.size() == 5);
+        auto& captured                          = metadata_view_test_hold_.py_model_inputs_.attention_inputs;
+        captured.cu_seqlens_device              = sources[0];
+        captured.cu_kv_seqlens_device           = sources[1];
+        captured.decode_cu_seqlens_device       = sources[2];
+        captured.sequence_lengths_plus_1_device = sources[3];
+        captured.valid_token_mask               = sources[4];
+        if (recapture) {
+            metadata_view_test_hold_.resetDecodeMetadataViews();
+        }
+        torch_ext::PyAttentionInputs destination;
+        destination.valid_token_mask = sources[4];
+        metadata_view_test_hold_.bindDecodeMetadataViews(destination, batch, physical_tokens, with_valid_mask);
+        return {destination.cu_seqlens_device,
+                destination.cu_kv_seqlens_device,
+                destination.decode_cu_seqlens_device,
+                destination.sequence_lengths_plus_1_device,
+                destination.valid_token_mask};
+    }
+
     static std::vector<int64_t> topologyWidths(const std::vector<uint32_t>& spans,
                                                const std::vector<uint32_t>& kernel_spans,
                                                const std::vector<int>&      types,
@@ -107,6 +133,29 @@ public:
         if (token_type_embedding.has_value()) {
             params.token_type_embedding = std::move(*token_type_embedding);
         }
+        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+    }
+
+    void init_mtp_draft_prefill(
+        py::object py_instance, int max_requests, int query_width, int sequence_parallel_size, int hc_mult) {
+        reset_runner();
+        GraphParams params;
+        params.enable_cuda_graph                = true;
+        params.is_prefill_cuda_graph_mode       = true;
+        params.role                             = CudaGraphRole::MTP_DRAFT_PREFILL;
+        params.max_seq_len                      = 64;
+        params.num_tokens_per_bs                = query_width;
+        params.sequence_parallel_size           = sequence_parallel_size;
+        params.hc_mult                          = hc_mult;
+        params.max_context_batch_size           = max_requests;
+        params.hidden_size                      = 4;
+        params.input_hidden_size                = 4 * hc_mult;
+        params.model_data_type                  = c10::ScalarType::BFloat16;
+        params.kv_cache_group_tags              = {"full", "aux"};
+        params.position_id_len_factor           = 1;
+        params.kernel_block_table_width         = 8;
+        params.fixed_capacity_mtp_draft_prefill = true;
+        params.device_only_attention_metadata   = true;
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
@@ -231,6 +280,7 @@ private:
 
     CudaGraphRunner* runner_ = nullptr;
     CudaGraphState   state_{};
+    CaptureMemoryHold metadata_view_test_hold_;
 };
 
 }  // namespace rtp_llm
@@ -240,6 +290,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     py::register_exception<DirtyCudaGraphCaptureError>(m, "DirtyCudaGraphCaptureError", PyExc_RuntimeError);
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())
+        .def("bindDecodeMetadataViews", &CudaGraphTestRunner::bindDecodeMetadataViews)
         .def_static("topologyWidths", &CudaGraphTestRunner::topologyWidths)
         .def("init_prefill",
              &CudaGraphTestRunner::init_prefill,
@@ -252,6 +303,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")            = std::vector<std::string>{},
              py::arg("position_encoding")     = py::none(),
              py::arg("token_type_embedding")  = py::none())
+        .def("init_mtp_draft_prefill", &CudaGraphTestRunner::init_mtp_draft_prefill)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),

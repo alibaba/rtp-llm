@@ -6,13 +6,25 @@
 
 namespace rtp_llm {
 
+// Read each request's last accepted token directly from its device-state views.
+// Descriptors travel in bounded kernel arguments; no pointer-table H2D staging.
+// Returns false without changing output for layouts/dtypes handled by the
+// existing ATen path. Callers must keep inputs alive and order their producer
+// before this stream, including allocator recordStream for cross-stream use.
+bool tryInvokeMtpAcceptedTokenGather(const std::vector<torch::Tensor>& accept_tokens,
+                                     const std::vector<torch::Tensor>& accept_lengths,
+                                     torch::Tensor&                    output,
+                                     cudaStream_t                      stream);
+
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,
                                   torch::Tensor&       prefix_lengths,
                                   torch::Tensor&       sequence_lengths_plus_1,
                                   torch::Tensor&       lm_output_indexes,
                                   int32_t              tokens_per_batch,
-                                  cudaStream_t         stream);
+                                  cudaStream_t         stream,
+                                  const torch::Tensor* position_bases = nullptr,
+                                  torch::Tensor*       position_ids   = nullptr);
 
 void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,
                                         torch::Tensor& lm_output_indexes,

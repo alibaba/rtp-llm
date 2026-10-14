@@ -4,6 +4,8 @@
 #include <memory>
 #include <list>
 #include <limits>
+#include <array>
+#include <fstream>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include "autil/EnvUtil.h"
@@ -24,6 +26,11 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAEvent.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 
 using namespace std;
 
@@ -720,6 +727,118 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     auto          last_hidden_states_h      = last_hidden_states.cpu().clone();
     vector<float> expect_last_hidden_states = {0.1, 0.2, 1.1, 1.2};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputKeepsEmptyTpFollowerPositionPlaceholder) {
+    const StreamGroups empty_stream_groups({});
+    for (const bool device_input : {false, true}) {
+        autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
+        for (int position_mode = 0; position_mode < 4; ++position_mode) {
+            ModelConfig model_config;
+            model_config.num_layers                            = 1;
+            model_config.has_positional_encoding               = position_mode == 1;
+            model_config.requires_token_position_ids           = position_mode == 2;
+            model_config.mm_model_config.mm_position_ids_style = position_mode == 3 ? MROPE : DEFAULT;
+            model_config.attn_config.rope_config.index_factor  = position_mode == 3 ? 3 : 1;
+            for (const auto spec_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+                for (const int propose_step : {1, 3}) {
+                    SCOPED_TRACE(testing::Message()
+                                 << "device_input=" << device_input << " position_mode=" << position_mode
+                                 << " spec_type=" << spec_type << " propose_step=" << propose_step);
+                    SpeculativeExecutionConfig sp_config;
+                    sp_config.type              = spec_type;
+                    sp_config.gen_num_per_cycle = propose_step;
+                    MtpBatchStreamProcessor processor(model_config,
+                                                      PDSepConfig{},
+                                                      ProfilingDebugLoggingConfig{},
+                                                      makeProcessorCacheConfig(),
+                                                      sp_config,
+                                                      false);
+                    TensorHolder            holder;
+                    // TP followers gather no local streams before receiving
+                    // the driver's input. An empty allocated tensor is still
+                    // a valid broadcast placeholder, unlike an undefined one.
+                    auto result = processor.gatherDecodeModelInput(empty_stream_groups, holder);
+                    ASSERT_TRUE(result.ok()) << result.status();
+                    ASSERT_TRUE(result->combo_tokens.defined());
+                    EXPECT_EQ(result->combo_tokens.numel(), 0);
+                    ASSERT_TRUE(result->input_lengths.defined());
+                    EXPECT_EQ(result->input_lengths.numel(), 0);
+                    const auto& positions = result->combo_position_ids;
+                    ASSERT_EQ(positions.defined(), position_mode != 0);
+                    if (positions.defined()) {
+                        EXPECT_EQ(positions.dim(), 1);
+                        EXPECT_EQ(positions.numel(), 0);
+                        EXPECT_EQ(positions.scalar_type(), torch::kInt32);
+                        EXPECT_TRUE(positions.device().is_cpu());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputUsesDeviceAndFreshRequestPositionBases) {
+    for (const bool device_input : {false, true}) {
+        autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
+        for (const bool mrope : {false, true}) {
+            for (const auto spec_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+                for (const int propose_step : {1, 3}) {
+                    SCOPED_TRACE(testing::Message() << "device_input=" << device_input << " mrope=" << mrope
+                                                    << " spec_type=" << spec_type << " propose_step=" << propose_step);
+                    ModelConfig model_config;
+                    model_config.max_seq_len                           = 2048;
+                    model_config.vocab_size                            = 256;
+                    model_config.num_layers                            = 1;
+                    model_config.has_positional_encoding               = false;
+                    model_config.requires_token_position_ids           = !mrope;
+                    model_config.mm_model_config.mm_position_ids_style = mrope ? MROPE : DEFAULT;
+                    model_config.attn_config.rope_config.index_factor  = mrope ? 3 : 1;
+                    RuntimeConfig              runtime_config;
+                    ResourceContext            resource_context;
+                    SpeculativeExecutionConfig sp_config;
+                    sp_config.type              = spec_type;
+                    sp_config.gen_num_per_cycle = propose_step;
+                    auto steady = createContextStream(model_config, runtime_config, resource_context, {10, 11}, 1);
+                    auto fresh  = createContextStream(model_config, runtime_config, resource_context, {20, 21, 22}, 2);
+                    steady->setIsContextStream(false);
+                    fresh->setIsContextStream(false);
+                    steady->setContextPositionIds(
+                        torch::tensor(mrope ? vector<int>{1, 1, 1, 2, 2, 2} : vector<int>{0, 1}, torch::kInt32));
+                    fresh->setContextPositionIds(torch::tensor(
+                        mrope ? vector<int>{100, 101, 102, 110, 111, 112, 120, 121, 122} : vector<int>{0, 1, 2},
+                        torch::kInt32));
+                    steady->getSPOutputBuffer()->hidden_states = torch::tensor({{1.0f, 2.0f}});
+                    fresh->getSPOutputBuffer()->hidden_states  = torch::tensor({{3.0f, 4.0f}});
+                    // The published device position is newer than the host's
+                    // two-token history; a fresh request has only host state.
+                    GenerateStream::MtpAsyncDeviceState state;
+                    state.next_position_ids_gpu =
+                        torch::tensor(mrope ? vector<int>{30, 40, 50} : vector<int>{30}, torch::kInt32)
+                            .to(torch::kCUDA);
+                    steady->setMtpAsyncDeviceState(std::move(state));
+                    StreamGroups            stream_groups({steady, fresh});
+                    MtpBatchStreamProcessor processor(model_config,
+                                                      PDSepConfig{},
+                                                      ProfilingDebugLoggingConfig{},
+                                                      makeProcessorCacheConfig(),
+                                                      sp_config,
+                                                      false);
+                    TensorHolder            holder;
+                    auto                    result = processor.gatherDecodeModelInput(stream_groups, holder);
+                    ASSERT_TRUE(result.ok()) << result.status();
+                    ASSERT_TRUE(result->combo_position_ids.defined());
+                    EXPECT_TRUE(result->combo_position_ids.is_cuda());
+                    EXPECT_EQ(result->combo_position_ids.dim(), 1);
+                    EXPECT_EQ(result->combo_position_ids.scalar_type(), torch::kInt32);
+                    // Gather publishes one position row per request. Draft
+                    // and target-verify expansion happens after TP broadcast.
+                    EXPECT_EQ((mrope ? vector<int>{30, 40, 50, 122, 122, 122} : vector<int>{30, 2}),
+                              toVec<int>(result->combo_position_ids));
+                }
+            }
+        }
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
@@ -1876,6 +1995,177 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsInitializes
     EXPECT_EQ((vector<int>{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
               toVec<int>(model_input.combo_position_ids));
 }
+
+#if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, TargetVerifyFusedPositionsPreserveBasesAndFallbacks) {
+    constexpr int64_t batch    = 104;
+    const auto        cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (int64_t width : {2, 4}) {
+        for (int64_t factor : {1, 3}) {
+            ModelConfig model_config;
+            model_config.mm_model_config.mm_position_ids_style = factor == 1 ? DEFAULT : MROPE;
+            model_config.attn_config.rope_config.index_factor  = factor;
+            SpeculativeExecutionConfig sp_config;
+            sp_config.gen_num_per_cycle = width - 1;
+            MtpBatchStreamProcessor processor(model_config,
+                                              PDSepConfig{},
+                                              ProfilingDebugLoggingConfig{},
+                                              makeProcessorCacheConfig(),
+                                              sp_config,
+                                              false);
+            const auto              original = torch::arange(batch * factor, torch::kInt32) * 7 - 50;
+            for (int layout = 0; layout < 4; ++layout) {
+                SCOPED_TRACE(testing::Message() << "factor=" << factor << " layout=" << layout);
+                auto source = layout == 1 ? original : original.cuda();
+                if (layout == 2) {
+                    auto strided = torch::empty({batch * factor, 2}, cuda_i32).select(1, 0);
+                    strided.copy_(source);
+                    source = strided;
+                } else if (layout == 3) {
+                    source = source.to(torch::kInt64);
+                }
+                const auto expected =
+                    (source.reshape({batch, 1, factor}) + torch::arange(width, source.options()).reshape({1, width, 1}))
+                        .flatten();
+                GptModelInputs input;
+                input.input_lengths      = torch::empty({batch}, cuda_i32);
+                input.combo_position_ids = source;
+                torch::Tensor bases;
+                processor.expandTargetVerifyPositionIdsFromDecode(input, &bases);
+                EXPECT_EQ(bases.defined(), layout == 0);
+                if (bases.defined()) {
+                    EXPECT_EQ(bases.data_ptr(), source.data_ptr());
+                }
+                auto sequence_lengths = torch::arange(batch, cuda_i32) + 100;
+                auto prefix           = torch::empty_like(sequence_lengths);
+                auto plus_one         = torch::empty_like(sequence_lengths);
+                auto indexes          = torch::empty_like(sequence_lengths);
+                invokeMtpTargetVerifyPrepare(sequence_lengths,
+                                             input.input_lengths,
+                                             prefix,
+                                             plus_one,
+                                             indexes,
+                                             width,
+                                             at::cuda::getCurrentCUDAStream().stream(),
+                                             bases.defined() ? &bases : nullptr,
+                                             bases.defined() ? &input.combo_position_ids : nullptr);
+                EXPECT_TRUE(torch::equal(input.combo_position_ids.cpu(), expected.cpu()));
+                EXPECT_TRUE(torch::equal(source.cpu().to(torch::kInt32), original));
+                EXPECT_TRUE(torch::equal(input.input_lengths.cpu(), torch::full({batch}, width, torch::kInt32)));
+                EXPECT_TRUE(torch::equal(prefix.cpu(), sequence_lengths.cpu()));
+                EXPECT_TRUE(torch::equal(plus_one.cpu(), sequence_lengths.cpu() + 1));
+                EXPECT_TRUE(torch::equal(indexes.cpu(), torch::arange(batch, torch::kInt32) * width));
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, TargetVerifyPositionPrepareMicrobenchmark) {
+    const auto* path = std::getenv("RTP_MTP_POSITION_BENCHMARK_JSON");
+    if (!path || !*path)
+        GTEST_SKIP() << "set RTP_MTP_POSITION_BENCHMARK_JSON to measure the prepare path";
+    c10::InferenceMode inference;
+    const auto         options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto         stream  = at::cuda::getCurrentCUDAStream();
+    std::ofstream      result(path);
+    ASSERT_TRUE(result.good());
+    result
+        << R"({"scope":"position expansion plus four metadata outputs, allocations included, single GPU","warmup":30,"samples_per_run":100,"iterations_per_sample":10,"width":4,"samples":[)";
+    bool first = true;
+    for (int64_t batch : {1, 23, 104, 127}) {
+        for (int64_t factor : {1, 3}) {
+            ModelConfig config;
+            config.mm_model_config.mm_position_ids_style = factor == 1 ? DEFAULT : MROPE;
+            config.attn_config.rope_config.index_factor  = factor;
+            SpeculativeExecutionConfig spec;
+            spec.gen_num_per_cycle = 3;
+            MtpBatchStreamProcessor processor(
+                config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), spec, false);
+            auto source  = torch::arange(batch * factor, options) + 65536;
+            auto lengths = torch::arange(batch, options) + 65536;
+            auto prepare = [&](bool fused) {
+                GptModelInputs input;
+                input.input_lengths      = torch::empty({batch}, options);
+                input.combo_position_ids = source;
+                torch::Tensor bases;
+                processor.expandTargetVerifyPositionIdsFromDecode(input, fused ? &bases : nullptr);
+                auto prefix   = torch::empty_like(lengths);
+                auto plus_one = torch::empty_like(lengths);
+                auto indexes  = torch::empty_like(lengths);
+                invokeMtpTargetVerifyPrepare(lengths,
+                                             input.input_lengths,
+                                             prefix,
+                                             plus_one,
+                                             indexes,
+                                             4,
+                                             stream.stream(),
+                                             fused ? &bases : nullptr,
+                                             fused ? &input.combo_position_ids : nullptr);
+                return std::array<torch::Tensor, 5>{
+                    input.combo_position_ids, input.input_lengths, prefix, plus_one, indexes};
+            };
+            const auto baseline = prepare(false), candidate = prepare(true);
+            for (size_t i = 0; i < baseline.size(); ++i)
+                ASSERT_TRUE(torch::equal(baseline[i], candidate[i]));
+            for (int run = 0; run < 2; ++run) {
+                for (int order = 0; order < 2; ++order) {
+                    const bool fused = (run == 0 ? order == 1 : order == 0);
+                    for (int i = 0; i < 30; ++i)
+                        (void)prepare(fused);
+                    at::cuda::CUDAEvent start(cudaEventDefault), stop(cudaEventDefault);
+                    for (int sample = 0; sample < 100; ++sample) {
+                        stream.synchronize();
+                        start.record(stream);
+                        const auto host_start = std::chrono::steady_clock::now();
+                        for (int i = 0; i < 10; ++i)
+                            (void)prepare(fused);
+                        const auto host_end = std::chrono::steady_clock::now();
+                        stop.record(stream);
+                        stop.synchronize();
+                        const double host_us =
+                            std::chrono::duration<double, std::micro>(host_end - host_start).count() / 10;
+                        const double event_us = start.elapsed_time(stop) * 1000.0 / 10;
+                        if (!first)
+                            result << ',';
+                        first = false;
+                        result << "{\"batch\":" << batch << ",\"factor\":" << factor << ",\"run\":" << run
+                               << ",\"order\":" << order << ",\"sample\":" << sample
+                               << ",\"fused\":" << (fused ? "true" : "false") << ",\"host_enqueue_us\":" << host_us
+                               << ",\"cuda_event_path_us\":" << event_us << '}';
+                    }
+                }
+            }
+        }
+    }
+    result << "]}\n";
+    ASSERT_TRUE(result.good());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, TargetVerifyPositionExpansionPreservesEmptyAndExpandedInputs) {
+    ModelConfig model_config;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), sp_config, false);
+    for (auto positions :
+         {torch::Tensor(),
+          torch::empty({0}, torch::kInt32),
+          torch::arange(104 * 2 * 3, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))}) {
+        GptModelInputs input;
+        input.input_lengths      = torch::empty({104}, torch::kInt32);
+        input.combo_position_ids = positions;
+        auto bases               = torch::ones({1}, torch::kInt32);
+        processor.expandTargetVerifyPositionIdsFromDecode(input, &bases);
+        EXPECT_FALSE(bases.defined());
+        ASSERT_EQ(input.combo_position_ids.defined(), positions.defined());
+        if (positions.defined()) {
+            EXPECT_EQ(input.combo_position_ids.data_ptr(), positions.data_ptr());
+        }
+    }
+}
+#endif
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
     ModelConfig                 model_config;

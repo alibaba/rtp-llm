@@ -40,6 +40,8 @@ public:
 struct FastTopKSamplerOutput {
     torch::Tensor all_probs;
     torch::Tensor token_ids;
+    torch::Tensor next_sequence_lengths;
+    torch::Tensor next_position_ids;
 };
 
 class FastTopKSampler {
@@ -51,6 +53,13 @@ public:
     virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
+
+    // MTP Q1 only: consume TP AllGather storage without a [B,V] transpose.
+    // Unsupported layouts/dtypes retain the original ATen sampler path.
+    FastTopKSamplerOutput forwardRankMajor(const torch::Tensor& logits,
+                                           int64_t              vocab_size,
+                                           const torch::Tensor& sequence_lengths = {},
+                                           const torch::Tensor& position_ids     = {});
 
 private:
     torch::Tensor d2t_map_;

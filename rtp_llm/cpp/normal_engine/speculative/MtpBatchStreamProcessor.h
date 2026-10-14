@@ -97,6 +97,9 @@ public:
                                                   TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    // A fused caller receives the original CUDA bases and fills the allocated output with its metadata kernel.
+    void expandTargetVerifyPositionIdsFromDecode(GptModelInputs& model_input,
+                                                 torch::Tensor*  fused_position_bases = nullptr) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,

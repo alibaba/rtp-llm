@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
 
+#include <array>
 #include <string>
 
 namespace rtp_llm {
@@ -27,6 +28,47 @@ public:
     void setMtpTargetHiddenStates(at::Tensor hidden_states) {
         mtp_target_hidden_states_ = hidden_states;
     };
+
+    void resetDecodeMetadataViews() {
+        decode_metadata_view_batch_ = -1;
+    }
+
+    void bindDecodeMetadataViews(torch_ext::PyAttentionInputs& destination,
+                                 int64_t                       batch,
+                                 int64_t                       physical_tokens,
+                                 bool                          with_valid_mask) {
+        // Cache view metadata only; each replay still fills the captured storage.
+        const auto&                            captured = py_model_inputs_.attention_inputs;
+        const std::array<const at::Tensor*, 5> sources  = {&captured.cu_seqlens_device,
+                                                           &captured.cu_kv_seqlens_device,
+                                                           &captured.decode_cu_seqlens_device,
+                                                           &captured.sequence_lengths_plus_1_device,
+                                                           &captured.valid_token_mask};
+        const size_t                           count    = with_valid_mask ? sources.size() : sources.size() - 1;
+        bool reuse = decode_metadata_view_batch_ == batch && decode_metadata_view_physical_tokens_ == physical_tokens
+                     && decode_metadata_view_with_valid_mask_ == with_valid_mask;
+        for (size_t i = 0; reuse && i < count; ++i) {
+            reuse = decode_metadata_view_sources_[i].is_same(*sources[i]);
+        }
+        if (!reuse) {
+            resetDecodeMetadataViews();
+            for (size_t i = 0; i < count; ++i) {
+                decode_metadata_view_sources_[i] = *sources[i];
+                const int64_t length             = i < 3 ? batch + 1 : (i == 3 ? batch : physical_tokens);
+                decode_metadata_views_[i]        = sources[i]->narrow(0, 0, length);
+            }
+            decode_metadata_view_batch_           = batch;
+            decode_metadata_view_physical_tokens_ = physical_tokens;
+            decode_metadata_view_with_valid_mask_ = with_valid_mask;
+        }
+        destination.cu_seqlens_device              = decode_metadata_views_[0];
+        destination.cu_kv_seqlens_device           = decode_metadata_views_[1];
+        destination.decode_cu_seqlens_device       = decode_metadata_views_[2];
+        destination.sequence_lengths_plus_1_device = decode_metadata_views_[3];
+        if (with_valid_mask) {
+            destination.valid_token_mask = decode_metadata_views_[4];
+        }
+    }
 
     CaptureMemoryHold() {}
 
@@ -82,6 +124,13 @@ public:
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
+
+private:
+    int64_t                   decode_metadata_view_batch_{-1};
+    int64_t                   decode_metadata_view_physical_tokens_{-1};
+    bool                      decode_metadata_view_with_valid_mask_{false};
+    std::array<at::Tensor, 5> decode_metadata_view_sources_;
+    std::array<at::Tensor, 5> decode_metadata_views_;
 };
 
 class GraphInstance {

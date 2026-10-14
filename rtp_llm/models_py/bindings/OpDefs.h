@@ -373,6 +373,9 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // C++ staging contract: payload rows are logical; attention metadata owns
+    // the physical SP geometry. Set only after validating the source tensors.
+    bool input_payload_unpadded = false;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

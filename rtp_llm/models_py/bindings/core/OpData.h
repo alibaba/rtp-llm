@@ -91,6 +91,8 @@ struct GptModelInputs {
     bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
+    // Local Q1 greedy consumer contract; assigned on every TP rank after input sync.
+    bool prefer_rank_major_logits = false;
     // Set when any stream requests return_all_hidden_states. Gates whether the
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
@@ -106,6 +108,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
     bool is_mtp_draft_update = false;
+    // Local execution identity; assigned independently on each TP rank after
+    // input broadcast. Zero means no background attention preparation.
+    uint64_t attention_prepare_id = 0;
     int64_t sp_logical_requests = 0;
     int64_t sp_logical_tokens = 0;
 
@@ -139,6 +144,9 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+    // Optional [TP, batch, local_vocab] output for a greedy-only consumer.
+    torch::Tensor greedy_logits_rank_major;
+    int64_t       greedy_vocab_size = 0;
 };
 
 struct CopyParams {

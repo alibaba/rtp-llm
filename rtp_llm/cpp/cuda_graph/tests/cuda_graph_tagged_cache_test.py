@@ -1,5 +1,6 @@
 import copy
 import gc
+import itertools
 import os
 import unittest
 import weakref
@@ -523,7 +524,139 @@ def _build_target_verify_inputs(
     )
 
 
+class RectangularMtpDraftModel:
+    def __init__(self, query_width):
+        self.query_width = query_width
+        self.capture_shapes = set()
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def forward(self, inputs, fmha_impl=None):
+        attention = inputs.attention_inputs["full"]
+        requests = attention.input_lengths.numel()
+        tokens = inputs.input_ids.numel()
+        assert tokens == requests * self.query_width
+        assert inputs.input_hiddens.size(0) == tokens
+        assert inputs.combo_position_ids.numel() == tokens
+        assert attention.physical_token_count == tokens
+        self.capture_shapes.add((requests, tokens))
+        hidden = inputs.input_hiddens.reshape(tokens, -1, HIDDEN_SIZE).sum(dim=1)
+        return PyModelOutputs(hidden * attention.valid_token_mask[:, None])
+
+
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_decode_metadata_views_reuse_and_invalidation(self):
+        runner = CudaGraphRunner()
+        sources = [
+            torch.arange(size, dtype=torch.int32, device="cuda")
+            for size in (129, 129, 129, 128)
+        ]
+        sources.append(torch.arange(128, device="cuda") % 2 == 0)
+
+        def bind(batch=112, physical_tokens=112, with_mask=True, recapture=False):
+            return runner.bindDecodeMetadataViews(
+                sources, batch, physical_tokens, with_mask, recapture
+            )
+
+        first = bind()
+        self.assertEqual(
+            [view._cdata for view in first], [view._cdata for view in bind()]
+        )
+        sources[0].fill_(7)
+        torch.testing.assert_close(first[0], sources[0][:113], rtol=0, atol=0)
+        previous = first
+        for batch, physical_tokens in ((111, 112), (111, 120), (112, 112)):
+            current = bind(batch, physical_tokens)
+            self.assertEqual(
+                [view.numel() for view in current],
+                [batch + 1] * 3 + [batch, physical_tokens],
+            )
+            self.assertTrue(
+                all(a._cdata != b._cdata for a, b in zip(previous, current))
+            )
+            previous = current
+
+        # A replacement can itself be a view; retain its owner and bind its storage.
+        sources[2] = torch.arange(130, dtype=torch.int32, device="cuda")[1:]
+        replaced = bind()
+        self.assertNotEqual(previous[2]._cdata, replaced[2]._cdata)
+        self.assertEqual(replaced[2].data_ptr(), sources[2].data_ptr())
+        torch.testing.assert_close(replaced[2], sources[2][:113], rtol=0, atol=0)
+        recaptured = bind(recapture=True)
+        self.assertTrue(all(a._cdata != b._cdata for a, b in zip(replaced, recaptured)))
+        without_mask = bind(with_mask=False)
+        self.assertEqual(without_mask[4]._cdata, sources[4]._cdata)
+        self.assertEqual(bind()[4].numel(), 112)
+
+    def test_rectangular_mtp_buckets_capture_their_own_capacity_with_hc_and_sp(self):
+        cases = (
+            (
+                4,
+                {(12, 48), (16, 64), (28, 112), (32, 128), (64, 256)},
+                ((14, 16, 64), (28, 28, 112), (12, 12, 48)),
+            ),
+            (
+                3,
+                {(16, 48), (32, 96), (48, 144)},
+                ((14, 16, 48), (28, 32, 96), (11, 16, 48)),
+            ),
+        )
+        for hc_mult, (query, captures, requests) in itertools.product((1, 2), cases):
+            with self.subTest(hc_mult=hc_mult, query=query):
+                model = RectangularMtpDraftModel(query)
+                runner = CudaGraphRunner()
+                runner.init_mtp_draft_prefill(model, 160, query, 16, hc_mult)
+                self.assertTrue(captures <= model.capture_shapes)
+                for logical, physical, bucket in requests:
+                    inputs = _build_target_verify_inputs(
+                        GROUP_TAGS,
+                        {"full": 2, "aux": 1},
+                        batch_size=physical,
+                        query_len=query,
+                        prefix_len=1,
+                    )
+                    tokens = physical * query
+                    inputs.input_hiddens = (
+                        torch.arange(
+                            tokens * HIDDEN_SIZE * hc_mult,
+                            dtype=torch.float32,
+                            device="cuda",
+                        )
+                        .reshape(tokens, HIDDEN_SIZE * hc_mult)
+                        .to(torch.bfloat16)
+                    )
+                    inputs.combo_position_ids = torch.arange(
+                        tokens, dtype=torch.int32, device="cuda"
+                    )
+                    tagged_attention = inputs.attention_inputs
+                    for attention in tagged_attention.values():
+                        attention.is_target_verify = False
+                        attention.is_mtp_draft_update = True
+                        attention.logical_request_count = logical
+                        attention.physical_request_count = physical
+                        attention.logical_token_count = logical * query
+                        attention.physical_token_count = tokens
+                        attention.valid_token_mask = (
+                            torch.arange(tokens, device="cuda") < logical * query
+                        )
+                        if logical < 13:
+                            storage = torch.zeros(
+                                tokens * 2, dtype=torch.bool, device="cuda"
+                            )
+                            storage[::2].copy_(attention.valid_token_mask)
+                            attention.valid_token_mask = storage[::2]
+                    inputs.attention_inputs = tagged_attention
+                    self.assertTrue(runner.canRun(inputs))
+                    self.assertEqual(runner.getCurrentRealGraphSize(), bucket)
+                    self.assertTrue(runner.prepare(inputs))
+                    output = runner.forward(inputs).hidden_states
+                    expected = (
+                        inputs.input_hiddens.reshape(tokens, -1, HIDDEN_SIZE).sum(dim=1)
+                        * inputs.attention_inputs["full"].valid_token_mask[:, None]
+                    )
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
     def test_target_linear_replay_metadata_tracks_growing_and_shrinking_batches(self):
         runner = CudaGraphRunner()
         runner.init_decode(
@@ -1580,7 +1713,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # The shared staging row is wider than the model-local capture row.
         # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=KERNEL_BLOCK_TABLE_WIDTH + 2,
         )
         self.assertTrue(runner.canRun(inputs))
         self.assertTrue(runner.canPrepare(inputs))
@@ -1608,7 +1744,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
                     spans = {"full": 8, "aux": 32}
                     real_width, fake_width = CudaGraphRunner.topologyWidths(
-                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                        [spans[tag] for tag in tags],
+                        [8, 8],
+                        [1, 1],
+                        64,
+                        reserve,
+                        fake_count,
                     )
                     self.assertEqual(max(real_width, fake_width), width)
                     runner = CudaGraphRunner()

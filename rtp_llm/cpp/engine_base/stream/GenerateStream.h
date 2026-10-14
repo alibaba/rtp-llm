@@ -657,7 +657,7 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
-        // Position tuple of the next round's newest committed token.  DSpARK
+        // Position tuple of the next round's newest committed token. MTP
         // carries this beside next_seq_len so MRoPE target-verify graphs can
         // be prepared without consulting worker-owned host bookkeeping.
         torch::Tensor next_position_ids_gpu;

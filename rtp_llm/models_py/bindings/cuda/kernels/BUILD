@@ -431,3 +431,17 @@ cc_library(
         "--cuda-gpu-arch=sm_100f",
     ],
 )
+
+# MTP Q1 top-1 over the rank-major TP AllGather result.
+cc_library(
+    name = "mtp_greedy_sampling",
+    srcs = ["mtp_greedy_sampling.cu"],
+    hdrs = ["mtp_greedy_sampling.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    # Preserve ATen's FP32 argmax order for subnormal values.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)

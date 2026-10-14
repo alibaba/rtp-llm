@@ -85,3 +85,15 @@ py_test(
     # Requires the CUDA13 native MLA runtime.
     tags = ["manual"],
 )
+
+py_test(
+    name = "page_rr_model_graph_metadata_test",
+    srcs = ["page_rr_model_graph_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    target_compatible_with = select({
+        "//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

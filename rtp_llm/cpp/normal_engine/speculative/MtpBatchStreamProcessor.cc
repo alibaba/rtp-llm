@@ -313,6 +313,33 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     return next_table;
 }
 
+void MtpBatchStreamProcessor::expandTargetVerifyPositionIdsFromDecode(GptModelInputs& model_input,
+                                                                      torch::Tensor*  fused_position_bases) const {
+    if (fused_position_bases)
+        *fused_position_bases = torch::Tensor();
+    if (!model_input.combo_position_ids.defined() || model_input.combo_position_ids.numel() == 0)
+        return;
+    const int64_t batch  = model_input.input_lengths.numel();
+    const int64_t factor = model_input_gatherer_config_.position_id_len_factor;
+    const int64_t width  = propose_step_ + 1;
+    if (propose_step_ == 1 && model_input.combo_position_ids.numel() == batch * width * factor)
+        return;
+    RTP_LLM_CHECK_WITH_INFO(factor > 0 && model_input.combo_position_ids.numel() == batch * factor,
+                            "target prepare position bases must have one row per request");
+    if (fused_position_bases && model_input.combo_position_ids.is_cuda()
+        && model_input.combo_position_ids.scalar_type() == torch::kInt32
+        && model_input.combo_position_ids.is_contiguous()) {
+        *fused_position_bases          = model_input.combo_position_ids;
+        model_input.combo_position_ids = torch::empty({batch * width * factor}, fused_position_bases->options());
+        return;
+    }
+    // The bases have already been TP-broadcast. Do not consult mutable stream
+    // state, or fabricate zero positions on non-driver ranks.
+    auto bases                     = model_input.combo_position_ids.reshape({batch, 1, factor});
+    auto offsets                   = torch::arange(width, bases.options()).reshape({1, width, 1});
+    model_input.combo_position_ids = (bases + offsets).reshape({-1}).contiguous();
+}
+
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input) const {
     if (!model_input.combo_position_ids.defined()) {
@@ -766,6 +793,14 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     RTP_LLM_CHECK(model_input.ok());
 
     overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder);
+    // TP followers have no local rows before rank 0 broadcasts the inputs.
+    // Preserve their allocated empty position tensor instead of reshaping an undefined result.
+    if (!stream_groups.empty() && model_input.value().combo_position_ids.defined()) {
+        // Generic snapshot gathering intentionally leaves host position rows
+        // empty while bookkeeping is pending. Bind immutable device positions
+        // before TP broadcast, so draft and target prepare share the same bases.
+        model_input.value().combo_position_ids = collectDSparkPositionBases(stream_groups, host_holder).reshape({-1});
+    }
 
     if (propose_step_ == 1 || is_dspark_) {
         return model_input;
@@ -788,9 +823,8 @@ absl::Status MtpBatchStreamProcessor::gatherLinearReplayInputs(
     }
     const int64_t batch = static_cast<int64_t>(streams.size());
     const int64_t groups = cache_config.groupNums();
-    auto host = LinearReplayInputs::allocate(batch, groups, torch::kCPU);
+    auto          host   = LinearReplayInputs::allocate(batch, groups, torch::kCPU, /*pin_memory=*/true);
     for (auto* tensor : host.tensors()) {
-        *tensor = tensor->pin_memory();
         tensor->zero_();
     }
     host.slot_ids.fill_(-1);
@@ -851,7 +885,9 @@ absl::Status MtpBatchStreamProcessor::gatherLinearReplayInputs(
         *tensor = tensor->to(torch::kCUDA, /*non_blocking=*/true);
     }
     if (!history_rows.empty()) {
-        auto rows_host = torch::tensor(history_rows, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
+        auto rows_host = torch::empty({static_cast<int64_t>(history_rows.size())},
+                                      torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+        std::copy(history_rows.begin(), history_rows.end(), rows_host.data_ptr<int64_t>());
         host_holder.hold_host(rows_host);
         auto rows = rows_host.to(torch::kCUDA, /*non_blocking=*/true);
         auto accepted = torch::cat(accepts).to(torch::kInt32);
@@ -1306,6 +1342,7 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
     }
 
     if (gatherMtpDecodeModelInputFromDeviceState(stream_groups, model_input, host_holder)) {
+        expandTargetVerifyPositionIdsFromDecode(model_input);
         return;
     }
 
@@ -1345,16 +1382,20 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
     if (model_input.combo_position_ids.defined()) {
-        const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
-        auto         next_position_ids =
-            torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
-        int*       dst_position_ids = next_position_ids.data_ptr<int>();
-        const auto src_position_ids = model_input.combo_position_ids.cpu().contiguous();
-        const int* src              = src_position_ids.data_ptr<int>();
-        for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
-            dst_position_ids[i] = src[i] + 1;
+        if (model_input.combo_position_ids.is_cuda()) {
+            model_input.combo_position_ids = model_input.combo_position_ids + 1;
+        } else {
+            const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
+            auto         next_position_ids =
+                torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
+            int*       dst_position_ids = next_position_ids.data_ptr<int>();
+            const auto src_position_ids = model_input.combo_position_ids.cpu().contiguous();
+            const int* src              = src_position_ids.data_ptr<int>();
+            for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
+                dst_position_ids[i] = src[i] + 1;
+            }
+            model_input.combo_position_ids = std::move(next_position_ids);
         }
-        model_input.combo_position_ids = std::move(next_position_ids);
     }
 
     if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda()) {

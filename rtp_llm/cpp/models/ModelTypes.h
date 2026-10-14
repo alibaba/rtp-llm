@@ -125,8 +125,15 @@ enum GptModelInputIndex : size_t {
     // [group, batch, blocks].
     kvCacheKernelBlockIdRank,
     kvCacheBlockIdRank,
+    // Small CPU group-type arrays share the shape frame instead of a second
+    // CPU collective. Larger arrays and CUDA tensors retain the packed lane.
+    inlineKvCacheGroupTypes0,
+    inlineKvCacheGroupTypes1,
     gptModelInputLength,
 };
+
+constexpr size_t kModelInputInlineGroupTypes =
+    GptModelInputIndex::inlineKvCacheGroupTypes1 - GptModelInputIndex::inlineKvCacheGroupTypes0 + 1;
 
 // Wire format of the first tpSync stage. int64, because a DSpARK long-prefill
 // last_hidden_states easily exceeds what int32 can carry (256K tokens *
@@ -165,6 +172,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlMtpDraftUpdate      = 1u << 10,
+    kControlInlineKvGroupTypes  = 1u << 11,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -195,6 +203,7 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual void            invalidatePreparedAttentionInputs() {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

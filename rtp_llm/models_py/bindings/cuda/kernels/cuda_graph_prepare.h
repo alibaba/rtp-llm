@@ -29,9 +29,52 @@ struct CudaGraphPrepareFillRegion {
 struct CudaGraphPrepareFillParams {
     int32_t                    region_count = 0;
     CudaGraphPrepareFillRegion regions[kMaxCudaGraphPrepareFillRegions];
+    uint8_t*                   zero_bytes                     = nullptr;
+    int64_t                    zero_byte_count                = 0;
+    bool*                      valid_token_mask               = nullptr;
+    const bool*                source_valid_token_mask        = nullptr;
+    int64_t                    mask_count                     = 0;
+    int64_t                    source_mask_count              = 0;
+    bool                       generate_valid_token_mask      = false;
+    const int32_t*             decode_sequence_lengths        = nullptr;
+    int32_t*                   decode_sequence_lengths_plus_1 = nullptr;
+    int64_t                    decode_batch_size              = 0;
 };
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream);
+
+struct SequenceParallelPadRegion {
+    const uint8_t* source                  = nullptr;
+    uint8_t*       destination             = nullptr;
+    int64_t        source_group_bytes      = 0;
+    int64_t        destination_group_bytes = 0;
+    int64_t        groups                  = 1;
+    uint64_t       fill_bits               = 0;
+    int32_t        element_bytes           = 0;
+};
+
+struct SequenceParallelPadParams {
+    int32_t                   region_count = 0;
+    SequenceParallelPadRegion regions[kMaxCudaGraphPrepareFillRegions];
+};
+
+void invokeSequenceParallelPad(SequenceParallelPadParams params, CudaGraphPrepareStream stream);
+
+// Per-launch sources for direct raw-input copy plus SP dummy-row padding.
+// Passed by value: no device descriptor, H2D publication or pinned allocation.
+struct CudaGraphInputStagingSources {
+    const uint8_t* input_ids           = nullptr;
+    const uint8_t* input_hiddens       = nullptr;
+    int64_t        input_ids_bytes     = 0;
+    int64_t        input_hiddens_bytes = 0;
+};
+
+void invokeCudaGraphInputStaging(CudaGraphInputStagingSources sources,
+                                 uint8_t*                     input_ids,
+                                 int64_t                      input_ids_capacity_bytes,
+                                 uint8_t*                     input_hiddens,
+                                 int64_t                      input_hiddens_capacity_bytes,
+                                 CudaGraphPrepareStream       stream);
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,
