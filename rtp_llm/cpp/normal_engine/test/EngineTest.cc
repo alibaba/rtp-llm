@@ -213,11 +213,11 @@ TEST_F(NormalEngineTest, speculativePipelineInitializesFullFastGenContext) {
             for (const auto& stream : batch.second) {
                 check_context(stream);
             }
-            if (full_context) {
-                auto warmup = engine->preRun(make_input(), preRunMode::prefill_warm_up);
-                ASSERT_TRUE(warmup.ok()) << warmup.status().ToString();
-                EXPECT_EQ(warmup.value()->currentChunkLen(), 7);
-            }
+            // Warmup bypasses scheduling even when live PP requests use chunks.
+            auto warmup = engine->preRun(make_input(), preRunMode::prefill_warm_up);
+            ASSERT_TRUE(warmup.ok()) << warmup.status().ToString();
+            EXPECT_EQ(warmup.value()->currentChunkLen(), 7);
+            EXPECT_FALSE(warmup.value()->isChunkStream());
         }
     }
 }

@@ -292,8 +292,9 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
-    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && mode != preRunMode::decode_warm_up
-        && stream->isChunkStream()) {
+    // Synthetic prefill warmup bypasses the PP scheduler that normally assigns chunks.
+    if ((mode == preRunMode::prefill_warm_up || parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE)
+        && mode != preRunMode::decode_warm_up && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     stream->setReserveStep(reserve_step_);
