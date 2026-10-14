@@ -79,7 +79,7 @@ class CacheStatusResponseCacheTest {
         memory.write(List.of(1L, 2L, 3L));
         assertSame(host, memory.keySnapshot());
         memory.pinRead(List.of(1L, 2L, 3L), 0).consume();
-        assertEquals(Set.of(1L, 2L, 3L), host);
+        assertEquals(List.of(1L, 2L, 3L), host);
         assertTrue(memory.keySnapshot().isEmpty());
     }
 
@@ -101,7 +101,14 @@ class CacheStatusResponseCacheTest {
                 RpcServiceGrpc.getGetCacheStatusMethod().getResponseMarshaller());
         var a = marshaller.stream(first);
         var b = marshaller.stream(first);
+        assertTrue(a instanceof io.grpc.KnownLength);
+        assertTrue(a instanceof io.grpc.Drainable);
         a.read();
+        var remaining = new java.io.ByteArrayOutputStream();
+        int expectedRemaining = first.toByteArray().length - 1;
+        assertEquals(expectedRemaining, ((io.grpc.Drainable) a).drainTo(remaining));
+        assertArrayEquals(java.util.Arrays.copyOfRange(first.toByteArray(), 1, expectedRemaining + 1), remaining.toByteArray());
+        assertEquals(0, a.available());
         assertEquals(first, EngineRpcService.CacheStatusPB.parseFrom(b));
         assertEquals(changed, marshaller.parse(marshaller.stream(changed)));
     }

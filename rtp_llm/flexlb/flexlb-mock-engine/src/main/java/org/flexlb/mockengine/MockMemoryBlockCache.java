@@ -34,7 +34,7 @@ final class MockMemoryBlockCache {
     private final DoubleConsumer onEviction;
     private long evictions, writeRejected, generation, accessSequence;
     private int pinned;
-    private Set<Long> keySnapshot;
+    private List<Long> keySnapshot;
 
     MockMemoryBlockCache(int capacity, DoubleConsumer onEviction) {
         this(capacity, true, onEviction, System::nanoTime);
@@ -274,8 +274,10 @@ final class MockMemoryBlockCache {
     synchronized long writeRejected() { return writeRejected; }
     synchronized List<Long> keys() { return List.copyOf(entries.keySet()); }
     /** Membership snapshot; pinning and LRU touches do not change published keys. */
-    synchronized Set<Long> keySnapshot() {
-        if (keySnapshot == null) keySnapshot = Set.copyOf(entries.keySet());
+    synchronized List<Long> keySnapshot() {
+        // This snapshot is only iterated for RPC publication. Avoid building a
+        // second hash table while holding the cache monitor used by admission.
+        if (keySnapshot == null) keySnapshot = List.copyOf(entries.keySet());
         return keySnapshot;
     }
     synchronized int size() { return entries.size(); }

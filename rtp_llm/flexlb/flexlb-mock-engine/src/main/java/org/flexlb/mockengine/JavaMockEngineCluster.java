@@ -5232,7 +5232,7 @@ public final class JavaMockEngineCluster {
             // cursor and make the Master skip the corrected snapshot.
             long version = cacheVersion.get();
             Set<Long> device = request.getNeedCacheKeys() ? cache.snapshotKeys() : null;
-            Set<Long> memory = request.getNeedCacheKeys() && memoryCache != null
+            java.util.Collection<Long> memory = request.getNeedCacheKeys() && memoryCache != null
                     ? memoryCache.keySnapshot() : Set.of();
             var status = cacheStatusResponses.response(availableKvTokens(), totalKvTokens,
                     performance.blockSize(), version, device, memory);

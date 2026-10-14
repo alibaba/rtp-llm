@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
-import com.google.protobuf.ByteString;
+import io.grpc.Drainable;
+import io.grpc.KnownLength;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerMethodDefinition;
 import io.grpc.ServerServiceDefinition;
@@ -9,19 +10,23 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 
 import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.io.OutputStream;
+import java.io.IOException;
+import java.util.Collection;
 import java.util.Set;
 import java.util.ArrayList;
 
 /** Reuse immutable full snapshots and their wire encoding, never omit keys by cursor. */
 final class CacheStatusResponseCache {
     private record Entry(long available, long total, long blockSize, long version,
-                         Set<Long> device, Set<Long> memory, EngineRpcService.CacheStatusPB response) {}
+                         Set<Long> device, Collection<Long> memory, EngineRpcService.CacheStatusPB response) {}
     private Entry withKeys;
     private Entry withoutKeys;
 
     synchronized EngineRpcService.CacheStatusPB response(
             long available, long total, long blockSize, long version,
-            Set<Long> device, Set<Long> memory) {
+            Set<Long> device, Collection<Long> memory) {
         boolean keys = device != null;
         Entry previous = keys ? withKeys : withoutKeys;
         if (previous != null && previous.available == available && previous.total == total
@@ -75,21 +80,34 @@ final class CacheStatusResponseCache {
     static final class Marshaller implements MethodDescriptor.Marshaller<EngineRpcService.CacheStatusPB> {
         private final MethodDescriptor.Marshaller<EngineRpcService.CacheStatusPB> delegate;
         private EngineRpcService.CacheStatusPB last;
-        private ByteString bytes;
+        private byte[] bytes;
         Marshaller(MethodDescriptor.Marshaller<EngineRpcService.CacheStatusPB> delegate) {
             this.delegate = delegate;
         }
         @Override
         public synchronized InputStream stream(EngineRpcService.CacheStatusPB value) {
             if (last != value) {
-                bytes = value.toByteString();
+                bytes = value.toByteArray();
                 last = value;
             }
-            return bytes.newInput();
+            return new EncodedStream(bytes);
         }
         @Override
         public EngineRpcService.CacheStatusPB parse(InputStream stream) {
             return delegate.parse(stream);
+        }
+    }
+
+    /** Preserve the protobuf marshaller's known-length/drainable framing path. */
+    private static final class EncodedStream extends ByteArrayInputStream implements KnownLength, Drainable {
+        EncodedStream(byte[] bytes) { super(bytes); }
+
+        @Override
+        public int drainTo(OutputStream target) throws IOException {
+            int remaining = count - pos;
+            target.write(buf, pos, remaining);
+            pos = count;
+            return remaining;
         }
     }
 }
