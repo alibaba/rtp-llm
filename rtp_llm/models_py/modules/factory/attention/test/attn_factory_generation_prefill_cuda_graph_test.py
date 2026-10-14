@@ -220,7 +220,10 @@ class AttentionFactoryPrefillCpDecodeTest(unittest.TestCase):
         config = types.SimpleNamespace(
             prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: True)
         )
-        configs = types.SimpleNamespace(rope_config=types.SimpleNamespace(style=None))
+        configs = types.SimpleNamespace(
+            rope_config=types.SimpleNamespace(style=None),
+            need_rope_kv_cache=False,
+        )
         inputs = types.SimpleNamespace(is_prefill=is_prefill)
         registry = "PREFILL_MHA_IMPS" if is_prefill else "DECODE_MHA_IMPS"
         with patch.object(attn_factory, registry, [_NoPrefillCpAttentionImpl]):
