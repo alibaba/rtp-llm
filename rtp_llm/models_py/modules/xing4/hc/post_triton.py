@@ -107,43 +107,46 @@ def _hc_post_kernel(
     # offset must not silently overflow int32 for large decode batches (same
     # pitfall as _fused_rmsnorm_rope_kernel in modules/dsv4).
     pid_t = tl.program_id(0).to(tl.int64)
+    pid_h = tl.program_id(1)
     offs_i = tl.arange(0, HC)
     post = tl.load(post_ptr + pid_t * stride_post_t + offs_i).to(tl.float32)
 
-    offs_h = tl.arange(0, BLOCK_H)
-    for h0 in range(0, H, BLOCK_H):
-        h_offs = h0 + offs_h
-        h_mask = h_offs < H
-        x = tl.load(
-            x_ptr + pid_t * stride_x_t + h_offs, mask=h_mask, other=0.0
+    # 2D grid (T, cdiv(H, BLOCK_H)): each program owns one H block, so the
+    # elementwise math is identical per element (no cross-block reduction) —
+    # bitwise unchanged vs the serial in-program loop, while decode (T=1)
+    # gains cdiv(H, BLOCK_H) CTAs instead of one and prefill fills the GPU.
+    offs_h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    h_mask = offs_h < H
+    x = tl.load(
+        x_ptr + pid_t * stride_x_t + offs_h, mask=h_mask, other=0.0
+    ).to(tl.float32)
+    # first: fp32 product rounded to bf16 (eager broadcast-mul opmath).
+    first = _rtne_round_bf16(post[:, None] * x[None, :])
+
+    # second: fp32 accumulation over j in ascending order, rounded to
+    # bf16 once per element after the full sum (cuBLAS bf16 bmm structure).
+    acc = tl.zeros((HC, BLOCK_H), dtype=tl.float32)
+    for j in tl.static_range(HC):
+        comb_j = tl.load(
+            comb_ptr + pid_t * stride_comb_t + offs_i * stride_comb_i + j
         ).to(tl.float32)
-        # first: fp32 product rounded to bf16 (eager broadcast-mul opmath).
-        first = _rtne_round_bf16(post[:, None] * x[None, :])
+        res_j = tl.load(
+            residual_ptr + pid_t * stride_res_t + j * stride_res_i + offs_h,
+            mask=h_mask,
+            other=0.0,
+        ).to(tl.float32)
+        acc += comb_j[:, None] * res_j[None, :]
+    second = _rtne_round_bf16(acc)
 
-        # second: fp32 accumulation over j in ascending order, rounded to
-        # bf16 once per element after the full sum (cuBLAS bf16 bmm structure).
-        acc = tl.zeros((HC, BLOCK_H), dtype=tl.float32)
-        for j in tl.static_range(HC):
-            comb_j = tl.load(
-                comb_ptr + pid_t * stride_comb_t + offs_i * stride_comb_i + j
-            ).to(tl.float32)
-            res_j = tl.load(
-                residual_ptr + pid_t * stride_res_t + j * stride_res_i + h_offs,
-                mask=h_mask,
-                other=0.0,
-            ).to(tl.float32)
-            acc += comb_j[:, None] * res_j[None, :]
-        second = _rtne_round_bf16(acc)
-
-        # out: fp32 add of the two bf16-rounded values, rounded to bf16.
-        out = (first + second).to(tl.bfloat16)
-        out_ptrs = (
-            out_ptr
-            + pid_t * stride_out_t
-            + offs_i[:, None] * stride_out_i
-            + h_offs[None, :]
-        )
-        tl.store(out_ptrs, out, mask=h_mask[None, :])
+    # out: fp32 add of the two bf16-rounded values, rounded to bf16.
+    out = (first + second).to(tl.bfloat16)
+    out_ptrs = (
+        out_ptr
+        + pid_t * stride_out_t
+        + offs_i[:, None] * stride_out_i
+        + offs_h[None, :]
+    )
+    tl.store(out_ptrs, out, mask=h_mask[None, :])
 
 
 def hc_post_triton(
@@ -236,7 +239,9 @@ def hc_post_triton(
     res_f = residual.view(T, hc, H)
     out_f = out.view(T, hc, H)
 
-    _hc_post_kernel[(T,)](
+    import triton as _triton
+
+    _hc_post_kernel[(T, _triton.cdiv(H, block_h))](
         post_f,
         comb_f,
         x_f,

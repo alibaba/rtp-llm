@@ -65,6 +65,11 @@ def _hc_collapse_kernel(
     # int64 before the row-stride multiply: pid * x_stride_t reaches
     # T * hc * H and overflows int32 for large T (see module docstring).
     pid = tl.program_id(0).to(tl.int64)
+    # 2D grid (T, cdiv(H, BLOCK_H)): each program owns one H block. The
+    # reduction over hc stays inside the program (axis=0 of the HC x BLOCK_H
+    # tile), so every output element keeps its exact reduction order —
+    # bitwise unchanged vs the serial loop while filling the GPU at small T.
+    pid_h = tl.program_id(1)
     i_off = tl.arange(0, HC).to(tl.int64)
 
     pre_row = pre_ptr + pid * pre_stride_t + i_off * pre_stride_hc
@@ -72,21 +77,16 @@ def _hc_collapse_kernel(
 
     x_row = x_ptr + pid * x_stride_t
     out_row = out_ptr + pid * out_stride_t
-    for h_start in range(0, H, BLOCK_H):
-        h_off = (h_start + tl.arange(0, BLOCK_H)).to(tl.int64)
-        h_mask = h_off < H
-        x_ptrs = (
-            x_row
-            + i_off[:, None] * x_stride_hc
-            + h_off[None, :] * x_stride_h
-        )
-        x = tl.load(x_ptrs, mask=h_mask[None, :], other=0.0).to(tl.float32)
-        acc = tl.sum(x * p[:, None], axis=0)
-        tl.store(
-            out_row + h_off * out_stride_h,
-            acc.to(out_ptr.dtype.element_ty),
-            mask=h_mask,
-        )
+    h_off = (pid_h * BLOCK_H + tl.arange(0, BLOCK_H)).to(tl.int64)
+    h_mask = h_off < H
+    x_ptrs = x_row + i_off[:, None] * x_stride_hc + h_off[None, :] * x_stride_h
+    x = tl.load(x_ptrs, mask=h_mask[None, :], other=0.0).to(tl.float32)
+    acc = tl.sum(x * p[:, None], axis=0)
+    tl.store(
+        out_row + h_off * out_stride_h,
+        acc.to(out_ptr.dtype.element_ty),
+        mask=h_mask,
+    )
 
 
 def hc_collapse(
@@ -200,7 +200,7 @@ def hc_collapse(
             f"hc_collapse block_h must be a power of two, got {selected_block_h}"
         )
 
-    _hc_collapse_kernel[(T,)](
+    _hc_collapse_kernel[(T, triton.cdiv(H, selected_block_h))](
         pre2,
         x3,
         out2,
