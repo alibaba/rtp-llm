@@ -236,6 +236,95 @@ protected:
     std::unique_ptr<BlockTreeCache> cache_;
 };
 
+TEST_F(BlockTreeCacheTest, PrefixMatchObservationSeparatesContentAndReusableEndpoint) {
+    resetCache();
+    BlockTreeCacheConfig config;
+    config.enable_prefix_cache_observability = true;
+    auto full_group = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto cache = makeBlockTreeCacheForTest({std::move(full_group)}, config, nullptr, nullptr, nullptr);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const std::vector<int> request_tokens{1, 2, 3, 4};
+    const auto result = cache->match({100, 200}, {}, &request_tokens);
+    ASSERT_TRUE(result.match_observation.has_value());
+    EXPECT_EQ(result.match_observation->input_tokens, 4);
+    ASSERT_TRUE(result.match_observation->content_pos.has_value());
+    EXPECT_EQ(*result.match_observation->content_pos, 4u);
+    ASSERT_TRUE(result.match_observation->local_valid_pos.has_value());
+    EXPECT_EQ(*result.match_observation->local_valid_pos, 3u);
+    ASSERT_EQ(result.match_observation->groups.size(), 1u);
+    ASSERT_TRUE(result.match_observation->groups[0].max_pos[0].has_value());
+    EXPECT_EQ(*result.match_observation->groups[0].max_pos[0], 3u);
+    ASSERT_TRUE(result.match_observation->groups[0].max_key[0].has_value());
+    EXPECT_EQ(*result.match_observation->groups[0].max_key[0], 200);
+    EXPECT_EQ(result.match_observation->medium_status[0], PrefixCacheMediumStatus::CHECKED);
+}
+
+TEST_F(BlockTreeCacheTest, PrefixObservabilityDoesNotChangeDeviceReuseOrResourceState) {
+    const auto make_cache = [](bool enable_observability) {
+        BlockTreeCacheConfig config;
+        config.enable_prefix_cache_observability = enable_observability;
+        auto full_group = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        return makeBlockTreeCacheForTest({std::move(full_group)}, config, nullptr, nullptr, nullptr);
+    };
+
+    auto disabled_cache = make_cache(false);
+    auto enabled_cache  = make_cache(true);
+    ASSERT_NE(disabled_cache, nullptr);
+    ASSERT_NE(enabled_cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    const std::vector<int>              request_tokens{1, 2, 3, 4};
+
+    disabled_cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+    enabled_cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const auto disabled_result = disabled_cache->match({100, 200}, {}, &request_tokens);
+    const auto enabled_result  = enabled_cache->match({100, 200}, {}, &request_tokens);
+    EXPECT_EQ(disabled_result.matched_device_blocks, enabled_result.matched_device_blocks);
+    EXPECT_EQ(disabled_result.matched_device_resources.size(), enabled_result.matched_device_resources.size());
+    for (size_t resource_index = 0; resource_index < disabled_result.matched_device_resources.size();
+         ++resource_index) {
+        const auto& disabled_resource = disabled_result.matched_device_resources[resource_index];
+        const auto& enabled_resource  = enabled_result.matched_device_resources[resource_index];
+        EXPECT_EQ(disabled_resource.group_set_id, enabled_resource.group_set_id);
+        EXPECT_EQ(disabled_resource.tier, enabled_resource.tier);
+        ASSERT_EQ(disabled_resource.node_blocks.size(), enabled_resource.node_blocks.size());
+        for (size_t node_index = 0; node_index < disabled_resource.node_blocks.size(); ++node_index) {
+            EXPECT_EQ(disabled_resource.node_blocks[node_index].second,
+                      enabled_resource.node_blocks[node_index].second);
+        }
+    }
+
+    const auto disabled_pool_metrics = disabled_cache->poolMetricsSnapshots();
+    const auto enabled_pool_metrics  = enabled_cache->poolMetricsSnapshots();
+    ASSERT_EQ(disabled_pool_metrics.size(), enabled_pool_metrics.size());
+    for (size_t pool_index = 0; pool_index < disabled_pool_metrics.size(); ++pool_index) {
+        EXPECT_EQ(disabled_pool_metrics[pool_index].used_blocks, enabled_pool_metrics[pool_index].used_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].free_blocks, enabled_pool_metrics[pool_index].free_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].request_ref_blocks,
+                  enabled_pool_metrics[pool_index].request_ref_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].block_cache_ref_blocks,
+                  enabled_pool_metrics[pool_index].block_cache_ref_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].load_ref_blocks,
+                  enabled_pool_metrics[pool_index].load_ref_blocks);
+    }
+
+    EXPECT_FALSE(disabled_result.match_observation.has_value());
+    EXPECT_TRUE(enabled_result.match_observation.has_value());
+}
+
 TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};

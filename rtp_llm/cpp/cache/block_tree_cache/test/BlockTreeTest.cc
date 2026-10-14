@@ -700,6 +700,150 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     EXPECT_EQ(node->parent, tree.root());
 }
 
+TEST(BlockTreeTest, PrefixObservabilityDisabledHasNoIntervalBookkeeping) {
+    BlockTree tree(makeGroupSets(1));
+    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.leaf_count, 0u);
+    EXPECT_EQ(snapshot.branch_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 0u);
+    EXPECT_EQ(snapshot.recovery.count, 0u);
+    EXPECT_EQ(snapshot.tier[0].count, 0u);
+    EXPECT_EQ(snapshot.tier[1].count, 0u);
+    EXPECT_EQ(snapshot.tier[2].count, 0u);
+    EXPECT_FALSE(snapshot.content.mean_age_us.has_value());
+    EXPECT_FALSE(snapshot.content.max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityEnabledSummarizesContentAndTiers) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.leaf_count, 1u);
+    EXPECT_EQ(snapshot.branch_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 3u);
+    EXPECT_EQ(snapshot.tier[0].count, 3u);
+    ASSERT_TRUE(snapshot.content.mean_age_us.has_value());
+    ASSERT_TRUE(snapshot.content.max_age_us.has_value());
+    EXPECT_GE(*snapshot.content.max_age_us, *snapshot.content.mean_age_us);
+    ASSERT_TRUE(snapshot.tier[0].mean_age_us.has_value());
+    ASSERT_TRUE(snapshot.tier[0].max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, ContentMatchIncludesTailAndPartialTokenInsideNode) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false, &segments);
+
+    EXPECT_EQ(tree.contentMatchPos({1, 2, 3, 4}), 4u);
+    EXPECT_EQ(tree.contentMatchPos({1, 2, 3, 9}), 3u);
+    EXPECT_EQ(tree.contentMatchPos({9, 2, 3, 4}), 0u);
+}
+
+TEST(BlockTreeTest, ObservationDisabledDoesNotStoreTokenSegments) {
+    BlockTree tree(makeGroupSets(1));
+    const std::vector<std::vector<int>> segments{{1, 2}};
+    const auto result = tree.insertNode({100}, make2DResources(1, 1, 10), false, false, &segments);
+    ASSERT_EQ(result.inserted_nodes.size(), 1u);
+    EXPECT_TRUE(result.inserted_nodes.front()->token_ids.empty());
+    EXPECT_EQ(tree.contentMatchPos({1, 2}), 0u);
+}
+
+TEST(BlockTreeTest, InsertBackfillsTokenSegmentsOnAdoptedNode) {
+    BlockTree                                  tree(makeGroupSets(1), 2, true);
+    std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
+    TreeNode*                                  node = insertAndGetNode(tree, {100}, original);
+    ASSERT_NE(node, nullptr);
+    EXPECT_TRUE(node->token_ids.empty());
+
+    const std::vector<std::vector<int>> segments{{1, 2}};
+    const BlockTreeInsertResult         result =
+        tree.insertNode({100}, make2DResources(1, 1, 20), /*collect_path=*/false, /*is_resident=*/false, &segments);
+    ASSERT_EQ(result.adopted_nodes.size(), 1u);
+    EXPECT_EQ(result.adopted_nodes[0].first, node);
+    EXPECT_EQ(node->token_ids, (std::vector<int>{1, 2}));
+    EXPECT_EQ(tree.contentMatchPos({1, 2}), 2u);
+}
+
+TEST(BlockTreeTest, PrefixObservabilityCountsBranchAndLeaves) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false);
+    tree.insertNode({100, 300}, make2DResources(1, 2, 20), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.branch_count, 1u);
+    EXPECT_EQ(snapshot.leaf_count, 2u);
+    EXPECT_EQ(snapshot.content.count, 3u);
+}
+
+TEST(BlockTreeTest, PrefixPlanProjectsOnlyNewJointRecoveryPointAndClosesAfterInsert) {
+    BlockTree tree(makeGroupSets(1), 2, true);
+    tree.insertNode({100}, make2DResources(1, 1, 10), false, false);
+
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    const auto resources = make2DResources(1, 2, 20);
+    const auto plan = tree.planRecoveryPoints({100, 200}, resources, &segments, Tier::DEVICE);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].index, 1u);
+    EXPECT_EQ(plan[0].key, 200);
+    EXPECT_EQ(plan[0].pos, 4u);
+
+    const auto unfulfilled_before = tree.unfulfilledPlanPoints(plan, {100, 200});
+    ASSERT_EQ(unfulfilled_before.size(), 1u);
+    EXPECT_EQ(unfulfilled_before[0].key, 200);
+
+    tree.insertNode({100, 200}, resources, false, false, &segments);
+    EXPECT_TRUE(tree.unfulfilledPlanPoints(plan, {100, 200}).empty());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityDisabledDoesNotFormPlanPoints) {
+    BlockTree tree(makeGroupSets(1), 2, false);
+    const auto plan =
+        tree.planRecoveryPoints({100}, make2DResources(1, 1, 10), nullptr, Tier::DEVICE);
+    EXPECT_TRUE(plan.empty());
+    EXPECT_TRUE(tree.unfulfilledPlanPoints({{0, 100, 0}}, {100}).empty());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityEndsContentIntervalWhenNodeIsRemoved) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    const auto insert_result = tree.insertNode({100}, resources, false, false);
+    ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(tree.observabilitySnapshot().content.count, 1u);
+
+    tree.removeNodeAndEmptyAncestors(insert_result.inserted_nodes.front());
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 0u);
+    EXPECT_FALSE(snapshot.content.mean_age_us.has_value());
+    EXPECT_FALSE(snapshot.content.max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, ContentMatchInfoCarriesKeyOffsetAndPartialFlag) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false, &segments);
+
+    const auto complete = tree.contentMatchInfo({1, 2, 3, 4});
+    ASSERT_TRUE(complete.has_value());
+    EXPECT_EQ(complete->pos, 4u);
+    EXPECT_EQ(complete->key, 200);
+    EXPECT_EQ(complete->node_offset, 2u);
+    EXPECT_FALSE(complete->partial);
+
+    const auto partial = tree.contentMatchInfo({1, 2, 3, 9});
+    ASSERT_TRUE(partial.has_value());
+    EXPECT_EQ(partial->pos, 3u);
+    EXPECT_EQ(partial->key, 200);
+    EXPECT_EQ(partial->node_offset, 1u);
+    EXPECT_TRUE(partial->partial);
+}
+
 TEST(BlockTreeTest, VisitNodeRangeLockedStopsAtMaxNodes) {
     BlockTree tree(makeGroupSets(1));
     tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), /*collect_path=*/false, /*is_resident=*/false);

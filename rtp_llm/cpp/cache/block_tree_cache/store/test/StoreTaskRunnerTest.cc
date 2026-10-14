@@ -274,6 +274,43 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     group_set->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{nullptr, source_holder[0]}}});
 }
 
+TEST(StoreTaskRunnerTest, TaskPhasePreventsDuplicateSettlementSubmission) {
+    StoreTaskRunner::Task task(Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
+    EXPECT_TRUE(task.markTransferring());
+    EXPECT_FALSE(task.markTransferring());
+    EXPECT_TRUE(task.markFinished());
+    EXPECT_FALSE(task.markFinished());
+
+    StoreTaskRunner::Task timed_out_task(Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
+    EXPECT_TRUE(timed_out_task.markFinished());
+    EXPECT_FALSE(timed_out_task.markTransferring());
+}
+
+TEST(StoreTaskRunnerTest, RepeatedRunTransferCannotSettleSameTaskTwice) {
+    const std::vector<GroupSetPtr> group_sets;
+    StoreTaskRunner                runner(group_sets);
+    auto                           engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
+    BlockTransferDispatcher        dispatcher(engine);
+    BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
+
+    auto   task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{}, std::chrono::seconds(30));
+    task->transfer_task = TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1)}, std::chrono::seconds(30));
+    size_t callback_count = 0;
+    const auto callback   = [&](ErrorInfo error) {
+        ++callback_count;
+        EXPECT_FALSE(error.ok());
+    };
+
+    runner.runTransfer(task, dispatcher, metrics_reporter, callback);
+    runner.runTransfer(task, dispatcher, metrics_reporter, callback);
+    EXPECT_TRUE(task->markFinished());
+    runner.runTransfer(task, dispatcher, metrics_reporter, callback);
+
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_EQ(engine->batches.size(), 1u);
+    EXPECT_EQ(task->phase.load(), StoreTaskRunner::Task::Phase::FINISHED);
+}
+
 TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
     const auto                     group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
     const auto                     topology = makeTestTopology({group});

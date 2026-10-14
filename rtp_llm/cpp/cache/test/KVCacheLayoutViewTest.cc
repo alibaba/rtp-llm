@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <numeric>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -10,7 +11,7 @@
 
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
@@ -230,7 +231,10 @@ TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode
         desc.entry_dtype                  = DataType::TYPE_UINT8;
         desc.entry_elems                  = 528;
         desc.explicit_entry_count         = 136;
-        desc.block_stride_bytes_alignment = 16896;  // LCM(512, 528)
+        // Decode owns the complete physical block and applies only this
+        // declared alignment. Include CP in that alignment so the full decode
+        // stride remains tileable by every producer rank.
+        desc.block_stride_bytes_alignment = std::lcm<size_t>(16896u, cp_size);
         desc.cp                           = CacheCpPolicyDesc{};
         desc.cp->align_payload            = true;
         desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::BLOCK_STRIDE;
@@ -247,8 +251,16 @@ TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode
         ctx.seq_size_per_block      = 128 * cp_size;
         ctx.kernel_tokens_per_block = 128;
         ctx.parallelism_config      = &prefill;
+        // FixedStateCacheSpec::build no longer derives CP geometry itself; supply the
+        // same role-resolved projection CacheConfigCreator would construct.
+        auto prefill_layouts        = FixedStateCacheSpec::resolveSwaByteLayouts(
+            {{desc}}, prefill, 128 * cp_size, 0, 128);
+        ctx.swa_byte_layouts        = &prefill_layouts;
         auto prefill_spec           = FixedStateCacheSpec::build(desc, ctx);
         ctx.parallelism_config      = &decode;
+        auto decode_layouts         = FixedStateCacheSpec::resolveSwaByteLayouts(
+            {{desc}}, decode, 128 * cp_size, 0, 128);
+        ctx.swa_byte_layouts        = &decode_layouts;
         auto       decode_spec      = FixedStateCacheSpec::build(desc, ctx);
         const auto full_stride      = decode_spec->block_size_bytes();
         EXPECT_EQ(full_stride % 528, 0u) << cp_size;
@@ -276,16 +288,18 @@ TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode
         config.seq_size_per_block = 128;
         config.layer_num          = 1;
         config.setTopology({group}, {{0, {desc.tag}}});
-        CPSlotMapper      mapper(0, cp_size, 128);
         std::vector<char> destination(full_stride);
         BlockInfo         block;
         block.addr       = destination.data();
         block.size_bytes = full_stride;
         for (uint32_t rank = 0; rank < cp_size; ++rank) {
-            const auto slices = mapper.sliceBlockForPeer(config, desc.tag, {block}, rank);
-            ASSERT_EQ(slices.size(), 1u);
-            EXPECT_EQ(slices[0].size_bytes, prefill_spec->block_size_bytes());
-            EXPECT_EQ(slices[0].addr, destination.data() + rank * prefill_spec->block_size_bytes());
+            const auto slice = sliceDecodeCacheBlock(config.group(desc.tag),
+                                                     group.policy.cp_slice,
+                                                     block,
+                                                     static_cast<int>(cp_size),
+                                                     static_cast<int>(rank));
+            EXPECT_EQ(slice.size_bytes, prefill_spec->block_size_bytes());
+            EXPECT_EQ(slice.addr, destination.data() + rank * prefill_spec->block_size_bytes());
         }
     }
 }

@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -308,8 +310,19 @@ bool KVCacheManager::init() {
 #endif
     }
 
+    KVCacheConfig tree_kv_cache_config = kv_cache_config_;
+    tree_kv_cache_config.enable_prefix_cache_observability =
+        autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0;
+    if (autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && !tree_kv_cache_config.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("RTP_LLM_PREFIX_CACHE_OBSERVABILITY requested but disabled: role=%s allocator_owner=%s",
+                         roleTypeToString(pd_sep_config_.role_type).c_str(),
+                         isAllocatorOwner() ? "true" : "false");
+    }
+
     block_tree_cache_ = createBlockTreeCache(config_,
-                                             kv_cache_config_,
+                                             tree_kv_cache_config,
                                              coordinator_manager_,
                                              parallelism_config_,
                                              std::move(storage_backend),
@@ -432,10 +445,12 @@ void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info,
     RTP_LLM_CHECK_WITH_INFO(!config_.request_projection_required
                                 || (theory_keys != nullptr && config_.cache_info_block_tokens.has_value()),
                             "prefill CP hit metrics require a global theory-window snapshot");
+    const int64_t request_seq_len = malloc_info.request_layout ?
+                                        malloc_info.request_layout->request_seq_len :
+                                        malloc_info.complete_token_ids->seqLength();
     prefill_cache_hit_metrics_reporter_->record(*malloc_info.batch_kv_cache_resource,
                                                 malloc_info.request_id,
-                                                malloc_info.request_layout ? malloc_info.request_layout->request_seq_len :
-                                                                             malloc_info.complete_token_ids->seqLength(),
+                                                request_seq_len,
                                                 config_.seq_size_per_block,
                                                 theory_keys,
                                                 static_cast<int64_t>(config_.cache_info_block_tokens.value_or(0)));

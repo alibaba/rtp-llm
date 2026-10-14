@@ -29,6 +29,8 @@ class MatchValidator {
 public:
     virtual ~MatchValidator()                               = default;
     virtual bool validate(const GroupSetResource& resource) = 0;
+    // Diagnostic tree walks fork the path state at branches without replaying ancestors.
+    virtual std::unique_ptr<MatchValidator> clone() const = 0;
 };
 
 // Layout of one packed HOST/DISK record for one GroupSet block on this rank.

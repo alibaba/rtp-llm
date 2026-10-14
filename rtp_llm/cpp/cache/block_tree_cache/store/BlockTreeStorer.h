@@ -39,7 +39,9 @@ public:
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
-                                 size_t&                                           resident_prefix_length);
+                                 size_t&                                           resident_prefix_length,
+                                 const std::vector<std::vector<int>>*              token_segments = nullptr,
+                                 PrefixCachePlanState*                             prefix_plan_state = nullptr);
     void             stopAdmissionLocked();
 
 private:
@@ -49,16 +51,22 @@ private:
     void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
-                                         size_t&                                           resident_prefix_length);
+                                         size_t&                                           resident_prefix_length,
+                                         const std::vector<std::vector<int>>*              token_segments,
+                                         PrefixCachePlanState*                             prefix_plan_state);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
-                                           Tier                                              target_tier);
+                                           Tier                                              target_tier,
+                                           const std::vector<std::vector<int>>*              token_segments,
+                                           PrefixCachePlanState*                             prefix_plan_state);
     void             runStoreTask(const StoreTaskPtr& task);
-    void             scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
-    void             settleTask(const StoreTask& task, bool copy_success);
-    size_t           settleLocked(const StoreTask& task, bool publish);
+    void             scheduleStoreSettlement(const StoreTaskPtr& task,
+                                             ErrorInfo            error,
+                                             const char*          failure_reason);
+    void             settleTask(StoreTask& task, bool copy_success, const char* failure_reason);
+    size_t           settleLocked(StoreTask& task, bool publish, const char* failure_reason);
 
     BlockTree*                      tree_;
     BlockTreeEvictor&               evictor_;
