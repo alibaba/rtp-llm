@@ -260,6 +260,35 @@ py_test(
     target_compatible_with = CUDA13_X86_ONLY,
 )
 
+# FlashAttention-2 prefill impl (sm120 eager path; math is arch-portable so
+# the same test runs on the local sm90 GPU and the RTX PRO 5000 CI pool).
+[
+    py_test(
+        name = "test_flash_attn_2_prefill_" + platform["sm"],
+        srcs = [
+            "test_flash_attn_2_prefill.py",
+            "base_attention_test.py",
+            "trt_tests/test_trt_base.py",
+            "trt_tests/trt_test_utils.py",
+            "attention_ref.py",
+        ],
+        main = "test_flash_attn_2_prefill.py",
+        exec_properties = {
+            "gpu": platform["gpu"],
+        },
+        tags = [platform["gpu"]],
+        target_compatible_with = CUDA13_X86_ONLY,
+        deps = py_test_deps + select({
+            "@//:using_cuda13_x86": flashinfer_deps,
+            "//conditions:default": [],
+        }),
+    )
+    for platform in [
+        {"sm": "sm90", "gpu": "H20_CU13"},
+        {"sm": "sm12x", "gpu": "RTX_5000_PRO_CU13"},
+    ]
+]
+
 # Benchmark for FlashInfer tensor cores performance comparison
 py_test(
     name = "bench_flashinfer_tensor_cores",

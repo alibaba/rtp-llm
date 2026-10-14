@@ -649,8 +649,8 @@ filelock==3.20.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
-flash-attn @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0
+flash-attn @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.4%2Bb27cdc3.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:85eb17af85b927217ce621140e9f82ff60e9ed995e81da3082f4903a7143339b
     # via -r deps/requirements_torch_gpu_cuda13.txt
 flash-mla @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f

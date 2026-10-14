@@ -27,8 +27,11 @@ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-
 
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl
-# Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl
+# Upstream v2.8.4 (artlab build b27cdc3) for CUDA 13.2. The previous
+# 2.8.3.post1 r1 wheel shipped only sm_80/sm_90 cubins (no PTX), so
+# flash_attn raised cudaErrorNoKernelImageForDevice on sm_120 (RTX PRO
+# Blackwell, CI run 79695290). 2.8.4 carries sm_80/90/100/110/120.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.4%2Bb27cdc3.cu132-cp310-cp310-linux_x86_64.whl
 
 # The HC regression target imports the vendored TileKernels implementation.
 tilelang==0.1.15

@@ -54,6 +54,9 @@ elif device_type == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
         HeadWiseFP8PrefillImpl,
     )
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_attn_2 import (
+        FlashAttn2PrefillImpl,
+    )
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_attn_3 import (
         FlashAttn3PagedShortGraphImpl,
     )
@@ -84,6 +87,7 @@ elif device_type == DeviceType.Cuda:
             FlashAttn3PagedShortGraphImpl,
             FlashInferTRTLLMSpecDecodeImpl,
             FlashInferTRTLLMPrefillImpl,
+            FlashAttn2PrefillImpl,
             FlashInferTRTLLMFMHAv2PrefillImpl,
             PyFlashinferPrefillImpl,
             PyFlashinferHybridPrefillImpl,
