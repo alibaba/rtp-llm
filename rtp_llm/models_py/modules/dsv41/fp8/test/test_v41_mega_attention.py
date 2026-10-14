@@ -3,7 +3,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import torch
 
@@ -55,6 +55,69 @@ class MegaAttentionCPU(unittest.TestCase):
             mega, "_backend", side_effect=AssertionError("backend imported")
         ):
             self.assertIsNone(mega.prepare(SimpleNamespace()))
+
+    def _supported_cpu_fixture(self):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        # Supply the packed-weight contract without executing a CUDA packer.
+        state = _state()
+        linear = V41MXFP8Linear.__new__(V41MXFP8Linear)
+        torch.nn.Module.__init__(linear)
+        linear.weight = state.query_weight
+        linear.weight_scales = state.query_scale
+        linear.N, linear.K = linear.weight.shape
+        return SimpleNamespace(
+            wq_b=linear,
+            _wo_a_stk_w=state.output_weight,
+            _wo_a_stk_s=state.output_scale,
+            freqs_cis=torch.zeros(256, 32, dtype=torch.complex64),
+            attn_sink=torch.zeros(state.heads, dtype=torch.float32),
+            skip_post_q_norm=True,
+            n_heads=state.heads,
+            n_groups=state.groups,
+            head_dim=512,
+            rope_head_dim=64,
+            o_lora_rank=128,
+        )
+
+    def test_default_enabled_and_explicit_disable_preserve_capability_gate(self):
+        attn = self._supported_cpu_fixture()
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
+        ), patch.object(mega, "_device_capability", return_value=(10, 3)), patch.object(
+            mega, "_backend", return_value=object()
+        ) as backend, patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CUDA initialized")
+        ):
+            self.assertTrue(mega.is_supported(attn))
+            backend.assert_called_once()
+            backend.reset_mock()
+            with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}):
+                self.assertFalse(mega.is_supported(attn))
+            backend.assert_not_called()
+
+    def test_default_keeps_cpu_on_split_path_without_hardware_probe(self):
+        attn = self._supported_cpu_fixture()
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            mega, "_device_capability", side_effect=AssertionError("CUDA queried")
+        ), patch.object(
+            mega, "_backend", side_effect=AssertionError("backend imported")
+        ):
+            self.assertIsNone(mega.prepare(attn))
+
+    def test_default_requires_sm10x_and_native_backend(self):
+        attn = self._supported_cpu_fixture()
+        for capability, backend in (((9, 0), object()), ((10, 3), None)):
+            with self.subTest(capability=capability, backend=backend), patch.dict(
+                os.environ, {}, clear=True
+            ), patch.object(
+                torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
+            ), patch.object(
+                mega, "_device_capability", return_value=capability
+            ), patch.object(
+                mega, "_backend", return_value=backend
+            ):
+                self.assertIsNone(mega.prepare(attn))
 
     def test_tp4_padding_preserves_chunk_layout(self):
         state = _state()

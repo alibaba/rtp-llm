@@ -662,15 +662,21 @@ def gated_engram_residual(
     return result if out is None else out.copy_(result)
 
 
-def engram_lookup_prefetch_enabled():
+def engram_lookup_prefetch_enabled(*, is_decode_role=False):
     return (
-        not engram_cpu_lookup_enabled()
+        not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
         and os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", "0") == "1"
     )
 
 
-def engram_cpu_lookup_enabled():
-    return os.getenv("DSV41_CPU_ENGRAM_LOOKUP", "0") == "1"
+def engram_cpu_lookup_enabled(*, is_decode_role=False):
+    """Resolve the role default without mutating process-wide environment.
+
+    A configured CPU lookup still only runs on ordinary target prefill.
+    Decode verification, draft, and CUDA graph capture keep the GPU path.
+    """
+    default = "0" if is_decode_role else "1"
+    return os.getenv("DSV41_CPU_ENGRAM_LOOKUP", default) == "1"
 
 
 def _hash_token_windows_cpu(state, windows, image_token, num_threads=None):
@@ -937,7 +943,12 @@ class EngramCPULookupRuntime:
 
 
 def prepare_engram_cpu_lookup(model, *, max_m):
-    if not engram_cpu_lookup_enabled() or max_m <= 0:
+    is_decode_role = bool(getattr(model, "_is_decode_role", False))
+    if (
+        is_decode_role
+        or not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
+        or max_m <= 0
+    ):
         return
     runtime = getattr(model, "_engram_cpu_runtime", None)
     if runtime is not None and runtime.capacity >= min(max_m, 32768):

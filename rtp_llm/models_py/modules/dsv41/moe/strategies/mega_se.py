@@ -5,10 +5,9 @@ optional shared weights.  This strategy is enabled by default and can be
 disabled via ``DSV4_USE_MEGA_MOE_SE=0``.  It owns independent
 buffer/packer/warmup state from the routed-only Mega path.
 
-Native V4.1 group-32 weights additionally require the opt-in
-``DSV41_MEGA_SHARED_EXPERT=1`` for both prefill and decode. The fused
-activation/combine rounding differs from the standalone BF16 shared expert,
-so this opt-in defaults to off.
+Native V4.1 group-32 shared weights are fused by default for both prefill and
+decode. Set ``DSV41_MEGA_SHARED_EXPERT=0`` for the standalone BF16 shared
+expert. Fused activation/combine rounding differs from that standalone path.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from ..mega_se_buf import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
     _mega_moe_se_enabled,
+    mega_moe_se_shared_recipe_kwargs,
 )
 from ..mega_se_input_packer import get_mega_moe_se_input_packer
 from ..mega_se_jit_warmup import (
@@ -88,6 +88,14 @@ class MegaMoEStrategySE(MegaMoEStrategy):
     name = "mega_se"
     routed_includes_shared = True
 
+    def __init__(self, cfg: MoeCfg):
+        super().__init__(cfg)
+        import deep_gemm
+
+        self._shared_recipe_kwargs = mega_moe_se_shared_recipe_kwargs(
+            deep_gemm.fp8_fp4_mega_moe, self._shared_recipe
+        )
+
     @property
     def _shared_recipe(self):
         return _SHARED_RECIPES[self.cfg.shared_fp8_block_size]
@@ -99,9 +107,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             and cfg.shared_fp8_block_size in _SHARED_RECIPES
             and (
                 cfg.shared_fp8_block_size != 32
-                or os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
+                or os.environ.get("DSV41_MEGA_SHARED_EXPERT", "1") == "1"
             )
-            and _mega_moe_se_enabled()
+            and _mega_moe_se_enabled(cfg.shared_fp8_block_size)
         )
 
     def setup_weights(self, layer_weights: Dict) -> None:
@@ -442,7 +450,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
-            shared_recipe=self._shared_recipe,
+            **self._shared_recipe_kwargs,
         )
 
     def forward(self, x, weights, indices):

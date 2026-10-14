@@ -678,7 +678,10 @@ class EngramCudaTest(unittest.TestCase):
             torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
             1e-20,
         )
-        with patch.dict(os.environ, {"DSV41_ASYNC_ENGRAM_LOOKUP": "1"}):
+        with patch.dict(
+            os.environ,
+            {"DSV41_ASYNC_ENGRAM_LOOKUP": "1", "DSV41_CPU_ENGRAM_LOOKUP": "0"},
+        ):
             from cuda.bindings import driver
 
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
