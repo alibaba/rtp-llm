@@ -93,9 +93,16 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
+    static bool                          v41AsyncCacheReservationAllowed(const std::string& model_type,
+                                                                         RoleType           role_type,
+                                                                         int                tp_size,
+                                                                         bool               linear_attention);
+    static std::shared_ptr<torch::Event> bookkeepingReadyEvent(bool v41_async_reservation,
+                                                               const std::shared_ptr<torch::Event>& transfer_event,
+                                                               const std::shared_ptr<torch::Event>& draft_event);
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
@@ -293,7 +300,8 @@ private:
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.
-    bool is_linear_attention_model_ = false;
+    bool is_linear_attention_model_   = false;
+    bool v41_async_cache_reservation_ = false;
 
     torch::Tensor d2t_map_;
 
@@ -319,8 +327,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

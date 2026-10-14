@@ -108,7 +108,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -841,6 +841,7 @@ StreamState GenerateStream::moveToNext() {
     // host table, so join the worker before acquiring mutex_.  Waiting after
     // taking mutex_ would deadlock with specUpdate().
     if (needsAsyncBookkeepingJoinForKvReservation()) {
+        RTP_LLM_PROFILE_SCOPE("stream.move_to_next(wait_async_bookkeeping_for_kv)");
         waitPendingAsyncBookkeeping();
     }
 
@@ -894,6 +895,9 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;
     }
+    if (canReserveMtpCacheWithoutBookkeepingJoin(state)) {
+        return false;
+    }
 
     // Reading group vector sizes is safe while specUpdate only swaps existing
     // elements.  No allocator mutation can run concurrently: scheduler calls
@@ -901,6 +905,88 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     return stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
                                                          static_cast<int>(reserve_step_))
            > 0;
+}
+
+bool GenerateStream::canReserveMtpCacheWithoutBookkeepingJoin(const MtpAsyncDeviceState& state) const {
+    if (!state.allow_async_cache_reservation || state.max_mtp_advance <= 0 || state.next_seq_len_upper_bound <= 0
+        || !hasMtpCacheSnapshot(state) || !stream_cache_resource_ || maxBatchSize() != 1 || hasNumBeams()) {
+        return false;
+    }
+    const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+    if (!manager || (manager->cpSlotMapper() && manager->cpSlotMapper()->isSharded())) {
+        return false;
+    }
+    for (const auto& group : manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            return false;
+        }
+        if (group.policy.group_type != CacheGroupType::SWA) {
+            continue;
+        }
+        const int64_t block_tokens   = group.seqSizePerBlock();
+        const int64_t retained_pages = std::max(1u, group.policy.active_tail_blocks) + reserve_step_;
+        // pre-sampler joins the preceding host commit before another dispatch.
+        // Thus the oldest unfinished KV consumer is at most two MTP advances
+        // behind this bound. Account for window, forward reservation, and page
+        // alignment; pruning beyond this retained tail cannot touch its pages.
+        // A state-cache group without a declared window conservatively needs a
+        // whole logical page. Keep the allocator's existing retention policy.
+        const int64_t history_tokens =
+            group.policy.sliding_window_size > 0 ? group.policy.sliding_window_size : block_tokens;
+        if (block_tokens <= 0 || retained_pages < 2
+            || (retained_pages - 1) * block_tokens < history_tokens + 2LL * state.max_mtp_advance + reserve_step_ + 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GenerateStream::replaceMtpCacheSnapshot(uint64_t                   expected_epoch,
+                                             torch::Tensor              physical,
+                                             torch::Tensor              kernel,
+                                             std::vector<torch::Tensor> host_buffers) {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    if (mtp_async_state_.epoch != expected_epoch) {
+        return false;
+    }
+    mtp_async_state_.next_kv_cache_block_id_gpu        = std::move(physical);
+    mtp_async_state_.next_kv_cache_kernel_block_id_gpu = std::move(kernel);
+    mtp_async_state_.cache_snapshot_host_buffers       = std::move(host_buffers);
+    return true;
+}
+
+absl::Status GenerateStream::reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state) {
+    RTP_LLM_PROFILE_SCOPE("stream.reserve_mtp_cache_from_upper_bound");
+    auto status = stream_cache_resource_->incrKVBlock(state.next_seq_len_upper_bound);
+    if (!status.ok()) {
+        return status;
+    }
+    const auto& resource       = stream_cache_resource_->kvCache();
+    const auto& tags           = stream_cache_resource_->resourceContext().cache_manager->cacheConfig().groupTags();
+    int64_t     physical_width = 0;
+    int64_t     kernel_width   = 0;
+    for (const auto& tag : tags) {
+        physical_width = std::max(physical_width, static_cast<int64_t>(resource.blocks(0, tag).size()));
+        kernel_width   = std::max(kernel_width, static_cast<int64_t>(resource.kernelBlocks(0, tag).size()));
+    }
+    const auto pinned_i32    = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto       physical_host = torch::zeros({static_cast<int64_t>(tags.size()), 1, physical_width}, pinned_i32);
+    auto       kernel_host   = torch::zeros({static_cast<int64_t>(tags.size()), 1, kernel_width}, pinned_i32);
+    for (size_t row = 0; row < tags.size(); ++row) {
+        const auto& physical = resource.blocks(0, tags[row]);
+        const auto& kernel   = resource.kernelBlocks(0, tags[row]);
+        std::copy(physical.begin(), physical.end(), physical_host.data_ptr<int32_t>() + row * physical_width);
+        std::copy(kernel.begin(), kernel.end(), kernel_host.data_ptr<int32_t>() + row * kernel_width);
+    }
+    // Sources are new immutable pinned tensors, never the mutable allocator
+    // vectors. Keep them with the state while H2D runs on the engine stream.
+    auto physical = physical_host.to(state.next_kv_cache_block_id_gpu.options(), /*non_blocking=*/true);
+    auto kernel   = kernel_host.to(state.next_kv_cache_kernel_block_id_gpu.options(), /*non_blocking=*/true);
+    RTP_LLM_CHECK_WITH_INFO(
+        replaceMtpCacheSnapshot(
+            state.epoch, std::move(physical), std::move(kernel), {std::move(physical_host), std::move(kernel_host)}),
+        "MTP cache reservation raced another state publication");
+    return absl::OkStatus();
 }
 
 bool GenerateStream::hasError() const {

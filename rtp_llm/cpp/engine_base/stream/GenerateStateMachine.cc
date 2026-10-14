@@ -151,8 +151,21 @@ void GenerateStateMachine::handleRunning() {
     int             seq_len_override = -1;
     GenerateStream* stream           = stream_cache_resource_->stream();
     if (stream != nullptr) {
-        const bool  pending   = stream->hasPendingAsyncBookkeeping();
+        const bool pending   = stream->hasPendingAsyncBookkeeping();
         const auto mtp_state = stream->getMtpAsyncDeviceState();
+        if (pending && stream->canReserveMtpCacheWithoutBookkeepingJoin(mtp_state)) {
+            if (stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,
+                                                              static_cast<int>(reserve_step_))
+                > 0) {
+                auto result = stream->reserveMtpCacheFromUpperBound(mtp_state);
+                if (!result.ok()) {
+                    reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "async MTP KV reservation failed");
+                    status.store(StreamState::FINISHED, std::memory_order_release);
+                    releaseResource();
+                }
+            }
+            return;
+        }
         if (pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.next_seq_len_upper_bound > 0
             && stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,
                                                              static_cast<int>(reserve_step_))

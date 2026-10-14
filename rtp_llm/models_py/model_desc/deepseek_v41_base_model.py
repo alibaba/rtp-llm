@@ -398,6 +398,13 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_path,
             )
 
+    @property
+    def supports_device_only_attention_metadata(self) -> bool:
+        # V4.1 target and DSpARK subclasses install v41_config after this base
+        # constructor returns. The native wrapper queries the completed model
+        # once at initialization, so derive the capability from its final args.
+        return self._v4_args.v41_config is not None and self.fp8_kv_cache
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
             return self._initialize_impl(init_resource)

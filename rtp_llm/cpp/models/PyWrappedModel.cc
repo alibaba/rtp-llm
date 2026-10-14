@@ -270,8 +270,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
-    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+    // The device metadata kernel below runs before the deferred fused H2D
+    // flush. A host prefix paired with device input lengths must be enqueued
+    // on this stream now, so the kernel cannot read an unfilled staging tensor.
+    // normalize_i32() has already pinned and retained the host source.
+    if (py_attn_inputs.input_lengths.defined() && py_attn_inputs.input_lengths.is_cuda()
+        && py_attn_inputs.prefix_lengths.defined() && !py_attn_inputs.prefix_lengths.is_cuda()) {
+        py_attn_inputs.prefix_lengths_device = py_attn_inputs.prefix_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    } else {
+        py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
+    }
+    py_attn_inputs.input_lengths_device = to_device_i32(py_attn_inputs.input_lengths);
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
@@ -311,21 +320,30 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // Must match cu_kv_seqlens_device's definition (input_lengths +
-        // prefix_lengths): the CUDA graph padding fill copies this scalar into
-        // the cu_kv_seqlens tail, and a prefix-less value makes the array
-        // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+        if (supports_device_only_attention_metadata_ && py_attn_inputs.prefix_lengths.is_cuda()) {
+            // The CUDA graph fused padding kernel reads the live cumulative
+            // KV tail directly from cu_kv_seqlens_device. V4.1 FP8 consumers
+            // also use device lengths, so do not synchronize the whole stream
+            // just to materialize an unused host scalar.
+            py_attn_inputs.context_total_kv_length = -1;
+        } else {
+            // Preserve the host scalar contract for generic attention backends.
+            // CPU prefixes need no dispatcher reduction or scalar extraction.
+            int64_t prefix_sum = 0;
+            if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+                prefix_sum = py_attn_inputs.prefix_lengths.is_cuda() ?
+                                 py_attn_inputs.prefix_lengths.sum().item<int64_t>() :
+                                 std::accumulate(py_attn_inputs.prefix_lengths.data_ptr<int32_t>(),
+                                                 py_attn_inputs.prefix_lengths.data_ptr<int32_t>()
+                                                     + py_attn_inputs.prefix_lengths.numel(),
+                                                 int64_t{0});
+            }
+            py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
-        py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
-        py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
+        py_attn_inputs.cu_seqlens           = torch::empty({0}, host_i32);
+        py_attn_inputs.cu_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.cu_kv_seqlens_device = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.padding_offset       = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths_device,
                                           py_attn_inputs.prefix_lengths_device,
@@ -344,8 +362,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         cu_kv_seqlens.slice(0, 1, context_batch_size + 1) =
             py_attn_inputs.input_lengths.add(py_attn_inputs.prefix_lengths).cumsum(0);
 
-        py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
-        py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
+        py_attn_inputs.context_total_kv_length = cu_kv_seqlens.data_ptr<int32_t>()[context_batch_size];
+        py_attn_inputs.total_tokens            = cu_seqlens.data_ptr<int32_t>()[batch_size];
         py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);

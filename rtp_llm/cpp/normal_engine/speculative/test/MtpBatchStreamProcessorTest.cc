@@ -1874,6 +1874,26 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
     EXPECT_TRUE(torch::equal(actual, expected));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testNonLinearCacheSnapshotOwnsUnchangedTables) {
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    // Different physical/kernel widths also occur with compressed cache
+    // groups. Large sequence lengths must not be used as table indices for
+    // FULL/SWA groups; only the allocator decides whether they have capacity.
+    for (const int64_t width : {3, 7}) {
+        auto source   = torch::arange(2 * 2 * width, cuda_i32).reshape({2, 2, width});
+        auto expected = source.cpu();
+        auto snapshot =
+            MtpBatchStreamProcessor::advanceLinearCacheBlockTable(source,
+                                                                  torch::tensor({32768, 32771}, cuda_i32),
+                                                                  torch::tensor({1, 6}, cuda_i32),
+                                                                  {CacheGroupType::FULL, CacheGroupType::SWA},
+                                                                  /*seq_size_per_block=*/64);
+        ASSERT_NE(snapshot.data_ptr(), source.data_ptr());
+        source.fill_(-1);
+        EXPECT_TRUE(torch::equal(snapshot.cpu(), expected));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

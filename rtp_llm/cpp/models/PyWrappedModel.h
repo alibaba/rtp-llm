@@ -174,6 +174,7 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool supports_device_only_attention_metadata_{false};
     bool supports_micro_batch_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
@@ -594,6 +595,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
+
+    // Opt in once at initialization. Generic attention implementations can still
+    // require an exact host context_total_kv_length (e.g. fused RoPE/KV cache).
+    supports_device_only_attention_metadata_ =
+        py::hasattr(py_model_, "supports_device_only_attention_metadata")
+        && py_model_.attr("supports_device_only_attention_metadata").cast<bool>();
 
     cache_store_async_writer_ =
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),

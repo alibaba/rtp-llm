@@ -295,6 +295,9 @@ struct PyAttentionInputs {
     torch::Tensor cu_seqlens_device;
     torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
     torch::Tensor decode_cu_seqlens;
+    // Exact host KV total, or -1 when a model explicitly supports device-only
+    // attention metadata. In that case cu_kv_seqlens_device's live tail is
+    // authoritative; CUDA graph padding consumes that device value directly.
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
