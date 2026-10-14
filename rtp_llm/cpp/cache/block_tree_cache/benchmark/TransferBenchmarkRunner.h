@@ -14,6 +14,7 @@
 namespace rtp_llm::benchmark {
 
 struct BenchmarkDeviceHostCopyStats {
+    std::atomic<size_t> cuda_3d_batch{0};
     std::atomic<size_t> staged_sm{0};
     std::atomic<size_t> cuda_batch{0};
     std::atomic<size_t> generic{0};
@@ -21,6 +22,7 @@ struct BenchmarkDeviceHostCopyStats {
     std::atomic<size_t> lowest_api_calls{0};
 
     void reset() {
+        cuda_3d_batch.store(0, std::memory_order_relaxed);
         staged_sm.store(0, std::memory_order_relaxed);
         cuda_batch.store(0, std::memory_order_relaxed);
         generic.store(0, std::memory_order_relaxed);

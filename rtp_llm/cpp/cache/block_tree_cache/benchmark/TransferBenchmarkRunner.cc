@@ -77,11 +77,36 @@ private:
     BenchmarkDeviceHostCopyStats*           stats_;
 };
 
+class RecordingCuda3DBatchDeviceHostCopyStrategy final: public Cuda3DBatchDeviceHostCopyStrategy {
+public:
+    explicit RecordingCuda3DBatchDeviceHostCopyStrategy(BenchmarkDeviceHostCopyStats* stats): stats_(stats) {}
+
+    StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
+                              const std::vector<TransferDescriptor>& descriptors,
+                              const std::vector<const GroupSet*>&    group_sets) override {
+        const auto start   = Clock::now();
+        auto       result  = Cuda3DBatchDeviceHostCopyStrategy::tryExecute(hosts, descriptors, group_sets);
+        const auto elapsed = elapsedNs(start, Clock::now());
+        if (result.status == StrategyStatus::DONE) {
+            stats_->cuda_3d_batch.fetch_add(1, std::memory_order_relaxed);
+            stats_->lowest_api_ns.fetch_add(elapsed, std::memory_order_relaxed);
+            stats_->lowest_api_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
+    }
+
+private:
+    BenchmarkDeviceHostCopyStats* stats_;
+};
+
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
-    RTP_LLM_CHECK(strategies.size() == 3);
     for (auto& strategy : strategies) {
+        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
+            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(stats.get());
+            continue;
+        }
         std::atomic<size_t>* completed = nullptr;
         if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->staged_sm;
@@ -669,6 +694,8 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     const bool   wrapped = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
 
     std::vector<std::string> actual_strategies;
+    if (setup.copy_stats->cuda_3d_batch.load(std::memory_order_relaxed) > 0)
+        actual_strategies.push_back("cuda-3d-batch");
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
         actual_strategies.push_back("staged-sm");
     if (setup.copy_stats->cuda_batch.load(std::memory_order_relaxed) > 0)

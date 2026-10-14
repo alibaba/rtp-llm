@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <map>
+#include <string_view>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -9,42 +12,112 @@
 
 namespace rtp_llm {
 
+namespace {
+
+std::string_view configurableStrategyName(const DeviceHostCopyStrategy& strategy) {
+    if (dynamic_cast<const Cuda3DBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "cuda_3d_batch";
+    }
+    if (dynamic_cast<const CudaBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "cuda_batch";
+    }
+    if (dynamic_cast<const StagedSmDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "sm";
+    }
+    if (dynamic_cast<const GenericMultiCopyDeviceHostCopyStrategy*>(&strategy) != nullptr) {
+        return "generic";
+    }
+    return {};
+}
+
+}  // namespace
+
 DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    transfer_task_pool,
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
     options_(std::move(options)) {
+    strategies_.push_back(std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
+    if (const char* selected = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY"); selected && *selected) {
+        const auto found = std::find_if(strategies_.begin(), strategies_.end(), [selected](const auto& strategy) {
+            return configurableStrategyName(*strategy) == selected;
+        });
+        if (found != strategies_.end()) {
+            std::rotate(strategies_.begin(), found, found + 1);
+        }
+    }
 }
 
 TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                         const std::vector<TransferDescriptor>& descriptors,
                                                         const std::vector<const GroupSet*>&    group_sets) {
-    auto [status, plans] = generatePlan(hosts, descriptors, group_sets);
-    if (status != TransferStatus::OK) {
-        return status;
+    if (descriptors.empty() || hosts.size() != descriptors.size() || group_sets.size() != descriptors.size()) {
+        return TransferStatus::INVALID_ARGS;
     }
-    for (const auto& plan : plans) {
-        bool handled = false;
-        for (auto& strategy : strategies_) {
-            auto result = strategy->tryExecute(plan, options_);
+    const Tier source = descriptors.front().source_tier;
+    const Tier target = descriptors.front().target_tier;
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        if (descriptors[i].source_tier != source || descriptors[i].target_tier != target || group_sets[i] == nullptr
+            || descriptors[i].blocksAt(Tier::DEVICE).size() != group_sets[i]->devicePools().size()) {
+            return TransferStatus::INVALID_ARGS;
+        }
+    }
+    std::vector<DeviceHostCopyPlan> plans;
+    std::vector<bool>               handled;
+    bool                            planned = false;
+    bool                            any_handled = false;
+    for (auto& strategy : strategies_) {
+        if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            // A raw-batch copy must not repeat any plan already completed by an earlier strategy.
+            if (any_handled) {
+                continue;
+            }
+            const auto result = copy3d->tryExecute(hosts, descriptors, group_sets);
             if (result.status == StrategyStatus::DONE) {
-                handled = true;
-                break;
+                return TransferStatus::OK;
             }
             if (result.status == StrategyStatus::FAILED) {
                 return result.copy_status;
             }
+            continue;
         }
-        if (!handled) {
-            RTP_LLM_LOG_WARNING("no strategy handled copy plan group_set=%zu", plan.group_set_id);
-            return TransferStatus::DEVICE_IO_ERROR;
+        if (!planned) {
+            auto generated = generatePlan(hosts, descriptors, group_sets);
+            if (generated.first != TransferStatus::OK) {
+                return generated.first;
+            }
+            plans   = std::move(generated.second);
+            handled.assign(plans.size(), false);
+            planned = true;
+        }
+        for (size_t index = 0; index < plans.size(); ++index) {
+            if (handled[index]) {
+                continue;
+            }
+            const auto result = strategy->tryExecute(plans[index], options_);
+            if (result.status == StrategyStatus::DONE) {
+                handled[index] = true;
+                any_handled    = true;
+            } else if (result.status == StrategyStatus::FAILED) {
+                return result.copy_status;
+            }
+        }
+        if (std::all_of(handled.begin(), handled.end(), [](bool done) { return done; })) {
+            return TransferStatus::OK;
         }
     }
-    return TransferStatus::OK;
+    if (planned) {
+        for (size_t index = 0; index < plans.size(); ++index) {
+            if (!handled[index]) {
+                RTP_LLM_LOG_WARNING("no strategy handled copy plan group_set=%zu", plans[index].group_set_id);
+            }
+        }
+    }
+    return TransferStatus::DEVICE_IO_ERROR;
 }
 
 std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
@@ -103,6 +176,10 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
                 } else {
                     const size_t kv_bytes    = group_base.kvBlockStrideBytes();
                     const size_t scale_bytes = group_base.kvScaleStrideBytes();
+                    if (buffers.size() != (scale_bytes == 0 ? 1u : 2u) || buffers[0].size_bytes != kv_bytes
+                        || (scale_bytes != 0 && buffers[1].size_bytes != scale_bytes)) {
+                        return {TransferStatus::INVALID_ARGS, {}};
+                    }
                     append_tile(0, kv_bytes, 0);
                     append_tile(1, scale_bytes, kv_bytes);
                     layer_offset = kv_bytes + scale_bytes;
