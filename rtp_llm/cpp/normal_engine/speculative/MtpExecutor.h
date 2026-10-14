@@ -88,7 +88,14 @@ public:
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size,
-                                                       bool                   is_dspark = false);
+                                                       bool                   is_dspark = false,
+                                                       // Width of the hidden the DRAFT consumes. 0 derives it from the
+                                                       // target config (hc_mult*hidden_size), which is only correct when
+                                                       // the draft eats the target's raw hc residual (DeepSeek-V4
+                                                       // contract). Models whose MTP head consumes the collapsed final
+                                                       // hidden (e.g. Xing4, draft hc_mult==1) must pass the draft
+                                                       // config's width instead.
+                                                       int64_t                mtp_hidden_width = 0);
     static bool              mustWaitBeforeStreamPreparation(bool stream_async,
                                                              bool drop_broad_sync,
                                                              bool linear_attention,

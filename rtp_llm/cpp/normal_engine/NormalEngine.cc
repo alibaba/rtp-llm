@@ -962,6 +962,13 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
         const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        // Width of the hidden the DRAFT consumes; only drafts that eat the
+        // target's raw hc residual (DeepSeek-V4) match the target's
+        // hc_mult*hidden_size. Xing4's MTP head consumes the collapsed
+        // final hidden (draft hc_mult == 1).
+        const auto& draft_model_config = propose_params_->getEngineInitParams().model_config_;
+        const int64_t draft_hidden_width =
+            static_cast<int64_t>(draft_model_config.hidden_size) * draft_model_config.hc_mult;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -972,7 +979,8 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark,
+                        draft_hidden_width));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -992,7 +1000,8 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark,
+                        draft_hidden_width));
                 }
                 break;
             }

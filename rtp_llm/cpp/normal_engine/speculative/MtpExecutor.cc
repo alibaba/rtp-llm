@@ -639,16 +639,23 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context,
                                                          int                    vocab_size,
-                                                         bool                   is_dspark) {
+                                                         bool                   is_dspark,
+                                                         int64_t                mtp_hidden_width) {
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
     // Non-dspark: the fake SP buffer's hidden_states stands in for the
-    // target's pre-output residual that the draft consumes
-    // ([T, hc_mult*hidden_size]). DSpARK gets only the single target-token
-    // slot; the hidden/vocab arguments are unused on that branch.
+    // target's pre-output residual that the draft consumes. The width comes
+    // from the DRAFT's config when provided (see the constructor note: only
+    // drafts that eat the raw hc residual match the target's
+    // hc_mult*hidden_size; Xing4's draft consumes the collapsed final
+    // hidden). DSpARK gets only the single target-token slot; the
+    // hidden/vocab arguments are unused on that branch.
+    const size_t fake_hidden_width = mtp_hidden_width > 0
+                                         ? static_cast<size_t>(mtp_hidden_width)
+                                         : static_cast<size_t>(model_config.hidden_size) * model_config.hc_mult;
     auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size * model_config.hc_mult, vocab_size, max_new_tokens, is_dspark);
+        model_config.data_type, fake_hidden_width, vocab_size, max_new_tokens, is_dspark);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -713,7 +720,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    // The fake SP hidden width must match what the DRAFT consumes
+    // (draft_config.hidden_size * draft_config.hc_mult). The target's
+    // hc width is only the right answer when the draft eats the target's
+    // raw hc residual (DeepSeek-V4 contract, draft hc_mult == target's);
+    // Xing4's MTP head consumes the collapsed final hidden instead
+    // (draft hc_mult == 1), and sizing from the target would feed the
+    // draft a 4x-wider tensor than its captured graph expects.
+    const auto& draft_model_config = propose_params->getEngineInitParams().model_config_;
+    hidden_size_                = draft_model_config.hidden_size * draft_model_config.hc_mult;
     propose_step_               = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
