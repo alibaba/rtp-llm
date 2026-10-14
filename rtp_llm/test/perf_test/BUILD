@@ -1438,3 +1438,303 @@ py_test(
     tags = ["manual", "SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
+
+
+# H20 pool workers have no CI-NAS FUSE mount; this entry stages the pinned
+# checkpoint worker-locally (whale mirror, resumable) and delegates to the
+# stock perf runner with rewritten paths.
+py_test(
+    name = "xing4_0_fp8_grid_h20",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32,64",
+        "--input_len", "1024,4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_prefill_h20",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--partial", "2",
+        "--input_len", "1024,4096",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+# Per-lens decode splits: remote test actions cut at ~670s (nativelink gRPC
+# stream); the combined 2-lens grid exceeds it. One lens per action fits.
+
+py_test(
+    name = "xing4_0_fp8_grid_p5k_1024",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "1024",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_grid_p5k_4096",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_grid_h20_1024",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "1024",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_grid_h20_4096",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+# PRO5000 graph decode splits (SM12x allows graph with the default strategy).
+
+py_test(
+    name = "xing4_0_fp8_grid_p5k_1024_graph",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "1024",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_grid_p5k_4096_graph",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+# H20 graph decode splits (same stream-cut split rationale).
+
+py_test(
+    name = "xing4_0_fp8_grid_h20_1024_graph",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "1024",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_grid_h20_4096_graph",
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32",
+        "--input_len", "4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "3",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
