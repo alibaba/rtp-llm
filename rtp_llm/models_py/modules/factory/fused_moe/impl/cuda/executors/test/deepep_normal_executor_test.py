@@ -194,11 +194,15 @@ class DeepGemmHybridExecutorTestBase:
             payload.expert_topk_ids.fill_(-1)
             payload.expert_topk_weights.zero_()
 
+            # Capture the output token shape before execution: the eager
+            # contiguous path releases the scattered input storage (dispose
+            # contract), so payload.expert_x itself shrinks to size 0.
+            expected_output_shape = payload.expert_x.shape
             combine_payload = self._execute(
                 executor, payload, enable_cuda_graph=enable_cuda_graph
             )
             self.assertEqual(
-                combine_payload.fused_expert_output.shape, payload.expert_x.shape
+                combine_payload.fused_expert_output.shape, expected_output_shape
             )
             self.assertEqual(
                 torch.count_nonzero(combine_payload.fused_expert_output).item(), 0

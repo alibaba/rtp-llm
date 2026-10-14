@@ -150,6 +150,27 @@ py_test (
     },
 )
 
+# Shared-expert fold (ep_gather accumulate) numerics contract for the pure-TP
+# FP8 path used by GenericMoeLayer: masked + contiguous layouts, bitwise
+# equivalence against the unfolded output + plain add.
+py_test (
+    name = "deepgemm_hybrid_shared_expert_fold_test",
+    srcs = ["deepgemm_hybrid_shared_expert_fold_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "1"},
+    # DeepGEMM defaults to $HOME/.deep_gemm; Bazel otherwise clears HOME.
+    env_inherit = ["HOME"],
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+)
+
 py_test (
     name = "deepep_normal_executor_sm100_test",
     srcs = [
@@ -194,6 +215,33 @@ py_test (
     ],
     exec_properties = {
         "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+)
+
+py_test (
+    name = "deepgemm_hybrid_executor_sm10x_test",
+    size = "large",
+    srcs = [
+        "deepgemm_hybrid_executor_sm10x_test.py",
+        "deepep_normal_executor_test.py",
+    ],
+    main = "deepgemm_hybrid_executor_sm10x_test.py",
+    # DeepGEMM defaults to $HOME/.deep_gemm; Bazel otherwise clears HOME.
+    env = {"GPU_COUNT": "1"},
+    env_inherit = ["HOME"],
+    deps = [
+        ":fused_moe_executor_test_util",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    tags = [
+        "manual",
+        "SM103_CU13",
+    ],
+    exec_properties = {
+        "gpu": "SM103_CU13",
         "gpu_count": "1",
     },
 )

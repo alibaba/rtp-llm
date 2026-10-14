@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
+    SHARED_EXPERT_ACCUMULATE_ARG,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -56,7 +57,7 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     moe_align_block_size_compiled,
 )
-from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm10x
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
@@ -147,6 +148,48 @@ def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
 
 
+def _extract_shared_expert_accumulate(
+    extra_expert_args: Optional[Dict[str, Any]],
+) -> Optional[torch.Tensor]:
+    """Read the optional shared-expert accumulation request.
+
+    ``None`` when the caller did not request the fold (the historical
+    behavior); otherwise the shared-expert output that must be included in
+    the returned ``fused_expert_output`` (see
+    ``FusedMoeExpertExecutor.supports_shared_expert_accumulate``).
+    """
+
+    if not extra_expert_args:
+        return None
+    shared = extra_expert_args.get(SHARED_EXPERT_ACCUMULATE_ARG)
+    if shared is None:
+        return None
+    if not isinstance(shared, torch.Tensor):
+        raise TypeError(
+            f"{SHARED_EXPERT_ACCUMULATE_ARG} must be a torch.Tensor, "
+            f"got {type(shared).__name__}"
+        )
+    return shared
+
+
+def _foldable_into_ep_gather(
+    shared: Optional[torch.Tensor],
+    output_shape: torch.Size,
+    output_dtype: torch.dtype,
+    device: torch.device,
+) -> bool:
+    """Whether ``shared`` can be folded into the ep_gather store directly."""
+
+    return (
+        shared is not None
+        and shared.dim() == 2
+        and shared.shape == output_shape
+        and shared.dtype == output_dtype
+        and shared.device == device
+        and shared.stride(1) == 1
+    )
+
+
 def get_sm120_triton_fp8_config(
     M: int,
     E: int,
@@ -182,6 +225,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
+    # execute_masked / execute_contiguous fold SHARED_EXPERT_ACCUMULATE_ARG
+    # into the ep_gather store (bitwise-identical to a separate add); the
+    # SM120 graph Triton path and degenerate empty batches keep a plain add
+    # so the returned output always contains the shared contribution.
+    supports_shared_expert_accumulate = True
 
     @classmethod
     def executor_type(cls) -> ExecutorType:
@@ -229,6 +277,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
         self.is_sm120 = get_sm()[0] == 12
+        # SM10x (SM100/SM103) reuses the SM120 device-side contiguous layout:
+        # per-expert alignment and the routing metadata never cross to the CPU.
+        self.is_sm10x = is_sm10x()
         if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
             self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
         else:
@@ -305,6 +356,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 payload,
                 activation,
                 apply_router_weight_on_input,
+                extra_expert_args,
             )
         # The contiguous path uses a shape-derived fixed workspace and performs
         # all routing metadata work on GPU, so it is safe to capture/replay.
@@ -334,6 +386,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         payload: ExpertForwardPayload,
         activation: str,
         apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[Dict[str, Any]] = None,
     ) -> CombineForwardPayload:
         """Run small SM120 decode batches without per-expert 64-row padding."""
         if not self.is_sm120:
@@ -442,6 +495,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             scale_ue8m0=True,
         )
         output = down_output.view(token_num, topk, hidden_size).sum(dim=1)
+        shared_expert_output = _extract_shared_expert_accumulate(extra_expert_args)
+        if shared_expert_output is not None:
+            # This path has no ep_gather epilogue to fold into; keep the plain
+            # add so the output still contains the shared contribution.
+            output = output + shared_expert_output
         return CombineForwardPayload(fused_expert_output=output)
 
     def execute_masked(
@@ -472,6 +530,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             topk_idx = payload.expert_topk_ids
             topk_weights = payload.expert_topk_weights
             num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
+            shared_expert_output = _extract_shared_expert_accumulate(
+                extra_expert_args
+            )
 
             token_num = hidden_states_fp8.shape[0]
             num_experts = num_recv_tokens_per_expert.shape[0]
@@ -632,13 +693,25 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 device=hidden_states_fp8_device,
                 dtype=torch.bfloat16,
             )
+            fold_shared_expert = _foldable_into_ep_gather(
+                shared_expert_output,
+                gather_out.shape,
+                gather_out.dtype,
+                gather_out.device,
+            )
             ep_gather(
                 down_output.view(self.num_experts_per_partition * alignment, self.K),
                 topk_idx,
                 topk_weights,
                 output_index,
                 gather_out,
+                accumulate_input=(
+                    shared_expert_output if fold_shared_expert else None
+                ),
             )
+            if shared_expert_output is not None and not fold_shared_expert:
+                # Layout mismatch: keep semantics with the plain add.
+                gather_out = gather_out + shared_expert_output
             return CombineForwardPayload(fused_expert_output=gather_out)
 
     def execute_contiguous(
@@ -686,15 +759,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         num_experts_local = num_recv_tokens_per_expert.shape[0]
         routed_tokens = hidden_states_fp8.shape[0] * topk_idx.shape[1]
+        shared_expert_output = _extract_shared_expert_accumulate(extra_expert_args)
         if routed_tokens == 0:
             return CombineForwardPayload(
-                fused_expert_output=torch.zeros(
-                    hidden_states_fp8.shape,
-                    device=hidden_states_fp8.device,
-                    dtype=torch.bfloat16,
+                fused_expert_output=self._empty_routed_output(
+                    hidden_states_fp8, shared_expert_output
                 )
             )
-        if self.is_sm120:
+        if self.is_sm120 or self.is_sm10x:
             expert_alignment = min(
                 self.EXPERT_ALIGNMENT,
                 get_theoretical_mk_alignment_for_contiguous_layout(
@@ -707,7 +779,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
         else:
-            # Preserve the pre-upgrade SM9x/SM100x layout: fixed 128-token
+            # Preserve the pre-upgrade SM9x layout: fixed 128-token
             # expert alignment and CPU-padded metadata.
             expert_alignment = self.EXPERT_ALIGNMENT
             max_active_experts = min(routed_tokens, num_experts_local)
@@ -716,7 +788,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
 
-        if not self.enable_cuda_graph:
+        # SM10x keeps the whole layout on device even in eager mode: the
+        # workspace stays at the shape-derived upper bound above (the same
+        # bound the CUDA-graph path uses) instead of shrinking it to the exact
+        # ``sum(align_up(count_e))`` value, which would require a D2H of
+        # ``num_recv_tokens_per_expert`` and its CPU-side reduction per layer.
+        # The scatter kernels keep every write capacity-bounded, so a larger
+        # workspace only leaves more ``-1`` rows that ``ep_gather`` skips.
+        if not self.enable_cuda_graph and not self.is_sm10x:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -733,10 +812,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             all_tokens = actual_aligned
             if all_tokens == 0:
                 return CombineForwardPayload(
-                    fused_expert_output=torch.zeros(
-                        hidden_states_fp8.shape,
-                        device=hidden_states_fp8.device,
-                        dtype=torch.bfloat16,
+                    fused_expert_output=self._empty_routed_output(
+                        hidden_states_fp8, shared_expert_output
                     )
                 )
         _, K = hidden_states_fp8.size()
@@ -765,15 +842,19 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         ]
         # DeepGEMM's SM120 grouped kernel skips tiles whose group ID is -1;
         # keep unused graph workspace tiles inactive instead of routing to 0.
-        # This relies on the pinned SM120 wheel (8bcfcab); non-SM120 scatter
-        # below fills all padded rows with valid expert IDs for older wheels.
+        # This relies on the pinned SM120 wheel (8bcfcab). The SM100 kernel
+        # instead computes those tiles with the group id clamped to 0
+        # (scheduler `max(0, m_indices)`), so on SM10x the padding rows hold
+        # gather-invisible garbage either way; ep_gather only follows
+        # output_index. Only the SM9x scatter below fills all padded rows
+        # with valid expert IDs for older wheels.
         m_indices = torch.full(
             (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
         )
         output_index = torch.full_like(topk_idx, -1)
         scatter_num_tokens_per_expert = num_recv_tokens_per_expert
         scatter_alignment = expert_alignment
-        if not self.is_sm120 and not self.enable_cuda_graph:
+        if not self.is_sm120 and not self.is_sm10x and not self.enable_cuda_graph:
             padded_num_tokens_per_expert = [
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
@@ -810,7 +891,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-        if self.is_sm120:
+        if self.is_sm120 or self.is_sm10x:
             configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
                 expert_alignment
             )
@@ -854,7 +935,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
-        if self.is_sm120:
+        if self.is_sm120 or self.is_sm10x:
             configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
                 expert_alignment
             )
@@ -874,5 +955,42 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        ep_gather(down_output, topk_idx, topk_weights, output_index, gather_out)
+        fold_shared_expert = _foldable_into_ep_gather(
+            shared_expert_output,
+            gather_out.shape,
+            gather_out.dtype,
+            gather_out.device,
+        )
+        ep_gather(
+            down_output,
+            topk_idx,
+            topk_weights,
+            output_index,
+            gather_out,
+            accumulate_input=(shared_expert_output if fold_shared_expert else None),
+        )
+        if shared_expert_output is not None and not fold_shared_expert:
+            # Layout mismatch: keep semantics with the plain add.
+            gather_out = gather_out + shared_expert_output
         return CombineForwardPayload(fused_expert_output=gather_out)
+
+    def _empty_routed_output(
+        self,
+        hidden_states_fp8: torch.Tensor,
+        shared_expert_output: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Zero routed output for degenerate no-routed-token batches.
+
+        A folded shared-expert request must still be honored, so add it here
+        (no ep_gather ran to fold into). Reachable only for empty batches or
+        topk == 0; the real forward always has at least one routed token.
+        """
+
+        output = torch.zeros(
+            hidden_states_fp8.shape,
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        if shared_expert_output is not None:
+            output = output + shared_expert_output
+        return output
