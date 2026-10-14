@@ -872,7 +872,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     auto engine                     = createMockEngine(config);
 
     // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
-    // each execute one final token after a block-aligned 18-token synthetic prefix. The 7-token
+    // each execute four tokens after a block-aligned 14-token synthetic prefix. The 7-token
     // whole-segment shape runs once during warmup and once while constructing the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
@@ -881,7 +881,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {4, 18, 4},
+                  {16, 14, 4},
                   {7, 0, 1},
                   {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
@@ -897,10 +897,67 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchS
     config.forward_shapes         = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
+    // The budget exceeds the prompt length, so all eight rows execute the full 19-token prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
                   {19, 0, 1},
-                  {8, 18, 8},
+                  {19 * 8, 0, 8},
+              }));
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
+    CustomConfig config;
+    config.warm_up            = true;
+    config.prefill_chunk_size = 5;
+    config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    // Middle chunks align to two-token blocks; the five-token row-heavy query keeps prefix 14.
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {25, 14, 5},
+              }));
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes) {
+    CustomConfig config;
+    config.warm_up                = true;
+    config.prefill_chunk_size     = 4;
+    config.max_context_batch_size = 8;
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.parallelism_config.role_type                             = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                       = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {4, 8};
+
+    auto forward_shapes = std::make_shared<std::vector<ForwardShape>>();
+    NormalExecutor::test_model_factory = [vocab = model_config.vocab_size, forward_shapes](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab, forward_shapes);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+
+    EXPECT_EQ(*forward_shapes,
+              (std::vector<ForwardShape>{
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {16, 14, 4},
               }));
 }
 

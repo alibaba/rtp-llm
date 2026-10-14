@@ -2673,8 +2673,24 @@ TEST_F(DSV4AllocatorTest, CompressedBlockCopyIncludesEveryPageAndPadding) {
     }
 }
 
-TEST_F(DSV4AllocatorTest, ChunkMallocReservesSparseBanksOnceAndFreesEachBankOnce) {
-    for (const auto type : {CacheGroupType::LINEAR, CacheGroupType::SWA}) {
+TEST_F(DSV4AllocatorTest, ChunkMallocSharesCommonSparseBanksAndKeepsPrivateTail) {
+    struct TestCase {
+        CacheGroupType type;
+        int            batch_size;
+        int            prompt_tokens;
+        int            chunk_tokens;
+        bool           reuse_cache;
+        size_t         physical_blocks;
+        int            expected_need_blocks;
+        size_t         first_required_position;
+    };
+    for (const auto& test_case : {TestCase{CacheGroupType::LINEAR, 1, 20, 8, false, 3, 8, 2},
+                                 TestCase{CacheGroupType::SWA, 1, 20, 8, false, 4, 9, 1},
+                                 TestCase{CacheGroupType::LINEAR, 2, 20, 8, false, 3, 8, 2},
+                                 TestCase{CacheGroupType::LINEAR, 2, 18, 8, false, 4, 10, 2},
+                                 TestCase{CacheGroupType::SWA, 2, 20, 12, true, 5, 10, 0},
+                                 TestCase{CacheGroupType::SWA, 2, 20, 8, true, 4, 9, 1}}) {
+        const auto type = test_case.type;
         auto config = makeSimpleHybridMhaCacheConfig(4, 10, 4, DataType::TYPE_FP16);
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -2685,6 +2701,8 @@ TEST_F(DSV4AllocatorTest, ChunkMallocReservesSparseBanksOnceAndFreesEachBankOnce
             }
         }
         config.setTopology(std::move(groups), config.topology().layers());
+        setGroupBlockNumsForTest(
+            config, config.groupTags(), {static_cast<uint32_t>(test_case.physical_blocks + 1), 10});
         auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
         const auto sparse_group = allocator->cacheGroups().front();
@@ -2692,32 +2710,63 @@ TEST_F(DSV4AllocatorTest, ChunkMallocReservesSparseBanksOnceAndFreesEachBankOnce
         const auto pool        = sparse_group->blockPool();
         const auto free_before = pool->availableBlocksNum();
         auto       resource    = std::make_shared<BatchKVCacheResource>();
-        resource->resetBatchSize(1);
+        resource->resetBatchSize(test_case.batch_size);
         initDsv4BatchGroups(*resource, config);
-        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, 84, 4);
+        auto tokens            = std::make_shared<CompleteTokenIds>(test_case.batch_size, test_case.batch_size, 84, 4);
         auto input             = std::make_shared<GenerateInput>();
-        input->input_ids       = torch::arange(20, torch::kInt32);
+        input->input_ids       = torch::arange(test_case.prompt_tokens, torch::kInt32);
         input->generate_config = std::make_shared<GenerateConfig>();
+        input->generate_config->num_return_sequences = test_case.batch_size;
         tokens->init(input);
         MallocInfo info{resource, tokens};
-        info.reuse_cache                  = false;
+        info.reuse_cache                  = test_case.reuse_cache;
         info.enable_cache_lookup          = false;
         info.enable_remove_skipped_blocks = false;
-        info.max_chunk_tokens             = 8;
+        info.max_chunk_tokens             = test_case.chunk_tokens;
         if (type == CacheGroupType::LINEAR) {
-            const auto need = sparse_group->getNeedBlocks(0, 20, 0, 0, false, {2, 3, 4});
+            const auto need = sparse_group->getNeedBlocks(0, test_case.prompt_tokens, 0, 0, false, {2, 3, 4});
             EXPECT_EQ(need.extra_blocks, 3);
         }
+        EXPECT_EQ(allocator->getNeedBlocks(info), test_case.expected_need_blocks);
+        if (test_case.batch_size > 1) {
+            auto occupied = pool->malloc();
+            ASSERT_TRUE(occupied.has_value());
+            pool->incRef(*occupied);
+            EXPECT_EQ(allocator->malloc(info).status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+            EXPECT_EQ(resource->curBlocksNum(), 0);
+            EXPECT_EQ(pool->freeBlocksNum(), free_before - 1);
+            pool->decRef(*occupied);
+        }
         ASSERT_TRUE(allocator->malloc(info).success);
-        const size_t banks = type == CacheGroupType::LINEAR ? 3 : 4;
+        const size_t banks = test_case.physical_blocks;
         EXPECT_EQ(pool->availableBlocksNum(), free_before - banks);
         const auto owning = resource->blocks(0, "linear");
+        if (test_case.batch_size > 1) {
+            const auto& second       = resource->blocks(1, "linear");
+            const auto  common_slots = static_cast<size_t>(test_case.prompt_tokens / 4);
+            ASSERT_EQ(second.size(), owning.size());
+            for (size_t pos = test_case.first_required_position; pos < owning.size(); ++pos) {
+                ASSERT_GT(owning[pos], 0) << "position=" << pos;
+                ASSERT_GT(second[pos], 0) << "position=" << pos;
+                if (pos < common_slots) {
+                    EXPECT_EQ(second[pos], owning[pos]) << "position=" << pos;
+                } else {
+                    EXPECT_NE(second[pos], owning[pos]) << "position=" << pos;
+                }
+            }
+        }
         info.max_chunk_tokens = 0;
         ASSERT_TRUE(allocator->malloc(info).success);
         EXPECT_EQ(resource->blocks(0, "linear"), owning);
         EXPECT_EQ(pool->availableBlocksNum(), free_before - banks);
         allocator->free(FreeInfo{resource, tokens});
         EXPECT_EQ(pool->availableBlocksNum(), free_before);
+        input->input_ids = torch::arange(24, torch::kInt32);
+        tokens->init(input);
+        info.max_chunk_tokens = 16;
+        EXPECT_EQ(allocator->malloc(info).status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+        EXPECT_EQ(resource->curBlocksNum(), 0);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
     }
 }
 

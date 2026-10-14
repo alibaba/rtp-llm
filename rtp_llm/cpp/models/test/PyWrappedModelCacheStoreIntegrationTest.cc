@@ -653,6 +653,34 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
+    if (name == "cyclic_chunk_views") {
+        auto config      = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
+        auto groups      = config.topology().groups();
+        groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto full_spec                      = groups[1].spec->clone();
+        full_spec->kernel_seq_size_per_block = 1;
+        groups[1].spec                      = std::move(full_spec);
+        config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
+        auto layout = makeLayout(config);
+        // Both chunk rows use cyclic execution banks, but only the final
+        // SWA row exposes its owned tail blocks to cache-store publication.
+        auto inputs = makeInputs(/*input_lengths=*/{4, 4},
+                                 /*request_ids=*/{301, 302},
+                                 /*cache_keys=*/{3101, 3102, 3103, 3104, 3201, 3202, 0, 0},
+                                 /*cache_keys_width=*/4,
+                                 /*block_ids=*/{-1, -1, 3, 4, -1, -1, -1, -1, 1, 2, 3, 4, 5, 6, 0, 0},
+                                 /*group_tags=*/{"swa", "full"},
+                                 /*block_table_width=*/4,
+                                 /*global_tokens_per_block=*/2,
+                                 /*global_stride_bytes=*/24);
+        inputs.prefix_lengths                   = pinnedTensor({4, 0}, {2});
+        inputs.cache_store_publish_start_tokens = pinnedTensor({4, 0}, {2});
+        inputs.kv_cache_kernel_block_id = pinnedTensor(
+            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0,
+             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
+            {2, 2, 8});
+        return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+    }
     if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
         || name == "single_model_extra_payload") {
         const bool single_group = name == "single_model_extra_payload";
