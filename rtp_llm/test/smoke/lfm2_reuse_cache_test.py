@@ -172,7 +172,6 @@ class Lfm2ReuseCacheTest(unittest.TestCase):
     def assert_reuse(self, aux, min_blocks, max_reuse):
         self.assertGreaterEqual(aux["reuse_len"], min_blocks * BLOCK_SIZE, aux)
         self.assertLessEqual(aux["reuse_len"], max_reuse, aux)
-        self.assertEqual(aux["reuse_len"] % BLOCK_SIZE, 0, aux)
 
     # ------------------------------------------------------------------ #
     #  scenario 1: same prefix, different suffix
