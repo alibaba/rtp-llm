@@ -300,11 +300,15 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
     else:
         batch_size_list = auto_generate_bs_list(args.concurrency_limit)
 
-    effective_max_concurrency = max(batch_size_list)
-    if args.target_tpot > 0:
-        effective_max_concurrency = max(
-            effective_max_concurrency, args.concurrency_limit
-        )
+    # The server-side admission bound needs headroom above the runner's max
+    # batch: the grid fires the next cell while the previous cell's sessions
+    # drain, and a limit equal to max(BS) rejects the whole next batch with
+    # 409_CONCURRENCY_LIMIT. Honor --concurrency_limit as the floor in every
+    # grid mode (not only target_tpot); the runner still sends at most
+    # max(BS) concurrent requests.
+    effective_max_concurrency = max(
+        max(batch_size_list), args.concurrency_limit
+    )
 
     return PerfTestConfig(
         is_distribution=False,
