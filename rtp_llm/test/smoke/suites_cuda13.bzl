@@ -133,6 +133,9 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
+            # TEMPORARY B300 cache diagnostic (see flashinfer_b300_cache_probe_test.py);
+            # remove once the fmha_gen runfiles-anchor gap is root-caused.
+            ":flashinfer_b300_cache_probe_test",
             # Only DeepSeek-V4-Pro case. Deliberately plain — no CUDA graph, no PD
             # separation, no speculative decode, no page-RR. The advanced feature
             # matrix is covered on Flash above; this exists so a Pro-specific
@@ -159,13 +162,7 @@ def cuda13_suites():
             smoke_test(
                 name="minicpmv4_7_1b_sm103",
                 task_info="data/model/minicpmv47/q_r_1b_sm103.json",
-                # The trtllm-gen attention's fmha_gen JIT op on the shared B300
-                # cache anchors its include path to a dead foreign-test runfiles
-                # sandbox (lfm2_longctx_clean_ci) that the eviction misses, so
-                # its cold compile dies on the missing flashInferMetaInfo.h.
-                # Run the SM103 case on the fallback attention impl; the golden
-                # re-pins from CI actual if the impl change flips the image tie.
-                smoke_args="--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192 --enable_flashinfer_trtllm_gen 0",
+                smoke_args="--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
                 gpu_type=[cuda13_x86_test_gpu()],
                 data=native.glob(["data/model/qwen_vl/*.jpeg"]),
             ),
