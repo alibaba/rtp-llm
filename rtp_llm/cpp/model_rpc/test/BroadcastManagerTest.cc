@@ -582,6 +582,35 @@ TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {
     EXPECT_FALSE(result->success());
 }
 
+TEST_F(BroadcastManagerTest, DeadlineKeepsAggregateErrorConsistentAcrossCompletionOrder) {
+    const auto verify = [](bool deadline_first) {
+        auto timeout_ctx    = makeIdleContext();
+        timeout_ctx->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+        auto cq_ctx         = makeIdleContext();
+        auto result         = std::make_shared<FunctionBroadcastResult>(
+            std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{timeout_ctx, cq_ctx});
+
+        if (deadline_first) {
+            result->finishRank(/*rank=*/0, /*cq_event_ok=*/true);
+            result->finishRank(/*rank=*/1, /*cq_event_ok=*/false);
+        } else {
+            result->finishRank(/*rank=*/1, /*cq_event_ok=*/false);
+            result->finishRank(/*rank=*/0, /*cq_event_ok=*/true);
+        }
+
+        EXPECT_TRUE(result->deadlineExceeded());
+        try {
+            result->waitDone();
+            FAIL() << "expected aggregate broadcast failure";
+        } catch (const rtp_llm::RTPException& error) {
+            EXPECT_NE(std::string(error.what()).find("broadcast rpc timeout"), std::string::npos);
+        }
+    };
+
+    verify(/*deadline_first=*/true);
+    verify(/*deadline_first=*/false);
+}
+
 // ---------------------------- workerNum ----------------------------
 
 TEST_F(BroadcastManagerTest, WorkerNum) {

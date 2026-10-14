@@ -117,14 +117,19 @@ public:
                 ++finished_count_;
                 const auto& ctx = worker_contexts_[rank];
                 if (!cq_event_ok) {
-                    fatal_error_ = "broadcast rpc cq event failed, rank=" + std::to_string(rank)
-                                   + " addr=" + ctx->server_addr;
+                    // A deadline reported by any rank is the aggregate error.
+                    // Do not let a later CQ failure replace its message while
+                    // deadlineExceeded() continues to report true.
+                    if (!deadline_exceeded_.load(std::memory_order_acquire) && fatal_error_.empty()) {
+                        fatal_error_ =
+                            "broadcast rpc cq event failed, rank=" + std::to_string(rank) + " addr=" + ctx->server_addr;
+                    }
                 } else if (ctx->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    deadline_exceeded_.store(true, std::memory_order_release);
-                    fatal_error_ = "broadcast rpc timeout, timeout_ms=" + std::to_string(ctx->timeout_ms)
-                                   + " rank=" + std::to_string(rank) + " err="
-                                   + std::to_string(ctx->status.error_code()) + "(" + ctx->status.error_message()
-                                   + ") addr=" + ctx->server_addr;
+                    if (!deadline_exceeded_.exchange(true, std::memory_order_acq_rel)) {
+                        fatal_error_ = "broadcast rpc timeout, timeout_ms=" + std::to_string(ctx->timeout_ms) + " rank="
+                                       + std::to_string(rank) + " err=" + std::to_string(ctx->status.error_code()) + "("
+                                       + ctx->status.error_message() + ") addr=" + ctx->server_addr;
+                    }
                 } else if (!ctx->status.ok()) {
                     RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%zu err=%d(%s) addr=%s",
                                         rank,

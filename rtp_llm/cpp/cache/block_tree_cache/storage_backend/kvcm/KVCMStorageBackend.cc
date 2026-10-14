@@ -354,6 +354,16 @@ public:
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
             return true;
         }
+        // Validate the complete route before resolving any block into an IOV.
+        // Requests arrive over RPC, so an unknown tag is a request failure and
+        // must not escape as an assertion or allow a valid prefix to start I/O.
+        for (const auto& tag : tags) {
+            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
+                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+                return false;
+            }
+        }
         setCudaDevice();
         kv_cache_manager::BlockBuffers buffers;
         if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
@@ -574,16 +584,6 @@ private:
         std::unordered_map<std::string, std::vector<size_t>> indices_by_tag;
         for (size_t index = 0; index < tags.size(); ++index) {
             indices_by_tag[tags[index]].push_back(index);
-        }
-        // Reject an invalid route before issuing any SDK operation. Otherwise
-        // the registered subsets could complete before a later unknown tag
-        // turns the whole request into a failure.
-        for (const auto& [tag, indices] : indices_by_tag) {
-            (void)indices;
-            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
-                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
-                return TransferResult::FAILED;
-            }
         }
         // Keep replacements local until every tag completes. A timeout or
         // failure is an all-or-nothing response and leaves response.actual_uris empty.
