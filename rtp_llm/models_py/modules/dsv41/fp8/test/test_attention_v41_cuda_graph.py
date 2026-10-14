@@ -69,6 +69,11 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
                 for tag, table in zip(specs, tables)
             }
         )
+        for tagged in inputs.values():
+            tagged.prefix_lengths_device = tagged.prefix_lengths
+            # Device-only graph preparation deliberately leaves host values
+            # untouched. They must not become the replay position source.
+            tagged.prefix_lengths = torch.full((2,), -123, dtype=torch.int32)
         config = DSv4DecodeFmhaImplConfigFP8(
             max_batch_size=2,
             q_len=6,
@@ -90,7 +95,7 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             captured_slots = meta.swa_global_slots.clone()
             captured_decoder_slots = meta.decoder_swa_metadata.swa_global_slots.clone()
         for starts in ([3, 129], [250, 245]):
-            inputs.prefix_lengths.copy_(
+            inputs.prefix_lengths_device.copy_(
                 torch.tensor(starts, dtype=torch.int32, device=device)
             )
             impl.prepare_cuda_graph(inputs)
@@ -111,7 +116,7 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             self.assertFalse(torch.equal(captured_slots, captured_decoder_slots))
             torch.testing.assert_close(
                 captured_positions.view(2, 6),
-                inputs.prefix_lengths[:, None]
+                inputs.prefix_lengths_device[:, None]
                 + torch.arange(6, device=device, dtype=torch.int32),
             )
 

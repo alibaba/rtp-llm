@@ -3,6 +3,7 @@ import gc
 import os
 import unittest
 import weakref
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -141,6 +142,61 @@ class FailOnceGraphPrepare:
         self.call_count += 1
         if self.call_count == 1:
             raise RuntimeError("injected prepare_cuda_graph failure")
+
+
+class _MetadataPrepareImpl:
+    def __init__(self, inputs, device_only):
+        self.device_only = device_only
+        if device_only:
+            self.cuda_graph_uses_device_metadata = True
+        self.signature = torch.empty(4, device="cuda", dtype=torch.bfloat16)
+        self.prepare_cuda_graph(inputs)
+
+    def prepare_cuda_graph(self, inputs):
+        full = inputs["full"]
+        if self.device_only:
+            starts = (
+                full.prefix_lengths_device
+                if full.is_target_verify
+                else full.sequence_lengths_plus_1_device - 1
+            )
+            tables = [inputs[tag].kv_cache_kernel_block_id_device for tag in GROUP_TAGS]
+        else:
+            starts = (
+                full.prefix_lengths if full.is_target_verify else full.sequence_lengths
+            )
+            tables = [inputs[tag].kv_cache_kernel_block_id for tag in GROUP_TAGS]
+        # The legacy backend really consumes refreshed CPU values. The device
+        # backend never reads a host mirror, including padded table rows.
+        signature = torch.stack(
+            (starts.sum(), starts[-1], tables[0].sum(), tables[1].sum())
+        )
+        self.signature.copy_(signature.to(device="cuda", dtype=torch.bfloat16))
+
+
+class DeviceMetadataPrepareModel:
+    def __init__(self, device_only):
+        self.device_only = device_only
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return _MetadataPrepareImpl(inputs.attention_inputs, self.device_only)
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(inputs.input_hiddens + fmha_impl.signature)
+
+
+class DictMetadataPrepareModel(TaggedBlockTableModel):
+    def __init__(self, flags):
+        self.flags = flags
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return {
+            tag: SimpleNamespace(
+                prepare_cuda_graph=lambda _inputs: None,
+                cuda_graph_uses_device_metadata=flag,
+            )
+            for tag, flag in zip(GROUP_TAGS, self.flags)
+        }
 
 
 class RetryableGraphPrepareModel(TaggedBlockTableModel):
@@ -505,6 +561,111 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_device_metadata_prepare_updates_and_padding(self):
+        prefix = "cuda_graph.prepareAttentionInputs("
+        for device_only in (False, True):
+            for q_len in (1, 3, 6):
+                with self.subTest(device_only=device_only, q_len=q_len):
+                    runner = CudaGraphRunner()
+                    runner.init_decode(
+                        DeviceMetadataPrepareModel(device_only),
+                        HIDDEN_SIZE,
+                        64,
+                        KERNEL_BLOCK_TABLE_WIDTH,
+                        [32],
+                        GROUP_TAGS,
+                        q_len > 1,
+                        q_len,
+                    )
+                    observed = []
+                    expected = []
+                    for step, batch in enumerate((32, 16, 32)):
+                        values = {"full": step + 1, "aux": step + 2}
+                        inputs = (
+                            _build_target_verify_inputs(
+                                GROUP_TAGS,
+                                values,
+                                batch_size=batch,
+                                query_len=q_len,
+                                prefix_len=19 + step,
+                            )
+                            if q_len > 1
+                            else _build_decode_inputs(
+                                GROUP_TAGS, values, batch_size=batch
+                            )
+                        )
+                        starts = torch.arange(batch, device="cuda", dtype=torch.int32)
+                        starts = starts % 4 + 19 + step
+                        tagged = inputs.attention_inputs
+                        for attn in tagged.values():
+                            # Exercise the real D2H mirror path, rather than
+                            # only CPU-to-CPU copies. Device mirrors remain
+                            # current while opt-in captured CPU values go stale.
+                            attn.input_lengths = attn.input_lengths.cuda()
+                            if q_len > 1:
+                                attn.prefix_lengths = starts
+                            else:
+                                attn.sequence_lengths = starts
+                            attn.sequence_lengths_plus_1_device = starts + 1
+                            attn.kv_cache_kernel_block_id = (
+                                attn.kv_cache_kernel_block_id_device
+                            )
+                        inputs.attention_inputs = tagged
+                        with torch.profiler.profile(
+                            activities=[torch.profiler.ProfilerActivity.CPU]
+                        ) as prof:
+                            self.assertTrue(
+                                runner.prepare(inputs, skip_forward_event_sync=True)
+                            )
+                        scopes = {event.key for event in prof.key_averages()}
+                        for name in ("host_mirror_copy)", "wait_host_mirror_d2h)"):
+                            self.assertEqual(prefix + name in scopes, not device_only)
+                        output = runner.forward(inputs).hidden_states.clone()
+                        last = (
+                            starts[-1] if batch == 32 else torch.zeros_like(starts[0])
+                        )
+                        signature = torch.stack(
+                            (
+                                starts.sum(),
+                                last,
+                                tagged["full"].kv_cache_kernel_block_id_device.sum(),
+                                tagged["aux"].kv_cache_kernel_block_id_device.sum(),
+                            )
+                        ).to(output.dtype)
+                        observed.append(output)
+                        expected.append(inputs.input_hiddens + signature)
+                    # No explicit host synchronization between replay results:
+                    # each clone must preserve its own metadata version.
+                    for actual, reference in zip(observed, expected):
+                        torch.testing.assert_close(actual, reference)
+
+    def test_device_metadata_prepare_dict_requires_all_backends(self):
+        for flags in ((True, True), (True, False), (False, True)):
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                DictMetadataPrepareModel(flags),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [2],
+                GROUP_TAGS,
+            )
+            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 3})
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as prof:
+                self.assertTrue(runner.prepare(inputs, skip_forward_event_sync=True))
+            scopes = {event.key for event in prof.key_averages()}
+            self.assertEqual(
+                "cuda_graph.prepareAttentionInputs(host_mirror_copy)" in scopes,
+                not all(flags),
+            )
+            output = runner.forward(inputs)
+            torch.testing.assert_close(
+                output.hidden_states,
+                torch.full_like(output.hidden_states, 2 + 16 * 3),
+            )
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()
@@ -1414,6 +1575,13 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         query_len=query_len,
                         prefix_len=prefix_len,
                     )
+                    # Device-only metadata producers intentionally do not
+                    # synchronize to populate the host KV total. Padding must
+                    # derive its cumulative tail from live device metadata.
+                    tagged = inputs.attention_inputs
+                    for attention in tagged.values():
+                        attention.context_total_kv_length = -1
+                    inputs.attention_inputs = tagged
                     self.assertTrue(runner.canRun(inputs))
                     self.assertEqual(runner.getCurrentRealGraphSize(), graph_size)
 
@@ -1502,7 +1670,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # The shared staging row is wider than the model-local capture row.
         # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=KERNEL_BLOCK_TABLE_WIDTH + 2,
         )
         self.assertTrue(runner.canRun(inputs))
         self.assertTrue(runner.canPrepare(inputs))
@@ -1511,18 +1682,34 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
     def test_topology_real_and_fake_allocator_bounds(self) -> None:
         # Enum values: LINEAR=0, FULL=1, SWA=2. Only FULL expands physical IDs.
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40])
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40]
+        )
         self.assertEqual(CudaGraphRunner.topologyWidths([8], [8], [1], 1, 0, 0), [1, 1])
         for sequence, reserve, fake in ((0, 0, 1), (2**63 - 1, 1, 1), (1, 0, 2**63)):
             with self.subTest(sequence=sequence, reserve=reserve, fake=fake):
                 with self.assertRaises(RuntimeError):
-                    CudaGraphRunner.topologyWidths([8], [2], [1], sequence, reserve, fake)
+                    CudaGraphRunner.topologyWidths(
+                        [8], [2], [1], sequence, reserve, fake
+                    )
 
     def test_topology_width_end_to_end_preserves_last_column(self) -> None:
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
@@ -1530,7 +1717,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
                     spans = {"full": 8, "aux": 32}
                     real_width, fake_width = CudaGraphRunner.topologyWidths(
-                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                        [spans[tag] for tag in tags],
+                        [8, 8],
+                        [1, 1],
+                        64,
+                        reserve,
+                        fake_count,
                     )
                     self.assertEqual(max(real_width, fake_width), width)
                     runner = CudaGraphRunner()
@@ -1554,12 +1746,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 runner.init_decode(
                     TaggedBlockTableModel(), HIDDEN_SIZE, 64, width, [4], GROUP_TAGS
                 )
-                inputs = _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width)
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width
+                )
                 self._assert_replay_signature(runner, inputs, 53)
 
         with self.assertRaisesRegex(RuntimeError, "positive kernel block table width"):
             runner = CudaGraphRunner()
-            runner.init_decode(TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS)
+            runner.init_decode(
+                TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS
+            )
 
     def test_generation_prefill_keeps_host_width_gate(self) -> None:
         runner = CudaGraphRunner()
@@ -1586,7 +1782,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             wide_tags[tag] = attention
         wide.attention_inputs = wide_tags
         self.assertFalse(runner.canRun(wide))
-        self.assertEqual(runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch")
+        self.assertEqual(
+            runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch"
+        )
         self.assertFalse(runner.canPrepare(wide))
 
     def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:

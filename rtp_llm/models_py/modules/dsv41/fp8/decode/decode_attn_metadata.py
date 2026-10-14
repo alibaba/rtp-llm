@@ -666,8 +666,17 @@ def _build_start_pos_from_attention_inputs(
     device: torch.device,
     max_seq_len: int,
     q_len: int,
+    *,
+    require_device_metadata: bool = False,
 ) -> torch.Tensor:
-    """Derive DSv4 decode first-token positions from framework attention inputs."""
+    """Derive positions from the framework's stream-ordered device mirrors.
+
+    CUDA graph preparation may deliberately leave the host mirrors stale.
+    Its caller requires device metadata so a missing mirror cannot silently
+    fall back to a stale host value. Eager callers retain the host-only input
+    contract; that fallback stays synchronous because its source can be a
+    mutable, framework-owned pinned buffer.
+    """
     if isinstance(attention_inputs, torch.Tensor):
         start_pos = attention_inputs
     else:
@@ -679,9 +688,31 @@ def _build_start_pos_from_attention_inputs(
         # sentinel values, so prefix_lengths is the only valid first-token
         # position source for those q_len > 1 paths.
         if is_target_verify or (is_prefill and q_len > 1):
-            start_pos = attention_inputs.prefix_lengths
+            start_pos = getattr(attention_inputs, "prefix_lengths", None)
+            mirror_name = "prefix_lengths_device"
+            mirror_offset = 0
         else:
-            start_pos = attention_inputs.sequence_lengths
+            start_pos = getattr(attention_inputs, "sequence_lengths", None)
+            mirror_name = "sequence_lengths_plus_1_device"
+            mirror_offset = 1
+
+        mirror = getattr(attention_inputs, mirror_name, None)
+        mirror_on_device = (
+            isinstance(mirror, torch.Tensor)
+            and mirror.is_cuda
+            and device.type == "cuda"
+            and (device.index is None or mirror.device.index == device.index)
+            and mirror.ndim == 1
+        )
+        if mirror_on_device:
+            start_pos = mirror - mirror_offset if mirror_offset else mirror
+        elif require_device_metadata:
+            raise ValueError(f"CUDA graph decode requires device {mirror_name}")
+
+    if require_device_metadata and (
+        not isinstance(start_pos, torch.Tensor) or not start_pos.is_cuda
+    ):
+        raise ValueError("CUDA graph decode requires device start positions")
 
     start_pos = start_pos.to(device=device, dtype=torch.int32)
     # Cuda-graph capture/warmup can hand us sentinel prefix lengths near
@@ -1030,6 +1061,7 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
     capture_full_width_lengths: bool = False,
+    require_device_metadata: bool = False,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -1062,6 +1094,7 @@ def update_decode_metadata_in_place_fp8(
         device,
         meta.max_seq_len,
         q_len,
+        require_device_metadata=require_device_metadata,
     )
     bs = int(start_pos.shape[0])
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
