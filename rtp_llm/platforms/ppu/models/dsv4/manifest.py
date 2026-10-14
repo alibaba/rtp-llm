@@ -80,16 +80,7 @@ def _supports_ppu_prefill(selection, request, cache_mode):
             _supports_flash_model(metadata),
             "requires Flash target or its MTP1/MTP2/MTP3 SWA draft in PD mode",
         ),
-        (
-            metadata.get("tp_size") == 4 and metadata.get("world_size") == 4,
-            "requires TP4 world4",
-        ),
-        (
-            metadata.get("ep_size") == 1
-            and metadata.get("dp_size") == 1
-            and metadata.get("pp_size") == 1,
-            "requires EP1 DP1 PP1",
-        ),
+        (metadata.get("pp_size") == 1, "requires PP1"),
         (
             options.get("DSV4_HC_IMPL", "hybrid") in ("hybrid", "tilelang"),
             "requires the PPU HC implementation",
@@ -170,14 +161,7 @@ def supports_ppu_fp4_decode(selection, request):
             _supports_flash_model(metadata),
             "requires Flash target or its MTP1/MTP2/MTP3 SWA draft in PD mode",
         ),
-        (
-            tuple(
-                metadata.get(k)
-                for k in ("tp_size", "dp_size", "ep_size", "pp_size", "world_size")
-            )
-            in ((1, 4, 4, 1, 4), (1, 8, 8, 1, 8)),
-            "requires TP1 PP1 with matching DP/EP/world of 4 or 8",
-        ),
+        (metadata.get("pp_size") == 1, "requires PP1"),
         (metadata.get("role") == "DECODE", "requires Decode resources"),
         (
             metadata.get("cache_geometry", {}).get("kernel_tokens_per_block") == 256,

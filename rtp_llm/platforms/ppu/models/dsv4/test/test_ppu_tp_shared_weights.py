@@ -44,11 +44,16 @@ class SharedWeightPartitionTest(unittest.TestCase):
         }
 
     def test_rank_slices_reconstruct_each_original_byte_once(self):
+        for tp in (1, 2, 4, 8):
+            with self.subTest(tp=tp):
+                self._check_rank_slices(tp)
+
+    def _check_rank_slices(self, tp):
         pieces = [
             self.shard(
-                self.weights, dim=self.dim, inter_dim=self.inter, tp_size=4, tp_rank=r
+                self.weights, dim=self.dim, inter_dim=self.inter, tp_size=tp, tp_rank=r
             )
-            for r in range(4)
+            for r in range(tp)
         ]
         for key in self.weights:
             if key.startswith("w13"):
@@ -98,7 +103,7 @@ class SharedWeightPartitionTest(unittest.TestCase):
             )
 
     def test_invalid_partition_and_scale_geometry_fail_before_slicing(self):
-        for kwargs in ({"tp_rank": 4}, {"tp_size": 2}):
+        for kwargs in ({"tp_rank": 4}, {"tp_size": 0}, {"tp_size": 3}):
             args = dict(dim=self.dim, inter_dim=self.inter, tp_size=4, tp_rank=0)
             args.update(kwargs)
             with self.assertRaises(ValueError):

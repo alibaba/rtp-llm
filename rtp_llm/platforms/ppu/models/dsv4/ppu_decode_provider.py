@@ -1,4 +1,4 @@
-"""TP1 Decode composition with matching four- or eight-rank DP/EP resources."""
+"""Decode composition with engine-owned DP/EP resources."""
 
 import weakref
 

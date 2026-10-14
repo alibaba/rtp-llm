@@ -13,8 +13,8 @@ def split_shared_weight(t, tp, tp_rank, *, projection, scale=False, **kwargs):
     """Prepare the TP owner's tensor at both initial load and weight update."""
     import torch
 
-    if tp != 4 or not 0 <= tp_rank < tp:
-        raise ValueError("PPU shared expert requires TP4 and rank in [0, 4)")
+    if tp <= 0 or not 0 <= tp_rank < tp:
+        raise ValueError("PPU shared expert requires a positive TP size and valid rank")
     dtype = torch.float8_e8m0fnu if scale else torch.float8_e4m3fn
     block = 1 if scale else 128
     if t.ndim != 2 or t.dtype != dtype or not t.is_contiguous():

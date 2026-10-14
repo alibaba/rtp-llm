@@ -1,4 +1,4 @@
-"""Source-only contract tests for the TP4/EP1 PPU grouped-MXFP4 strategy."""
+"""Source-only contract tests for the PPU grouped-MXFP4 strategy."""
 
 import ast
 import math
@@ -65,12 +65,14 @@ class PpuGroupedFP4SourceContractTest(unittest.TestCase):
         cls.source = _SOURCE_PATH.read_text()
         cls.tree, cls.helpers = _load_helpers()
 
-    def test_strategy_identity_and_exact_topology(self):
+    def test_strategy_identity_and_positive_group_sizes(self):
         supports = self.helpers["_supports_topology"]
-        self.assertTrue(supports(_cfg(tp_size=4, ep_size=1)))
-        self.assertFalse(supports(_cfg(tp_size=1, ep_size=1)))
-        self.assertFalse(supports(_cfg(tp_size=4, ep_size=8)))
-        self.assertFalse(supports(_cfg(tp_size=8, ep_size=1)))
+        for tp, ep in ((1, 1), (2, 1), (4, 8), (8, 1)):
+            with self.subTest(tp=tp, ep=ep):
+                self.assertTrue(supports(_cfg(tp_size=tp, ep_size=ep)))
+        for tp, ep in ((0, 1), (-1, 1), (4, 0), (4, -1)):
+            with self.subTest(tp=tp, ep=ep):
+                self.assertFalse(supports(_cfg(tp_size=tp, ep_size=ep)))
 
         strategy = next(
             node
@@ -148,8 +150,20 @@ class PpuGroupedFP4SourceContractTest(unittest.TestCase):
         bad[1] = (256, 7168, 255)
         with self.assertRaises(ValueError):
             derive(_cfg(), *bad)
-        with self.assertRaises(RuntimeError):
-            derive(_cfg(tp_size=1), *_shapes(2048))
+        for tp in (1, 2, 4, 8):
+            with self.subTest(tp=tp):
+                self.assertEqual(
+                    derive(_cfg(tp_size=tp), *_shapes(2048 // tp)),
+                    (2048 // tp, tp),
+                )
+
+    def test_local_weights_still_require_complete_expert_ownership(self):
+        cfg = _cfg(ep_size=2)
+        cfg.n_local_experts = 128
+        with self.assertRaisesRegex(ValueError, "every routed expert"):
+            self.helpers["_derive_inter_local_and_tp"](
+                cfg, *_shapes(512, experts=128)
+            )
 
     def test_hidden_dim_rejects_exact_gather_incompatible_alignment(self):
         derive = self.helpers["_derive_inter_local_and_tp"]

@@ -226,6 +226,55 @@ class Dsv4PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_parallelism(pc)
 
+    def test_parallel_groups_are_not_restricted_to_fixed_sizes(self):
+        from rtp_llm.models.dsv4.adapter import validate_parallelism
+
+        for decode, tp, dp, ep in (
+            (False, 2, 1, 1),
+            (False, 8, 1, 1),
+            (False, 4, 1, 4),
+            (True, 1, 2, 2),
+            (True, 2, 2, 4),
+            (True, 1, 16, 16),
+        ):
+            world = tp * dp
+            topology = dict(
+                tp_size=tp, dp_size=dp, ep_size=ep, pp_size=1, world_size=world
+            )
+            with self.subTest(decode=decode, **topology):
+                validate_parallelism(SimpleNamespace(**topology))
+                digests = set()
+                for rank in range(world):
+                    if decode:
+                        ctx = self.decode_context(rank, **topology)
+                    else:
+                        ctx = ModuleBuildContext(
+                            get_module_registry(),
+                            selection(rank, role="PREFILL", **topology),
+                            explicit_config(),
+                            world_size=world,
+                        )
+                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                    self.assertEqual(len(ctx.bindings), 130)
+                self.assertEqual(len(digests), 1)
+
+    def test_parallel_groups_still_require_consistent_engine_geometry(self):
+        from rtp_llm.models.dsv4.adapter import validate_parallelism
+
+        for changed in (
+            {"tp_size": 0},
+            {"dp_size": 0},
+            {"ep_size": 0},
+            {"pp_size": 2},
+            {"world_size": 8},
+            {"ep_size": 3},
+            {"ep_size": 1},
+        ):
+            values = dict(tp_size=2, dp_size=2, ep_size=4, pp_size=1, world_size=4)
+            values.update(changed)
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validate_parallelism(SimpleNamespace(**values))
+
     def test_only_measured_execution_combinations_are_published(self):
         for make_context, expected in (
             (self.decode_context, DECODE_EXECUTION_OPTIONS),
@@ -291,9 +340,6 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx.selection.model_metadata, is_decode_role=True, is_speculative=True
             )
         for changed in (
-            {"tp_size": 4},
-            {"ep_size": 4},
-            {"dp_size": 4},
             {"role": "PDFUSION"},
             {"cache_geometry": {}},
             {"cache_geometry": {"kernel_tokens_per_block": 1024}},
@@ -504,8 +550,6 @@ class Dsv4PlanTest(unittest.TestCase):
 
     def test_unqualified_modes_rejected_by_real_predicate(self):
         for change in [
-            {"tp_size": 8},
-            {"ep_size": 8},
             {"cp_enabled": True},
             {"role": "DECODE"},
             {"speculative": True},

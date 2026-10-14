@@ -68,7 +68,7 @@ def _log_moe_selection(
 def _fail_closed(operation: str) -> None:
     raise RuntimeError(
         f"DSV4 candidate provider {operation} is unavailable: "
-        "the requested topology is outside the verified EP1/EP8 contracts"
+        "the requested configuration has no matching PPU implementation"
     )
 
 
@@ -77,8 +77,8 @@ class M890PDsv4Provider:
 
     Construction factories preserve provider identity while delegating to the
     supplied factory. Attention uses the verified public rich-FlashMLA path;
-    EP1/TP4 MoE forces the PPU grouped-FP4 strategy, while TP1/EP8 keeps the
-    DeepEP normal-mode dispatch/combine path. Other topologies fail closed.
+    Local MoE uses the PPU grouped-FP4 strategy, while distributed MoE uses
+    the configured DeepEP dispatch/combine path.
     """
 
     name = "m890p-dsv4-candidate"
@@ -185,7 +185,7 @@ class M890PDsv4Provider:
         ep_size = kwargs.get("ep_size")
         tp_size = kwargs.get("tp_size")
         requested_strategy = kwargs.get("strategy")
-        if type(ep_size) is not int or ep_size not in (1, 8):
+        if type(ep_size) is not int or ep_size <= 0:
             _log_moe_selection(
                 provider=self.name,
                 tp_size=tp_size,
@@ -196,7 +196,7 @@ class M890PDsv4Provider:
                 decision="fail_closed",
             )
             _fail_closed(f"MoE construction for ep_size={ep_size!r}")
-        if ep_size == 8 and self._bool("DSV4_PPU_GROUPED_FP4", False):
+        if ep_size > 1 and self._bool("DSV4_PPU_GROUPED_FP4", False):
             from .ppu_legacy_deepep import PpuLegacyDeepEPStrategy
 
             if kwargs.pop("strategy", None) not in (None, "auto", "deepep"):
@@ -212,7 +212,7 @@ class M890PDsv4Provider:
                 platform_provider=self,
                 **kwargs,
             )
-        if ep_size == 1 and tp_size == 4:
+        if ep_size == 1:
             from .ppu_tp_moe import PpuTPMoE
 
             return PpuTPMoE(*args, platform_provider=self, **kwargs)
@@ -295,15 +295,10 @@ class M890PDsv4Provider:
 
 
 def register_m890p_dsv4_provider(*, ep_size: int) -> M890PDsv4Provider:
-    """Explicitly register the EP1/EP8 candidate before model construction.
-
-    This function is intentionally never called at import time. Only the EP1
-    pure-TP and EP8 distributed topologies covered by the M890P gates are
-    accepted.
-    """
+    """Explicitly register the candidate before model construction."""
 
     provider = M890PDsv4Provider()
-    if type(ep_size) is not int or ep_size not in (1, 8):
+    if type(ep_size) is not int or ep_size <= 0:
         _fail_closed(f"provider registration for ep_size={ep_size!r}")
     register_dsv4_platform_provider(provider)
     return provider

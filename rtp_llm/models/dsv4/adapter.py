@@ -46,11 +46,15 @@ def validate_parallelism(pc):
         int(getattr(pc, name))
         for name in ("tp_size", "dp_size", "ep_size", "pp_size", "world_size")
     )
-    tp_group = world == tp and dp == 1
-    decode_ep_group = tp == 1 and dp == ep == world and pc.role_type.name == "DECODE"
-    if min(tp, dp, ep, pp, world) < 1 or pp != 1 or not (tp_group or decode_ep_group):
+    if (
+        min(tp, dp, ep, pp, world) < 1
+        or pp != 1
+        or world != tp * dp
+        or ep not in (1, world)
+        or (ep == 1 and dp != 1)
+    ):
         raise ValueError(
-            "Module startup requires a homogeneous TP group or TP1 Decode DP/EP world"
+            "Module startup requires PP1, world=TP*DP, and EP=world or EP1/DP1"
         )
 
 

@@ -1,4 +1,4 @@
-"""M890P grouped-MXFP4 routed experts for the DSV4 TP4/EP1 topology.
+"""M890P grouped-MXFP4 routed experts for DSV4.
 
 This strategy is deliberately separate from the CUDA ``grouped_fp4`` backend.
 It consumes the checkpoint's packed MXFP4 tensors, executes two PPU nopad
@@ -59,9 +59,9 @@ def _module_path(module: object) -> str:
 
 
 def _supports_topology(cfg: MoeCfg) -> bool:
-    """The provider seam is intentionally limited to the TP4/EP1 pivot."""
+    """Weight geometry determines compatibility after validating group sizes."""
 
-    return int(cfg.tp_size) == 4 and int(cfg.ep_size) == 1
+    return int(cfg.tp_size) > 0 and int(cfg.ep_size) > 0
 
 
 def _runtime_eligible() -> bool:
@@ -88,13 +88,13 @@ def _derive_inter_local_and_tp(
     """Validate packed MXFP4 geometry and derive the routed TP contract."""
 
     if not _supports_topology(cfg):
-        raise RuntimeError("ppu_grouped_fp4 requires exactly tp_size=4 and ep_size=1")
+        raise RuntimeError("ppu_grouped_fp4 requires positive TP and EP sizes")
 
     experts = int(cfg.n_local_experts)
     dim = int(cfg.dim)
     if experts != int(cfg.n_routed_experts):
         raise ValueError(
-            "EP1 grouped MXFP4 must bind every routed expert on each TP rank"
+            "Local grouped MXFP4 must bind every routed expert on each TP rank"
         )
     if len(w1_shape) != 3:
         raise ValueError(f"packed MXFP4 w1 must be rank 3, got {w1_shape}")
@@ -148,7 +148,7 @@ def _derive_inter_local_and_tp(
 
 
 class PpuGroupedFP4Strategy(torch.nn.Module):
-    """Strict M890P packed-MXFP4 strategy for DSV4 TP4/EP1."""
+    """Strict M890P packed-MXFP4 strategy for DSV4."""
 
     name = "ppu_grouped_fp4"
     route_weight_contract = _ROUTE_WEIGHT_CONTRACT
@@ -183,7 +183,7 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
 
         if not _supports_topology(self.cfg):
             raise RuntimeError(
-                "ppu_grouped_fp4 setup rejected a non-TP4/EP1 configuration"
+                "ppu_grouped_fp4 setup requires positive TP and EP sizes"
             )
 
         from rtp_llm.utils.model_weight import W

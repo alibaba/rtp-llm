@@ -32,12 +32,8 @@ def build_decode_model(*, build_ctx, request, **kwargs):
 def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
     from .ppu_deepep_fp4 import PpuDeepEPFP4Strategy
 
-    if (
-        kwargs.get("tp_size") != 1
-        or kwargs.get("ep_size") not in (4, 8)
-        or not kwargs.get("is_decode_role")
-    ):
-        raise ValueError("PPU Decode MoE requires TP1 with EP4 or EP8 Decode resources")
+    if not kwargs.get("is_decode_role"):
+        raise ValueError("PPU Decode MoE requires Decode resources")
     from .ppu_ep_moe import PpuEPMoE
 
     baseline.validate_arguments(build_ctx, request, kwargs)

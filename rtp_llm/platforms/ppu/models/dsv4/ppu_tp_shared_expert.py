@@ -19,8 +19,8 @@ class PpuTPSharedExpert(PpuSharedExpert):
         platform_provider,
     ):
         nn.Module.__init__(self)
-        if tp_size != 4 or not 0 <= tp_rank < tp_size:
-            raise ValueError("PPU shared expert requires TP4 and rank in [0, 4)")
+        if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+            raise ValueError("PPU shared expert requires a positive TP size and valid rank")
         if inter_dim <= 0 or inter_dim % (128 * tp_size) or dim <= 0 or dim % 128:
             raise ValueError("Shared expert dimensions must preserve block-128 scales")
         local = inter_dim // tp_size

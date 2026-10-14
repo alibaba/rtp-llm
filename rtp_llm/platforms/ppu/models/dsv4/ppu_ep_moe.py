@@ -53,12 +53,15 @@ class PpuEPMoE(nn.Module):
         record_function_scope=nullcontext,
     ):
         super().__init__()
-        if tp_size != 1 or tp_rank != 0 or ep_size not in (4, 8) or n_shared_experts != 1:
-            raise ValueError("PPU EP MoE requires TP1 with EP4 or EP8 and one shared expert")
+        if n_shared_experts != 1:
+            raise ValueError("PPU EP MoE requires one shared expert")
         if n_physical_experts not in (None, n_routed_experts):
             raise ValueError("PPU EP MoE does not support redundant experts")
         if (
-            max_tokens_per_rank <= 0
+            tp_size <= 0
+            or not 0 <= tp_rank < tp_size
+            or ep_size <= 0
+            or max_tokens_per_rank <= 0
             or n_routed_experts % ep_size
             or not 0 <= ep_rank < ep_size
         ):

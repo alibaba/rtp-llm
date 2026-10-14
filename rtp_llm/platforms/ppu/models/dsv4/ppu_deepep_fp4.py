@@ -47,15 +47,15 @@ def prepare_routed_mxfp4_weights(cfg, layer_weights):
 
 
 class PpuDeepEPFP4Strategy(torch.nn.Module):
-    """TP1, DP/EP routed compute; selection is explicit, never process-global."""
+    """DP/EP routed compute; selection is explicit, never process-global."""
 
     name = "ppu_deepep_fp4"
 
     @classmethod
     def can_handle(cls, cfg):
         return (
-            cfg.tp_size == 1
-            and cfg.ep_size > 1
+            cfg.tp_size > 0
+            and cfg.ep_size > 0
             and cfg.n_local_experts > 0
             and 0 <= cfg.ep_rank < cfg.ep_size
             and cfg.local_expert_start == cfg.ep_rank * cfg.n_local_experts
@@ -86,7 +86,7 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
         self._gemm_tile = gemm_tile
         if not self.can_handle(cfg):
             raise ValueError(
-                "PPU DeepEP MXFP4 requires TP1 with compatible EP-local experts"
+                "PPU DeepEP MXFP4 requires compatible EP-local experts"
             )
         self._wrapper = None
         self._expected_m = max(
