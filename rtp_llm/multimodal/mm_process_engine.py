@@ -1407,7 +1407,11 @@ class MMProcessEngine:
             # Empty URL bypasses the generic URL cache. The model cache uses the
             # trusted content hash and processor identity, and bypasses empty hashes.
             item = MMWorkItem(
-                [MultimodalInput("", MMUrlType.IMAGE)],
+                [
+                    MultimodalInput(
+                        "", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig()
+                    )
+                ],
                 mm_timeout_ms=(
                     min(timeout_ms, self.vit_config.mm_timeout_ms)
                     if timeout_ms > 0
