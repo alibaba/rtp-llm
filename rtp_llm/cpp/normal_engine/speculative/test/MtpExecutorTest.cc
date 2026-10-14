@@ -1378,6 +1378,12 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         components.executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     }
+    int  profile_starts           = 0;
+    int  profile_finishes         = 0;
+    components.executor->setModelForwardCallbacks([&]() { ++profile_starts; }, [&]() { ++profile_finishes; });
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(profile_starts, 0);
+    EXPECT_EQ(profile_finishes, 0);
 
     size_t batch_size = 1;
 
@@ -1482,6 +1488,10 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         EXPECT_FALSE(stream1->hasError());
     }
+    // PDFUSION runs prefill followed by an idle decode phase here: count one
+    // real work step, with balanced callbacks, rather than both phases.
+    EXPECT_EQ(profile_starts, 1);
+    EXPECT_EQ(profile_finishes, 1);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0},
