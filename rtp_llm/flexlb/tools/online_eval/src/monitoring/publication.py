@@ -8,13 +8,14 @@ from pathlib import Path
 from importlib.util import find_spec
 
 from case_api.registry import registry
-from monitoring.contracts import MetricContractError, validate_observation
+from monitoring.contracts import MetricContractError, validate_observation, validate_definition
 from monitoring.producer_contract import output_contract
 
 
 def publish(store, metric_id, definition, rows, *, producer, evidence):
     """A declared Python producer publishes numeric data with explicit provenance."""
 
+    validate_definition(definition, metric_id, publication=True)
     declared = store.document["definitions"].get(metric_id)
     if declared is None or declared != definition or declared.get("producer") != producer or producer not in registry().producers:
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)

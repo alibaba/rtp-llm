@@ -162,7 +162,9 @@ class EnvironmentDeclaration:
     def apply_performance(self, baseline):
         performance = copy.deepcopy(baseline)
         if self.prefill_perf is not None:
-            performance["prefill"] = asdict(self.prefill_perf)
+            if performance.get("prefill", {}).get("fifo") is not None:
+                raise ValueError("prefill_perf legacy batch limits cannot override a FIFO preset")
+            performance.setdefault("prefill", {}).update(asdict(self.prefill_perf))
         if self.prefill_max_waiting_batches is not None:
             performance.setdefault("prefill", {})["max_waiting_batches"] = self.prefill_max_waiting_batches
         if self.prefill_cache_policy is not None:

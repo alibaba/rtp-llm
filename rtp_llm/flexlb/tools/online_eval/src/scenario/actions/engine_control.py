@@ -68,7 +68,7 @@ def execute(ctx, params, deadline):
     )
     path = ctx.artifact_dir / f"engine-control-{uuid.uuid4().hex}.json"
     try:
-        evidence["before"] = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
+        evidence["before"] = select_engines(control_json(ctx.ops, "snapshot?view=topology", deadline), targets)
         for name in targets:
             body = dict(engine=name, **params.get("perf", {}))
             response = control_json(
@@ -86,7 +86,7 @@ def execute(ctx, params, deadline):
                 raise ValueError(
                     f"{operation}({name}) lacks successful target acknowledgement"
                 )
-        evidence["after"] = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
+        evidence["after"] = select_engines(control_json(ctx.ops, "snapshot?view=topology", deadline), targets)
         for name in targets:
             before, after = evidence["before"][name], evidence["after"][name]
             if (

@@ -61,15 +61,15 @@ class SharedRuntimeTests(unittest.TestCase):
 
 
     def test_java_environment_reads_are_all_isolated(self):
-        source = (
-            ROOT.parents[1]
-            / "flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaLoadClient.java"
-        ).read_text()
-        names = set(
-            re.findall(
-                r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?)\("([A-Z_]+)"', source
-            )
-        )
+        directory = ROOT.parents[1] / "flexlb-mock-engine/src/main/java/org/flexlb/mockengine"
+        sources = [(directory / name).read_text() for name in
+                   ("JavaLoadClient.java", "Playback.java", "FlowControl.java", "ClientEventJournal.java")]
+        names = set()
+        for source in sources:
+            names.update(re.findall(
+                r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?)\("([A-Z_]+)"', source))
+            names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))
+            names.update(re.findall(r'text\(env,\s*"([A-Z_]+)"', source))
         self.assertTrue(names)
         self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))

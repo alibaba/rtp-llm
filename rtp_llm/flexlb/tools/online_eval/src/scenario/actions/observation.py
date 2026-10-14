@@ -47,6 +47,8 @@ def validate_snapshot(params, plan):
     if plan.case:
         from case_api.registry import registry
         available.update(registry().cases[plan.case].definition.snapshot_sources)
+    if isinstance(sources, list) and 'master_debug' in sources and 'master_debug' not in available:
+        _error(plan, 'master_debug requires a case-owned snapshot source; bundled Master has no debug snapshot endpoint')
     if (
         not isinstance(sources, list)
         or not sources

@@ -26,7 +26,10 @@ def cache_main():
     if args.client_snapshot:
         snapshot = json.loads(args.client_snapshot.read_text())
         if len(snapshot["issued"]) == snapshot.get("status", {}).get("submitted"):
-            align_send_counters(evidence, snapshot["issued"])
+            try:
+                align_send_counters(evidence, snapshot["issued"])
+            except ValueError as error:
+                evidence.setdefault("errors", []).append(str(error))
         else:
             evidence.setdefault("errors", []).append("issued send accounting incomplete")
         attribute_client(evidence, snapshot)

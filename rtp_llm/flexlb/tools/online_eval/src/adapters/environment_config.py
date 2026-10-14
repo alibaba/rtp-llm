@@ -177,6 +177,10 @@ class EnvSpec:
     # None selects standalone scheduling without election or forwarding.
     zk_consistency: Optional[ZooKeeperConfig] = None
 
+    def __post_init__(self):
+        if self.master_profile == "none" and self.raw_config is None:
+            raise ValueError("master_profile='none' disables Master; raw_config is required for mock scheduler configuration")
+
     def fingerprint(self) -> str:
         return json.dumps(
             {

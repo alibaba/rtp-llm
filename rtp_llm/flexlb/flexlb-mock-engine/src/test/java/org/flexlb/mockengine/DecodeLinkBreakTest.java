@@ -66,6 +66,20 @@ class DecodeLinkBreakTest {
         }
     }
 
+    @Test void gracefulAdmissionCloseAllowsAlreadyPreparedHandoff() throws Exception {
+        try (var c = MockEngineTestCluster.create(
+                performanceModel(tempDir, "250", 1), 62100, 1, 1)) {
+            Output output = submit(c, 1);
+            c.decode(0).closeAdmission();
+            assertTrue(output.done.await(3, TimeUnit.SECONDS));
+            assertNull(output.error);
+            assertTrue(output.frames.stream().anyMatch(f -> f.getFlattenOutput().getFinishedList().contains(true)));
+            assertFalse(output.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
+            c.awaitAllInflightZero(2000);
+            assertEquals(1, c.decode(0).getAcceptedCount());
+        }
+    }
+
     @Test void stopAfterHandoff() throws Exception { death(0, false); }
     @Test void crashAfterHandoff() throws Exception { death(1, false); }
     @Test void forcedDrainAfterHandoff() throws Exception { death(2, false); }

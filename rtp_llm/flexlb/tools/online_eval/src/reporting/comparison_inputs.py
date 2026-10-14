@@ -38,17 +38,17 @@ def load_snapshot(path, *, view=None):
         if view is not None:
             raise ValueError('view selection applies only to experiment ZIP inputs')
         directory = read_bundle(path)
-        manifest = json.loads((directory / 'manifest.json').read_text())
+        manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
         if manifest.get('kind') != 'run':
             raise ValueError('comparison input must be a run bundle: ' + str(path))
         required = {'analysis.json', 'report-spec.json', 'report.html'}
         if any(manifest['files'][name]['path'] != name for name in required):
             raise ValueError('run bundle must verify canonical report files')
-        spec = json.loads((directory / 'report-spec.json').read_text())
+        spec = json.loads((directory / 'report-spec.json').read_text(encoding='utf-8'))
         analysis = load_analysis(directory)
         digest = hashlib.sha256((directory / 'manifest.json').read_bytes()).hexdigest()
         return RunSnapshot(path, analysis, spec, FrozenReport.read(spec), digest,
-                           'bundle', None, json.loads((directory / 'execution.json').read_text())
+                           'bundle', None, json.loads((directory / 'execution.json').read_text(encoding='utf-8'))
                            if manifest['files'].get('execution.json', {}).get('path') == 'execution.json' else {})
     if not path.is_file() or not zipfile.is_zipfile(path):
         raise ValueError('comparison input must be a run bundle directory or experiment ZIP: ' + str(path))

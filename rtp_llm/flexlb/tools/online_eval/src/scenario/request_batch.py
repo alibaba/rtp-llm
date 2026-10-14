@@ -2,6 +2,7 @@
 
 import json
 import threading
+import sys
 
 from adapters.requests import ClientRecords, request_success
 from runtime.deadline import StageTimeout
@@ -119,7 +120,7 @@ class RequestBatch(ClientRecords):
                 raise
             finally:
                 self.persist()
-                if self.params.get("post_issue_delay_s", 0):
+                if self.params.get("post_issue_delay_s", 0) and sys.exc_info()[0] is None:
                     deadline.sleep(self.params["post_issue_delay_s"])
 
     def _register_schedule_call(self, entry, call):

@@ -12,6 +12,26 @@ from artifacts.json_io import write_json
 from monitoring.query_plan import definitions, plan_hash
 
 
+def _query_identity(query_id):
+    if not isinstance(query_id, str) or '/' not in query_id:
+        raise MetricContractError('archived query requires source/metric identity: ' + str(query_id))
+    source, metric = query_id.split('/', 1)
+    if not source or not metric:
+        raise MetricContractError('archived query requires source/metric identity: ' + query_id)
+    return source, metric
+
+
+def _archive_paths(directory):
+    directory = Path(directory)
+    paths = sorted(directory.glob('telemetry/*/queries.json'))
+    root = directory / 'queries.json'
+    if root.is_file():
+        if any(path.parent.name == '1' for path in paths):
+            raise MetricContractError('ambiguous epoch 1 archives: root and telemetry/1')
+        paths.append(root)
+    return paths
+
+
 def _finite(value):
     number = float(value)
     return number if math.isfinite(number) else None
@@ -21,9 +41,7 @@ def _archive_series(directory, anchor, *, archives=None):
     """Read only monitor query archives; return curves, provenance and health gaps."""
     series, sources, gaps, errors = {}, {}, {}, []
     if archives is None:
-        paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
-        if (Path(directory) / "queries.json").is_file():
-            paths.append(Path(directory) / "queries.json")
+        paths = _archive_paths(directory)
         archives = ((path, json.loads(path.read_text())) for path in paths)
     for path, data in archives:
         epoch = path.parent.name if path.parent != Path(directory) else "1"
@@ -34,7 +52,7 @@ def _archive_series(directory, anchor, *, archives=None):
             for query in data.get("missing_queries", [])
         )
         for query_id, query in data["queries"].items():
-            source, metric = query_id.split("/", 1)
+            source, metric = _query_identity(query_id)
             for row in query["result"]:
                 labels = dict(row["metric"])
                 labels.pop("__name__", None)
@@ -116,9 +134,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     directory = Path(directory)
     selected_plan = plan
     archive_root = Path(archive_directory) if archive_directory is not None else directory
-    paths = sorted(archive_root.glob("telemetry/*/queries.json"))
-    if (archive_root / "queries.json").is_file():
-        paths.append(archive_root / "queries.json")
+    paths = _archive_paths(archive_root)
     archives = [(path, json.loads(path.read_text())) for path in paths]
     series, sources, gaps, errors = _archive_series(archive_root, 0, archives=archives)
     plans, declared, observations = {}, {}, {}
@@ -130,7 +146,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
             plans[epoch] = dict(name=data["query_plan"], sha256=plan_hash(archive_plan), definition=archive_plan)
         kinds = data.get("target_kinds", {})
         for query_id, query in data["queries"].items():
-            source, metric = query_id.split("/", 1)
+            source, metric = _query_identity(query_id)
             kind = kinds[source] if source in kinds else _legacy_source_kind(source)
             if kind not in SOURCE_KINDS:
                 raise MetricContractError("invalid archived source kind: " + str(kind))

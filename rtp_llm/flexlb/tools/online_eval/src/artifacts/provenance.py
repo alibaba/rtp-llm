@@ -14,11 +14,11 @@ def collect(directory, environments, metadata=None, *, required=()):
                                 ("performance", "perf.json"), ("master_config", "master_config.json")):
             path = root / filename
             if path.is_file():
-                data[field] = json.loads(path.read_text())
+                data[field] = json.loads(path.read_text(encoding='utf-8'))
             elif field in required:
                 raise ValueError(f"required provenance file missing: {path}")
         epochs[epoch] = data
-    flows = [json.loads(path.read_text()) for path in sorted(Path(directory).glob("**/flow-input.json"))]
+    flows = [json.loads(path.read_text(encoding='utf-8')) for path in sorted(Path(directory).glob("**/flow-input.json"))]
     from runtime.paths import MOCK_JAR
     from file_digest import sha256_file
     mock_artifact = dict(path=str(MOCK_JAR), sha256=sha256_file(MOCK_JAR)) if Path(MOCK_JAR).is_file() else None
@@ -38,7 +38,7 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     launch = observed["environments"][epoch]
     trace = dict(flow.trace_manifest)
     trace["workload_sha256"] = trace_workload_sha(trace["path"])
-    client = json.loads((flow.directory / "flow-input.json").read_text())
+    client = json.loads((flow.directory / "flow-input.json").read_text(encoding='utf-8'))
     from runtime import observation
     from case_api import windows
     from case_api import metric_inputs

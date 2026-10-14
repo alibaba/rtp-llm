@@ -14,6 +14,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class MockMemoryBlockCacheTest {
     @TempDir Path dir;
 
+    @Test void duplicateReadKeysOwnOnlyOnePinPerPhysicalEntry() {
+        var cache = new MockMemoryBlockCache(2, ignored -> { });
+        cache.write(List.of(1L, 2L));
+        try (var lease = cache.pinRead(List.of(1L, 1L, 2L), 0)) {
+            assertEquals(2, lease.blocks());
+        }
+        cache.write(List.of(3L, 4L));
+        assertEquals(List.of(3L, 4L), cache.keys());
+    }
+
     @Test void lruTouchPreservesCreationAgeAndMissStopsPrefix() {
         var time = new AtomicLong();
         var ages = new ArrayList<Double>();
@@ -99,6 +109,10 @@ class MockMemoryBlockCacheTest {
                 });
                 assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS));
                 assertNull(error.get());
+                long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+                while (!((java.util.Map<?, ?>) field(p, "activeBlockLeases")).isEmpty()
+                        && System.nanoTime() < until) Thread.sleep(1);
+                assertTrue(((java.util.Map<?, ?>) field(p, "activeBlockLeases")).isEmpty());
                 var mem = (MockMemoryBlockCache) field(p, "memoryCache");
                 assertEquals(3, mem.size());
                 if (round == 0) ((MockLruBlockCache) field(p, "cache")).clear();

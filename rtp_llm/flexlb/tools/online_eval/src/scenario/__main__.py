@@ -25,7 +25,7 @@ def main(argv=None):
         )
         if not plans:
             raise ScenarioError("selection contains no scenario instances")
-    except ScenarioError as exc:
+    except (ScenarioError, ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     print(

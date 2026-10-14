@@ -64,6 +64,8 @@ final class MockPrefillSession {
         return true;
     }
 
+    synchronized boolean hasContinued() { return continued; }
+
     synchronized boolean isClosed() {
         return closed;
     }

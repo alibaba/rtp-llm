@@ -30,6 +30,8 @@ def stop_process(process, deadline):
     try:
         remaining = deadline.remaining()
     except TimeoutError:
-        process.proc.wait(timeout=0)
+        if process.proc.poll() is None:
+            process.proc.kill()
+        process.proc.wait(timeout=2)
         raise
     process.proc.wait(timeout=remaining)

@@ -3,6 +3,7 @@
 import json
 import time
 from pathlib import Path
+from artifacts.json_io import write_json
 
 from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
 
@@ -103,9 +104,7 @@ class JavaFlowGroup:
             self.monitor.add_client_target(
                 self.monitor_target, json.loads(target_path.read_text())["url"], deadline=deadline
             )
-            (self.directory / "metrics-ready").write_text(
-                str(int(time.time() * 1000) + 500)
-            )
+            write_json(self.directory / "metrics-ready", int(time.time() * 1000) + 500)
         from artifacts.startup import startup_phase
         from adapters.flow_control import wait_flow_started
         with startup_phase(self.directory, 'client/sending', deadline):

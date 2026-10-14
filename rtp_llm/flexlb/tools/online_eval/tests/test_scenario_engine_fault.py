@@ -26,7 +26,7 @@ class EngineFaultTests(unittest.TestCase):
 
     def http(self, ops, endpoint, deadline, body=None):
         self.calls.append((endpoint, body))
-        if endpoint == "snapshot":
+        if endpoint == "snapshot?view=topology":
             return {
                 "engines": [
                     dict(
@@ -124,7 +124,7 @@ class EngineFaultTests(unittest.TestCase):
 
     def test_unknown_or_existing_visible_fault_blocks_mutation(self):
         for state in (None, True):
-            snap = self.http(None, "snapshot", None)
+            snap = self.http(None, "snapshot?view=topology", None)
             snap["engines"][0]["inject_config"]["generate_error"] = state
             with patch.object(ef, "control_json", return_value=snap) as http:
                 with self.assertRaises(ValueError):

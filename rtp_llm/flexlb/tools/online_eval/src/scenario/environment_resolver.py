@@ -114,10 +114,10 @@ class EnvironmentResolver:
                 ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
                 ("decode_cache_blocks", "decode_kv_pool_blocks"),
             ) if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]]
-            if ("prefill_expression" in declared_overrides and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or declaration.prefill_perf is not None:
+            if (declared_overrides.get("prefill_expression") is not None and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or declaration.prefill_perf is not None:
                 changed.append("prefill model")
             changed.extend("master." + key for key, val in declared_overrides.items()
-                           if key in paired_master and val != paired_master[key])
+                           if val is not None and key in paired_master and val != paired_master[key])
             if declaration.prefill_cache_policy is not None:
                 performance = self.performance
                 policy = declaration.prefill_cache_policy

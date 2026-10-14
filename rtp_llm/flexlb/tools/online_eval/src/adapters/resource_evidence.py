@@ -8,7 +8,7 @@ def flow_evidence(value, profile, deadline):
     snapshot = value.evidence_snapshot()
     manifest = snapshot if profile == "diagnostic" else {
         k: v for k, v in snapshot.items() if k not in ("records", "issued", "unfinished")}
-    if profile != "diagnostic":
+    if profile == "request":
         manifest["request_journal"] = str(value.directory / "client_lifecycle.jsonl")
     return ResourceEvidence(requests=manifest,
         producer="python" if snapshot.get("producer_kind") == "python" else id(value),

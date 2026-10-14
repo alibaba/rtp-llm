@@ -19,7 +19,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         plan = resolve_ci_selection(args)
-    except ScenarioError as exc:
+    except (ScenarioError, ValueError, OSError) as exc:
         parser.error(str(exc))
     payload = plan.to_dict(args.worker)
     args.json.parent.mkdir(parents=True, exist_ok=True)

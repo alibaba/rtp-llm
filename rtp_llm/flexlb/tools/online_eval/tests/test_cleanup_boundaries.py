@@ -58,7 +58,7 @@ def test_expired_budget_still_cancels_client_and_attempts_sampler():
         client_resource(proc=process, state_sampler=sampler).cleanup(deadline)
     process.proc.terminate.assert_called_once()
     process.proc.kill.assert_called_once()
-    process.proc.wait.assert_called_once_with(timeout=0)
+    process.proc.wait.assert_called_once_with(timeout=2)
     sampler.stop.assert_called_once()
 
 

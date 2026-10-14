@@ -37,6 +37,15 @@ def provenance(ctx, flow):
 def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     c = effective_profile(p["criteria"], ctx.instance["profile"])
+    # With no warmup the first observed state defines the window origin;
+    # provenance/HTTP work must not create an uncovered gap before that sample.
+    initial_state = initial_provenance = initial_error = None
+    if c["warmup_s"] == 0:
+        try:
+            initial_provenance = provenance(ctx, flow)
+            initial_state = flow.control_status()
+        except Exception as exc:
+            initial_error = exc
     clock = ctx.start_observation()
     origin = clock.origin_epoch_s * 1000
     lo = origin + c["warmup_s"] * 1000
@@ -47,12 +56,20 @@ def observe(ctx, p, deadline):
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
     )
     try:
-        evidence["provenance"].update(provenance(ctx, flow))
+        if initial_error is not None:
+            raise initial_error
+        evidence["provenance"].update(initial_provenance if initial_provenance is not None else provenance(ctx, flow))
         budget = SampleBudget(p["observation"]["capture"])
         evidence["window_declarations"] = p["observation"]["windows"]
         def sample():
-            state = flow.control_status()
-            row = dict(clock.stamp(ctx.clock()), state=state.get("state"),
+            nonlocal initial_state
+            if initial_state is not None:
+                state, initial_state = initial_state, None
+                timestamp = clock.origin_monotonic_s
+            else:
+                state = flow.control_status()
+                timestamp = ctx.clock()
+            row = dict(clock.stamp(timestamp), state=state.get("state"),
                        process_returncode=state.get("process_returncode"))
             row["epoch_ms"] = row["epoch_s"] * 1000
             budget.append(row)

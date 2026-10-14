@@ -49,7 +49,7 @@ def main(argv=None):
         parser.error('--out-dir must be a new or empty directory')
     try:
         plan = resolve_ci_selection(args)
-    except ScenarioError as exc:
+    except (ScenarioError, ValueError, OSError) as exc:
         parser.error(str(exc))
     target.mkdir(parents=True, exist_ok=True)
     (target / 'ci-plan.json').write_text(json.dumps(plan.to_dict(args.worker), indent=2) + '\n')

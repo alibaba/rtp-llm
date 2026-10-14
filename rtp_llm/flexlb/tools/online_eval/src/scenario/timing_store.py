@@ -12,7 +12,7 @@ from schema_contract import matches_schema
 def timing_path():
     return Path(
         os.environ.get(
-            "FLEXLB_FT_INSTANCE_TIMING_BASELINE",
+            "FLEXLB_FT_TIMING_BASELINE",
             "/tmp/flexlb_ft_instance_timing_v1.json",
         )
     )
@@ -23,7 +23,7 @@ def read_timings(path):
         return {}
     try:
         data = json.loads(path.read_text())
-        if not matches_schema(data, "timings_schema_version", 1) or not isinstance(
+        if not (matches_schema(data, "timings_schema_version", 1) or matches_schema(data, "run_summary_schema_version", 1)) or not isinstance(
             data.get("instances"), list
         ):
             raise ValueError("expected versioned instance timings")

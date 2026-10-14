@@ -23,6 +23,51 @@ class PlaybackPlanTest {
         for(String line:Files.readAllLines(path)) out.add(JSON.readTree(line));
         return out;
     }
+    @Test void manualAliasesDefaultsAndSkippedZeroOutputsMatchActualSends() throws Exception {
+        Path trace = temp.resolve("aliases.jsonl"), out = temp.resolve("aliases-out");
+        Files.writeString(trace, "{\"rid\":\"skipped\",\"ts\":0,\"il\":1,\"ol\":0,\"input_ids\":[1]}\n"
+                + "{\"request_id\":\"accepted\",\"ts_epoch_ms\":10,\"input_token_len\":1,\"output_token_len\":2,\"input_ids\":[1],\"bh\":[99]}\n");
+        try (var client = new JavaLoadClient(config(trace, out, 1, 0, "replay"))) {
+            client.run(new Playback(Map.of("MAX_LAPS", "1"), false, 0));
+        }
+        Path plan = out.resolve("plan.jsonl");
+        PlaybackPlan.write(out.resolve("playback.json"), trace, plan);
+        var rows = read(plan);
+        assertEquals(1, rows.size());
+        assertEquals("accepted", rows.get(0).path("rid").asText());
+        assertEquals(JSON.readTree("[99]"), rows.get(0).path("block_keys"));
+    }
+
+    @Test void invalidUnboundedOfflineReplayPreservesExistingOutput() throws Exception {
+        Path trace = temp.resolve("bounded.jsonl"), snapshot = temp.resolve("snapshot.json"), output = temp.resolve("frozen-plan.jsonl");
+        Files.writeString(trace, "{\"rid\":\"a\",\"ts\":0,\"il\":1,\"ol\":2,\"input_ids\":[1]}\n");
+        var policy = JSON.createObjectNode();
+        policy.put("planner_version", "PLAYBACK_V1").put("offline_plan_supported", true)
+                .put("trace_sha256", PlaybackPlan.sha256(trace)).put("num_shards", 1)
+                .put("shard_index", 0).put("duration_seconds", 1).put("max_laps", 0)
+                .put("identity", "none").put("mode", "replay").put("speed", 0).put("token_stride", 2);
+        JSON.writeValue(snapshot.toFile(), policy);
+        Files.writeString(output, "previous complete output");
+        assertThrows(IllegalArgumentException.class, () -> PlaybackPlan.write(snapshot, trace, output));
+        assertEquals("previous complete output", Files.readString(output));
+    }
+
+    @Test void skippedMalformedTokensCannotPoisonStrideAndHashOnlyLapsKeepTheirPrefixes() throws Exception {
+        try (var client = new JavaLoadClient(config(temp.resolve("unused"), temp.resolve("unused-out"), 1, 0, "replay"))) {
+            assertThrows(IllegalArgumentException.class, () -> client.parseTraceRecord(JSON.readTree(
+                    "{\"rid\":\"bad\",\"il\":1,\"ol\":2,\"input_ids\":[2147483648]}")));
+            client.parseTraceRecord(JSON.readTree("{\"rid\":\"good\",\"il\":1,\"ol\":2,\"input_ids\":[1]}"));
+            var stride = JavaLoadClient.class.getDeclaredField("tokenStride"); stride.setAccessible(true);
+            assertEquals(2L, stride.getLong(client));
+            var a = client.parseTraceRecord(JSON.readTree("{\"rid\":\"a\",\"il\":1024,\"ol\":2,\"bh\":[1,2]}"));
+            var b = client.parseTraceRecord(JSON.readTree("{\"rid\":\"b\",\"il\":1024,\"ol\":2,\"bh\":[1,3]}"));
+            var nextA = client.makeLoopRequest(a, 1, 0);
+            var nextB = client.makeLoopRequest(b, 1, 1);
+            assertNotEquals(a.blockKeys, nextA.blockKeys);
+            assertNotEquals(nextA.blockKeys, nextB.blockKeys);
+            assertEquals(nextA.blockKeys.get(0), nextB.blockKeys.get(0));
+        }
+    }
     @Test void dryRunSnapshotReconstructsMultiLapIdentitiesShardsAndReplay() throws Exception {
         Path trace=temp.resolve("trace.jsonl");
         StringBuilder source=new StringBuilder();

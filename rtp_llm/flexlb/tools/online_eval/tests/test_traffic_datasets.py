@@ -31,7 +31,6 @@ class TrafficDatasetsTest(unittest.TestCase):
                 )
                 self.assertEqual('real', manifest['data_kind'])
                 self.assertIn('model', manifest['source'])
-                self.assertIn('model', manifest['source'])
         path = catalog.model_path()
         digest = datasets.read_manifest(path)['sha256']
         fixture = derive(path)

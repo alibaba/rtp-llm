@@ -170,3 +170,10 @@ def test_victim_start_renders_its_own_environment_spec(tmp_path):
         with pytest.raises(RuntimeError, match='stop'):
             manager.start_victim(env, 'prefill')
     assert render.call_args.args == (env,)
+
+
+@pytest.fixture(autouse=True)
+def isolated_port_capacity():
+    from adapters import java_mock_resources
+    with patch.object(port_windows, 'MOCK_PORT_WINDOW_LAST', 151), patch.object(java_mock_resources, 'MOCK_WINDOW_LAST', 151), patch.dict(os.environ, {'FLEXLB_FT_WORKER_PORT_CAPACITY': '149'}):
+        yield

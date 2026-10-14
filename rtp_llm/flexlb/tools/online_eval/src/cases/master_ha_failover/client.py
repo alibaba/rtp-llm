@@ -86,6 +86,7 @@ class HaReplayClient:
             "DURATION_S": str(int(duration_s)),
             "MAX_CONCURRENCY": str(max_concurrency),
             "TIMEOUT_MS": str(int(timeout_ms)),
+            "RESPONSE_TIMEOUT": str(max(120, ((len(self.targets) + 1) * int(timeout_ms) + 999) // 1000)),
             "REPLAY_UNIQUE_PREFIX": "false", "FETCH_OUTPUT_STREAM": "true",
             "N_CHANNELS": "8",
             "EVENT_LOOP_THREADS": "8",

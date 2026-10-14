@@ -33,7 +33,9 @@ def _identity(key):
     if len(parts) != 3 or "/" not in parts[2]:
         raise ValueError("invalid archived series key: " + key)
     epoch, source, tail = parts
-    metric, raw_labels = tail.rsplit("/", 1)
+    metric, raw_labels = tail.split("/{", 1) if "/{" in tail else tail.rsplit("/", 1)
+    if "/{" in tail:
+        raw_labels = "{" + raw_labels
     if not raw_labels.startswith("{"):
         return (epoch, source, metric + "/" + raw_labels), {}
     labels = json.loads(raw_labels)

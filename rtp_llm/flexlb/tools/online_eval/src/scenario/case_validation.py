@@ -17,7 +17,7 @@ def validate_cases(source, *, profile=None):
     for plan in plans:
         implementation = plan['implementation']
         configuration = implementation['configuration']
-        parameters = copy.deepcopy(configuration['parameters'])
+        parameters = copy.deepcopy(configuration.get('parameters', {}))
         for variant in configuration.get('variants', []):
             if variant['id'] == plan['variant_id']:
                 parameters = merge_data(parameters, variant.get('parameters', {}))

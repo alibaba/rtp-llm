@@ -11,7 +11,7 @@ from pathlib import Path
 
 from schema_contract import matches_schema
 from artifacts.json_io import write_json
-from monitoring.contracts import MetricContractError, MetricUnavailable, validate_observation
+from monitoring.contracts import MetricContractError, MetricUnavailable, validate_observation, validate_definition
 
 
 _READ_SESSION = ContextVar('frozen_metric_reads', default=None)
@@ -47,6 +47,8 @@ class MetricStore:
         if (not isinstance(document.get("collection_gaps", {}), dict)
                 or not isinstance(document.get("errors", []), list)):
             raise MetricContractError("invalid metric artifact diagnostics")
+        for metric_id, definition in document["definitions"].items():
+            validate_definition(definition, metric_id)
         for metric_id, observations in document["metrics"].items():
             if not isinstance(observations, list):
                 raise MetricContractError("metric observations must be a list")
@@ -154,7 +156,10 @@ class MetricStore:
                                     json.dumps(row["labels"], sort_keys=True)))
                 if key in series:
                     raise MetricContractError("duplicate archived series key: " + key)
-                series[key] = [[t - anchor, value] for t, value in _ordered_points(row)]
+                points = list(_ordered_points(row))
+                if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for _, value in points):
+                    raise MetricUnavailable(row['metric_id'] + ': non-finite observation')
+                series[key] = [[t - anchor, value] for t, value in points]
                 sources[key] = dict(row["provenance"], metric_id=row["metric_id"],
                                     unit=self.document["definitions"][row["metric_id"]]["unit"])
         gaps = {k: [t - anchor for t in v] for k, v in self.document.get("collection_gaps", {}).items()}

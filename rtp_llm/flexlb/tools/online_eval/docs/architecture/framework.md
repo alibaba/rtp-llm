@@ -149,7 +149,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
 
-流量强度由 `RateCurve`、两种 retention schedule 和 `PlaybackIntensity` 表达，环境变量由 `PlaybackEnvCodec` 解码。时间积分与带 seed 的事件计数保持确定性，发送与循环仍由 Java 客户端控制。
+回放配置由 `PlaybackConfiguration` 表达，`PlaybackConfigurationCodec` 校验 uniform/true-ts、圈数和请求身份策略。`normalize()` 生成 Java 环境变量；Java 客户端控制发送与循环，发送端的 `PLAYBACK_V1` 快照用于离线重建和一致性验证。
 
 lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。
 

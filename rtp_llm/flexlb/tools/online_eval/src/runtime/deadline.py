@@ -26,8 +26,8 @@ def interruptible(deadline, enabled=False):
         raise StageTimeout("stage wall-clock deadline expired")
 
     signal.signal(signal.SIGALRM, expire)
-    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline.remaining()))
     try:
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline.remaining()))
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)

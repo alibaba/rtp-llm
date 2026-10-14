@@ -13,6 +13,7 @@ from traffic.traffic_source import materialize, SourceSpecification
 from traffic.contracts import java_client_priority
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
+from case_api.execution_contract import ExecutionRequirements
 from scenario.parameters import validate_fields
 from adapters.mock_control import engine_snapshot
 
@@ -121,7 +122,10 @@ def _checkpoint_validate(params, plan):
         if type(p[k]) is not int or p[k] < 0:
             raise ValueError("checkpoint bounds must be explicit nonnegative integers")
     if "engine" in p:
-        plan.reference(p["engine"], "string")
+        if isinstance(p["engine"], dict):
+            plan.reference(p["engine"], "string")
+        elif not isinstance(p["engine"], str) or not p["engine"]:
+            raise ValueError("engine must be a name or string output reference")
     return p
 
 
@@ -229,5 +233,6 @@ HANDLERS = [
         _check,
         {},
         checks=frozenset({"complete", "success_rate"}),
+        execution_requirements=ExecutionRequirements(request_evidence=True),
     ),
 ]
