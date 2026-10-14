@@ -268,6 +268,17 @@ charts:
       axis: ratio
       color: '#1677ff'
       hidden: false
+      source_unit: ratio
+    derived/baseline_hit_ratio:
+      metric_id: derived/baseline_hit_ratio
+      labels: {}
+      name: 初始全体 P 半窗命中率
+      group: 缓存
+      unit: ''
+      axis: ratio
+      color: '#52c41a'
+      hidden: false
+      source_unit: ratio
     mock/worker_status_qps_fleet:
       metric_id: mock/worker_status_qps_fleet
       labels:
@@ -288,10 +299,39 @@ charts:
       axis: latency
       color: '#fa8c16'
       hidden: false
+    cache_gate/status_min_qps:
+      metric_id: cache_gate/status_min_qps
+      labels: {}
+      name: 跨阶段上报 QPS 最小值
+      group: 状态上报门禁
+      unit: requests/s
+      axis: qps
+      color: '#1677ff'
+      hidden: false
+      source_unit: requests/s
+    cache_gate/status_max_rt_us:
+      metric_id: cache_gate/status_max_rt_us
+      labels: {}
+      name: 跨阶段读取耗时最大采样值
+      group: 状态上报门禁
+      unit: us
+      axis: latency
+      color: '#fa8c16'
+      hidden: false
+      source_unit: us
   panels:
   - id: cache-hit
+    gate_lines:
+    - check: baseline_hit
+      curve_id: derived/baseline_hit_ratio
+      name: 初始全体 P 半窗命中率下界
+    - check: collapse
+      reference: hit_floor
+      curve_id: derived/survivor_hit_ratio
+      name: Survivor collapse 命中率下界
     title: Prefill 缓存命中率 · P 数量
     curve_ids:
+    - derived/baseline_hit_ratio
     - derived/survivor_hit_ratio
     - mock/cache_hit_ratio
     - mock/engine_count
@@ -415,6 +455,29 @@ charts:
     curve_ids:
     - mock/worker_status_qps_fleet
     - mock/worker_status_rt_us_fleet
+  - id: worker-status-gate
+    requires_gate_evidence: true
+    title: WorkerStatus 门禁统计与阶段参考线
+    curve_ids:
+    - cache_gate/status_min_qps
+    - cache_gate/status_max_rt_us
+    gate_lines:
+    - check: status_qps
+      curve_id: cache_gate/status_min_qps
+      name: 状态上报 QPS 下界
+    - check: status_latency
+      curve_id: cache_gate/status_max_rt_us
+      name: 状态读取耗时上界
+    axes:
+      qps:
+        title: 每引擎 RPC / 秒
+        position: left
+      latency:
+        title: 微秒
+        position: right
+    caption: 点为跨阶段所有被检查引擎样本的全局最小 QPS / 最大读取耗时；baseline 为初始全体 P，transition/post 仅 survivors。原始
+      fleet 曲线含其他 P，只作观测，不与这两条线逐点判定。零时长阶段仅判定瞬时样本。
+    empty_caption: 没有有效状态上报门禁统计；参考线不代表观测可用。
   - id: master-cpu
     title: Master JVM / 系统 CPU 利用率 · 可见 CPU 数
     axes:

@@ -90,3 +90,21 @@ def measure_client_metric(params, rows, *, target=None, prefill_pool=()):
     if calculator is None:
         raise ValueError(f"unknown HA metric: {params['metric']}")
     return calculator(_ClientMetricInput(params, rows, target, prefill_pool))
+
+
+from analysis.gate_references import definition
+
+GATE_REFERENCES = [
+    definition(check, 'threshold', 'ha_gate/' + metric, 'ratio', description=description)
+    for check, metric, description in (
+        ('baseline_success', 'success_rate', 'baseline 整窗请求成功率下界'),
+        ('b_success', 'success_rate', 'B-only 整窗请求成功率下界'),
+        ('a_success', 'success_rate', 'A-only 整窗请求成功率下界'),
+        ('both_success', 'success_rate', '双 Master 整窗请求成功率下界'),
+        ('b_balance', 'prefill_max_share', 'B-only 整窗最热 Prefill 分配占比上界'),
+        ('a_balance', 'prefill_max_share', 'A-only 整窗最热 Prefill 分配占比上界'),
+        ('both_balance', 'prefill_max_share', '双 Master 整窗最热 Prefill 分配占比上界'),
+        ('b_route', 'target_share', 'B-only 整窗路由到 B 的请求占比下界'),
+        ('a_route', 'target_share', 'A-only 整窗路由到 A 的请求占比下界'),
+    )
+]

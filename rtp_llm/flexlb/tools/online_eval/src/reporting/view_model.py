@@ -206,6 +206,8 @@ class PanelPresentation:
     caption: str = ''
     empty_caption: str = '没有有效观测数据；缺失值不补零。'
     event_ids: tuple[str, ...] | None = None
+    gate_lines: tuple = ()
+    requires_gate_evidence: bool = False
 
     @classmethod
     def read(cls, value):
@@ -226,10 +228,21 @@ class PanelPresentation:
         events = value.get('event_ids')
         if events is not None and (not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events)):
             raise ValueError('invalid panel event_ids')
+        from reporting.gate_lines import GateLine
+        lines = value.get('gate_lines', [])
+        if not isinstance(lines, list):
+            raise ValueError('panel gate_lines must be a list')
+        lines = tuple(GateLine.read(line) for line in lines)
+        if len({(line.check, line.reference, line.curve_id) for line in lines}) != len(lines):
+            raise ValueError('duplicate panel gate_lines binding')
+        if 'requires_gate_evidence' in value and type(value['requires_gate_evidence']) is not bool:
+            raise ValueError('requires_gate_evidence must be a boolean')
+        if value.get('requires_gate_evidence') and not lines:
+            raise ValueError('requires_gate_evidence requires gate_lines')
         return cls(value['id'], value['title'], tuple(curves),
             tuple((key, AxisPresentation.read(axis)) for key, axis in axes.items()),
             tuple((key, PresetSelection.read(selector)) for key, selector in presets.items()),
-            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events) if events is not None else None)
+            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events) if events is not None else None, lines, value.get('requires_gate_evidence', False))
 
     def to_dict(self):
         result = dict(id=self.id, title=self.title, curve_ids=list(self.curve_ids),
@@ -241,9 +254,16 @@ class PanelPresentation:
             result['presets'] = {key: value.to_dict() for key, value in self.presets}
         if self.event_ids is not None:
             result['event_ids'] = list(self.event_ids)
+        if self.gate_lines:
+            result['gate_lines'] = [line.to_dict() for line in self.gate_lines]
+        if self.requires_gate_evidence:
+            result['requires_gate_evidence'] = True
         return result
 
     def validate_bindings(self, curves):
+        for line in self.gate_lines:
+            if line.curve_id not in self.curve_ids:
+                raise ValueError('invalid panel gate_lines: curve must belong to its panel')
         axes = dict(self.axes)
         for identity in self.curve_ids:
             if identity not in curves:

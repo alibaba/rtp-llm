@@ -18,7 +18,7 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
     from cases.master_performance.panels import prepare_curves, report_panels
 
     curves, monitoring = prepare_curves(directory, evidence, presentation)
-    panels = report_panels(curves, evidence.get("criteria", {}), presentation)
+    panels = report_panels(curves, result, presentation, origin=evidence["window"]["start_epoch_ms"] / 1000)
     spec = dict(
         run_id=p["instance"],
         title=title(p["instance"]),
@@ -61,6 +61,9 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
+    from reporting.gate_lines import validate_bindings
+    from cases.master_performance.analysis import GATE_REFERENCES
+    validate_bindings(data, GATE_REFERENCES)
     validate_section_contract(path, data, {
         "checks": 4, "monitoring": None, "validity": None, "metrics": None,
     }, fail)
