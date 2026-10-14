@@ -135,6 +135,8 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
                 metric_color = colors[original['id'], original['series'].index(reference)]
                 curve['hidden'] = reference.get('hidden', False)
             curve.update(curve_style(metric_color, i, len(labels)))
+            if curve.get('role') == 'gate_reference':
+                curve.update(dash=source['series'][n]['dash'], marker_count=0)
             panel['series'].append(curve)
             panel['presets'].setdefault('run · ' + labels[i], []).append(curve['name'])
             metric_names.setdefault(name, []).append(curve['name'])
@@ -147,7 +149,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
         for i, source in candidates:
             if any(entry[0] == i for entry in entries):
                 panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name']) for e in source.get('events', []))
-        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，全部为连续实线。保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
+        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，观测曲线为实线，门禁参考线保留虚线。保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
         overlays.append(panel)
         pairing.append(dict(panel=original['id'], status='PAIRED', metrics=records))
     separate = []

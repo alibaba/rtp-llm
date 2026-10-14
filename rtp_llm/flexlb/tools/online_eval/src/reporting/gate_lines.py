@@ -41,6 +41,8 @@ def apply_gate_lines(panels, presentation, thresholds):
             source = next((s for s in panel['series'] if s['curve_id'] == binding.curve_id), None)
             panel['series'].append(dict(
                 curve_id=binding.curve_id + '/gate/' + binding.reference,
+                metric_id=style.metric_id, labels=dict(style.labels or ()), scale=style.scale,
+                measurement=dict(kind='gate_reference', reference=binding.reference),
                 source_type='configuration', role='gate_reference',
                 name=binding.name, group='门禁', axis=style.axis,
                 unit=style.unit or (source or {}).get('unit', ''),
