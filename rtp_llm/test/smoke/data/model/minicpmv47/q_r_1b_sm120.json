@@ -8,41 +8,6 @@
                 "messages": [
                     {
                         "role": "user",
-                        "content": "Hello, who are you? Answer in one short sentence."
-                    }
-                ],
-                "max_tokens": 32,
-                "temperature": 0.0,
-                "top_p": 0,
-                "top_k": 1
-            },
-            "result": {
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "Hmm, the user just asked who I am in a short sentence. This is a straightforward identity question. I should state my name clearly and simply. I'm",
-                            "partial": false
-                        },
-                        "finish_reason": "length"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 22,
-                    "total_tokens": 54,
-                    "completion_tokens": 32,
-                    "completion_tokens_details": null,
-                    "prompt_tokens_details": null
-                }
-            }
-        },
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
                         "content": [
                             {
                                 "type": "image_url",
