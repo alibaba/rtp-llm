@@ -119,7 +119,7 @@ class V41MegaAttentionRequirementsCPU(unittest.TestCase):
             torch.cuda, "get_device_capability", return_value=(10, 3)
         ), patch.dict(
             "sys.modules", {"flash_mla": package, "flash_mla.cuda": package.cuda}
-        ), self.assertRaisesRegex(ImportError, "install_mega_attention.sh"):
+        ), self.assertRaisesRegex(ImportError, "open_source/deps requirements"):
             MegaAttention.create(attn)
 
     def test_tp_padding_preserves_chunk_layout_and_current_sink(self):

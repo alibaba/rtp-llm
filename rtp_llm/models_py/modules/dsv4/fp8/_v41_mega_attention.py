@@ -36,9 +36,9 @@ class MegaAttention:
                 "and 8 heads per group"
             )
         dependency_error = (
-            "FlashMLA was built without mega attention. With the service's "
-            "Python/PyTorch and CUDA >=12.9, run "
-            "bash 3rdparty/flashmla/install_mega_attention.sh from the RTP source root."
+            "FlashMLA was built without mega attention. Install the pinned "
+            "FlashMLA wheel from RTP's open_source/deps requirements for your "
+            "platform in the service's Python environment."
         )
         try:
             import flash_mla.cuda as native
