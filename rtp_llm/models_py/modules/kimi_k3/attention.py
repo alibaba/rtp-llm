@@ -193,11 +193,10 @@ class KimiK3KDA(nn.Module):
                 )
         else:
             with profile_scope("RTP::attention.input_all_gather"):
-                full_hidden = (
-                    all_gather(hidden, Group.TP) if self.tp_size > 1 else hidden
-                )
-            with profile_scope("RTP::attention.kda.input_proj"):
-                fused = self.input(full_hidden)
+                if self.tp_size > 1:
+                    fused = self.input.forward_all_gather(hidden)
+                else:
+                    fused = self.input(hidden)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
@@ -369,6 +368,10 @@ class KimiK3MLA(nn.Module):
             with profile_scope("RTP::attention.fp8_ag_gemm"):
                 fused_input = self._fp8_collective.all_gather_gemm(hidden, self.input)
             full_hidden = None
+        elif self.tp_size > 1 and getattr(self.input, "scale_ue8m0", False):
+            with profile_scope("RTP::attention.input_all_gather"):
+                fused_input = self.input.forward_all_gather(hidden)
+            full_hidden = None
         else:
             with profile_scope("RTP::attention.input_all_gather"):
                 full_hidden = (
@@ -396,14 +399,14 @@ class KimiK3MLA(nn.Module):
         else:
             with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
                 qkv, gate = (
-                    fused_input if use_fused_ag else self.input(full_hidden)
+                    fused_input if full_hidden is None else self.input(full_hidden)
                 ).split([qkv_rows, self.heads * self.v_dim], dim=-1)
             # The projected tensors no longer depend on the gathered input.
             # Release it before MLA expands a historical KV chunk, as the
             # feat/k3_dev projection path does before entering attention.
-            del full_hidden
-            if use_fused_ag:
+            if full_hidden is None:
                 del fused_input
+            del full_hidden
             output = self._attend(qkv, fmha, cache)
         valid_mask = attention_inputs.valid_token_mask
         if valid_mask is not None:

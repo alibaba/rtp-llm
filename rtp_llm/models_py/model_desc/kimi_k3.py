@@ -371,8 +371,28 @@ class KimiK3Model(GptModelBase):
         if type(self) is not KimiK3Model or self.tp_size == 1:
             return
         decode_staging = self.parallelism_config.role_type == RoleType.DECODE
-        enable_ag = os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
-        enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
+        workspace = self._tp_collective_workspace if decode_staging else None
+        enable_ag = (
+            workspace.fp8_ag is not None
+            if workspace is not None
+            else os.environ.get("RTP_LLM_FP8_AG_GEMM", "0") == "1"
+        )
+        # Decode GEMM uses the projection's existing producer and shared Push RS;
+        # this is independent of requesting the large-Prefill fused GEMM/RS API.
+        enable_rs = (
+            workspace.push_rs is not None
+            if workspace is not None
+            else os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
+        )
+        if decode_staging:
+            enable_ag = enable_ag and all(
+                getattr(layer.attention.input, "scale_ue8m0", False)
+                for layer in self.layers
+            )
+            enable_rs = enable_rs and all(
+                getattr(layer.attention.output, "scale_ue8m0", False)
+                for layer in self.layers
+            )
         if not (enable_ag or enable_rs):
             return
         for layer in self.layers:
@@ -390,10 +410,9 @@ class KimiK3Model(GptModelBase):
         device = self.layers[0].attention.input.weight.device
         max_m = self.fp8_collective_max_tokens
         if decode_staging:
-            rows = self._max_generate_batch_size * max(
-                int(self.config.gen_num_per_cycle) + 1, 1
-            )
-            max_m = (rows + self.tp_size - 1) // self.tp_size * self.tp_size
+            if workspace is None:
+                return
+            max_m = workspace.max_m
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP),
             device,
@@ -402,6 +421,7 @@ class KimiK3Model(GptModelBase):
             enable_ag=enable_ag,
             enable_rs=enable_rs,
             decode_staging=decode_staging,
+            decode_workspace=workspace,
         )
         for layer in self.layers:
             layer.attention._fp8_collective = self._fp8_collective

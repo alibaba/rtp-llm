@@ -114,6 +114,30 @@ class LinearBase(nn.Module, ABC):
         """
         return F.gelu(self.forward(input))
 
+    def forward_all_gather(self, input: torch.Tensor, group=None) -> torch.Tensor:
+        """Project token shards gathered through the shared TP communication path."""
+        from rtp_llm.models_py.distributed.collective_torch import (
+            Group,
+            _get_group,
+            all_gather,
+        )
+        from rtp_llm.models_py.distributed.tp_collective_workspace import (
+            try_all_gather_projection,
+        )
+
+        selected_group = Group.TP if group is None else group
+        if selected_group == Group.TP:
+            output = try_all_gather_projection(input, self, _get_group(selected_group))
+            if output is not None:
+                return output
+        return self.forward(all_gather(input, selected_group))
+
+    def forward_reduce_scatter(self, input: torch.Tensor, group=None) -> torch.Tensor:
+        """Project and reduce BF16 row shards using the configured TP backend."""
+        from rtp_llm.models_py.distributed.collective_torch import Group, reduce_scatter
+
+        return reduce_scatter(self.forward(input), Group.TP if group is None else group)
+
     def __repr__(self) -> str:
         """Return string representation of the strategy"""
         return f"{self.__class__.__name__}"

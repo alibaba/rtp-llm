@@ -1,4 +1,25 @@
 py_test(
+    name = "tp_collective_workspace_test",
+    srcs = ["tp_collective_workspace_test.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch"],
+    timeout = "short",
+)
+
+py_test(
+    name = "tp_collective_workspace_gpu_test",
+    srcs = ["tp_collective_workspace_gpu_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["SM100_ARM_CU13", "open_skip"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "fp8_collective_projection_test",
     srcs = ["fp8_collective_projection_test.py"],
     deps = ["//rtp_llm/models_py/distributed:collective_torch"],

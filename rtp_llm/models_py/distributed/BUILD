@@ -20,6 +20,7 @@ py_library(
         "flashinfer_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "tp_collective_workspace.py",
     ],
     deps = [
         ":custom_all_gather",

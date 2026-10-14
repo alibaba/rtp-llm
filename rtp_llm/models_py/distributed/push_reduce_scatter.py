@@ -114,13 +114,13 @@ def _all_ready(ready: bool, group, device) -> bool:
 
 
 def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
-    """Return a same-host NVLink workspace for BF16 Decode ReduceScatter.
+    """Return an NVLink workspace for 16-byte-aligned BF16 row shards.
 
     No allocation, rendezvous, topology query or backend change occurs during
     forward or CUDA Graph capture.
     """
     world_size = group.size()
-    if world_size not in (2, 4, 8, 16) or n != 7168:
+    if world_size not in (2, 4, 8, 16) or n <= 0 or n % 8:
         return None
     if max_m <= 0 or max_m % world_size:
         raise ValueError("Push RS capacity must be positive and divisible by TP size")
@@ -156,8 +156,6 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
         uuids = [item[1] for item in peers_metadata]
         hostnames = [item[0] for item in peers_metadata]
         cross_host = len(set(hostnames)) > 1
-        if cross_host:
-            raise RuntimeError("Decode push ReduceScatter requires one host")
         if (
             any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
             or len(set(uuids)) != world_size
@@ -183,6 +181,8 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     storage = counters = None
     try:
         storage = symm.empty(2 * max_m * n * 2, dtype=torch.uint8, device=device)
+        if cross_host and not _is_fabric_allocation(storage):
+            raise RuntimeError("cross-host NVLink requires a CUDA FABRIC allocation")
         counters = torch.zeros(
             props.multi_processor_count, dtype=torch.int32, device=device
         )
