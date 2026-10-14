@@ -1,6 +1,7 @@
 """Supervise one master and a local mock cluster as separate JVMs in a test Pod."""
 
 import json
+import re
 
 from master_compat import mock_formula_config, legacy_discovery
 import os
@@ -21,6 +22,15 @@ sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
 from adapters.perf_presets import resolve_performance_calibration
+
+
+def normalize_heap(value, name):
+    """Accept JVM size strings or positive integer byte counts."""
+    if type(value) is int and value > 0:
+        return str(value)
+    if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*[kKmMgG]?", value):
+        return value
+    raise ValueError(f"{name} must be a positive byte count or JVM heap size")
 
 
 def run():
@@ -50,6 +60,8 @@ def run():
         ):
             raise ValueError(f"{role} must be a positive integer")
     cfg.update(overrides)
+    for name in ("mock_heap", "master_heap"):
+        cfg[name] = normalize_heap(cfg[name], name)
     mode = resolve_mode("whale_embedded", cfg["master_mode"]) if "master_mode" in cfg else None
     profile = mode["master_profile"] if mode else cfg["profile"]
     observation = (mode["observation"] if mode else

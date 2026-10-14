@@ -16,6 +16,11 @@ from traffic.contracts import source_priority
 class HaReplayClient:
     """Own HA replay and observation resources across start, finish and cleanup."""
 
+    @property
+    def max_concurrency(self):
+        """Configured upper bound for outstanding client requests."""
+        return int(self._overrides["MAX_CONCURRENCY"])
+
     def __init__(
         self,
         manager,

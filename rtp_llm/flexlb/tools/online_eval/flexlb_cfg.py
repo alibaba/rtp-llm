@@ -662,7 +662,7 @@ def render_process_config(
     *raw_config* bypasses the generator entirely (the EnvSpec
     negative-test channel — the atpm strict-reject variants inject
     deliberately-illegal documents).  The raw string is projected into
-    the envelope verbatim; EnvManager._master_env injects the SAME string
+    the envelope verbatim; MasterLifecycle.master_environment injects the SAME string
     into the master env, preserving the single-source/two-projections
     invariant on the bypass path too.
     """

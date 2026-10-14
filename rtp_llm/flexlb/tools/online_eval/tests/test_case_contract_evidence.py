@@ -1,10 +1,10 @@
 """Counterexamples for offline batch evidence and owned master recovery."""
 
 import unittest
-from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 from adapters.engine_ops import EngineOps
+from cases.master_ha_failover.client import HaReplayClient
 from scenario.actions.master import (
     decode_residual_bound,
     owner_clean,
@@ -16,7 +16,8 @@ class ExecutionEvidenceTests(unittest.TestCase):
 
     def test_bound_tracks_client_configuration_and_owner_stays_strict(self):
         for n in [1, 4, 16]:
-            client = NS(flow=NS(_overrides={"MAX_CONCURRENCY": str(n)}))
+            client = HaReplayClient.__new__(HaReplayClient)
+            client._overrides = {"MAX_CONCURRENCY": str(n)}
             b = decode_residual_bound(client)
             self.assertEqual(n, b)
             self.assertTrue(owner_clean(0, {"prefill": [1, 0], "decode": [b, 0]}, 1, b))

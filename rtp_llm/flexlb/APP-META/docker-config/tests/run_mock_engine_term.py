@@ -111,7 +111,7 @@ def main():
             "shutdownQuietPeriodMs"
         ] = args.quiet_period_ms
         save("flexlb-config.json", config)
-        launch_env = dict(os.environ, **manager._master_env(env))
+        launch_env = dict(os.environ, **manager.master_lifecycle.master_environment(env))
         launch_env["FLEXLB_CONFIG"] = json.dumps(config)
         launch_env["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = '{"needConsistency":false}'
         launch_env["APP_NAME"] = "FlexLB"

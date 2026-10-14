@@ -5,6 +5,9 @@ from enum import Enum
 import math
 
 
+JAVA_REPLAY_SPEED = 10.0
+
+
 class PacingMode(str, Enum):
     UNIFORM = 'uniform'
     TIMESTAMPS = 'true-ts'
@@ -86,6 +89,7 @@ class PlaybackConfigurationCodec:
             raise ValueError('LOOP must be true or false')
         values = {key: (int if key == 'max_laps' else float)(env[raw])
                   for key, raw in ENV_FIELDS.items() if raw in env}
+        values.setdefault('speed', JAVA_REPLAY_SPEED)
         values.setdefault('max_laps', 0 if env.get('LOOP') == 'true' else 1)
         if 'LOOP' in env and (env['LOOP'] == 'true') != (values['max_laps'] != 1):
             raise ValueError('LOOP conflicts with MAX_LAPS')

@@ -19,7 +19,7 @@
 | `MOCK_BUNDLE_LEGACY_MASTER=1` | 使用镜像内 pin 的 legacy Master |
 | `MOCK_BUNDLE_FILE_DISCOVERY=1` | legacy 模式显式使用 bundle 文件发现适配 |
 
-`MOCK_BUNDLE_OVERRIDES_YAML` 只接受实现列出的字段，所有数值必须为正整数。P/D 数量变化后必须同时检查 Pod CPU/内存、端口数、Mock heap、每引擎 KV 容量和 D 并发；只增逻辑实例不会自动增加 Pod 资源。
+`MOCK_BUNDLE_OVERRIDES_YAML` 只接受实现列出的字段，数量、块容量和并发覆盖必须为正整数；heap 接受正整数字节数或 JVM 容量字符串（如 `512m`、`8g`）。P/D 数量变化后必须同时检查 Pod CPU/内存、端口数、Mock heap、每引擎 KV 容量和 D 并发；只增逻辑实例不会自动增加 Pod 资源。
 
 性能 JSON 的 `block_size` 必须与 bundle 的物理 block size 一致。P/D 使用不同有效 block size 时同时配置 `prefill_block_size`、`decode_block_size` 和对应 pool blocks，不能用路由层旧缓存块参数替代物理 KV 块。
 

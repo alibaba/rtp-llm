@@ -165,7 +165,7 @@ def _ready_validate(params, plan):
 
 def decode_residual_bound(client):
     # MAX_CONCURRENCY is the client's global cap, shared by its targets.
-    value = int(client.flow._overrides["MAX_CONCURRENCY"])
+    value = client.max_concurrency
     if value < 1:
         raise ValueError("invalid flow concurrency")
     return value

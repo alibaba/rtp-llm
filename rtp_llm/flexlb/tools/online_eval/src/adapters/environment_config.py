@@ -128,7 +128,7 @@ class EnvSpec:
     # WHITELIST, FLEXLB_ADVERTISED_IP, FLEXLB_SYNC_CONSISTENCY_CONFIG).
     # FLEXLB_CONFIG must NOT ride here — the narrowed channel is
     # config_overrides (generator layering) / raw_config (negative-test
-    # bypass); _master_env rejects a stray FLEXLB_CONFIG key.
+    # bypass); master_environment rejects a stray FLEXLB_CONFIG key.
     master_env: dict = field(default_factory=dict)
     # FLEXLB_CONFIG layer: flexlb_cfg.ConfigOverride applied on top of the
     # master_profile base document (base < profile < override — see

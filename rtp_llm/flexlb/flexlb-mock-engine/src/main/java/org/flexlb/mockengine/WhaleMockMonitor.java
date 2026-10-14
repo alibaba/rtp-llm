@@ -61,20 +61,29 @@ final class WhaleMockMonitor implements AutoCloseable {
 
     WhaleMockMonitor(FlexMonitor monitor) { this.monitor = monitor; }
 
-    synchronized void sample(JavaMockEngineCluster.FastRpcService service) {
-        long now = System.nanoTime();
+    void sample(JavaMockEngineCluster.FastRpcService service) {
+        // Engine snapshots acquire cache, decode and completion locks. Never
+        // hold the monitor lock while reading them: engine callbacks report
+        // metrics while holding those same locks.
         Map<String, String> labels = service.whaleMetricTags();
         Map<String, Number> values = new HashMap<>(service.whaleMetrics());
-        if ("ROLE_TYPE_DECODE".equals(labels.get("role"))) {
-            var reader = state(labels).decodeTps;
-            values.put("mock_decode_wall_tps", reader.sample(service.decodeTpsSnapshot(), now));
-            values.put("rtp_llm_generate_tps", reader.lastTokens());
+        var decode = "ROLE_TYPE_DECODE".equals(labels.get("role"))
+                ? service.decodeTpsSnapshot() : null;
+        var prefill = "ROLE_TYPE_PREFILL".equals(labels.get("role"))
+                ? service.prefillTpsSnapshot() : null;
+        var cacheHits = service.cacheHitSnapshot();
+        long now = System.nanoTime();
+        synchronized (this) {
+            if (decode != null) {
+                var reader = state(labels).decodeTps;
+                values.put("mock_decode_wall_tps", reader.sample(decode, now));
+                values.put("rtp_llm_generate_tps", reader.lastTokens());
+            }
+            state(labels).cacheHits.sample(cacheHits, now)
+                    .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
+            sample(values, labels, now);
+            if (prefill != null) samplePrefillTps(prefill, labels, now);
         }
-        state(labels).cacheHits.sample(service.cacheHitSnapshot(), now)
-                .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
-        sample(values, labels, now);
-        if ("ROLE_TYPE_PREFILL".equals(labels.get("role")))
-            samplePrefillTps(service.prefillTpsSnapshot(), labels, System.nanoTime());
     }
 
     synchronized void samplePrefillTps(PrefillTpsMetrics.Snapshot snapshot,
