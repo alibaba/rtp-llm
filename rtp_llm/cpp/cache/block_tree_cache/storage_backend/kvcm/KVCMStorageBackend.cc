@@ -469,20 +469,18 @@ private:
                 RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
                 return {};
             }
-            const size_t registration_size =
-                gdr_enabled_ ? pool->getAllocationSizeBytes() : pool->getTotalSizeBytes();
+            bool use_gdr = false;
+#if USING_CUDA
+            use_gdr = gdr_enabled_ && pool->where() == MemoryType::MEMORY_GPU && pool->usesDedicatedDeviceAllocation()
+                      && pool->getAllocationSizeBytes() > 0 && pool->deviceIndex() >= 0;
+#endif
+            const size_t registration_size = use_gdr ? pool->getAllocationSizeBytes() : pool->getTotalSizeBytes();
             kvcm::ClientWrapper::PoolRegistration registration{
                 {pool->getBaseAddress(), registration_size},
                 kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
                                           groups.at(group_id).group_name)};
-            if (gdr_enabled_) {
+            if (use_gdr) {
 #if USING_CUDA
-                if (pool->where() != MemoryType::MEMORY_GPU || !pool->usesDedicatedDeviceAllocation()
-                    || pool->getAllocationSizeBytes() == 0 || pool->deviceIndex() < 0) {
-                    RTP_LLM_LOG_ERROR(
-                        "RemoteCache GDR requires a dedicated cudaMalloc backing for group %d", group_id);
-                    return {};
-                }
                 const long page_size = sysconf(_SC_PAGESIZE);
                 if (page_size <= 0
                     || reinterpret_cast<uintptr_t>(pool->getBaseAddress()) % static_cast<size_t>(page_size) != 0
@@ -499,11 +497,23 @@ private:
                 memory_registrations.gpu.push_back(
                     {pool->getBaseAddress(), pool->getAllocationSizeBytes(), pool->deviceIndex()});
                 registration.memory_registrations = std::move(memory_registrations);
-#else
-                RTP_LLM_LOG_ERROR("RemoteCache GDR requires a CUDA build");
-                return {};
 #endif
             }
+            if (gdr_enabled_ && !use_gdr) {
+                RTP_LLM_LOG_WARNING("RemoteCache GDR unavailable for group %d tag=%s; falling back to standard "
+                                    "registration, memory_type=%d dedicated=%d allocation_size=%zu device=%d",
+                                    group_id,
+                                    tag.c_str(),
+                                    static_cast<int>(pool->where()),
+                                    pool->usesDedicatedDeviceAllocation(),
+                                    pool->getAllocationSizeBytes(),
+                                    pool->deviceIndex());
+            }
+            RTP_LLM_LOG_INFO("KVCM pool registration group=%d tag=%s mode=%s span_size=%zu",
+                             group_id,
+                             tag.c_str(),
+                             use_gdr ? "gdr" : "standard",
+                             registration_size);
             pools_by_tag.emplace(tag, pool);
             registration_tags.push_back(tag);
             registrations.push_back(std::move(registration));
