@@ -42,7 +42,8 @@ class CutlassImportTest(unittest.TestCase):
                 "from pathlib import Path",
                 # Isolate fixture wheels from the test runner's installed DSL.
                 "sys.path[:] = [p for p in sys.path if not "
-                "(Path(p) / 'nvidia_cutlass_dsl').is_dir()]",
+                "((Path(p) / 'nvidia_cutlass_dsl').is_dir() or "
+                "(Path(p) / 'cutlass').is_dir())]",
                 f"sys.path[:0] = {[str(site) for site in sites]!r}",
                 f"spec = importlib.util.spec_from_file_location('helper', {str(helper)!r})",
                 "helper = importlib.util.module_from_spec(spec)",
@@ -60,75 +61,51 @@ class CutlassImportTest(unittest.TestCase):
             check=False,
         )
 
-    def _check_split_wheels(self, record, legacy=False):
+    def test_prefers_build_install_to_partial_pip_repositories(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            core = self._wheel(
-                root,
+            partial = self._wheel(
+                root / "raw",
                 "nvidia-cutlass-dsl-libs-core",
-                {
-                    "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": "from ._mlir.loader import FLAVOR\n",
-                },
-                record=record,
+                {"nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": "VALUE = 0\n"},
             )
-            base = self._wheel(
-                root,
-                "nvidia-cutlass-dsl-libs-base",
+            complete = self._wheel(
+                root / "build",
+                "nvidia-cutlass-dsl",
                 {
+                    "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": "from ._mlir.loader import VALUE\n",
                     "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/loader.py": "from pathlib import Path\n"
-                    "FLAVOR = Path(__file__).with_name('native.cu13').read_text()\n",
+                    "VALUE = Path(__file__).with_name('runtime').read_text()\n",
+                    "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/runtime": "complete",
                 },
-                record=record,
             )
-            cuda = self._wheel(
-                root,
-                "nvidia-cutlass-dsl-libs-cu13",
-                {"nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/native.cu13": "cu13"},
-                record=record,
+            packages = complete / "nvidia_cutlass_dsl/dsl_packages"
+            # Compare paths in the child, where the selected import is observable.
+            result = self._run(
+                [partial, complete, packages],
+                "helper.setup_cutlass_import_path()\n"
+                "import cutlass\n"
+                f"assert Path(cutlass.__file__).parent == Path({str(packages / 'cutlass')!r})\n"
+                "assert cutlass.VALUE == 'complete'\n"
+                "helper.setup_cutlass_import_path()\n",
             )
-            shim = self._wheel(root, "nvidia-cutlass-dsl", {})
-            older = []
-            if legacy:
-                older.append(
-                    self._wheel(
-                        root / "legacy",
-                        "nvidia-cutlass-dsl",
-                        {
-                            "nvidia_cutlass_dsl/python_packages/cutlass/__init__.py": "FLAVOR = 'old'\n",
-                            "nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so": "old runtime",
-                        },
-                        version="4.4.2",
-                    )
-                )
-            for sites in ((core, base, cuda), (base, cuda, core)):
-                with self.subTest(order=sites):
-                    result = self._run(
-                        [*sites, shim, *older],
-                        "helper.setup_cutlass_import_path()\n"
-                        "import cutlass\n"
-                        "first = cutlass.__file__\n"
-                        "helper.setup_cutlass_import_path()\n"
-                        "assert cutlass.__file__ == first\n"
-                        "assert cutlass.FLAVOR == 'cu13'\n",
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    if legacy:
-                        result = self._run(
-                            [*sites, shim, *older],
-                            "helper.setup_cutlass_import_path()\n"
-                            "assert not (Path(helper._install_view.name) / "
-                            "'nvidia_cutlass_dsl/lib/libcute_dsl_runtime.so').exists()\n",
-                        )
-                        self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_split_wheels_join_native_loader_siblings(self):
-        self._check_split_wheels(record=True)
-
-    def test_split_runfiles_without_record_ignore_generated_namespace_init(self):
-        self._check_split_wheels(record=False)
-
-    def test_split_wheels_exclude_older_installed_runtime_libraries(self):
-        self._check_split_wheels(record=False, legacy=True)
+    def test_rejects_wrong_version_at_direct_import_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = self._wheel(
+                Path(directory),
+                "nvidia-cutlass-dsl",
+                {
+                    "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": "__version__ = '4.4.2'\n"
+                },
+            )
+            result = self._run(
+                [site, site / "nvidia_cutlass_dsl/dsl_packages"],
+                "helper.setup_cutlass_import_path()",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("differs from installed 4.7.1", result.stderr)
 
     def test_single_wheel_keeps_both_supported_layouts(self):
         for layout in ("dsl_packages", "python_packages"):
@@ -146,8 +123,7 @@ class CutlassImportTest(unittest.TestCase):
                     [site],
                     "helper.setup_cutlass_import_path()\n"
                     "import cutlass\n"
-                    "assert cutlass.VALUE == 42\n"
-                    "assert helper._install_view is None\n",
+                    "assert cutlass.VALUE == 42\n",
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -167,54 +143,9 @@ class CutlassImportTest(unittest.TestCase):
                         [site, alias],
                         "helper.setup_cutlass_import_path()\n"
                         "import cutlass\n"
-                        "assert cutlass.VALUE == 42\n"
-                        "assert helper._install_view is None\n",
+                        "assert cutlass.VALUE == 42\n",
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_identical_split_payloads_are_complete(self):
-        for record in (True, False):
-            with self.subTest(
-                record=record
-            ), tempfile.TemporaryDirectory() as directory:
-                sites = [
-                    self._wheel(
-                        Path(directory),
-                        name,
-                        {
-                            "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": "VALUE = 42\n"
-                        },
-                        record=record,
-                    )
-                    for name in (
-                        "nvidia-cutlass-dsl-libs-core",
-                        "nvidia-cutlass-dsl-libs-base",
-                    )
-                ]
-                result = self._run(
-                    sites,
-                    "helper.setup_cutlass_import_path()\n"
-                    "import cutlass\n"
-                    "assert cutlass.VALUE == 42\n",
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_conflicting_payloads_fail_before_import(self):
-        with tempfile.TemporaryDirectory() as directory:
-            sites = [
-                self._wheel(
-                    Path(directory),
-                    name,
-                    {"nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py": content},
-                )
-                for name, content in (
-                    ("nvidia-cutlass-dsl-libs-core", "VALUE = 1\n"),
-                    ("nvidia-cutlass-dsl-libs-base", "VALUE = 2\n"),
-                )
-            ]
-            result = self._run(sites, "helper.setup_cutlass_import_path()")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Conflicting CUTLASS wheel payload", result.stderr)
 
     def test_default_package_survives_later_dependency_path_insertion(self):
         with tempfile.TemporaryDirectory() as directory:

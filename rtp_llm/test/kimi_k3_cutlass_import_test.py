@@ -1,12 +1,31 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 
 class KimiK3CutlassImportTest(unittest.TestCase):
+    def test_cutlass_is_importable_before_runtime_path_setup(self):
+        environment = os.environ.copy()
+        environment.pop("KIMI_K3_CUTLASS_DSL_ROOT", None)
+        environment.pop("KIMI_K3_FLASHINFER_ROOT", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.metadata, cutlass, cutlass.cute; "
+                "assert cutlass.__version__ == "
+                "importlib.metadata.version('nvidia-cutlass-dsl')",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_cuda_factories_use_the_declared_cutlass_distribution(self):
         environment = os.environ.copy()
         environment.pop("KIMI_K3_CUTLASS_DSL_ROOT", None)

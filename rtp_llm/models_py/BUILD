@@ -5,6 +5,11 @@ py_library(
     srcs = glob([
         "utils/*.py",
     ]),
+    deps = select({
+        "@//:using_cuda13_x86": ["//3rdparty/cutlass_dsl:cutlass_dsl"],
+        "@//:using_cuda13_arm": ["//3rdparty/cutlass_dsl:cutlass_dsl"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
