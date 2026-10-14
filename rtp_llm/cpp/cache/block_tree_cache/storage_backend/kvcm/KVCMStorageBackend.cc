@@ -116,6 +116,11 @@ public:
             if (!kv_cache_config_.kvcm_client_config.empty()) {
                 auto [location_infos, location_groups] = genLocationSpecs();
                 autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
+                if (client_config_map.size() == 1 && !client_config_map.begin()->first.empty()) {
+                    auto config = client_config_map.begin()->second;
+                    client_config_map.clear();
+                    client_config_map.emplace("", std::move(config));
+                }
                 if (group_policy_->groups().size() != topology.groups().size()) {
                     // Keep custom settings and aliases, but only advertise
                     // payloads that the runtime can actually reuse and transfer.

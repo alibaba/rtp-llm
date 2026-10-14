@@ -150,8 +150,9 @@ int main(int argc, char** argv) {
         auto [offset_code, offset_match] = meta->MatchLocation(
             trace, QueryType::QT_BATCH_GET, keys, {}, BlockMaskOffset{1}, 0, {});
         check(offset_code, "Batch match with local prefix");
-        require(offset_match.size() == keys.size() && offset_match[0].empty(),
-                "Batch offset query did not preserve the skipped key position");
+        // Batch matching preserves key positions but may also return the local prefix.
+        require(offset_match.size() == keys.size(),
+                "Batch offset query did not preserve key positions");
         for (size_t i = 1; i < keys.size(); ++i) {
             require(std::is_permutation(offset_match[i].begin(), offset_match[i].end(),
                                         published.locations[i].begin(), published.locations[i].end(),

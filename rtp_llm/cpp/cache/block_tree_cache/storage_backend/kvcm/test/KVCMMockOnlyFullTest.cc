@@ -126,7 +126,7 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
         std::make_shared<kvcm::SdkWrapperConfig>(), groups,
         kvcm::ModelDeployment("custom_model", "fp16", false, 1, 1, 1, "", ""));
     KVCacheConfig config;
-    config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"", custom}});
+    config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"custom", custom}});
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
@@ -147,6 +147,7 @@ TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {
     environment.cache_config.layer_num = 2;
     environment.cache_config.seq_size_per_block = 8;
     auto window = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    window.enable_prefix_reuse = true;
     window.sliding_window_size = 16;
     environment.cache_config.fromGroupedSpecs(
         {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),

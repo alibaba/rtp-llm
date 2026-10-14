@@ -128,6 +128,7 @@ TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAnd
     auto hca_state = defaultCacheGroupPolicy(CacheGroupType::SWA);
     hca_state.enable_prefix_reuse = false;
     auto window = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    window.enable_prefix_reuse = true;
     window.sliding_window_size = 16;
     environment.cache_config.fromGroupedSpecs(
         {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
