@@ -24,7 +24,7 @@ void invokeMaskLogits(T*             logits_batch,
 // Applies compact packed allow-masks to selected logits rows. Each int32 mask
 // word encodes 32 tokens (bit=1 allowed); row_indices maps compact mask rows to
 // rows in logits_batch. A null row_indices pointer means identity mapping.
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 template<typename T>
 void invokePackedMaskLogits(T*             logits_batch,
                             const int32_t* packed_allow_mask,
@@ -35,7 +35,11 @@ void invokePackedMaskLogits(T*             logits_batch,
                             const int      vocab_size,
                             const int      bitmask_row_stride,
                             const int      bitmask_words,
+#if USING_CUDA
                             cudaStream_t   stream);
+#else
+                            hipStream_t    stream);
+#endif
 #endif
 
 }  // namespace rtp_llm
