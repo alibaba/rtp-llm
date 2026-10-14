@@ -1008,6 +1008,7 @@ py_test(
         "gpu": "SM103_CU13",
         "gpu_count": "1",
     },
+    tags = ["manual", "SM103_CU13"],
     deps = [
         "//rtp_llm:pyodps",
         "//rtp_llm:testlib",
@@ -1026,7 +1027,6 @@ py_test(
         "--enable_cuda_graph", "1",
         "--enable_fp32_lm_head", "false",
     ],
-    tags = ["manual"],
 )
 
 py_test(
@@ -1038,6 +1038,7 @@ py_test(
         "gpu": "SM103_CU13",
         "gpu_count": "1",
     },
+    tags = ["manual", "SM103_CU13"],
     deps = [
         "//rtp_llm:pyodps",
         "//rtp_llm:testlib",
@@ -1059,5 +1060,4 @@ py_test(
         "--profile",
         "--profile_steps", "5",
     ],
-    tags = ["manual"],
 )
