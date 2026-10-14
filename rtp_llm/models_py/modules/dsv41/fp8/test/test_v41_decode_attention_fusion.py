@@ -887,10 +887,11 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         logits = torch.empty(2, 1024, device="cuda")
         lengths = torch.tensor([8, 900], dtype=torch.int32, device="cuda")
         self.assertTrue(self.impl.is_supported(logits, lengths, 512))
+        self.assertTrue(self.impl.is_supported(logits.bfloat16(), lengths, 512))
         with patch.object(self.impl, "_TOPK_V3_OK", False):
             self.assertFalse(self.impl.is_supported(logits, lengths, 512))
         for values, lens, count in (
-            (logits.to(torch.bfloat16), lengths, 512),
+            (logits.to(torch.float16), lengths, 512),
             (logits[:, ::2], lengths, 512),
             (logits[:1].expand(2, -1), lengths, 512),
             (logits[:, :511], lengths, 512),
