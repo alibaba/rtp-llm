@@ -16,6 +16,7 @@ identity against per-scenario no-cache references, never text-only compare.
 import json
 import logging
 import os
+import pathlib
 import threading
 import unittest
 from pathlib import Path
@@ -50,8 +51,30 @@ def make_archive_prefix(tokenizer, min_tokens):
             return prefix
 
 
+def _pin_cubin_dir():
+    """Pin FLASHINFER_CUBIN_DIR to this test's own runfiles extraction.
+
+    On shared CI workers the flashinfer JIT can resolve the cubin package
+    from a different test's runfiles tree (e.g. h2o_lightning_4b_full),
+    whose extraction may be partial. Setting the env var to OUR OWN
+    runfiles copy ensures the trtllm-gen include headers are found.
+    """
+    import flashinfer_cubin
+
+    cubin_dir = flashinfer_cubin.get_cubin_dir()
+    os.environ["FLASHINFER_CUBIN_DIR"] = str(cubin_dir)
+    logging.info("FLASHINFER_CUBIN_DIR pinned to %s", cubin_dir)
+    # Verify the critical header exists for the sm103a fmha_gen compile
+    metainfo = pathlib.Path(cubin_dir) / "55bba55929d4093682e32d817bd11ffb0441c749" / "fmha" / "trtllm-gen" / "include" / "flashInferMetaInfo.h"
+    if not metainfo.exists():
+        logging.warning("flashInferMetaInfo.h missing at %s; JIT may fail on sm103a", metainfo)
+    else:
+        logging.info("flashInferMetaInfo.h present at %s", metainfo)
+
+
 class Lfm2ReuseCacheTest(unittest.TestCase):
     def setUp(self):
+        _pin_cubin_dir()
         self.output_dir = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
         self.server = MagaServerManager(
             env_args={"LOAD_PYTHON_MODEL": "1", "FRONTEND_SERVER_COUNT": "1"},

@@ -37,13 +37,13 @@ def community_suites():
             # aux_info reuse_len plus token-identity vs the no-cache baseline.
             custom_smoke_test(
                 name = "lfm2_reuse_cache",
-                main = "lfm2_reuse_cache_test.py",
-                smoke_args = "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --warm_up 0 --max_seq_len 16384 --seq_size_per_block 2048 --concurrency_limit 4 --enable_cuda_graph 1 --enable_fp32_lm_head false --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0",
+                deps = ["//rtp_llm:transformers"],
                 data = [
                     "//rtp_llm:sdk",
                     "data/model/qwen_vl/1.jpeg",
                 ],
-                deps = ["//rtp_llm:transformers"],
+                main = "lfm2_reuse_cache_test.py",
+                smoke_args = "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --warm_up 0 --max_seq_len 16384 --seq_size_per_block 2048 --concurrency_limit 4 --enable_cuda_graph 1 --enable_fp32_lm_head false --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0",
                 gpu_type = ["H20_CU13"],
                 tags = ["manual"],
             ),
@@ -64,12 +64,12 @@ def community_measurement_suites():
         custom_smoke_test(
             name = name,
             main = "lfm2_reuse_cache_test.py",
-            smoke_args = reuse_args,
+            deps = ["//rtp_llm:transformers"],
             data = [
                 "//rtp_llm:sdk",
                 "data/model/qwen_vl/1.jpeg",
             ],
-            deps = ["//rtp_llm:transformers"],
+            smoke_args = reuse_args,
             gpu_type = [gpu],
             tags = ["manual"],
         )
