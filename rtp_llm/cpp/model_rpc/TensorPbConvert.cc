@@ -25,6 +25,9 @@ size_t checkedElementCount(const TensorPB& tensor_pb) {
 }
 
 void validateTensorPayload(const TensorPB& tensor_pb, const std::string& active_data, size_t dtype_size) {
+    if (tensor_pb.shape_size() == 0 && active_data.empty()) {
+        return;
+    }
     const size_t numel = checkedElementCount(tensor_pb);
     if (numel > std::numeric_limits<size_t>::max() / dtype_size) {
         throw std::runtime_error("TensorPB payload byte size overflow.");
@@ -63,6 +66,22 @@ void validateInactivePayloadsAreEmpty(const TensorPB& tensor_pb) {
 }
 
 }  // namespace
+
+void TensorPbConvert::validate(const TensorPB& tensor_pb) {
+    validateInactivePayloadsAreEmpty(tensor_pb);
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            return validateTensorPayload(tensor_pb, tensor_pb.fp32_data(), sizeof(float));
+        case TensorPB::INT32:
+            return validateTensorPayload(tensor_pb, tensor_pb.int32_data(), sizeof(int32_t));
+        case TensorPB::FP16:
+            return validateTensorPayload(tensor_pb, tensor_pb.fp16_data(), sizeof(c10::Half));
+        case TensorPB::BF16:
+            return validateTensorPayload(tensor_pb, tensor_pb.bf16_data(), sizeof(c10::BFloat16));
+        default:
+            throw std::runtime_error("Unsupported data type.");
+    }
+}
 
 at::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
