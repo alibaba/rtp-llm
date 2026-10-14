@@ -15,6 +15,7 @@ _TESTS = [
     "test_v41_batched_producer",
     "test_v41_candidate_topk",
     "test_v41_decode_attention_fusion",
+    "test_v41_decode_device_metadata",
     "test_v41_decode_global",
     "test_v41_decode_indexer",
     "test_v41_decode_preprocessing",

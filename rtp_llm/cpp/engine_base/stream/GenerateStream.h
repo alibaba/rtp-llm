@@ -631,6 +631,12 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        // Opt-in from the V4.1 TP1 decode executor. The stream additionally
+        // verifies the retained SWA tail against this round's maximum advance.
+        bool allow_async_cache_reservation = false;
+        int  max_mtp_advance               = 0;
+        // Immutable pinned sources for an asynchronously published grown table.
+        std::vector<torch::Tensor> cache_snapshot_host_buffers;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -710,7 +716,15 @@ public:
     bool hasMtpCacheSnapshot() const {
         return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
     }
-    void clearMtpCacheSnapshot() {
+    bool canReserveMtpCacheWithoutBookkeepingJoin(const MtpAsyncDeviceState& state) const;
+    // Called under the stream mutex; cache-key reads and host table updates
+    // must not race specUpdate. Preserves every non-table field and the epoch.
+    absl::Status reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state);
+    bool         replaceMtpCacheSnapshot(uint64_t                   expected_epoch,
+                                         torch::Tensor              physical,
+                                         torch::Tensor              kernel,
+                                         std::vector<torch::Tensor> host_buffers);
+    void         clearMtpCacheSnapshot() {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();

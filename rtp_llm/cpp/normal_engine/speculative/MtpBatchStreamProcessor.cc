@@ -247,7 +247,12 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
                             batch_size,
                             previous_seq_lengths.numel(),
                             accept_lengths.numel());
-    if (batch_size == 0 || block_count == 0) {
+    // FULL/SWA groups are unchanged by specUpdate. Publish independent
+    // storage so later input-buffer reuse cannot overwrite a pending round's
+    // snapshot; no sequence-dependent permutation is needed for these groups.
+    const bool has_linear_group =
+        std::find(group_types.begin(), group_types.end(), CacheGroupType::LINEAR) != group_types.end();
+    if (!has_linear_group || batch_size == 0 || block_count == 0) {
         return current_table.clone();
     }
 

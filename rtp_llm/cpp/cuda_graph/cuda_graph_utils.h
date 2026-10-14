@@ -70,7 +70,10 @@ public:
     }
 
 public:
-    py::object               attn_pyobj_{py::none()};
+    py::object attn_pyobj_{py::none()};
+    // Opt-in backend contract: prepare/replay do not read host metadata
+    // values. Cached at capture so replay does not need a Python lookup.
+    bool                     uses_device_metadata_{false};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;

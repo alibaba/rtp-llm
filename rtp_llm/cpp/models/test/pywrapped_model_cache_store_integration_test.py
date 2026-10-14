@@ -966,6 +966,168 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                     process.join(timeout=5)
 
 
+class AttentionInputMetadataModel:
+    def __init__(self, device_only: bool) -> None:
+        self.supports_device_only_attention_metadata = device_only
+
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs):
+        raise AssertionError("metadata test must not execute a model forward")
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class AttentionInputMetadataTest(unittest.TestCase):
+    def build_inputs(self, input_device, prefix_device, *, verify=False):
+        lengths = torch.tensor([2, 3], dtype=torch.int32, device=input_device)
+        prefixes = torch.tensor([7, 11], dtype=torch.int32, device=prefix_device)
+        sequences = torch.empty(0, dtype=torch.int32)
+        tokens = torch.empty(5, dtype=torch.int32)
+        return lengths, prefixes, sequences, tokens, verify
+
+    @unittest.skipIf(
+        torch.version.hip is not None, "device metadata kernel is CUDA-only"
+    )
+    def test_capability_property_is_queried_after_initialize(self):
+        class InitializedMetadataModel:
+            def __init__(self):
+                self.ready = False
+
+            @property
+            def supports_device_only_attention_metadata(self):
+                return self.ready
+
+            def initialize(self, resources):
+                self.ready = True
+                return True
+
+            def forward(self, inputs):
+                raise AssertionError("metadata test must not execute forward")
+
+        model = InitializedMetadataModel()
+        self.assertFalse(model.supports_device_only_attention_metadata)
+        builder = _extension.AttentionInputBuilder(model)
+        self.assertTrue(model.supports_device_only_attention_metadata)
+        args = self.build_inputs("cuda", "cuda", verify=True)
+        builder.build(*args)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            result = builder.build(*args)
+        torch.cuda.synchronize()
+        self.assertNotIn("aten::item", {e.key for e in profile.key_averages()})
+        self.assertEqual(result.context_total_kv_length, -1)
+        self.assertEqual(result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23])
+
+    @unittest.skipIf(
+        torch.version.hip is not None, "device metadata kernel is CUDA-only"
+    )
+    def test_device_lengths_avoid_scalar_sync_and_preserve_metadata(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        for verify in (False, True):
+            for prefix_device in ("cuda", "cpu"):
+                with self.subTest(verify=verify, prefix_device=prefix_device):
+                    args = self.build_inputs("cuda", prefix_device, verify=verify)
+                    # Exercise the actual copy/kernel ordering on a nondefault
+                    # stream. Warm allocations and CUDA libraries before profiling.
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        builder.build(*args)
+                    stream.synchronize()
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as profile:
+                        with torch.cuda.stream(stream):
+                            result = builder.build(*args)
+                    stream.synchronize()
+                    names = {event.key for event in profile.key_averages()}
+                    self.assertNotIn("aten::item", names)
+                    self.assertNotIn("aten::_local_scalar_dense", names)
+                    self.assertEqual(result.total_tokens, 5)
+                    self.assertEqual(
+                        result.context_total_kv_length,
+                        -1 if prefix_device == "cuda" else 23,
+                    )
+                    self.assertEqual(result.is_target_verify, verify)
+                    self.assertEqual(result.cu_seqlens_device.cpu().tolist(), [0, 2, 5])
+                    self.assertEqual(
+                        result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23]
+                    )
+                    self.assertEqual(
+                        result.padding_offset.cpu().tolist(), [0, 0, 1, 1, 1]
+                    )
+                    expected_seq = [8, 12] if verify else []
+                    self.assertEqual(
+                        result.sequence_lengths_plus_1_device.cpu().tolist(),
+                        expected_seq,
+                    )
+
+    def test_host_metadata_and_generic_scalar_contract(self):
+        for device_only in (False, True):
+            builder = _extension.AttentionInputBuilder(
+                AttentionInputMetadataModel(device_only)
+            )
+            for input_device, prefix_device in (
+                ("cpu", "cpu"),
+                ("cpu", "cuda"),
+                ("cuda", "cuda"),
+            ):
+                if torch.version.hip is not None and input_device == "cuda":
+                    continue
+                with self.subTest(
+                    device_only=device_only,
+                    input_device=input_device,
+                    prefix_device=prefix_device,
+                ):
+                    result = builder.build(
+                        *self.build_inputs(input_device, prefix_device)
+                    )
+                    torch.cuda.synchronize()
+                    expected_total = (
+                        -1
+                        if device_only and input_device == prefix_device == "cuda"
+                        else 23
+                    )
+                    self.assertEqual(result.context_total_kv_length, expected_total)
+                    self.assertEqual(result.total_tokens, 5)
+                    self.assertEqual(
+                        result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23]
+                    )
+
+    def test_decode_and_mixed_batch_contract(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        for device in ("cpu", "cuda"):
+            with self.subTest(device=device):
+                result = builder.build(
+                    torch.tensor([1, 1], dtype=torch.int32, device=device),
+                    torch.empty(0, dtype=torch.int32),
+                    torch.tensor([7, 11], dtype=torch.int32, device=device),
+                    torch.empty(2, dtype=torch.int32),
+                    False,
+                )
+                torch.cuda.synchronize()
+                self.assertFalse(result.is_prefill)
+                self.assertEqual(result.total_tokens, 0)
+                self.assertEqual(result.context_total_kv_length, 0)
+                self.assertEqual(
+                    result.decode_cu_seqlens_device.cpu().tolist(), [0, 1, 2]
+                )
+                self.assertEqual(
+                    result.sequence_lengths_plus_1_device.cpu().tolist(), [8, 12]
+                )
+        with self.assertRaisesRegex(RuntimeError, "mixed prefill\\+decode batch"):
+            builder.build(
+                torch.tensor([1, 2], dtype=torch.int32),
+                torch.tensor([7], dtype=torch.int32),
+                torch.tensor([11], dtype=torch.int32),
+                torch.empty(3, dtype=torch.int32),
+                False,
+            )
+
+
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
