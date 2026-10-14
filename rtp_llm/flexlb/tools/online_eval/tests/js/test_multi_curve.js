@@ -137,3 +137,19 @@ const compact={times:raw.map(p=>p.x),values:raw.map(p=>p.y)};
 for(const [lo,hi] of [[0,4],[1,1],[2,2],[1.5,3],[9,10]]) {
   assert.deepEqual(FlexMultiCurve.statistics([],compact)(lo,hi),FlexMultiCurve.statistics(raw)(lo,hi));
 }
+
+// A reference remains a threshold when the selected interval contains neither endpoint.
+const gateRoot=new Element('root');
+const gateChart=FlexMultiCurve.mount(gateRoot,{title:'gate',caption:'frozen',axes:{pct:{title:'%'}},
+  series:[{name:'floor',role:'gate_reference',axis:'pct',unit:'%',points:[{x:0,y:95},{x:10,y:95}],color:'#123456',dash:[6,4]}]},
+  {timeAxis:{min:0,max:10},events:[]});
+const gatePanel=gateRoot.children[0],gateToolbar=gatePanel.children[2];
+const gateRange=gateToolbar.children.find(e=>e.className==='multi-range');
+const gateInputs=gateRange.children.filter(e=>e instanceof Element&&e.tag==='input');
+gateInputs[0].value=2;gateInputs[1].value=8;gateInputs[0].onchange();
+const gateLegend=gatePanel.children.find(e=>e.className==='multi-legend');
+const gateValues=gateLegend.children[0].children.find(e=>e.className==='multi-legend-values');
+assert.equal(gateChart.data.datasets[0].statistics(2,8).count,0);
+assert.equal(gateValues.children[0].textContent,'阈值 95 %');
+assert.equal(gateValues.children[1].textContent,'窗口 0–10 s');
+assert.equal(gateChart.data.datasets[0].pointRadius,0);
