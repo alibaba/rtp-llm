@@ -33,6 +33,17 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_flashinfer_test",
+    srcs = ["jit_cache_flashinfer_test.py"],
+    deps = [
+        "//rtp_llm:filelock",
+        "//rtp_llm:jit_cache_flashinfer",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm/test/utils:jit_sys_path_setup",
+    ],
+)
+
+py_test(
     name = "jit_cache_compile_test",
     size = "large",
     srcs = ["jit_cache_compile_test.py"],

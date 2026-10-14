@@ -29,7 +29,7 @@ py_library(
 py_library(
     name = "jit_sys_path_setup",
     srcs = ["jit_sys_path_setup.py"],
-    deps = [":filelock", "//rtp_llm:jit_cache_env"],
+    deps = [":filelock", "//rtp_llm:jit_cache_env", "//rtp_llm:jit_cache_flashinfer"],
 )
 
 py_binary(

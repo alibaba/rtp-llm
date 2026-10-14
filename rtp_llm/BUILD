@@ -142,6 +142,7 @@ requirement([
     "fastsafetensors",
     "pybind11_stubgen",
     "watchdog",
+    "filelock",
     "zstandard",
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
@@ -164,12 +165,13 @@ _JIT_CACHE_SRCS = [
     "utils/jit_cache_deep_gemm.py",
 ]
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
+_JIT_CACHE_FLASHINFER_SRCS = ["utils/jit_cache_flashinfer.py"]
 
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
-    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + _JIT_CACHE_FLASHINFER_SRCS + [
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -201,10 +203,18 @@ py_library(
 )
 
 py_library(
+    name = "jit_cache_flashinfer",
+    srcs = _JIT_CACHE_FLASHINFER_SRCS,
+    deps = [":filelock"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "jit_cache_manager_lib",
     srcs = _JIT_CACHE_SRCS,
     deps = [
         ":jit_cache_env",
+        ":jit_cache_flashinfer",
         ":utils",
         ":watchdog",
         ":zstandard",
