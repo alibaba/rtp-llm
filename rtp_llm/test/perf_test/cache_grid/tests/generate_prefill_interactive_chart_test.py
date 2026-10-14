@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -20,6 +21,8 @@ from rtp_llm.test.perf_test.cache_grid.runner.result_schema import (
     observed_cache_len,
     prefill_rt,
 )
+
+PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
 
 def _sample_metrics(statuses=None):
@@ -133,6 +136,7 @@ class LoadRowsTest(unittest.TestCase):
 
 
 class LatencyColorTest(unittest.TestCase):
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_higher_latency_is_darker_without_changing_values(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "results.json"
@@ -261,6 +265,7 @@ class AllRunsTest(unittest.TestCase):
             rows = load_rows(source, 1, all_runs=True)
         self.assertEqual([row["prefill_rt"] for row in rows], [10.0])
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_all_runs_hover_shows_run_index(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self._write(directory, _sample_metrics(["ok"]))
@@ -277,6 +282,7 @@ class AllRunsTest(unittest.TestCase):
         self.assertEqual([entry[3] for entry in points.customdata], [1, 2, 3])
         self.assertEqual([entry[4] for entry in points.customdata], [10.0] * 3)
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_median_hover_uses_fixed_customdata_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self._write(directory, _sample_metrics(["ok"]))
@@ -337,6 +343,7 @@ class ZMetricTest(unittest.TestCase):
         rows = apply_z_metric(self.ROWS, "tpm-effective")
         self.assertNotIn(1024.0, [row["input_len"] for row in rows])
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_tpm_effective_axes_and_hover(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "results.json"
@@ -383,6 +390,7 @@ class ZMetricTest(unittest.TestCase):
             )
             self.assertIsNone(detect_cards(source))
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_per_card_tpm_uses_embedded_profile(self):
         payload = {
             "schema_version": 2,
@@ -428,6 +436,7 @@ class ZMetricTest(unittest.TestCase):
             figure.layout.scene.zaxis.title.text,
         )
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_all_run_tpm_uses_explicit_profile_world_size(self):
         payload = {
             "schema_version": 2,
@@ -518,6 +527,7 @@ class ZMetricTest(unittest.TestCase):
             )
             self.assertEqual(detect_cards(source), 16)
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_main_explicit_cards_one_keeps_system_tpm(self):
         payload = {
             "schema_version": 2,

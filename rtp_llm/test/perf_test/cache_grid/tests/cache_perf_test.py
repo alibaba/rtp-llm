@@ -222,6 +222,21 @@ class CachePerfTest(unittest.TestCase):
                 {},
             )
 
+    def test_resume_rejects_bazel_launch_overrides(self):
+        self.save_run()
+        for option in (
+            "--config=changed",
+            "--output-base=/tmp/changed-bazel-output",
+            "--bazel=changed-bazel",
+        ):
+            with self.subTest(option=option), self.assertRaisesRegex(
+                ValueError, "launch overrides"
+            ):
+                cli.build_plan(
+                    self.args("resume", extra=[option], explicit=False),
+                    {},
+                )
+
     def test_launch_v2_stores_profile_and_environment_once(self):
         plan = self.save_run()
         raw = json.loads(plan["artifacts"][cli.MANIFEST])

@@ -1,6 +1,7 @@
 """All benchmark consumers select server first_token_cost_time from raw results."""
 
 import copy
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -25,6 +26,8 @@ from rtp_llm.test.perf_test.cache_grid.plot.generate_prefill_interactive_chart i
 from rtp_llm.test.perf_test.cache_grid.plot.generate_prefill_interactive_chart import (
     load_rows as interactive_rows,
 )
+
+PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
 
 def result(grouped=False):
@@ -130,6 +133,7 @@ class ServerLatencyTest(unittest.TestCase):
         data["metrics"][0]["runs"][0]["requests"][0]["prefill_time_ms"] = 0
         self.assertEqual(analyze_results(data), [])
 
+    @unittest.skipUnless(PLOTLY_AVAILABLE, "plotly is an optional chart dependency")
     def test_batch_cli_renders_raw_json_and_rejects_old_intermediate(self):
         output = self.path.with_suffix(".html")
         self.path.write_text(json.dumps(result(grouped=True)))

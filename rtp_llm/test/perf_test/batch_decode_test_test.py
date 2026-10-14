@@ -18,6 +18,7 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _effective_grid_max_seq_len,
     _effective_performance_config,
     _engine_arg_argv,
+    _ensure_batch_decode_scheduler,
     _finalize_completed_cache_checkpoint,
     _fingerprint_engine_env,
     _load_cache_grid_cases,
@@ -669,6 +670,10 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertGreaterEqual(result["ttft_ms"], 0.0)
         self.assertEqual(result["ttft_ms"], result["client_wall_time_ms"])
         self.assertEqual(result["ttft_source"], "client_http_wall_max_new_tokens_1")
+        self.assertEqual(
+            post.call_args.kwargs["headers"],
+            {"X-DashScope-LoggingConsent": "none"},
+        )
 
     def test_post_prefill_ids_parses_grpc_metrics(self):
         from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -687,9 +692,10 @@ class BatchDecodeTest(unittest.TestCase):
         infer.parameters["engine_wait_time_us"].int64_param = 500
 
         class Stub:
-            def ModelStreamInfer(self, requests, timeout):
+            def ModelStreamInfer(self, requests, timeout, metadata):
                 request = next(requests)
                 self.assert_timeout = timeout
+                self.metadata = metadata
                 self.request = request
                 return iter((response,))
 
@@ -703,6 +709,10 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(result["total_time_ms"], 12.5)
         self.assertEqual(result["wait_time_ms"], 0.5)
         self.assertEqual(stub.assert_timeout, 10)
+        self.assertEqual(
+            stub.metadata,
+            (("x-dashscope-inner-loggingconsent", "none"),),
+        )
         self.assertTrue(stub.request.parameters["force_sp_accept"].bool_param)
         self.assertEqual(
             result["ttft_source"],
@@ -849,7 +859,7 @@ class BatchDecodeTest(unittest.TestCase):
             clear=True,
         ):
             fingerprint = _fingerprint_engine_env(["PRIVATE_TOKEN"])
-        self.assertEqual(fingerprint["PERF_MEASURE_RUNS"], "3")
+        self.assertRegex(fingerprint["PERF_MEASURE_RUNS"], r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("PRIVATE_TOKEN", fingerprint)
 
     def test_effective_config_records_cli_precedence(self):
@@ -894,10 +904,55 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(remaining.count("--tp_size"), 1)
         self.assertEqual(remaining[remaining.index("--tp_size") + 1], "4")
 
+    def test_engine_arg_namespace_values_override_profile_without_forwarding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile.json"
+            profile.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "engine": {
+                            "dp_size": 8,
+                            "max_seq_len": 16384,
+                            "concurrency_limit": 32,
+                        },
+                    }
+                )
+            )
+            args, remaining = parse_args(
+                [
+                    "--profile",
+                    str(profile),
+                    "--engine_arg=dp_size=1",
+                    "--engine_arg=max_seq_len=4096",
+                    "--engine_arg=concurrency_limit=4",
+                ]
+            )
+        self.assertEqual(args.dp_size, 1)
+        self.assertEqual(args.max_seq_len, 4096)
+        self.assertEqual(args.concurrency_limit, 4)
+        self.assertFalse(
+            any(
+                item.split("=", 1)[0]
+                in ("--dp_size", "--max_seq_len", "--concurrency_limit")
+                for item in remaining
+            )
+        )
+
     def test_full_option_name_is_required_for_perf_arguments(self):
-        args, remaining = parse_args(["--cache_commit_tail_token=8"])
-        self.assertEqual(args.cache_commit_tail_tokens, 4096)
-        self.assertIn("--cache_commit_tail_token=8", remaining)
+        for option in ("--dp=2", "--max_seq=16", "--conc=2", "--cache_measure=2"):
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                parse_args([option])
+
+    def test_cache_grid_requires_batch_decode_scheduler(self):
+        remaining = []
+        _ensure_batch_decode_scheduler(remaining)
+        self.assertEqual(remaining, ["--use_batch_decode_scheduler", "1"])
+        for value in ("0", "false"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "require --use_batch_decode_scheduler=1"
+            ):
+                _ensure_batch_decode_scheduler(["--use_batch_decode_scheduler", value])
 
     def test_dsv4_profile_injects_model_identity_and_paths(self):
         profile = (
@@ -949,11 +1004,16 @@ class BatchDecodeTest(unittest.TestCase):
     def test_capture_reproduction_env_records_values_and_redacts_secrets(self):
         with patch.dict(
             "os.environ",
-            {"DSV4_CHUNK_TOKENS": "8192", "PRIVATE_TOKEN": "secret-value"},
+            {
+                "DSV4_CHUNK_TOKENS": "8192",
+                "DSV4_ENDPOINT": "https://user:password@example.invalid/model",
+                "PRIVATE_TOKEN": "secret-value",
+            },
             clear=False,
         ):
             captured = _capture_reproduction_env(["PRIVATE_TOKEN"])
         self.assertEqual(captured["DSV4_CHUNK_TOKENS"], "8192")
+        self.assertRegex(captured["DSV4_ENDPOINT"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(captured["PRIVATE_TOKEN"], "***")
 
     def test_test_info_records_resume_config_env_and_attempt_count(self):
@@ -1473,6 +1533,12 @@ class CacheGridProfileTest(unittest.TestCase):
     def wire(self, runner, *, bad_reuse=False, write_traces=True):
         events = []
         active = []
+        profile_reuse = iter(
+            int(case["cache_len"])
+            for case in runner.cases
+            if int(case["case_id"]) in runner.profile_case_ids
+            for _ in range(runner.profile_runs)
+        )
 
         def arm(url, json, timeout):
             self.assertTrue(url.endswith("/start_profile"))
@@ -1496,14 +1562,18 @@ class CacheGridProfileTest(unittest.TestCase):
                     (runner.result_dir / f"{active[-1]}_wr{rank}_1.json").write_text(
                         json.dumps({"traceEvents": [{"name": "kernel", "dur": 1}]})
                     )
-            cached = "seq16_cache8" in request_id
+            reuse_len = (
+                (0 if bad_reuse else next(profile_reuse))
+                if is_profile
+                else 8 if "seq16_cache8" in request_id else 0
+            )
             return {
                 "prefill_time_ms": 1000.0 if is_profile else 10.0,
                 "success": True,
                 "request_id": request_id,
                 "input_len": len(text.split()),
                 "output_len": 1,
-                "reuse_len": 0 if bad_reuse and is_profile else 8 if cached else 0,
+                "reuse_len": reuse_len,
                 "ttft_ms": 1000.0 if is_profile else 10.0,
             }
 
@@ -2315,6 +2385,34 @@ class CacheGridRunnerResumeGuardTest(unittest.TestCase):
                 payload["progress"]["next_pending_case"]["input_len"], 2048
             )
             self.assertEqual(payload["progress"]["next_pending_case"]["cache_len"], 512)
+
+    def test_save_redacts_credentials_from_profile_and_run_config(self):
+        secret = "https://user:password@example.invalid/model?token=secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CacheGridRunner(
+                0,
+                _WordTokenizer(),
+                [
+                    {
+                        "case_id": 0,
+                        "batch_size": 1,
+                        "input_len": 16,
+                        "cache_len": 0,
+                    }
+                ],
+                tmp,
+                profile={"engine": {"checkpoint_path": secret}},
+                run_config={
+                    "model": {"checkpoint_path": secret},
+                    "engine": {"environment": {"PRIVATE_TOKEN": "secret"}},
+                },
+            )
+            runner._save(complete=False)
+            encoded = (Path(tmp) / "cache_grid_results.json").read_text()
+        self.assertNotIn("password", encoded)
+        self.assertNotIn("token=secret", encoded)
+        self.assertNotIn('"PRIVATE_TOKEN": "secret"', encoded)
+        self.assertIn("sha256:", encoded)
 
 
 class MaterializedCaseStoreProfileTest(unittest.TestCase):

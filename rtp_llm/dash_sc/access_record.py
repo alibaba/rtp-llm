@@ -43,8 +43,8 @@ from rtp_llm.dash_sc.codec import (
     DashScRequestControls,
     SamplingParams,
     _lookup_ds_request_control,
+    _parse_input_ids_for_inference,
     parse_ds_header_attributes,
-    parse_input_ids_from_request,
     parse_request_controls,
     parse_sampling_params,
 )
@@ -646,7 +646,7 @@ class GrpcAccessRecord:
         self,
         request: predict_v2_pb2.ModelInferRequest | None,
         *,
-        input_ids: list[int] | None = None,
+        input_ids: Sequence[int] | None = None,
         sampling: SamplingParams | None = None,
         request_controls: DashScRequestControls | None = None,
     ) -> None:
@@ -664,16 +664,18 @@ class GrpcAccessRecord:
         if self.input_len is None:
             if input_ids is None:
                 try:
-                    input_ids = parse_input_ids_from_request(request)
+                    parsed_input_ids = _parse_input_ids_for_inference(request)
+                    input_ids = (
+                        parsed_input_ids.sequence
+                        if parsed_input_ids is not None
+                        else None
+                    )
                 except Exception:
                     input_ids = None
             if input_ids is not None:
                 self.input_len = len(input_ids)
                 self._repetition_monitor.set_input_ids(input_ids)
-                # Avoid retaining and serializing multi-megabyte token lists in
-                # access logs. Long-context cache-grid requests only need their
-                # length and repetition statistics here.
-                self.input_ids = list(input_ids) if len(input_ids) <= 4096 else None
+                self.input_ids = list(input_ids) if self.log_input_output else None
         if self.generate_config is None:
             try:
                 if sampling is None or request_controls is None:

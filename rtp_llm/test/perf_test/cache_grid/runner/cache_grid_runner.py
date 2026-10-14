@@ -57,6 +57,7 @@ from rtp_llm.test.perf_test.cache_grid.runner.result_schema import (
     run_prefill_rt,
 )
 from rtp_llm.test.perf_test.cache_grid.runner.scheduler import configure_scheduler
+from rtp_llm.test.perf_test.perf_utils import _sanitize_nested_provenance
 
 
 def profile_trace_name(session_id: str, case_key: str, run_index: int) -> str:
@@ -169,6 +170,7 @@ def resume_config_fingerprint(config: Dict[str, Any] | None) -> str | None:
     """Return a stable fingerprint for the model/workload configuration."""
     if config is None:
         return None
+    config = _sanitize_nested_provenance("run_config", config)
     canonical = json.dumps(
         config, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -838,7 +840,10 @@ def _post_prefill(
     started = time.perf_counter()
     try:
         response = (session or requests).post(
-            f"http://127.0.0.1:{port}", json=body, timeout=timeout
+            f"http://127.0.0.1:{port}",
+            json=body,
+            headers={"X-DashScope-LoggingConsent": "none"},
+            timeout=timeout,
         )
     except Exception as exc:
         return {
@@ -895,7 +900,11 @@ def _post_prefill_ids(stub, input_ids, timeout: int, request_id: str) -> Dict[st
             enable_thinking=False,
             force_sp_accept=True,
         )
-        responses = stub.ModelStreamInfer(iter((request,)), timeout=timeout)
+        responses = stub.ModelStreamInfer(
+            iter((request,)),
+            timeout=timeout,
+            metadata=(("x-dashscope-inner-loggingconsent", "none"),),
+        )
         values: Dict[str, Any] = {}
         output_len = 0
         for response in responses:
@@ -1098,10 +1107,10 @@ class CacheGridRunner:
         self.grid_metadata = grid_metadata or {}
         self.grid_sha256 = grid_sha256
         self.expected_block_size = expected_block_size
-        self.profile = profile
+        self.profile = _sanitize_nested_provenance("profile", profile)
         self.profile_sha256 = profile_sha256
-        self.run_config = run_config
-        self.run_config_sha256 = resume_config_fingerprint(run_config)
+        self.run_config = _sanitize_nested_provenance("run_config", run_config)
+        self.run_config_sha256 = resume_config_fingerprint(self.run_config)
         self.result_path = self.result_dir / "cache_grid_results.json"
         self.progress_path = self.result_dir / "cache_grid_progress.json"
         self.journal_path = self.result_dir / "cache_grid_results.journal.jsonl"

@@ -11,6 +11,11 @@ import time
 import uuid
 from pathlib import Path
 
+from rtp_llm.test.perf_test.cache_grid.config.grid_config import (
+    dedupe_cache_grid_cases,
+    load_cache_grid_cases,
+    resolve_cache_block_size,
+)
 from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
     is_sensitive_environment_name,
     load_profile,
@@ -141,16 +146,10 @@ def load_saved(directory):
 
 
 def load_cases(path):
-    from rtp_llm.test.perf_test.batch_decode_test import (
-        _dedupe_cache_grid_cases,
-        _load_cache_grid_cases,
-        _resolve_cache_block_size,
-    )
-
     payload = json.loads(path.read_text())
-    cases = _load_cache_grid_cases(str(path))
-    block = _resolve_cache_block_size(payload)
-    return payload, _dedupe_cache_grid_cases(cases, block)
+    cases = load_cache_grid_cases(str(path))
+    block = resolve_cache_block_size(payload)
+    return payload, dedupe_cache_grid_cases(cases, block)
 
 
 def build_plan(args, inherited=None):
@@ -175,10 +174,13 @@ def build_plan(args, inherited=None):
         or args.grid
         or args.runs is not None
         or args.env
+        or args.config
+        or args.output_base
+        or args.bazel
         or args.skip_reuse_validation
     ):
         raise ValueError(
-            "resume uses frozen configuration; profile/grid/runs/env overrides are forbidden"
+            "resume uses frozen configuration; launch overrides are forbidden"
         )
     if replay != bool(args.cases):
         raise ValueError("--cases is required only for retest/profile")
@@ -411,6 +413,9 @@ def build_plan(args, inherited=None):
         process_env=process_env,
         artifacts=artifacts,
         destination=dest,
+        reuse_existing_artifacts=bool(
+            getattr(args, "allow_restart_without_checkpoint", False)
+        ),
         summary=dict(
             mode=args.mode,
             planned_cases=len(cases),
@@ -435,7 +440,16 @@ def execute_plan(plan, *, allow_existing=True):
     dest = plan["destination"]
     dest.mkdir(parents=True, exist_ok=allow_existing)
     for name, content in plan["artifacts"].items():
-        with (dest / name).open("xb") as stream:
+        path = dest / name
+        if plan.get("reuse_existing_artifacts") and (
+            path.exists() or path.is_symlink()
+        ):
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+                raise ValueError(
+                    f"restart artifact differs from frozen launch configuration: {path}"
+                )
+            continue
+        with path.open("xb") as stream:
             stream.write(content)
     return subprocess.run(
         plan["command"], cwd=REPO, env=plan["process_env"], check=False

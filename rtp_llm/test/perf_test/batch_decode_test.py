@@ -17,13 +17,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rtp_llm.test.perf_test.cache_grid.config.grid_config import (
+    _dedupe_cache_grid_cases,
+    _load_cache_grid_cases,
+    _resolve_cache_block_size,
+)
 from rtp_llm.test.perf_test.cache_grid.config.perf_profile import profile_environment
 from rtp_llm.test.perf_test.cache_grid.runner.cache_grid_runner import (
     CacheGridRunner,
     MaterializedCaseStore,
     PrefixPromptFactory,
     is_grouped_case,
-    normalize_cache_case,
     resume_config_fingerprint,
     validate_cache_grid_resume,
 )
@@ -50,6 +54,7 @@ from rtp_llm.test.perf_test.perf_config import (
 from rtp_llm.test.perf_test.perf_utils import (
     _is_sensitive_name,
     _redact_argv,
+    _sanitize_nested_provenance,
     _sanitize_provenance_value,
     collect_timeline_files,
     filter_bs_by_kvcache,
@@ -107,38 +112,6 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 
-def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
-    """Load current explicit grids without generating or filling case fields."""
-    with open(path, encoding="utf-8") as stream:
-        config = json.load(stream)
-    _resolve_cache_block_size(config)
-    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
-        raise ValueError("cache grid requires schema_version=2")
-    if "cases" not in config:
-        raise ValueError("cache grid requires explicit cases")
-    raw_cases = config["cases"]
-    if not isinstance(raw_cases, list):
-        raise ValueError("cache grid cases must be a list")
-    cases: List[Dict[str, int]] = []
-    seen = set()
-    seen_ids = set()
-    for index, raw in enumerate(raw_cases):
-        if not isinstance(raw, dict):
-            raise ValueError(f"cache grid case {index} must be an object")
-        case = normalize_cache_case(raw)
-        key = CacheGridRunner.case_key(case)
-        if key in seen:
-            raise ValueError(f"duplicate cache grid case: {case}")
-        seen.add(key)
-        if case["case_id"] in seen_ids:
-            raise ValueError(f"duplicate cache grid case_id: {case['case_id']}")
-        seen_ids.add(case["case_id"])
-        cases.append(case)
-    if not cases:
-        raise ValueError(f"cache grid {path} contains no cases")
-    return cases
-
-
 _REPRODUCTION_ENV_NAMES = {
     "CUDA_VISIBLE_DEVICES",
     "LOCAL_WORLD_SIZE",
@@ -173,9 +146,9 @@ def _capture_reproduction_env(
     for name in sorted(requested):
         if name not in os.environ:
             continue
-        lowered = name.lower()
-        sensitive = _is_sensitive_name(lowered)
-        captured[name] = "***" if sensitive else os.environ[name]
+        captured[name] = _sanitize_provenance_value(
+            name, os.environ[name], allow_plaintext=True
+        )
     return captured
 
 
@@ -313,63 +286,6 @@ def _configure_cache_batch_limits(args, remaining, cases, *, cache_alignment=Non
         )
 
 
-def _resolve_cache_block_size(grid_payload: Any) -> int:
-    """Read the single authoritative cache alignment in the grid."""
-    if not isinstance(grid_payload, dict):
-        raise ValueError("cache grid must be a JSON object")
-    generator = grid_payload.get("generator")
-    if not isinstance(generator, dict):
-        raise ValueError("grid requires generator.cache_alignment")
-    sampling = generator.get("cache_sampling")
-    if "cache_block_size" in grid_payload or (
-        isinstance(sampling, dict) and "alignment" in sampling
-    ):
-        raise ValueError(
-            "cache alignment must only be configured at generator.cache_alignment"
-        )
-    value = generator.get("cache_alignment")
-    if type(value) is not int or value <= 0:
-        raise ValueError("generator.cache_alignment must be a positive integer")
-    return value
-
-
-def _dedupe_cache_grid_cases(
-    cases: List[Dict[str, int]], block_size: int
-) -> List[Dict[str, int]]:
-    """Collapse cases whose requested cache lengths share one physical bucket.
-
-    The engine reuses prefix KV only in whole block_size chunks, so requests
-    whose cache_len floors to the same block count measure the identical
-    geometry.  Keep one representative per bucket: prefer the aligned request
-    (its observed reuse then equals what it asked for), otherwise the largest
-    request in the bucket, which stays closest to the next boundary if the
-    block-size assumption is slightly off.
-    """
-    buckets: Dict[tuple, Dict[str, int]] = {}
-    order: List[tuple] = []
-    for case in cases:
-        if is_grouped_case(case):
-            key = (CacheGridRunner.case_key(case),)
-            if key not in buckets:
-                buckets[key] = case
-                order.append(key)
-            continue
-        key = (case["batch_size"], case["input_len"], case["cache_len"] // block_size)
-        kept = buckets.get(key)
-        if kept is None:
-            buckets[key] = case
-            order.append(key)
-        elif kept["cache_len"] % block_size and not case["cache_len"] % block_size:
-            buckets[key] = case
-        elif (
-            kept["cache_len"] % block_size
-            and case["cache_len"] % block_size
-            and case["cache_len"] > kept["cache_len"]
-        ):
-            buckets[key] = case
-    return [buckets[key] for key in order]
-
-
 def _load_materialized_case_store(
     root: str,
     cases: List[Dict[str, int]],
@@ -414,20 +330,6 @@ def _load_materialized_case_store(
             "materialization. Rerun --materialize_cache_cases."
         )
     return store
-
-
-def _sanitize_nested_provenance(name: str, value: Any) -> Any:
-    """Recursively remove credentials while retaining useful configuration shape."""
-    if isinstance(value, dict):
-        return {
-            key: _sanitize_nested_provenance(str(key), item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_sanitize_nested_provenance(name, item) for item in value]
-    if isinstance(value, str):
-        return _sanitize_provenance_value(name, value, allow_plaintext=True)
-    return value
 
 
 def _finalize_completed_cache_checkpoint(
@@ -644,6 +546,18 @@ def _ensure_xgrammar_lib_path() -> None:
                 )
                 logging.info(f"Added {xgrammar_dir} to LD_LIBRARY_PATH")
             return
+
+
+def _ensure_batch_decode_scheduler(remaining: List[str]) -> None:
+    """Require the scheduler used by fixed-batch cache-grid measurements."""
+    value = extract_arg(remaining, "use_batch_decode_scheduler")
+    if value is None:
+        remaining.extend(["--use_batch_decode_scheduler", "1"])
+        return
+    if str(value).lower() not in ("1", "true"):
+        raise ValueError(
+            "cache-grid measurements require --use_batch_decode_scheduler=1"
+        )
 
 
 def _prepare_cache_profile_result_dir(args):
@@ -980,9 +894,7 @@ def main() -> str:
     _ensure_xgrammar_lib_path()
     _apply_run_overrides(args)
     remaining = resolve_perf_engine_paths(remaining)
-    # batch_decode_test always needs BatchDecodeScheduler
-    if extract_arg(remaining, "use_batch_decode_scheduler") is None:
-        remaining.extend(["--use_batch_decode_scheduler", "1"])
+    _ensure_batch_decode_scheduler(remaining)
     generate_config = json.loads(args.generate_config)
     if args.cache_profile_runs and args.dp_size != 1:
         raise ValueError(

@@ -94,7 +94,7 @@ class WorkspaceBudgetTest(unittest.TestCase):
                     args = argparse.Namespace(
                         cache_workspace_tokens=65536,
                         dp_size=1,
-                        concurrency_limit=1,
+                        concurrency_limit=4,
                         max_seq_len=8192,
                         cache_shared_seed=False,
                         cache_commit_tail_tokens=1024,
@@ -115,7 +115,7 @@ class WorkspaceBudgetTest(unittest.TestCase):
                     self.assertEqual(
                         extract_arg(remaining, "max_batch_tokens_size"), "65536"
                     )
-                    self.assertEqual(args.concurrency_limit, 1)
+                    self.assertEqual(args.concurrency_limit, 4)
                     with self.assertRaisesRegex(ValueError, "padded token sum"):
                         _configure_cache_batch_limits(
                             args,
@@ -143,7 +143,7 @@ class WorkspaceBudgetTest(unittest.TestCase):
         args = argparse.Namespace(
             cache_workspace_tokens=65536,
             dp_size=1,
-            concurrency_limit=1,
+            concurrency_limit=4,
             max_seq_len=8192,
             cache_shared_seed=False,
             cache_commit_tail_tokens=1024,

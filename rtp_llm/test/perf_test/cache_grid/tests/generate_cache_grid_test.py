@@ -182,6 +182,38 @@ class GenerateFixedCacheSweepTest(unittest.TestCase):
         )
         self.assertEqual(plan["generator"]["commit_tail_tokens"], 4096)
 
+    def test_explicit_cache_slice_must_leave_commit_tail(self):
+        with self.assertRaisesRegex(ValueError, "commit-tail-tokens"):
+            build_grid(
+                self._args(
+                    max_input_len=22528,
+                    fixed_cache_len=[0, 20480],
+                    compute_step=2048,
+                    min_compute_len=2048,
+                )
+            )
+
+    def test_random_cache_slices_all_leave_commit_tail(self):
+        plan = build_grid(
+            self._args(
+                max_input_len=22528,
+                fixed_cache_len=None,
+                random_cache_count=5,
+                compute_step=2048,
+                min_compute_len=2048,
+            )
+        )
+        cache_lengths = plan["generator"]["cache_sampling"]["values"]
+        self.assertEqual(cache_lengths, [0, 4096, 8192, 12288, 16384])
+        self.assertEqual(plan["summary"]["cache_count"], len(cache_lengths))
+        self.assertEqual(
+            cache_lengths,
+            sorted({case["cache_len"] for case in plan["cases"]}),
+        )
+        self.assertTrue(
+            all(not value or value + 4096 <= 22528 for value in cache_lengths)
+        )
+
     def test_compute_steps_run_coarse_to_fine_without_duplicates(self):
         plan = build_grid(
             self._args(

@@ -166,6 +166,9 @@ def run(args):
         or args.grid_dir
         or args.env
         or args.runs is not None
+        or args.config
+        or args.output_base
+        or args.bazel
         or args.skip_reuse_validation
     ):
         raise ValueError(
@@ -238,7 +241,11 @@ def run(args):
             local.grid = Path(entry["grid_json"])
         inherited = None
         if multi and state.get("inherited_environment") is not None:
-            inherited = {k: v for k, v in os.environ.items() if not cli.managed_env(k)}
+            inherited = {
+                k: v
+                for k, v in os.environ.items()
+                if not cli.managed_env(k) or cli.is_sensitive_environment_name(k)
+            }
             inherited.update(state["inherited_environment"])
         plan = cli.build_plan(local, inherited)
         launches.append((entry, plan))

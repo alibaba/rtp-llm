@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -311,6 +312,19 @@ class CachePerfPipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "launch overrides"):
             cli.run_pipeline(args)
 
+    def test_resume_rejects_unfrozen_launch_overrides(self):
+        for option in (
+            "--config=cuda12",
+            "--output-base=/tmp/bazel",
+            "--bazel=bazelisk",
+        ):
+            with self.subTest(option=option):
+                args = cli.parser().parse_args(
+                    self.argv("--test-mode=resume", option, launch=False)
+                )
+                with self.assertRaisesRegex(ValueError, "launch overrides"):
+                    cli.run_pipeline(args)
+
     def test_multi_grid_merge_and_completed_resume(self):
         grids = self.root / "grids"
         grids.mkdir()
@@ -489,6 +503,70 @@ class CachePerfPipelineTest(unittest.TestCase):
         self.assertIn("--test_arg=--require_cache_resume", commands[0])
         self.assertNotIn("--test_arg=--require_cache_resume", commands[1])
         self.assertIn("--test_arg=--cache_measure_runs=4", commands[1])
+
+    def test_multi_grid_resume_reuses_launch_artifacts_and_reinjects_credentials(self):
+        grids = self.root / "grids"
+        grids.mkdir()
+        for name in ("a", "b"):
+            (grids / f"{name}.json").write_bytes(self.grid.read_bytes())
+        argv = ["pipeline", "--result-root", str(self.result), "--skip-fit"]
+        original = cli.execute_plan
+
+        def interrupted(plan):
+            with patch.object(
+                cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 7)
+            ):
+                return original(plan)
+
+        with patch.dict(
+            os.environ, {"CACHE_API_TOKEN": "initial-secret"}
+        ), patch.object(cli, "execute_plan", side_effect=interrupted):
+            self.assertEqual(
+                cli.main(
+                    argv
+                    + [
+                        "--profile",
+                        str(self.profile),
+                        "--grid-dir",
+                        str(grids),
+                    ]
+                ),
+                7,
+            )
+
+        first = self.result / "a"
+        self.assertTrue((first / cli.MANIFEST).is_file())
+        self.assertFalse((first / "cache_grid_results.json").exists())
+        self.assertNotIn(
+            "initial-secret", (self.result / "batch_runs.json").read_text()
+        )
+        commands = []
+
+        def resumed(plan):
+            self.assertEqual(plan["process_env"]["CACHE_API_TOKEN"], "rotated-secret")
+            self.assertIn("--test_env=CACHE_API_TOKEN", plan["command"])
+            commands.append(plan["command"])
+            with patch.object(
+                cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ):
+                code = original(plan)
+            (plan["destination"] / "cache_grid_results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "mode": "prefix_cache_grid",
+                        "complete": True,
+                        "metrics": [grouped_metric()],
+                    }
+                )
+            )
+            return code
+
+        with patch.dict(
+            os.environ, {"CACHE_API_TOKEN": "rotated-secret"}
+        ), patch.object(cli, "execute_plan", side_effect=resumed):
+            self.assertEqual(cli.main(argv + ["--test-mode", "resume"]), 0)
+        self.assertEqual(len(commands), 2)
 
     def test_different_models_cannot_be_merged(self):
         from rtp_llm.test.perf_test.cache_grid.runner.unified_pipeline import (

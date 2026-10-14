@@ -229,17 +229,34 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
 
     min_cache_len = getattr(args, "min_cache_len", 0)
     requested_max_cache = getattr(args, "max_cache_len", None)
-    largest_usable_cache = args.max_input_len - min_compute_len
+    cached_compute_floor = max(min_compute_len, commit_tail_tokens)
+    largest_usable_cache = args.max_input_len - cached_compute_floor
+    # A zero-cache slice does not seed a prefix and therefore needs no commit
+    # tail. Keep that cold slice available even when no positive cache fits.
+    if min_cache_len == 0:
+        largest_usable_cache = max(0, largest_usable_cache)
     max_cache_len = (
         largest_usable_cache if requested_max_cache is None else requested_max_cache
     )
     if max_cache_len > largest_usable_cache:
         raise ValueError(
-            "--max-cache-len must leave room for --min-compute-len under "
-            "--max-input-len"
+            "--max-cache-len must leave room for the cached compute floor "
+            "max(--min-compute-len, --commit-tail-tokens) under --max-input-len"
+        )
+    explicit_cache_lengths = list(getattr(args, "fixed_cache_len", None) or [])
+    invalid_explicit = [
+        value
+        for value in explicit_cache_lengths
+        if value > 0 and value > largest_usable_cache
+    ]
+    if invalid_explicit:
+        raise ValueError(
+            f"fixed cache length {invalid_explicit[0]} must leave room for the "
+            "cached compute floor max(--min-compute-len, "
+            "--commit-tail-tokens) under --max-input-len"
         )
     cache_lengths = generate_fixed_cache_lengths(
-        explicit=list(getattr(args, "fixed_cache_len", None) or []),
+        explicit=explicit_cache_lengths,
         random_count=getattr(args, "random_cache_count", None),
         minimum=min_cache_len,
         maximum=max_cache_len,
@@ -251,9 +268,7 @@ def build_fixed_cache_sweep(args: argparse.Namespace) -> dict[str, Any]:
     seen = set()
     for cache_len in cache_lengths:
         max_compute_len = args.max_input_len - cache_len
-        first_compute_len = (
-            max(min_compute_len, commit_tail_tokens) if cache_len else min_compute_len
-        )
+        first_compute_len = cached_compute_floor if cache_len else min_compute_len
         for refinement_level, compute_step in enumerate(compute_steps):
             for compute_len in range(
                 first_compute_len, max_compute_len + 1, compute_step

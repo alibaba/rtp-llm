@@ -219,16 +219,27 @@ def parse_args(
 
     parsed_argv = sys.argv[1:] if argv is None else argv
     args, remaining = parser.parse_known_args(parsed_argv)
+    _reject_perf_option_abbreviations(parser, remaining)
     # Treat shorthand engine arguments as explicit CLI arguments before profile
     # defaults are merged.  This both preserves CLI precedence and prevents a
     # profile value for the same key from being forwarded alongside it.
-    remaining.extend(_engine_arg_argv(args.engine_arg))
+    forwarded_engine_args, namespace_overrides = _split_engine_arg_overrides(
+        parser, args.engine_arg
+    )
+    remaining.extend(forwarded_engine_args)
+    for name, value in namespace_overrides.items():
+        setattr(args, name, value)
     if any(arg.split("=", 1)[0] == "--expected_cache_block_size" for arg in remaining):
         parser.error(
             "--expected_cache_block_size was removed; set "
             "grid.generator.cache_alignment"
         )
-    explicit_options = {item.split("=", 1)[0] for item in parsed_argv}
+    explicit_names = {
+        item.split("=", 1)[0].lstrip("-").replace("-", "_")
+        for item in parsed_argv
+        if item.startswith("--")
+    }
+    explicit_names.update(namespace_overrides)
     if args.cache_profile_runs < 0 or args.cache_profile_trace_timeout <= 0:
         parser.error(
             "cache profile runs must be non-negative and trace timeout positive"
@@ -267,7 +278,7 @@ def parse_args(
             "measure_runs",
             (
                 args.cache_measure_runs
-                if "--cache_measure_runs" in explicit_options
+                if "cache_measure_runs" in explicit_names
                 else None
             ),
             3,
@@ -278,7 +289,7 @@ def parse_args(
             "commit_tail_tokens",
             (
                 args.cache_commit_tail_tokens
-                if "--cache_commit_tail_tokens" in explicit_options
+                if "cache_commit_tail_tokens" in explicit_names
                 else None
             ),
             int(os.environ.get("CACHE_COMMIT_TAIL_TOKENS", "4096")),
@@ -296,11 +307,7 @@ def parse_args(
                         profile,
                         "engine",
                         name,
-                        (
-                            getattr(args, name)
-                            if f"--{name}" in explicit_options
-                            else None
-                        ),
+                        (getattr(args, name) if name in explicit_names else None),
                         fallback,
                     ),
                 )
@@ -331,6 +338,52 @@ def _engine_arg_argv(engine_args: List[str]) -> List[str]:
         name, value = _parse_name_value(item, "--engine_arg")
         result.extend([f"--{name}", value])
     return result
+
+
+_ENGINE_NAMESPACE_INT_OPTIONS = {"dp_size", "max_seq_len", "concurrency_limit"}
+
+
+def _split_engine_arg_overrides(
+    parser: argparse.ArgumentParser, engine_args: List[str]
+) -> Tuple[List[str], Dict[str, int]]:
+    """Separate perf-owned engine options from arguments forwarded to the server."""
+    forwarded: List[str] = []
+    overrides: Dict[str, int] = {}
+    for item in engine_args:
+        name, value = _parse_name_value(item, "--engine_arg")
+        normalized = name.replace("-", "_")
+        if normalized not in _ENGINE_NAMESPACE_INT_OPTIONS:
+            forwarded.extend([f"--{name}", value])
+            continue
+        try:
+            overrides[normalized] = int(value)
+        except ValueError:
+            parser.error(f"--engine_arg {name} requires an integer, got {value!r}")
+    return forwarded, overrides
+
+
+def _reject_perf_option_abbreviations(
+    parser: argparse.ArgumentParser, remaining: List[str]
+) -> None:
+    """Reject unknown tokens that are prefixes of perf-owned long options."""
+    known = {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    }
+    for item in remaining:
+        if not item.startswith("--"):
+            continue
+        option = item.split("=", 1)[0]
+        matches = sorted(
+            candidate for candidate in known if candidate.startswith(option)
+        )
+        if matches:
+            parser.error(
+                f"abbreviated perf option {option!r} is not supported; "
+                f"use one of: {', '.join(matches)}"
+            )
 
 
 def _apply_engine_env(engine_env: List[str]) -> List[str]:
