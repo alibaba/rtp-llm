@@ -107,6 +107,17 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void routesBeforeMediaHashesExistAndRevalidatesSelectedWorker() {
+        var ctx = context();
+        ctx.getRequest().setVitRouteOnly(true);
+        var selected = selector.select(ctx, "two");
+        assertTrue(selected.isSuccess());
+        assertEquals(b.getIp(), selected.getServerIp());
+        ctx.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(ctx, "two").isSuccess());
+    }
+
+    @Test
     void workerRestartInvalidatesColdKeyPlacements() {
         snapshot(a, "a1");
         snapshot(b, "b1");
