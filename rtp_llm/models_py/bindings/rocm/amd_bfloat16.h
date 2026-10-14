@@ -2,7 +2,7 @@
 
 #include <hip/hip_bf16.h>
 
-#include "rocm/include/rocm-core/rocm_version.h"
+#include <rocm-core/rocm_version.h>
 
 #define ROCM_VERSION (ROCM_VERSION_MAJOR * 10000 + ROCM_VERSION_MINOR * 100 + ROCM_VERSION_PATCH)
 

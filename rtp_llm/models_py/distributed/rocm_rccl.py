@@ -11,6 +11,8 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import sys
+import threading
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -59,6 +61,22 @@ _is_rocm_runtime: bool = getattr(torch.version, "hip", None) is not None
 # this global must be guarded by an explicit lock or replaced with thread-local storage.
 _HipgraphAllGatherCacheKey = Tuple[Tuple[int, ...], torch.dtype, str, int]
 _hipgraph_allgather_outputs: Dict[_HipgraphAllGatherCacheKey, torch.Tensor] = {}
+_aiter_capture_state = threading.local()
+
+
+def _get_aiter_custom_ar_capture():
+    """Use AITER's registered-buffer path when its TP group is initialized.
+
+    RTP owns the HIP Graph stream, so only enter the custom all-reduce buffer
+    registration context; AITER's higher-level graph_capture() would switch
+    streams and conflict with RTP's active capture.
+    """
+    parallel_state = sys.modules.get("aiter.dist.parallel_state")
+    group = getattr(parallel_state, "_TP", None)
+    communicator = getattr(getattr(group, "device_communicator", None), "ca_comm", None)
+    if communicator is None or communicator.disabled:
+        return None
+    return communicator.capture()
 
 
 class _NcclUniqueId(ctypes.Structure):
@@ -435,6 +453,12 @@ def enter_hipgraph_capture_mode(
     """
     if nccl_comm_handle != 0 and world_size > 1:
         set_hipgraph_capture_nccl_comm(nccl_comm_handle, world_size, rank)
+    if getattr(_aiter_capture_state, "context", None) is not None:
+        raise RuntimeError("nested AITER custom all-reduce graph capture")
+    context = _get_aiter_custom_ar_capture()
+    if context is not None:
+        context.__enter__()
+        _aiter_capture_state.context = context
     # Keep previously registered comm when no valid handle is provided.
     # C++ registration path is responsible for explicit clear via
     # set_hipgraph_capture_nccl_comm(0, 0, rank) when needed.
@@ -446,7 +470,10 @@ def exit_hipgraph_capture_mode() -> None:
     consume_capture is deferred to finish_hipgraph_capture_session() to
     avoid ProcessGroupNCCL watchdog hipErrorCapturedEvent races.
     """
-    return
+    context = getattr(_aiter_capture_state, "context", None)
+    if context is not None:
+        _aiter_capture_state.context = None
+        context.__exit__(None, None, None)
 
 
 def finish_hipgraph_capture_session() -> None:
