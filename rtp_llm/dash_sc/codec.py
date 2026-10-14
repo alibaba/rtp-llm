@@ -872,6 +872,7 @@ class OtherParams:
     """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
 
     return_input_ids: bool = False
+    can_use_pd_separation: bool = True
     enable_thinking: bool | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
@@ -940,6 +941,9 @@ class SamplingParams:
                 )
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
+            can_use_pd_separation=(
+                other.can_use_pd_separation if other is not None else True
+            ),
             num_return_sequences=self.num_return_sequences,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -1173,6 +1177,10 @@ def parse_other_params(
     if enable_thinking is None:
         enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
 
+    can_use_pd_separation = _parse_optional_parameter_bool(
+        request, "can_use_pd_separation"
+    )
+
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
         max_new_think_tokens = _parse_optional_parameter_int(
@@ -1222,6 +1230,9 @@ def parse_other_params(
 
     return OtherParams(
         return_input_ids=return_input_ids,
+        can_use_pd_separation=(
+            can_use_pd_separation if can_use_pd_separation is not None else True
+        ),
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,
