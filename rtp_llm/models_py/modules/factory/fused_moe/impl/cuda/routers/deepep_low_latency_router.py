@@ -212,6 +212,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             a1, topk_ids, topk_weights
         )
 
+        self.record_expert_load(tp_topk_ids)
+
         # Prepare dispatch basic arguments
         dispatch_args = {
             "x": tp_dispatch_input,

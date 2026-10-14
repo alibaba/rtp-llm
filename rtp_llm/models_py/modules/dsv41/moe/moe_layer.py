@@ -307,6 +307,11 @@ class MoE(nn.Module):
             return
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids)
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(indices, counts)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
@@ -423,6 +428,11 @@ class MoE(nn.Module):
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(indices, counts)
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)

@@ -140,6 +140,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
 
+        self.record_expert_load(topk_ids)
         a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
 
         a1_full = all_gather(a1, group=Group.DP_AND_TP)

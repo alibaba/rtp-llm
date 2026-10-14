@@ -235,6 +235,7 @@ cc_library(
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda/kernels:expert_load",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"

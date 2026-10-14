@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/DeviceInputMode.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
@@ -389,7 +390,14 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_ou
 
 bool MtpExecutor::useDeviceInput() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled");
+        const bool  on           = deviceInputEnabled();
+        const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
+        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_STREAM_ASYNC=%s RTP_LLM_DEVICE_INPUT=%s -> enabled=%d",
+                         stream_async ? stream_async : "(unset)",
+                         device_input ? device_input : "(unset)",
+                         static_cast<int>(on));
+        return on;
     }();
     return enabled;
 }
@@ -828,6 +836,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    if (!warm_up_) {
+        model_init_params.eplb_monitor_config = params.eplb_config;
+    }
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;

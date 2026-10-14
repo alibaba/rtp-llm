@@ -130,6 +130,14 @@ class FusedMoeDataRouter(ABC):
         # Keep the legacy field for router-local logic. Callers that need the
         # size of the Group.TP collective must use tp_collective_size below.
         self.tp_size = config.tp_size
+        self._expert_load_counts: Optional[torch.Tensor] = None
+
+    def record_expert_load(self, topk_ids: torch.Tensor) -> None:
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(topk_ids, counts)
 
     @property
     def tp_collective_size(self) -> int:

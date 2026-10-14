@@ -173,6 +173,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     cout << "ExpertBalancer constructed with " << log_exp_num << " logical experts" << endl;
     printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
     eplb_control_data_ = eplb_config;
+    monitor_metrics_enabled_ = eplb_config.eplb_metrics_report_interval > 0;
 
     // init memory
     stats_.init(num_layers, log_exp_num, ep_size_);
@@ -225,6 +226,16 @@ void ExpertBalancer::syncController() {
 }
 
 void ExpertBalancer::reportStats(OverallExpertStats& stats) {
+    if (monitor_metrics_enabled_) {
+        // The independent monitor owns load reporting and its window D2H.
+        // Keep weight-update events without the legacy per-forward load copy.
+        if (metrics_reporter_ && executor_collector_.update_weights_qps
+            && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
+            executor_collector_.gpu_loads.clear();
+            metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
+        }
+        return;
+    }
     if (metrics_reporter_
         && eplb_control_data_.checkEplbMode(eplb_control_data_.eplb_mode, EplbMode::STATS, EplbMode::ALL)) {
         int layer_num = stats.layer_num;
@@ -380,6 +391,8 @@ void ExpertBalancer::loadPlanWeights() {
 }
 
 void ExpertBalancer::applyPlanWeights(ModelBase& model) {
+    // applyPlanWeights is reached after the existing all-rank readiness check.
+    model.beforeExpertMappingChange();
     auto& result         = eplb_plan_buffers_;
     auto& balanced_layer = model.weights_.layers[result.layer_id].ffn_weights;
 

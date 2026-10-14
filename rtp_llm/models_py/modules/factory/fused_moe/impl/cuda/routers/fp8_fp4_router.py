@@ -38,6 +38,7 @@ class Fp8Fp4Router(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         if a1_scale is not None or a2_scale is not None:
             raise ValueError("FP8/FP4 MoE quantizes activations inside its executor")
+        self.record_expert_load(topk_ids)
         return ExpertForwardPayload(
             expert_x=a1,
             expert_x_origin_dtype=a1.dtype,

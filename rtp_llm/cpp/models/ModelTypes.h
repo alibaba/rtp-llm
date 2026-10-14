@@ -76,6 +76,8 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    // Main-model monitoring only. Draft wrappers may share one Python object.
+    EPLBConfig eplb_monitor_config;
 };
 
 enum GptModelInputIndex : size_t {
@@ -205,6 +207,7 @@ public:
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual void                       beforeExpertMappingChange() {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

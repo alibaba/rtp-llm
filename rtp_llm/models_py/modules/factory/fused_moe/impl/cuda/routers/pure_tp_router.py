@@ -103,6 +103,8 @@ class PureTpRouterBase(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
+        self.record_expert_load(topk_ids)
+
         # Apply quantization
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
         expert_x, expert_x_scale = self._do_quant(a1)

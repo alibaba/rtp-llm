@@ -44,7 +44,10 @@ std::string EPLBConfig::to_string() const {
         << "  eplb_stats_window_size: " << eplb_stats_window_size << "\n"
         << "  eplb_control_step: " << eplb_control_step << "\n"
         << "  eplb_test_mode: " << eplb_test_mode << "\n"
-        << "  eplb_balance_layer_per_step: " << eplb_balance_layer_per_step;
+        << "  eplb_balance_layer_per_step: " << eplb_balance_layer_per_step << "\n"
+        << "  eplb_metrics_report_interval: " << eplb_metrics_report_interval << "\n"
+        << "  eplb_metrics_snapshot_dir: " << eplb_metrics_snapshot_dir << "\n"
+        << "  eplb_metrics_snapshot_max_files: " << eplb_metrics_snapshot_max_files;
     return oss.str();
 }
 

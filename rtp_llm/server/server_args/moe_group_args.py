@@ -172,6 +172,30 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="负载均衡的统计窗口大小",
     )
     moe_group.add_argument(
+        "--eplb_metrics_report_interval",
+        env_name="EPLB_METRICS_REPORT_INTERVAL",
+        bind_to=(eplb_config, "eplb_metrics_report_interval"),
+        type=int,
+        default=0,
+        help="每 W 次模型 forward 汇报专家激活量，0 关闭；独立于 EPLB_MODE，启动后固定。",
+    )
+    moe_group.add_argument(
+        "--eplb_metrics_snapshot_dir",
+        env_name="EPLB_METRICS_SNAPSHOT_DIR",
+        bind_to=(eplb_config, "eplb_metrics_snapshot_dir"),
+        type=str,
+        default="logs/eplb_monitor",
+        help="专家激活量窗口快照目录。",
+    )
+    moe_group.add_argument(
+        "--eplb_metrics_snapshot_max_files",
+        env_name="EPLB_METRICS_SNAPSHOT_MAX_FILES",
+        bind_to=(eplb_config, "eplb_metrics_snapshot_max_files"),
+        type=int,
+        default=10,
+        help="每个模型实例保留的专家激活量窗口快照数，重启后的新实例独立计数。",
+    )
+    moe_group.add_argument(
         "--masked_max_token_num",
         env_name="MASKED_MAX_TOKEN_NUM",
         bind_to=(moe_config, "masked_max_token_num"),

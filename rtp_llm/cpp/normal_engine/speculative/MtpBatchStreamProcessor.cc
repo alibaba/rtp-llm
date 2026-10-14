@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/DeviceInputMode.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -356,10 +357,12 @@ bool shouldLogFallback(uint64_t count) {
 
 bool useMtpDeviceInput() {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
-        bool        on  = (env != nullptr && std::string(env) == "1");
-        RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_DEVICE_INPUT=%s -> processor enabled=%d",
-                         env ? env : "(unset)",
+        const bool  on           = deviceInputEnabled();
+        const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
+        RTP_LLM_LOG_INFO("[mtp-device-input processor] RTP_LLM_STREAM_ASYNC=%s RTP_LLM_DEVICE_INPUT=%s -> enabled=%d",
+                         stream_async ? stream_async : "(unset)",
+                         device_input ? device_input : "(unset)",
                          static_cast<int>(on));
         return on;
     }();

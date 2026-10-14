@@ -152,6 +152,7 @@ private:
 
     EplbController eplb_controller_;
     EPLBConfig     eplb_control_data_;
+    bool           monitor_metrics_enabled_ = false;
 
     RtpLLmEplbMetricsCollector   executor_collector_;
     kmonitor::MetricsReporterPtr metrics_reporter_;

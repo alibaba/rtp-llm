@@ -81,6 +81,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
             a1_scale is None and a2_scale is None
         ), "BatchedDataRouter does not support quantized MoE"
 
+        self.record_expert_load(topk_ids)
         num_tokens = a1.size(0)
         num_experts = self.num_local_experts
         token_ids = torch.arange(num_tokens, device=a1.device, dtype=torch.int32)

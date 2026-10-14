@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/DeviceInputMode.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -67,11 +68,6 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
 
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
-    return env != nullptr && std::string(env) == "1";
-}
-
-bool deviceInputEnabled() {
-    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
     return env != nullptr && std::string(env) == "1";
 }
 
@@ -481,9 +477,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
-                                   && stream_groups.totalContextBatchSize() == 0
+    bool use_normal_device_state = deviceInputEnabled() && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {

@@ -495,6 +495,11 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(buf.topk_idx[:tokens], counts)
         self._launch(y, tokens, x.device)
         return y
 

@@ -167,6 +167,7 @@ cc_library(
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
         ":model_inputs_logger",
+        ":expert_load_monitor",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
@@ -201,6 +202,30 @@ cc_library(
 )
 
 # Expert statistics - monitoring component
+cc_library(
+    name = "expert_load_monitor",
+    hdrs = ["eplb/ExpertLoadMonitor.h"],
+    srcs = ["eplb/ExpertLoadMonitor.cc"],
+    deps = [
+        ":expert_load_metrics",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "expert_load_metrics",
+    hdrs = ["eplb/ExpertLoadMetrics.h"],
+    srcs = ["eplb/ExpertLoadMetrics.cc"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "stats",
     hdrs = [

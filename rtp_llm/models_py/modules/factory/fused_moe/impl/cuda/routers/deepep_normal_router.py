@@ -114,6 +114,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             torch.int64
         )
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        self.record_expert_load(tp_expert_ids)
 
         (
             num_tokens_per_rank,

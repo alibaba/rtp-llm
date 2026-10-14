@@ -378,6 +378,11 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             tokens,
             block_m,
         )
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(buf.topk_idx[:tokens], counts)
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]

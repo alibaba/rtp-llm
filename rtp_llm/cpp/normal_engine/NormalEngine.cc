@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/DeviceInputMode.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -70,14 +71,6 @@ bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const
 
 bool cacheStatusSnapshotEnabled() {
     const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
-// Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
-// (RTP_LLM_DEVICE_INPUT == "1"); the guard below rejects combinations that
-// the executor's device-input path cannot handle.
-bool deviceInputEnabled() {
-    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
@@ -190,8 +183,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // publishNormalDeviceState stores sampler token ids as the next step's device
         // input without restoration; under pruning those are compact ids, which would
         // be fed to the embedding lookup as-is. Reject until that path restores them.
-        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
-                                "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+        RTP_LLM_CHECK_WITH_INFO(
+            !deviceInputEnabled(),
+            "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT or RTP_LLM_STREAM_ASYNC)");
         const auto& output_vocab_ids = model_config_.output_vocab_ids;
         RTP_LLM_CHECK_WITH_INFO(std::is_sorted(output_vocab_ids.begin(), output_vocab_ids.end())
                                     && std::adjacent_find(output_vocab_ids.begin(), output_vocab_ids.end())

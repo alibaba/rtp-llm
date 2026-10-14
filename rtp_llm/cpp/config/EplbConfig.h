@@ -21,6 +21,10 @@ struct EPLBConfig {
     int              eplb_control_step = 100;
     bool             eplb_test_mode = false;
     int              eplb_balance_layer_per_step = 1;
+    // Independent of eplb_mode. Fixed before graph capture; 0 disables collection.
+    int         eplb_metrics_report_interval    = 0;
+    std::string eplb_metrics_snapshot_dir       = "logs/eplb_monitor";
+    int         eplb_metrics_snapshot_max_files = 10;
     template<typename... CheckModes>
     bool checkEplbMode(EplbMode mode, CheckModes... modes) {
         return ((mode == modes) || ...);

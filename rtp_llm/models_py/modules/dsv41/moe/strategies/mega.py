@@ -590,6 +590,11 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
+        counts = getattr(self, "_expert_load_counts", None)
+        if counts is not None:
+            from rtp_llm.models_py.utils.expert_load_monitor import record_expert_load
+
+            record_expert_load(buf.topk_idx[:T], counts)
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device

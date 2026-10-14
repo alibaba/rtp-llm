@@ -108,6 +108,7 @@ class PureCpRouterBase(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
 
+        self.record_expert_load(topk_ids)
         a1_full = all_gather(a1, group=Group.TP)
         topk_weights_full = all_gather(topk_weights, group=Group.TP)
         topk_ids_full = all_gather(topk_ids, group=Group.TP)

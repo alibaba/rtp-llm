@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/eplb/ExpertLoadMonitor.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -93,6 +94,7 @@ public:
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    void                       beforeExpertMappingChange() override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
@@ -160,6 +162,7 @@ private:
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
 
+    std::unique_ptr<ExpertLoadMonitor> expert_load_monitor_;
     std::unique_ptr<GraphBase> graph_runner_;
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
@@ -357,6 +360,28 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    RTP_LLM_CHECK_WITH_INFO(params.eplb_monitor_config.eplb_metrics_report_interval >= 0,
+                            "EPLB_METRICS_REPORT_INTERVAL must be non-negative");
+    if (params.eplb_monitor_config.eplb_metrics_report_interval > 0 && description_.ffn_conf.moe_configs.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.pp_size == 1,
+                                "expert load monitoring does not support pipeline parallel model partitions");
+        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate,
+                                "expert load monitoring does not support disaggregated FFN execution");
+        const auto& moe      = description_.ffn_conf.moe_configs.value();
+        expert_load_monitor_ = std::make_unique<ExpertLoadMonitor>(layer_num_,
+                                                                   moe.expert_num + moe.extra_expert_num,
+                                                                   params.parallelism_config,
+                                                                   params.eplb_monitor_config,
+                                                                   model_id_,
+                                                                   params.metrics_reporter);
+    }
+    const auto bind_load_monitor = [&]() {
+        if (expert_load_monitor_) {
+            py::module_::import("rtp_llm.models_py.utils.expert_load_monitor")
+                .attr("bind_expert_load_monitor")(py_model_, expert_load_monitor_->stepCounts());
+        }
+    };
+    bind_load_monitor();
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
@@ -479,6 +504,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         auto py_initialize_method = py_instance.attr("initialize");
         try {
             py_init_result = py_initialize_method(init_resources);
+            // initialize may replace deferred MoE layers. Rebind the same
+            // persistent storage before any captured kernel can reference it.
+            bind_load_monitor();
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -593,6 +621,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     auto py_init_success = py_init_result.cast<bool>();
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
+    }
+    if (expert_load_monitor_) {
+        // Capture warmups and validation replays execute the histogram too.
+        // initCapture drains its capture stream before this reset.
+        expert_load_monitor_->beginStep(/*warmup=*/true);
+        expert_load_monitor_->finishStep();
     }
 
     cache_store_async_writer_ =

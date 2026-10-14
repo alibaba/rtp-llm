@@ -85,6 +85,29 @@ private:
     bool                                   track_store_completions_{false};
 };
 
+class ExpertLoadStepGuard {
+public:
+    ExpertLoadStepGuard(ExpertLoadMonitor* monitor, bool warmup): monitor_(monitor) {
+        if (monitor_) {
+            monitor_->beginStep(warmup);
+        }
+    }
+    ~ExpertLoadStepGuard() {
+        if (monitor_) {
+            monitor_->abortStep();
+        }
+    }
+    void finish() {
+        if (monitor_) {
+            monitor_->finishStep();
+            monitor_ = nullptr;
+        }
+    }
+
+private:
+    ExpertLoadMonitor* monitor_;
+};
+
 }  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -172,6 +195,12 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
 
 bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
+}
+
+void PyWrappedModel::beforeExpertMappingChange() {
+    if (expert_load_monitor_) {
+        expert_load_monitor_->beforeMappingChange();
+    }
 }
 
 PyWrappedModel::~PyWrappedModel() {
@@ -992,6 +1021,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    ExpertLoadStepGuard expert_load_step(expert_load_monitor_.get(), inputs.warmup);
+
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
     }
@@ -1022,7 +1053,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool has_multimodal_features =
             inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
         if (int(device_props_.enable_layer_micro_batch) && supports_micro_batch_ && !has_multimodal_features) {
-            return with_generation_prefill_cuda_graph_status(forwardMicroBatched(inputs, capture_hidden_states));
+            auto outputs = forwardMicroBatched(inputs, capture_hidden_states);
+            expert_load_step.finish();
+            return with_generation_prefill_cuda_graph_status(std::move(outputs));
         }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp && has_context_request) {
@@ -1136,6 +1169,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
+
+        // GPU updates remain ordered after eager kernels or graph replay on
+        // the producing stream, including MTP's async target-forward worker.
+        expert_load_step.finish();
 
         if (capture_hidden_states) {
             // Capture consumes the Python output directly. CP restoration below
