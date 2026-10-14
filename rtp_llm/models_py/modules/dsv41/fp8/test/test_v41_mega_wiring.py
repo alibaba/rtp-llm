@@ -20,6 +20,9 @@ def _owner():
     owner.wq_b, owner.wo_b = object(), object()
     owner.softmax_scale = 0.5
     owner.attn_sink = torch.zeros(2)
+    owner.is_index_source = False
+    owner._qb_weight_owner = None
+    owner._mega_attention = None
     owner._prefill_output_all_reduce = Mock()
     return owner
 
@@ -52,7 +55,7 @@ class MegaAttentionWiringTest(unittest.TestCase):
 
         owner = _owner()
         owner._mega_attention = None
-        ready = object()
+        ready = SimpleNamespace()
         order = []
         with patch.object(
             attention.AttentionFP8,
@@ -68,19 +71,20 @@ class MegaAttentionWiringTest(unittest.TestCase):
         prepare.assert_called_once_with(owner, shared=owner._shared_attention)
         self.assertIs(owner._mega_attention, ready)
 
-    def test_reinitialization_prepares_from_current_weights_and_rope(self):
+    def test_reinitialization_reloads_captured_buffers_in_place(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mega_attention
 
         owner = _owner()
-        original, refreshed = object(), object()
+        original = SimpleNamespace(reload_weights=Mock())
         with patch.object(attention.AttentionFP8, "init_rope_cache"), patch.object(
-            _v41_mega_attention, "prepare", side_effect=[original, refreshed]
+            _v41_mega_attention, "prepare", return_value=original
         ) as prepare:
             owner.init_rope_cache(device="cuda:0")
             self.assertIs(owner._mega_attention, original)
             owner.init_rope_cache(device="cuda:0")
-            self.assertIs(owner._mega_attention, refreshed)
-        self.assertEqual(prepare.call_count, 2)
+            self.assertIs(owner._mega_attention, original)
+        self.assertEqual(prepare.call_count, 1)
+        original.reload_weights.assert_called_once_with(owner)
 
     def test_prefill_chunks_use_absolute_positions_for_cp_and_non_cp(self):
         for cp in (False, True):
@@ -157,7 +161,7 @@ class MegaAttentionWiringTest(unittest.TestCase):
                 )
                 owner._prefill_output_all_reduce.assert_called_once_with(result)
 
-    def test_unsupported_prefill_preserves_original_q_rope_attention_and_projection(
+    def test_unsupported_prefill_raises_before_any_projection_or_attention(
         self,
     ):
         for rejected in ("query", "kv", "disabled"):
@@ -176,21 +180,9 @@ class MegaAttentionWiringTest(unittest.TestCase):
                 lengths = torch.ones(7, dtype=torch.int32)
                 kv = torch.ones(16, 1, 4, dtype=torch.bfloat16)
                 common = SimpleNamespace(workspace=_workspace(), freqs_cis=freqs)
-                projected = []
-
-                def legacy_q(q, freq, workspace):
-                    projected.append((q.clone(), freq.clone()))
-                    return q.view(-1, 2, 4) + 2
-
-                owner._project_prefill_q = Mock(side_effect=legacy_q)
-                owner._prefill_output_proj_into = Mock(
-                    side_effect=lambda o, freq, out, workspace: out.copy_(
-                        o[:, 0, :3] + 5
-                    )
-                )
-                native = Mock(
-                    side_effect=lambda **kwargs: (kwargs["q"] + 3, None, None)
-                )
+                owner._project_prefill_q = Mock(side_effect=AssertionError("split Q"))
+                owner._prefill_output_proj_into = Mock()
+                native = Mock(side_effect=AssertionError("split attention"))
                 with patch.object(
                     attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 3
                 ), patch.object(attention, "dispose_tensor"), patch.dict(
@@ -201,19 +193,18 @@ class MegaAttentionWiringTest(unittest.TestCase):
                         )
                     },
                 ):
-                    actual = owner._prefill_sparse_attention(
-                        SimpleNamespace(qr=qr),
-                        common,
-                        kv=kv,
-                        indices=indices,
-                        topk_length=lengths,
-                        profile_name="legacy",
-                    )
-                torch.testing.assert_close(actual, qr.view(7, 2, 4)[:, 0, :3] + 10)
-                self.assertEqual(native.call_count, 3)
-                for chunk, (q, freq) in enumerate(projected):
-                    torch.testing.assert_close(q, qr[chunk * 3 : chunk * 3 + 3])
-                    torch.testing.assert_close(freq, freqs[chunk * 3 : chunk * 3 + 3])
+                    with self.assertRaisesRegex(RuntimeError, "prefill input contract"):
+                        owner._prefill_sparse_attention(
+                            SimpleNamespace(qr=qr),
+                            common,
+                            kv=kv,
+                            indices=indices,
+                            topk_length=lengths,
+                            profile_name="legacy",
+                        )
+                native.assert_not_called()
+                owner._project_prefill_q.assert_not_called()
+                owner._prefill_output_proj_into.assert_not_called()
                 mega.project_q.assert_not_called()
                 mega.prefill.assert_not_called()
 
@@ -273,11 +264,15 @@ class MegaAttentionWiringTest(unittest.TestCase):
                 ), patch.object(
                     compute_qkv, "decode_compute_qkv", side_effect=StopAfterQKV
                 ) as project:
-                    with self.assertRaises(StopAfterQKV):
+                    exception = StopAfterQKV if reject is None else RuntimeError
+                    with self.assertRaises(exception):
                         owner._forward_decode_body(torch.zeros(2, 2, 3), metadata)
+                if reject is not None:
+                    project.assert_not_called()
+                    continue
                 self.assertIs(
                     project.call_args.kwargs.get("mega_attention"),
-                    mega if reject is None else None,
+                    mega,
                 )
                 torch.testing.assert_close(
                     project.call_args.kwargs["swa_slots"], torch.arange(4)
@@ -346,8 +341,8 @@ class MegaAttentionWiringTest(unittest.TestCase):
                     self.assertNotIn("apply_q_rope", fused_cache.call_args.kwargs)
 
     def test_decode_executes_selected_path_and_preserves_swa_cache_write(self):
-        for supported in (False, True):
-            with self.subTest(supported=supported):
+        for swa_written in (False, True):
+            with self.subTest(swa_written=swa_written):
                 owner = _owner()
                 owner.compress_ratio = 0
                 owner.freqs_cis = torch.empty(128, 2)
@@ -360,7 +355,7 @@ class MegaAttentionWiringTest(unittest.TestCase):
                 owner._project_output = Mock(return_value=torch.full((6, 3), -1.0))
                 mega = SimpleNamespace(
                     supports_input=Mock(return_value=True),
-                    supports_decode=Mock(return_value=supported),
+                    supports_decode=Mock(return_value=True),
                     decode=Mock(return_value=torch.full((6, 3), 2.0)),
                     project_output=Mock(side_effect=lambda pair, linear: pair),
                 )
@@ -374,7 +369,11 @@ class MegaAttentionWiringTest(unittest.TestCase):
                     pool_write_slot_mappings={attention.SWA_KV: torch.arange(7)},
                 )
                 qkv = compute_qkv.DecodeQKV(
-                    torch.ones(2, 3, 8), raw_q, kv, torch.zeros(6, 2)
+                    torch.ones(2, 3, 8),
+                    raw_q,
+                    kv,
+                    torch.zeros(6, 2),
+                    swa_written=swa_written,
                 )
                 with patch.object(
                     rope_metadata,
@@ -382,28 +381,24 @@ class MegaAttentionWiringTest(unittest.TestCase):
                     return_value=(positions[:6], qkv.freqs_cis),
                 ), patch.object(compute_qkv, "decode_compute_qkv", return_value=qkv):
                     result = owner._forward_decode_body(torch.zeros(2, 3, 3), metadata)
-                owner._decode_write_swa_fp8.assert_called_once_with(kv, 2, 3, metadata)
-                self.assertEqual(result.shape, (2, 3, 3))
-                torch.testing.assert_close(
-                    result, torch.full_like(result, 2 if supported else -1)
-                )
-                self.assertEqual(owner._prefill_output_all_reduce.call_count, 1)
-                if supported:
-                    self.assertIs(mega.decode.call_args.args[0], raw_q)
-                    self.assertIs(mega.decode.call_args.args[1], pool)
-                    torch.testing.assert_close(
-                        mega.decode.call_args.args[3], positions[:6].int()
-                    )
-                    self.assertIsNone(mega.decode.call_args.kwargs["extra_pool"])
-                    self.assertIsNone(mega.decode.call_args.kwargs["extra_indices"])
-                    owner._forward_decode_swa_only.assert_not_called()
-                    owner._project_output.assert_not_called()
+                if swa_written:
+                    owner._decode_write_swa_fp8.assert_not_called()
                 else:
-                    mega.decode.assert_not_called()
-                    owner._forward_decode_swa_only.assert_called_once_with(
-                        raw_q, 2, 3, metadata
+                    owner._decode_write_swa_fp8.assert_called_once_with(
+                        kv, 2, 3, metadata
                     )
-                    self.assertEqual(owner._project_output.call_count, 1)
+                self.assertEqual(result.shape, (2, 3, 3))
+                torch.testing.assert_close(result, torch.full_like(result, 2))
+                self.assertEqual(owner._prefill_output_all_reduce.call_count, 1)
+                self.assertIs(mega.decode.call_args.args[0], raw_q)
+                self.assertIs(mega.decode.call_args.args[1], pool)
+                torch.testing.assert_close(
+                    mega.decode.call_args.args[3], positions[:6].int()
+                )
+                self.assertIsNone(mega.decode.call_args.kwargs["extra_pool"])
+                self.assertIsNone(mega.decode.call_args.kwargs["extra_indices"])
+                owner._forward_decode_swa_only.assert_not_called()
+                owner._project_output.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
 
@@ -50,11 +51,12 @@ def _state(device="cpu", heads=16, backend=None):
 
 
 class MegaAttentionCPU(unittest.TestCase):
-    def test_disabled_does_not_import_or_initialize_cuda(self):
+    def test_unsupported_configuration_raises_without_loading_backend(self):
         with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}), patch.object(
             mega, "_backend", side_effect=AssertionError("backend imported")
         ):
-            self.assertIsNone(mega.prepare(SimpleNamespace()))
+            with self.assertRaisesRegex(RuntimeError, "V4.1 Mega Attention requires"):
+                mega.prepare(SimpleNamespace())
 
     def _supported_cpu_fixture(self):
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -80,7 +82,7 @@ class MegaAttentionCPU(unittest.TestCase):
             o_lora_rank=128,
         )
 
-    def test_default_enabled_and_explicit_disable_preserve_capability_gate(self):
+    def test_old_switch_cannot_disable_mega_attention(self):
         attn = self._supported_cpu_fixture()
         with patch.dict(os.environ, {}, clear=True), patch.object(
             torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
@@ -90,20 +92,19 @@ class MegaAttentionCPU(unittest.TestCase):
             torch.cuda, "_lazy_init", side_effect=AssertionError("CUDA initialized")
         ):
             self.assertTrue(mega.is_supported(attn))
-            backend.assert_called_once()
-            backend.reset_mock()
             with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}):
-                self.assertFalse(mega.is_supported(attn))
+                self.assertTrue(mega.is_supported(attn))
             backend.assert_not_called()
 
-    def test_default_keeps_cpu_on_split_path_without_hardware_probe(self):
+    def test_cpu_fails_before_hardware_probe(self):
         attn = self._supported_cpu_fixture()
         with patch.dict(os.environ, {}, clear=True), patch.object(
             mega, "_device_capability", side_effect=AssertionError("CUDA queried")
         ), patch.object(
             mega, "_backend", side_effect=AssertionError("backend imported")
         ):
-            self.assertIsNone(mega.prepare(attn))
+            with self.assertRaisesRegex(RuntimeError, "SM10x"):
+                mega.prepare(attn)
 
     def test_default_requires_sm10x_and_native_backend(self):
         attn = self._supported_cpu_fixture()
@@ -117,7 +118,10 @@ class MegaAttentionCPU(unittest.TestCase):
             ), patch.object(
                 mega, "_backend", return_value=backend
             ):
-                self.assertIsNone(mega.prepare(attn))
+                exception = RuntimeError if capability[0] != 10 else ImportError
+                message = "SM10x" if capability[0] != 10 else "deps/ requirements"
+                with self.assertRaisesRegex(exception, message):
+                    mega.prepare(attn)
 
     def test_tp4_padding_preserves_chunk_layout(self):
         state = _state()
@@ -290,6 +294,7 @@ class MegaAttentionCUDA(unittest.TestCase):
         self.assertTrue(torch.isfinite(actual).all().item())
         difference = actual - expected
         relative_l2 = difference.norm() / expected.norm().clamp_min(1e-7)
+        print(f"mega attention relative_l2={relative_l2.item():.6f}", flush=True)
         self.assertLess(relative_l2.item(), 0.05)
         self.assertLess(
             difference.abs().max().item(), 0.125 * expected.abs().max().item() + 0.003
@@ -299,7 +304,7 @@ class MegaAttentionCUDA(unittest.TestCase):
         )
 
     def test_prefill_ragged_cp_positions_tp4_and_full_heads(self):
-        for heads in (16, 64):
+        for heads in (8, 16, 32, 64, 128):
             with self.subTest(heads=heads):
                 state, table, q, pos = self._fixture(heads)
                 kv = (torch.randn(384, 512, device="cuda") * 0.5).to(torch.bfloat16)
@@ -536,6 +541,210 @@ class MegaAttentionCUDA(unittest.TestCase):
             rtol=0,
             atol=0,
         )
+
+    def _projection_fixture(self, heads=64, rank=128):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        groups = heads // 8
+        torch.manual_seed(8217 + heads)
+        linear = V41MXFP8Linear(
+            (torch.randn(heads * 512, 128, device="cuda") * 0.1).to(
+                torch.float8_e4m3fn
+            ),
+            torch.ones(heads * 16, 4, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        angles = torch.randn(256, 32, device="cuda") * 0.5
+        attn = SimpleNamespace(
+            wq_b=linear,
+            _wo_a_stk_w=(torch.randn(groups, rank, 4096, device="cuda") * 0.02).to(
+                torch.float8_e4m3fn
+            ),
+            _wo_a_stk_s=torch.full(
+                (groups, 32, rank), 0x7F7F7F7F, device="cuda", dtype=torch.int32
+            ).transpose(1, 2),
+            freqs_cis=torch.polar(torch.ones_like(angles), angles),
+            attn_sink=torch.randn(heads, device="cuda"),
+            skip_post_q_norm=True,
+            n_heads=heads,
+            n_groups=groups,
+            head_dim=512,
+            rope_head_dim=64,
+            o_lora_rank=rank,
+            softmax_scale=512**-0.5,
+            wo_b=lambda value, out=None: value if out is None else out.copy_(value),
+            _prefill_output_all_reduce=lambda value: None,
+        )
+        attn._mega_attention = mega.prepare(attn)
+        return attn
+
+    def _assert_projection_close(self, actual, reference):
+        actual, reference = actual.float().flatten(), reference.float().flatten()
+        self.assertTrue(torch.isfinite(actual).all().item())
+        relative_l2 = (actual - reference).norm() / reference.norm().clamp_min(1e-7)
+        cosine = torch.nn.functional.cosine_similarity(actual, reference, dim=0)
+        print(
+            f"mega projection relative_l2={relative_l2.item():.6f} "
+            f"cosine={cosine.item():.6f}",
+            flush=True,
+        )
+        self.assertLess(relative_l2.item(), 0.05)
+        self.assertGreater(cosine.item(), 0.999)
+
+    @torch.inference_mode()
+    def test_tp_projection_matches_unfused_and_reload_preserves_graph(self):
+        for heads in (8, 16, 32, 64):
+            with self.subTest(heads=heads):
+                attn = self._projection_fixture(heads)
+                state = attn._mega_attention
+                qr = torch.randn(6, 128, dtype=torch.bfloat16, device="cuda")
+                kv = torch.randn(384, 512, dtype=torch.bfloat16, device="cuda")
+                indices = torch.randint(
+                    0, 384, (6, 128), device="cuda", dtype=torch.int32
+                )
+                indices[:, -9:] = -1
+                positions = torch.tensor(
+                    [31, 99, 3, 201, 107, 255], device="cuda"
+                ).int()
+
+                def call():
+                    q = state.project_q(attn.wq_b, qr)
+                    return state.project_output(
+                        state.prefill(q, kv.unsqueeze(1), indices, positions), attn.wo_b
+                    )
+
+                def reference():
+                    q = attn.wq_b(qr).view(6, heads, 512)
+                    output = _attention_reference(
+                        q, kv, indices, positions, attn.freqs_cis, attn.attn_sink
+                    )
+                    return (
+                        torch.einsum(
+                            "mgk,grk->mgr",
+                            output.view(6, heads // 8, 4096),
+                            attn._wo_a_stk_w.float(),
+                        )
+                        .to(torch.bfloat16)
+                        .flatten(1)
+                    )
+
+                for _ in range(3):
+                    call()
+                self._assert_projection_close(call(), reference())
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = call()
+                pointers = [value.data_ptr() for value in state.buffers()]
+                # Reload changes derived Q/Wo weights, RoPE and sinks in place.
+                attn.wq_b.weight.copy_(
+                    (-attn.wq_b.weight.float()).to(attn.wq_b.weight.dtype)
+                )
+                attn._wo_a_stk_w.copy_(
+                    (-attn._wo_a_stk_w.float()).to(attn._wo_a_stk_w.dtype)
+                )
+                attn.freqs_cis.mul_(complex(0, 1))
+                attn.attn_sink.add_(1)
+                state.reload_weights(attn)
+                self.assertEqual(
+                    pointers, [value.data_ptr() for value in state.buffers()]
+                )
+                qr.mul_(0.5)
+                graph.replay()
+                torch.testing.assert_close(captured, call(), atol=0, rtol=0)
+                self._assert_projection_close(captured, reference())
+
+    @torch.inference_mode()
+    def test_dspark_five_queries_keep_noncausal_slots_and_lengths(self):
+        from rtp_llm.models_py.model_desc import (
+            deepseek_v41_base_dspark_model as dspark,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_triton as swa
+
+        attn = self._projection_fixture()
+        state = attn._mega_attention
+        batch, gamma, rows = 2, 5, 10
+        qr = torch.randn(batch, gamma, 128, dtype=torch.bfloat16, device="cuda")
+        kv = torch.randn(rows, 512, dtype=torch.bfloat16, device="cuda")
+        pool = torch.zeros(1, 32, 528, dtype=torch.uint8, device="cuda")
+        slots = torch.arange(rows, device="cuda")
+        positions = torch.arange(31, 31 + rows, device="cuda").view(batch, gamma)
+        # All five proposal KVs are visible even to the first query; positive
+        # slots after the per-row length deliberately test length masking.
+        indices = torch.zeros(rows, 128, dtype=torch.int32, device="cuda")
+        indices[:, :gamma] = slots.view(batch, gamma).repeat_interleave(gamma, 0).int()
+        lengths = torch.tensor([gamma, 0], dtype=torch.int32, device="cuda")
+        model = SimpleNamespace(
+            _swa_cache_bound=lambda *args: nullcontext((attn, 32, pool)),
+            _proposal_metadata=lambda *args: (slots, indices, lengths),
+        )
+
+        def project(attention, value, query_positions, *, mega_attention):
+            self.assertIs(mega_attention, state)
+            torch.testing.assert_close(query_positions, positions.reshape(-1))
+            return SimpleNamespace(q=state.project_q(attn.wq_b, value), kv=kv)
+
+        with patch.object(dspark, "decode_compute_qkv", side_effect=project):
+            actual = dspark.DeepSeekV4DSparkModel._forward_dspark_attention(
+                model, 0, qr, positions, None, None, None, 32, None, {}
+            )
+        keys = swa.dequantize_swa_k_cache(pool, slots)
+        q = attn.wq_b(qr).view(rows, 64, 512)
+        reference = _attention_reference(
+            q,
+            keys,
+            indices,
+            positions.reshape(-1),
+            attn.freqs_cis,
+            attn.attn_sink,
+            lengths.repeat_interleave(gamma),
+        )
+        reference = (
+            torch.einsum(
+                "mgk,grk->mgr", reference.view(rows, 8, 4096), attn._wo_a_stk_w.float()
+            )
+            .to(torch.bfloat16)
+            .reshape(batch, gamma, -1)
+        )
+        self._assert_projection_close(actual, reference)
+
+    @torch.inference_mode()
+    def test_mega_fp8_pair_keeps_fused_wo_a_projection_and_graph(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        attn = self._projection_fixture(rank=1024)
+        attn.wo_b = V41MXFP8Linear(
+            (torch.randn(5120, 8192, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(160, 256, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        state = attn._mega_attention
+        self.assertTrue(_v41_wo_a_quant.warmup(state.output_weight, state.output_scale))
+        for rows in (1, 64, 512):
+            with self.subTest(rows=rows):
+                q = _q_fused(torch.randn(rows, 64, 512, device="cuda").bfloat16())
+                kv = torch.randn(257, 1, 512, device="cuda").bfloat16()
+                indices = torch.randint(0, 257, (rows, 128), device="cuda").int()
+                positions = torch.arange(rows, device="cuda").int().remainder_(256)
+                pair = state.prefill(q, kv, indices, positions)
+                self.assertTrue(
+                    _v41_wo_a_quant.is_supported(
+                        pair, (state.output_weight, state.output_scale)
+                    )
+                )
+                with patch.object(
+                    _v41_wo_a_quant, "try_grouped_quant", return_value=None
+                ):
+                    expected = state.project_output(pair, attn.wo_b)
+                out = torch.empty_like(expected)
+                self.assertIs(state.project_output(pair, attn.wo_b, out=out), out)
+                torch.testing.assert_close(out, expected, atol=0, rtol=0)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = state.project_output(pair, attn.wo_b)
+                pair[0].zero_()
+                graph.replay()
+                torch.testing.assert_close(
+                    captured, state.project_output(pair, attn.wo_b), atol=0, rtol=0
+                )
 
 
 if __name__ == "__main__":

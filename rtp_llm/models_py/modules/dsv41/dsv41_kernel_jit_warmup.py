@@ -29,18 +29,12 @@ _MEGA_WARMED: set[tuple] = set()
 def warmup_v41_mega_jit(model, *, max_m, device, decode):
     """Warm native module loading and reachable GEMM/insert specializations.
 
-    Enabled by default alongside MegaAttention; ordinary model warmup switches
-    and ``DSV41_MEGA_ATTENTION=0`` still disable these launches.
+    Ordinary model warmup switches control these launches.
     Every launch uses private KV/output allocations. Include the CUDA stream
     and the real SWA page size so later cache binding cannot reuse an incomplete
     pre-cache warmup entry.
     """
-    if (
-        not model_warm_up_enabled()
-        or os.environ.get("DSV41_MEGA_ATTENTION", "1") != "1"
-        or not common._is_cuda_device(device)
-        or max_m <= 0
-    ):
+    if not model_warm_up_enabled() or not common._is_cuda_device(device) or max_m <= 0:
         return
     common._assert_not_capturing()
     from rtp_llm.models_py.modules.dsv41.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
