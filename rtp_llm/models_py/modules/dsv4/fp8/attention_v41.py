@@ -2585,31 +2585,28 @@ class AttentionV41FP8(AttentionFP8):
             from . import _v41_sparse_decode as sparse_decode
 
             if (
-                self.compress_ratio != 1 or candidate_size != 8
-                or self.index_topk != 512 or self.index_n_heads != 32
-                or self.index_head_dim != 128 or keys.pool.shape[1] != 128
-                or keys.logical_entries_per_block != 128
+                self.compress_ratio == 1 and candidate_size == 8
+                and self.index_topk == 512 and self.index_n_heads == 32
+                and self.index_head_dim == 128 and keys.pool.shape[1] == 128
+                and keys.logical_entries_per_block == 128
+                and sparse_decode.is_supported(candidates)
             ):
-                raise ValueError(
-                    "Sparse reindex requires ratio-1 FP4 pages128, "
-                    "H32/D128, block8, TopK512"
-                )
-            plan = shared.get("decode_sparse_plan")
-            if plan is None:
-                with record_function_range("dsv41.decode.sparse_mqa_plan"):
-                    plan = sparse_decode.make_plan(
-                        candidates, visible_per_token, keys.block_table, query_len=S,
+                plan = shared.get("decode_sparse_plan")
+                if plan is None:
+                    with record_function_range("dsv41.decode.sparse_mqa_plan"):
+                        plan = sparse_decode.make_plan(
+                            candidates, visible_per_token, keys.block_table, query_len=S,
+                        )
+                    shared["decode_sparse_plan"] = plan
+                with record_function_range("dsv41.decode.sparse_mqa_select"):
+                    output = sparse_decode.select_decode(
+                        q.view(B, S, self.index_n_heads, self.index_head_dim),
+                        weights.view(B, S, self.index_n_heads), self.freqs_cis,
+                        positions.reshape(T), keys.pool, plan,
+                        rope_head_dim=self.rope_head_dim,
                     )
-                shared["decode_sparse_plan"] = plan
-            with record_function_range("dsv41.decode.sparse_mqa_select"):
-                output = sparse_decode.select_decode(
-                    q.view(B, S, self.index_n_heads, self.index_head_dim),
-                    weights.view(B, S, self.index_n_heads), self.freqs_cis,
-                    positions.reshape(T), keys.pool, plan,
-                    rope_head_dim=self.rope_head_dim,
-                )
-            shared["topk"] = {self.layer_id: output}
-            return output
+                shared["topk"] = {self.layer_id: output}
+                return output
         if paged:
             all_logits = decode_indexer.score_decode_indexer(
                 q.view(B, S, self.index_n_heads, self.index_head_dim),
