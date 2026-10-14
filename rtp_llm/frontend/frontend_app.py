@@ -38,6 +38,7 @@ from rtp_llm.distribute.distributed_server import (
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_socket import create_frontend_socket
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.frontend.sleep_routes import register_sleep_routes
 from rtp_llm.frontend.worker_address_utils import (
@@ -540,14 +541,10 @@ class FrontendApp(object):
             auto_loop_setup()
             asyncio.set_event_loop(asyncio.new_event_loop())
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
             f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
         )
-        sock.bind(("0.0.0.0", self.server_config.server_port))
-        sock.listen()
+        sock = create_frontend_socket("0.0.0.0", self.server_config.server_port)
         fd = sock.fileno()
         timeout_keep_alive = self.server_config.timeout_keep_alive
 

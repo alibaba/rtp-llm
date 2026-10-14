@@ -495,6 +495,11 @@ py_library(
 )
 
 py_library(
+    name = "frontend_socket",
+    srcs = ["frontend/frontend_socket.py"],
+)
+
+py_library(
     name = "frontend_sleep_routes",
     srcs = ["frontend/sleep_routes.py"],
     deps = [
