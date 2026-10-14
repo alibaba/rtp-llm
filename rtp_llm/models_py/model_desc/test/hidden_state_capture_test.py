@@ -83,6 +83,14 @@ class _MoeLayer(nn.Module):
 class _Qwen3NextLayer(_MoeLayer):
     layer_type = None
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Qwen3NextModel.forward probes the first layer's norm backend for the
+        # residual=None fast path (ca9da5f87f).  This fake keeps the classic
+        # zeros-fill semantics so the capture paths stay on the pre-fast-path
+        # behavior the assertions below were written against.
+        self.input_layernorm = SimpleNamespace(supports_none_residual=False)
+
     def forward(
         self,
         hidden_states,
