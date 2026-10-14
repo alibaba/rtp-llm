@@ -207,6 +207,14 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             )
             self.absorb_fmha.plan(self.fmha_params)
 
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        # MTP verify / draft prefill graph captures run fixed-shape prefill
+        # forwards (q_len = gen + 1, marked is_prefill=True by
+        # cuda_graph_runner). The prefill wrapper is CUDA-graph capturable
+        # once the plan is prepared without realloc, mirroring the decode
+        # impl's graph entry.
+        self.prepare(attn_inputs, forbid_realloc=True)
+
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
