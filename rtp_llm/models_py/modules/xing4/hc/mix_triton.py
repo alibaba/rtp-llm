@@ -70,9 +70,13 @@ def _xing4_hc_mix_kernel(
     c = tl.arange(0, 4)
 
     mixes_row = mixes_ptr + pid * 24
-    pre_w = tl.load(mixes_row + r)
-    post_w = tl.load(mixes_row + 4 + r)
-    comb_w = tl.load(mixes_row + 8 + r[:, None] * 4 + c[None, :])
+    # .to(tl.float32) is a no-op for fp32 mixes and a lossless widen for the
+    # bf16 GEMM output: the model feeds the hc_fn F.linear output directly
+    # (no separate widen launch), keeping the math bitwise identical to the
+    # eager path's .float()-then-compute.
+    pre_w = tl.load(mixes_row + r).to(tl.float32)
+    post_w = tl.load(mixes_row + 4 + r).to(tl.float32)
+    comb_w = tl.load(mixes_row + 8 + r[:, None] * 4 + c[None, :]).to(tl.float32)
 
     pre_b = tl.load(base_ptr + r)
     post_b = tl.load(base_ptr + 4 + r)
@@ -152,7 +156,9 @@ def hc_mix_triton(
     )
     assert base.shape == (_MIX_WIDTH,), f"base must be [{_MIX_WIDTH}], got {tuple(base.shape)}"
     assert scale.shape == (3,), f"scale must be [3], got {tuple(scale.shape)}"
-    assert mixes.dtype == torch.float32, "mixes must be fp32 (F.linear(...).float())"
+    assert mixes.dtype in (torch.float32, torch.bfloat16), (
+        "mixes must be fp32 or the bf16 hc_fn GEMM output (widened losslessly in-kernel)"
+    )
     assert base.dtype == torch.float32 and scale.dtype == torch.float32, (
         "base/scale must be fp32"
     )

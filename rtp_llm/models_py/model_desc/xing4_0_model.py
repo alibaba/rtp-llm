@@ -166,8 +166,10 @@ class Xing4HCUnit(HCUnitBase):
         # intermediate, hence no chunking on this path).
         flat_normed = entries.row_rms_norm(x, self.norm_eps)
         # GEMM preserved verbatim (the hc_fn F.linear share stays out of the
-        # fusion numerator); mixes stays fp32 exactly like the eager .float().
-        mixes = torch.nn.functional.linear(flat_normed, self._fn_for(dtype)).float()
+        # fusion numerator); the bf16 GEMM output feeds K2 directly (widened
+        # losslessly in-kernel — bitwise identical to the eager .float() path,
+        # minus the separate widen launch).
+        mixes = torch.nn.functional.linear(flat_normed, self._fn_for(dtype))
         mixes = mixes.reshape(-1, (hc + 2) * hc)
         # K2: gates + clamp/exp + sinkhorn comb in one launch; its single exit
         # cast lands exactly where the reference casts pre/post/comb.

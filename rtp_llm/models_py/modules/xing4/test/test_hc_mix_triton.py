@@ -362,6 +362,28 @@ class TestXing4HCMixTriton(unittest.TestCase):
             torch.testing.assert_close(out, want, rtol=0.0, atol=_FP32_ATOL)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_bf16_mixes_bitwise_matches_widened_fp32(self):
+        """The bf16 hc_fn GEMM output path must match fp32(widened) bitwise.
+
+        The kernel widens bf16 loads losslessly; the removed eager widen
+        launch (aten::_to_copy) changes no values.
+        """
+        g = torch.Generator(device="cuda").manual_seed(7)
+        T = 257
+        mixes = (torch.randn(T, 24, generator=g, device="cuda") * 6.0)
+        base = torch.randn(24, generator=g, device="cuda") * 0.5
+        scale = torch.randn(3, generator=g, device="cuda").abs() + 0.5
+        kw = dict(sinkhorn_iters=20, eps=1e-6, out_dtype=torch.bfloat16)
+        mixes_bf16 = mixes.to(torch.bfloat16)
+        # Same input VALUES through both paths: the eager widen (bf16->fp32
+        # aten copy) vs the in-kernel widen. (Comparing against the original
+        # fp32 tensor would differ by the bf16 rounding of the input itself.)
+        b = hc_mix_triton(mixes_bf16.float(), base, scale, **kw)
+        c = hc_mix_triton(mixes_bf16, base, scale, **kw)
+        for x, y in zip(b, c):
+            self.assertTrue(torch.equal(x, y))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_contract_validation(self):
         mixes = torch.randn(8, 24, device="cuda")
         base = torch.zeros(24, device="cuda")
@@ -372,8 +394,9 @@ class TestXing4HCMixTriton(unittest.TestCase):
             hc_mix_triton(mixes, torch.zeros(16, device="cuda"), scale)
         with self.assertRaises(AssertionError):
             hc_mix_triton(mixes, base, torch.ones(2, device="cuda"))
-        with self.assertRaises(AssertionError):
-            hc_mix_triton(mixes.to(torch.bfloat16), base, scale)
+        # bf16 mixes (the hc_fn GEMM output dtype) is accepted and widened
+        # losslessly in-kernel; only non-fp32 base/scale still reject.
+        hc_mix_triton(mixes.to(torch.bfloat16), base, scale)
         with self.assertRaises(AssertionError):
             hc_mix_triton(mixes, base.to(torch.bfloat16), scale)
         with self.assertRaises(AssertionError):
