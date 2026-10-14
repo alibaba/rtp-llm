@@ -8,7 +8,10 @@ import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
-from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    FusedMoe,
+    SHARED_EXPERT_ACCUMULATE_ARG,
+)
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
 
@@ -92,6 +95,9 @@ def _configure_forward(layer, *, gate_enabled=False):
     )
     fused_moe = MagicMock(spec=FusedMoe, return_value=routed_output)
     fused_moe.topk_ids_dtype = torch.int32
+    # MagicMock auto-creates truthy values for every spec attribute; pin the
+    # new fold capability off so legacy-path tests keep the historic merge.
+    fused_moe.supports_shared_expert_accumulate = False
     layer.fused_moe = fused_moe
     layer.shared_expert = MagicMock(spec=DenseMLP, return_value=shared_output)
     if gate_enabled:
@@ -230,6 +236,131 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeSharedExpertFoldTest(TestCase):
+    """Contract for folding the shared-expert add into the MoE combine kernel.
+
+    When the strategy advertises ``supports_shared_expert_accumulate`` and the
+    merge is a plain add of aligned partials, the layer must hand the shared
+    output to the MoE (which folds it into its combine kernel, e.g. the
+    ep_gather accumulate) instead of issuing the separate bf16 add. Every
+    other configuration must keep the historic merge.
+    """
+
+    def _fold_mock(self, layer, routed_output, shared_output):
+        """Make the mocked FusedMoe simulate an executor-side fold."""
+
+        fused_moe = layer.fused_moe
+
+        def fold_and_combine(**kwargs):
+            extra = kwargs.get("extra_expert_args")
+            if not extra or SHARED_EXPERT_ACCUMULATE_ARG not in extra:
+                return routed_output
+            return routed_output + extra[SHARED_EXPERT_ACCUMULATE_ARG]
+
+        fused_moe.side_effect = fold_and_combine
+
+    def test_tp_one_folds_shared_into_moe_combine(self):
+        layer = _make_layer(ffn_tp_size=1, attn_tp_size=1)
+        hidden_states, routed_output, shared_output, _, fused_moe = (
+            _configure_forward(layer)
+        )
+        fused_moe.supports_shared_expert_accumulate = True
+        self._fold_mock(layer, routed_output, shared_output)
+
+        order = Mock()
+        order.attach_mock(layer.shared_expert, "shared_expert")
+        order.attach_mock(fused_moe, "fused_moe")
+
+        result = layer(hidden_states)
+
+        torch.testing.assert_close(result, routed_output + shared_output)
+        extra = fused_moe.call_args.kwargs.get("extra_expert_args")
+        self.assertIsNotNone(extra)
+        self.assertIs(extra[SHARED_EXPERT_ACCUMULATE_ARG], shared_output)
+        self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
+        self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+        # The fold needs the shared output before the routed combine runs.
+        names = [name for name, _, _ in order.mock_calls]
+        self.assertLess(names.index("shared_expert"), names.index("fused_moe"))
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_unified_tp_folds_before_single_allreduce(self, mock_all_reduce):
+        layer = _make_layer(ffn_tp_size=2, attn_tp_size=2)
+        hidden_states, routed_output, shared_output, _, fused_moe = (
+            _configure_forward(layer)
+        )
+        fused_moe.supports_shared_expert_accumulate = True
+        self._fold_mock(layer, routed_output, shared_output)
+        folded = routed_output + shared_output
+        mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
+
+        result = layer(hidden_states)
+
+        mock_all_reduce.assert_called_once()
+        reduce_input = mock_all_reduce.call_args.args[0]
+        torch.testing.assert_close(reduce_input, folded)
+        torch.testing.assert_close(result, folded * 2)
+        extra = fused_moe.call_args.kwargs.get("extra_expert_args")
+        self.assertIs(extra[SHARED_EXPERT_ACCUMULATE_ARG], shared_output)
+        self.assertTrue(fused_moe.call_args.kwargs["skip_tp_allreduce"])
+        self.assertTrue(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+    def test_no_fold_without_strategy_support(self):
+        layer = _make_layer(ffn_tp_size=1, attn_tp_size=1)
+        hidden_states, routed_output, shared_output, _, fused_moe = (
+            _configure_forward(layer)
+        )
+        fused_moe.supports_shared_expert_accumulate = False
+
+        result = layer(hidden_states)
+
+        self.assertIsNone(fused_moe.call_args.kwargs.get("extra_expert_args"))
+        torch.testing.assert_close(result, routed_output + shared_output)
+
+    def test_no_fold_with_shared_expert_gate(self):
+        layer = _make_layer(ffn_tp_size=1, attn_tp_size=1)
+        hidden_states, routed_output, shared_output, gate_output, fused_moe = (
+            _configure_forward(layer, gate_enabled=True)
+        )
+        fused_moe.supports_shared_expert_accumulate = True
+        expected = routed_output.clone()
+        expected.add_(torch.sigmoid(gate_output) * shared_output)
+
+        result = layer(hidden_states)
+
+        self.assertIsNone(fused_moe.call_args.kwargs.get("extra_expert_args"))
+        torch.testing.assert_close(result, expected)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_no_fold_in_ep_mode(self, mock_all_reduce):
+        layer = _make_layer(ffn_tp_size=2, attn_tp_size=2, ep_size=2)
+        hidden_states, routed_output, shared_output, _, fused_moe = (
+            _configure_forward(layer)
+        )
+        fused_moe.supports_shared_expert_accumulate = True
+        mock_all_reduce.side_effect = lambda tensor, group: tensor * 2
+
+        result = layer(hidden_states)
+
+        self.assertIsNone(fused_moe.call_args.kwargs.get("extra_expert_args"))
+        torch.testing.assert_close(result, routed_output + shared_output * 2)
+
+    def test_no_fold_when_router_tp_size_mismatches_ffn_tp(self):
+        # TP > 1 without the unified path: the routed and shared partials are
+        # reduced separately before the merge, so the fold must stay off to
+        # keep the reduction order (and the numerics) unchanged.
+        layer = _make_layer(ffn_tp_size=2, attn_tp_size=4)
+        hidden_states, routed_output, shared_output, _, fused_moe = (
+            _configure_forward(layer)
+        )
+        fused_moe.supports_shared_expert_accumulate = True
+
+        result = layer(hidden_states)
+
+        self.assertIsNone(fused_moe.call_args.kwargs.get("extra_expert_args"))
+        torch.testing.assert_close(result, routed_output + shared_output)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,16 @@ class PureTpRouterBase(FusedMoeDataRouter):
     def supports_skip_tp_allreduce(self) -> bool:
         return True
 
+    @property
+    def supports_shared_expert_accumulate(self) -> bool:
+        # finalize() is either a passthrough (tp_size == 1 or
+        # skip_tp_allreduce) or a single Group.TP all-reduce over the same
+        # group a TP-partial shared expert is reduced with, so a shared-expert
+        # sum folded into the executor's combine output survives finalize.
+        # Callers still restrict the fold to layouts where the fold is
+        # bitwise-identical to the unfused merge (GenericMoeLayer).
+        return True
+
     def _maybe_all_reduce_tp(
         self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
     ) -> torch.Tensor:

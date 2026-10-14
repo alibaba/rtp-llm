@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0
 
 import logging
+from typing import Optional
 
 import torch
 import triton
@@ -414,6 +415,10 @@ def _fwd_kernel_ep_gather(
     output_tensor,
     output_tensor_stride0,
     output_tensor_stride1,
+    accumulate_input,
+    accumulate_input_stride0,
+    accumulate_input_stride1,
+    ACCUMULATE: tl.constexpr,
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -447,12 +452,29 @@ def _fwd_kernel_ep_gather(
                         + off_d
                     )
                     accumulator += tmp.to(tl.float32) * acc_weight
+        # Round the fp32 accumulator to the output dtype first (this is the
+        # value the original kernel stored), then add the shared-expert
+        # contribution with one more fp32 -> output-dtype rounding.  This
+        # reproduces, rounding for rounding, the two-kernel sequence
+        # ``ep_gather(...); output += shared`` so the fused store is bitwise
+        # identical to the separate kernels' result.
+        store_val = accumulator.to(output_tensor.dtype.element_ty)
+        if ACCUMULATE:
+            shared_val = tl.load(
+                accumulate_input
+                + cur_token * accumulate_input_stride0
+                + cur_block * BLOCK_D
+                + off_d
+            )
+            store_val = (store_val.to(tl.float32) + shared_val.to(tl.float32)).to(
+                output_tensor.dtype.element_ty
+            )
         tl.store(
             output_tensor
             + cur_token * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
-            accumulator.to(output_tensor.dtype.element_ty),
+            store_val,
         )
 
 
@@ -463,12 +485,37 @@ def ep_gather(
     recv_topk_weight: torch.Tensor,
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
+    accumulate_input: Optional[torch.Tensor] = None,
 ):
+    """Gather routed expert outputs, optionally folding a shared-expert sum.
+
+    ``accumulate_input`` must match ``output_tensor`` in shape, dtype and
+    unit-stride last dimension; when given, its values are added inside the
+    gather kernel's store with the exact rounding sequence of
+    ``ep_gather(...) + accumulate_input`` executed as a separate aten add
+    (round the fp32 accumulator to the output dtype, widen both operands to
+    fp32, add, round once more) — bitwise identical results, one fewer
+    memory-bound kernel launch.
+    """
     BLOCK_D = 512  # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
     assert hidden_size % BLOCK_D == 0
+    if accumulate_input is None:
+        # Keep the kernel signature stable: an unused pointer alias is safe
+        # because ACCUMULATE=False compiles the load out.
+        accumulate_ptr = output_tensor
+        accumulate_stride0 = output_tensor.stride(0)
+        accumulate_stride1 = output_tensor.stride(1)
+    else:
+        assert accumulate_input.dim() == 2
+        assert accumulate_input.shape == output_tensor.shape
+        assert accumulate_input.dtype == output_tensor.dtype
+        assert accumulate_input.stride(1) == 1
+        accumulate_ptr = accumulate_input
+        accumulate_stride0 = accumulate_input.stride(0)
+        accumulate_stride1 = accumulate_input.stride(1)
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
@@ -488,6 +535,10 @@ def ep_gather(
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
+        accumulate_ptr,
+        accumulate_stride0,
+        accumulate_stride1,
+        ACCUMULATE=accumulate_input is not None,
         topk_num=recv_topk_ids.shape[1],
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,

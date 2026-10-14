@@ -29,6 +29,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
 
 SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
 
+SHARED_EXPERT_ACCUMULATE_ARG: Final[Literal["shared_expert_accumulate"]] = (
+    "shared_expert_accumulate"
+)
+
 
 class FinalizeArgs(TypedDict, total=False):
     """Private, optional arguments passed from ``FusedMoe`` to routers."""
@@ -156,6 +160,22 @@ class FusedMoeDataRouter(ABC):
 
         return False
 
+    @property
+    def supports_shared_expert_accumulate(self) -> bool:
+        """Whether ``finalize`` preserves a shared-expert sum folded upstream.
+
+        Routers that dispatch tokens across ranks (EP/DP/CP) finalize by
+        reordering or scattering tokens across the group, so a rank-local
+        shared-expert tensor folded into the executor's combine output before
+        ``finalize`` would be misplaced; they must keep the default ``False``.
+        A router may override this to ``True`` only when ``finalize`` is
+        value-preserving for such a folded sum: a pure passthrough, or a
+        single all-reduce over the same group the caller reduces the shared
+        expert with (see GenericMoeLayer's unified TP all-reduce path).
+        """
+
+        return False
+
     def prepare_gate_pack(
         self,
         a1: torch.Tensor,
@@ -203,6 +223,13 @@ class FusedMoeDataRouter(ABC):
 class FusedMoeExpertExecutor(ABC):
     includes_shared_expert = False
     execute_empty_inputs = False
+    # Whether ``execute`` consumes ``SHARED_EXPERT_ACCUMULATE_ARG`` from
+    # ``extra_expert_args`` and guarantees the returned
+    # ``fused_expert_output`` already contains that contribution: folded into
+    # an existing combine kernel when the executed path allows it, otherwise
+    # via a plain add. Callers gate the request on the combined
+    # ``FusedMoe.supports_shared_expert_accumulate`` capability.
+    supports_shared_expert_accumulate = False
 
     def __init__(
         self,
@@ -287,6 +314,15 @@ class FusedMoe(torch.nn.Module):
     def supports_gate_pack(self) -> bool:
         return bool(
             self.router.supports_gate_pack and self.fused_experts.supports_gate_pack
+        )
+
+    @property
+    def supports_shared_expert_accumulate(self) -> bool:
+        """Router and executor both accept a folded shared-expert output."""
+
+        return bool(
+            self.router.supports_shared_expert_accumulate
+            and self.fused_experts.supports_shared_expert_accumulate
         )
 
     def forward_gate_pack(

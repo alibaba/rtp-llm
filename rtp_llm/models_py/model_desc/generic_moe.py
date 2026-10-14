@@ -33,6 +33,9 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    SHARED_EXPERT_ACCUMULATE_ARG,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -91,6 +94,7 @@ class GenericMoeLayer(nn.Module):
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
+        self.router_tp_size = router_tp_size
 
         self.num_local_experts = self.num_experts // max(self.ep_size, 1)
         self.add_shared_expert = (
@@ -171,6 +175,34 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
+    def _fold_shared_expert_into_moe(self) -> bool:
+        """Whether the shared-expert add can fold into the routed combine.
+
+        Requires an ungated shared expert, a strategy that folds the shared
+        output into its combine kernel (see
+        ``FusedMoe.supports_shared_expert_accumulate``), and a layout where
+        the fold is bitwise-identical to the separate merge:
+
+        * TP == 1: routed and shared outputs are both complete, the router
+          finalize is a passthrough, so the folded store equals the plain
+          ``experts_output + shared_expert_output`` rounding for rounding.
+        * unified TP all-reduce: both outputs are TP-partial over the same
+          group; folding before the single all-reduce reproduces the original
+          merge-then-reduce sequence on identical values.
+
+        TP > 1 without the unified path keeps the historical merge (the two
+        partials are reduced separately before the add), and the EP shared
+        all-reduce path gates and reduces the shared output on its own.
+        """
+
+        return bool(
+            self.shared_expert is not None
+            and self.shared_expert_gate is None
+            and not self.use_ep_shared_allreduce
+            and self.fused_moe.supports_shared_expert_accumulate
+            and (self.use_unified_tp_allreduce or self.router_tp_size == 1)
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
@@ -218,6 +250,31 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
+        if self._fold_shared_expert_into_moe():
+            # Compute the shared expert first and let the strategy fold its
+            # output into the routed combine kernel (ep_gather accumulate),
+            # replacing the separate bf16 add launch. The fold reproduces the
+            # exact two-rounding sequence of the plain add, so the result is
+            # bitwise identical to the merge below.
+            shared_expert_output = self.shared_expert(
+                hidden_states,
+                skip_allreduce=(
+                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                ),
+            )
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                skip_tp_allreduce=self.use_unified_tp_allreduce,
+                extra_expert_args={
+                    SHARED_EXPERT_ACCUMULATE_ARG: shared_expert_output
+                },
+            )
+            if self.use_unified_tp_allreduce:
+                experts_output = all_reduce(experts_output, group=Group.TP)
+            return experts_output
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
