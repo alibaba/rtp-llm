@@ -74,14 +74,14 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777280342,
+                "created": 1791780410,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的具体规划和升学指导服务。如果您有其他问题或需要帮助，欢迎随时告诉我！",
+                            "content": "我理解您的需求，但目前我无法提供与新高考相关的规划与升学指导服务。如果您有其他问题或需要帮助，我很乐意为您提供支持。",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -101,14 +101,14 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 817.134,
+                    "cost_time": 44790.779,
                     "iter_count": 34,
                     "prefix_len": 0,
                     "input_len": 497,
                     "output_len": 34,
                     "step_output_len": 34,
-                    "first_token_cost_time": 308.257,
-                    "wait_time": 0.0,
+                    "first_token_cost_time": 30695.299,
+                    "wait_time": 0.701,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -202,14 +202,14 @@
             "result": {
                 "id": "chat",
                 "object": "chat.completion.chunk",
-                "created": 1777280342,
+                "created": 1791780411,
                 "model": null,
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的具体规划和升学指导服务。如果您有其他问题或需要帮助，欢迎随时告诉我！",
+                            "content": "我理解您的需求，但目前我无法提供与新高考相关的规划与升学指导服务。如果您有其他问题或需要帮助，我很乐意为您提供支持。",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null
