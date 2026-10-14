@@ -230,7 +230,7 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
-    torch::Tensor publish_start_tokens;
+    torch::Tensor                 publish_start_tokens;
 };
 
 struct AttentionCommonInputs {

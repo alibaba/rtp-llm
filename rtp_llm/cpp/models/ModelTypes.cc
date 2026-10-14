@@ -182,8 +182,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         const auto publish_count = (size_t)shape_hints_ptr[GptModelInputIndex::cacheStorePublishStartTokens];
-        inputs.cache_store_publish_start_tokens = publish_count ?
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
+        inputs.cache_store_publish_start_tokens =
+            publish_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
             // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below

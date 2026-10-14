@@ -204,13 +204,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
 RequiredPositions HybridKVCacheAllocator::chunkRequiredPositions(const MallocInfo& info, int gid) const {
     RequiredPositions positions;
-    const int seq_len = info.incrSeqLen();
-    const auto count = config_.chunkCacheBlockCount(gid, seq_len, info.max_chunk_tokens,
-                                                   info.reuse_cache, info.complete_token_ids->getReserveStep());
+    const int         seq_len = info.incrSeqLen();
+    const auto        count   = config_.chunkCacheBlockCount(
+        gid, seq_len, info.max_chunk_tokens, info.reuse_cache, info.complete_token_ids->getReserveStep());
     if (count > 0) {
         const size_t block_size = kv_cache_groups_[gid]->seqSizePerBlock();
-        const size_t slots = (static_cast<size_t>(seq_len) + block_size - 1) / block_size;
-        const auto& blocks = info.batch_kv_cache_resource->blocks(0, gid);
+        const size_t slots      = (static_cast<size_t>(seq_len) + block_size - 1) / block_size;
+        const auto&  blocks     = info.batch_kv_cache_resource->blocks(0, gid);
         for (size_t pos = slots - count; pos < slots; ++pos) {
             if (!info.reuse_cache || pos >= blocks.size() || isNullBlockIdx(blocks[pos])) {
                 positions.insert(pos);
@@ -329,8 +329,11 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                                            config_.group_types[static_cast<size_t>(gid)] :
                                            CacheGroupType::FULL;
             const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, chunkRequiredPositions(malloc_info, gid))) {
+            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(block_ids,
+                                                                    group_seq_len,
+                                                                    malloc_info.reuse_cache,
+                                                                    reserve_step,
+                                                                    chunkRequiredPositions(malloc_info, gid))) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -664,11 +667,12 @@ void HybridKVCacheAllocator::rollbackInitMalloc(BatchKVCacheResource&           
     for (int gid = 0; gid < kv_resource.groupNums(); ++gid) {
         auto& block_ids = kv_resource.mutableBlockIds(0, gid);
         if (static_cast<size_t>(gid) < original_sizes.size()) {
-            const auto& referenced = referenced_blocks[static_cast<size_t>(gid)];
+            const auto&      referenced = referenced_blocks[static_cast<size_t>(gid)];
             BlockIndicesType backfilled;
             for (size_t pos = 0; pos < original_sizes[static_cast<size_t>(gid)]; ++pos) {
                 const auto block = block_ids.blocks()[pos];
-                if (!isNullBlockIdx(block) && std::find(referenced.begin(), referenced.end(), block) == referenced.end()) {
+                if (!isNullBlockIdx(block)
+                    && std::find(referenced.begin(), referenced.end(), block) == referenced.end()) {
                     backfilled.push_back(block);
                 }
             }
@@ -723,8 +727,13 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
                                           CacheGroupType::FULL;
         const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-        const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled, chunkRequiredPositions(malloc_info, gid));
+        const auto need =
+            kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(group_common_seq,
+                                                                      group_seq_len,
+                                                                      reserve_step,
+                                                                      reuse_blocks_len,
+                                                                      reuse_enabled,
+                                                                      chunkRequiredPositions(malloc_info, gid));
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }

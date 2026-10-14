@@ -6,6 +6,7 @@ single rank with one chunk so that generate_q_indices yields valid indices
 for index_select on local q_fp8.
 """
 
+import os
 from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
 from unittest.mock import patch
@@ -158,13 +159,9 @@ class GetTopkRaggedCPZeroLocalTest(TestCase):
                 self._make_indexer_op()
 
     def test_prefill_topk_canonicalization_switch(self):
-        with patch.dict(
-            "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}
-        ):
+        with patch.dict("os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
             self.assertTrue(_fp8_prefill_topk_canonicalize())
-        with patch.dict(
-            "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "0"}
-        ):
+        with patch.dict("os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "0"}):
             self.assertFalse(_fp8_prefill_topk_canonicalize())
 
     def test_prefill_topk_policy_is_chunk_invariant(self):
@@ -180,9 +177,7 @@ class GetTopkRaggedCPZeroLocalTest(TestCase):
             self.assertTrue(_fp8_prefill_topk_force_radix_sort())
             got = _canonicalize_topk_indices(indices)
 
-        expected = torch.tensor(
-            [[3, 5, 7, -1], [2, 4, 9, -1]], dtype=torch.int32
-        )
+        expected = torch.tensor([[3, 5, 7, -1], [2, 4, 9, -1]], dtype=torch.int32)
         torch.testing.assert_close(got, expected, atol=0, rtol=0)
 
     def test_zero_local_ids_returns_empty_tensor(self):
@@ -229,6 +224,10 @@ class GetTopkRaggedCPTest(TestCase):
     def setUp(self):
         if not CUDA_DEEPGEMM_OK:
             raise SkipTest(SKIP_REASON)
+        os.environ.setdefault(
+            "DG_JIT_CACHE_DIR",
+            os.path.join(os.environ.get("TEST_TMPDIR", "/tmp"), "topk_deep_gemm"),
+        )
         self.device = torch.device("cuda:0")
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)
@@ -244,19 +243,19 @@ class GetTopkRaggedCPTest(TestCase):
         inputs.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32)
         inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32)
         inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
-        inputs.kv_cache_kernel_block_id = torch.tensor(blocks, dtype=torch.int32)
-        inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_kernel_block_id.to(
-            self.device
+        inputs.kv_cache_kernel_block_id_host = torch.tensor(blocks, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id_device = (
+            inputs.kv_cache_kernel_block_id_host.to(self.device)
         )
         inputs.context_total_kv_length = 2116
-        inputs.cu_kv_seqlens_device = torch.tensor(
+        inputs.cu_kv_seqlens = torch.tensor(
             [0, 2050, 2116], dtype=torch.int32, device=self.device
         )
         params = rtp_llm_ops.SparseMlaParams()
         params.fill_params(inputs, 64)
-        cache = LayerKVCache(
-            torch.full((36, 64 * 132), 0xA5, dtype=torch.uint8, device=self.device),
-            64,
+        cache = LayerKVCache()
+        cache.kv_scale_base = torch.full(
+            (36, 64, 132), 0xA5, dtype=torch.uint8, device=self.device
         )
         for row, (prefix, length) in enumerate(zip(prefixes, lengths)):
             for start, end in ((0, prefix), (prefix, prefix + length)):

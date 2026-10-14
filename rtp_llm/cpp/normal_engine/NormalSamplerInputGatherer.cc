@@ -220,7 +220,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                    cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
-            const bool no_sample_chunk = !score_batch && stream->isMiddleChunk();
+            const bool no_sample_chunk    = !score_batch && stream->isMiddleChunk();
             input_lengths[batch_idx]      = stream->inputLength();
             sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
             num_beams_in[batch_idx]       = stream->currentNumBeams();
@@ -232,7 +232,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
             presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
             frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
             // Middle chunk output is discarded; avoid advancing the request RNG.
-            do_sample[batch_idx]          = stream->generateConfig()->do_sample && !no_sample_chunk;
+            do_sample[batch_idx] = stream->generateConfig()->do_sample && !no_sample_chunk;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;
                 top_p[batch_idx]       = 1;

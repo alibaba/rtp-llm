@@ -2857,28 +2857,27 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
-
 TEST_F(FIFOSchedulerTest, ChunkPrefillFillsAcrossLongShortLongRequests) {
-    auto cache_config = makeMhaCacheConfig(1, 128, 1, 4, 16, rtp_llm::DataType::TYPE_FP16);
+    auto cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 16, rtp_llm::DataType::TYPE_FP16);
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource;
     resource.cache_manager = cache_manager;
-    resource.role_type = RoleType::PREFILL;
+    resource.role_type     = RoleType::PREFILL;
     ModelConfig model;
     model.max_seq_len = 1024;
     RuntimeConfig runtime;
-    runtime.max_generate_batch_size = 8;
+    runtime.max_generate_batch_size                     = 8;
     runtime.fifo_scheduler_config.max_batch_tokens_size = 128;
-    runtime.fifo_scheduler_config.prefill_chunk_size = 128;
+    runtime.fifo_scheduler_config.prefill_chunk_size    = 128;
     PDSepConfig pd;
     pd.role_type = RoleType::PREFILL;
     FIFOScheduler scheduler(runtime, model, pd, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
     for (int length : {300, 20, 300}) {
-        auto query = std::make_shared<GenerateInput>();
-        query->input_ids = torch::ones({length}, torch::kInt32);
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::ones({length}, torch::kInt32);
         query->generate_config = std::make_shared<GenerateConfig>();
-        auto stream = std::make_shared<NormalGenerateStream>(query, model, runtime, resource, nullptr);
+        auto stream            = std::make_shared<NormalGenerateStream>(query, model, runtime, resource, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     std::vector<int> tokens_per_step;
@@ -2912,19 +2911,19 @@ TEST_F(FIFOSchedulerTest, ChunkBudgetsIncludeCPPaddingAndRefillAllThreeSizes) {
     for (int budget : {65536, 131072, 262144}) {
         for (int cp_size : {1, 8}) {
             SCOPED_TRACE(::testing::Message() << "budget=" << budget << " cp_size=" << cp_size);
-            auto cache_config = makeMhaCacheConfig(1, 16385, 1, 4, 64, rtp_llm::DataType::TYPE_FP16);
+            auto cache_config  = makeMhaCacheConfig(1, 16385, 1, 4, 64, rtp_llm::DataType::TYPE_FP16);
             auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
             ASSERT_TRUE(cache_manager->init());
             ResourceContext resource;
             resource.cache_manager = cache_manager;
-            resource.role_type = RoleType::PREFILL;
+            resource.role_type     = RoleType::PREFILL;
             ModelConfig model;
             model.max_seq_len = 262144;
             RuntimeConfig runtime;
-            runtime.max_generate_batch_size = 16;
+            runtime.max_generate_batch_size                     = 16;
             runtime.fifo_scheduler_config.max_batch_tokens_size = budget;
             // A larger PREFILL_CHUNK_SIZE must never bypass MAX_BATCH_TOKENS_SIZE.
-            runtime.fifo_scheduler_config.prefill_chunk_size = 2 * budget;
+            runtime.fifo_scheduler_config.prefill_chunk_size      = 2 * budget;
             runtime.fifo_scheduler_config.cp_force_single_prefill = false;
             PDSepConfig pd;
             pd.role_type = RoleType::PREFILL;
@@ -2934,18 +2933,18 @@ TEST_F(FIFOSchedulerTest, ChunkBudgetsIncludeCPPaddingAndRefillAllThreeSizes) {
                 parallel.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
             }
             FIFOScheduler scheduler(runtime, model, pd, parallel, ModelSpecificConfig{}, cache_manager);
-            int expected_tokens = 0;
+            int           expected_tokens = 0;
             for (int repeat = 0; repeat < 3; ++repeat) {
                 for (int length : {98341, 1027, 163859}) {
-                    auto query = std::make_shared<GenerateInput>();
-                    query->input_ids = torch::ones({length}, torch::kInt32);
+                    auto query             = std::make_shared<GenerateInput>();
+                    query->input_ids       = torch::ones({length}, torch::kInt32);
                     query->generate_config = std::make_shared<GenerateConfig>();
                     auto stream = std::make_shared<NormalGenerateStream>(query, model, runtime, resource, nullptr);
                     ASSERT_TRUE(scheduler.enqueue(stream).ok());
                     expected_tokens += length;
                 }
             }
-            int computed_tokens = 0;
+            int computed_tokens    = 0;
             int multi_stream_steps = 0;
             for (int step = 0; step < 32 && !scheduler.empty(); ++step) {
                 auto batch = scheduler.schedule();
@@ -2975,6 +2974,123 @@ TEST_F(FIFOSchedulerTest, ChunkBudgetsIncludeCPPaddingAndRefillAllThreeSizes) {
             EXPECT_GT(multi_stream_steps, 0);
             EXPECT_EQ(cache_manager->freeBlocksNum(), 16384);
         }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, ChunkPrefillRespectsExplicitKVLimit) {
+    auto cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 16, rtp_llm::DataType::TYPE_FP16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource;
+    resource.cache_manager = cache_manager;
+    resource.role_type     = RoleType::PREFILL;
+    ModelConfig model;
+    model.max_seq_len = 1024;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                     = 8;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 128;
+    runtime.fifo_scheduler_config.prefill_chunk_size    = 128;
+    runtime.fifo_scheduler_config.max_batch_kv_len      = 192;
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    FIFOScheduler scheduler(runtime, model, pd, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    for (int length : {160, 160, 160, 193}) {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::ones({length}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto stream            = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+        EXPECT_EQ(scheduler.enqueue(stream).ok(), length <= 192);
+    }
+    int computed = 0;
+    for (int step = 0; step < 16 && !scheduler.empty(); ++step) {
+        auto batch = scheduler.schedule();
+        ASSERT_TRUE(batch.ok());
+        int q = 0, kv = 0;
+        for (const auto& stream : *batch) {
+            q += stream->contextLength();
+            kv += stream->prefixLength() + stream->contextLength();
+            if (stream->isMiddleChunk()) {
+                stream->advanceChunk();
+            } else {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+        }
+        EXPECT_LE(q, 128);
+        EXPECT_LE(kv, 192);
+        computed += q;
+    }
+    EXPECT_TRUE(scheduler.empty());
+    EXPECT_EQ(computed, 480);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 127);
+}
+
+TEST_F(FIFOSchedulerTest, ChunkPrefillBoundsParkedDecodeAndReleasesAllQueues) {
+    for (bool stop_while_parked : {false, true}) {
+        SCOPED_TRACE(stop_while_parked);
+        auto cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 16, DataType::TYPE_FP16);
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        ASSERT_TRUE(cache_manager->init());
+        ResourceContext resource;
+        resource.cache_manager = cache_manager;
+        resource.role_type     = RoleType::PDFUSION;
+        ModelConfig model;
+        model.max_seq_len = 1024;
+        RuntimeConfig runtime;
+        runtime.max_generate_batch_size                     = 3;
+        runtime.fifo_scheduler_config.max_batch_tokens_size = 128;
+        runtime.fifo_scheduler_config.prefill_chunk_size    = 128;
+        PDSepConfig pd;
+        pd.role_type = RoleType::PDFUSION;
+        FIFOScheduler scheduler(runtime, model, pd, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        for (int length : {300, 20, 300, 16}) {
+            auto input             = std::make_shared<GenerateInput>();
+            input->input_ids       = torch::ones({length}, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            auto stream            = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+            ASSERT_TRUE(scheduler.enqueue(stream).ok());
+        }
+        for (int step = 0; step < 4; ++step) {
+            auto batch = scheduler.schedule();
+            ASSERT_TRUE(batch.ok());
+            ASSERT_FALSE(batch->empty());
+            for (auto& stream : *batch) {
+                ASSERT_TRUE(stream->isContextStream());
+                if (stream->isMiddleChunk()) {
+                    stream->advanceChunk();
+                } else {
+                    stream->setIsContextStream(false);
+                }
+            }
+        }
+        ASSERT_EQ(scheduler.pending_decode_streams_.size(), 2);
+        EXPECT_EQ(scheduler.runningStreamsSize(), 3);
+        EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+        EXPECT_EQ(scheduler.onflightStreams(), 4);
+        if (!stop_while_parked) {
+            auto last_context = scheduler.schedule();
+            ASSERT_TRUE(last_context.ok());
+            ASSERT_EQ(last_context->size(), 1);
+            ASSERT_FALSE(last_context->front()->isMiddleChunk());
+            last_context->front()->setIsContextStream(false);
+            auto decode = scheduler.schedule();
+            ASSERT_TRUE(decode.ok());
+            ASSERT_EQ(decode->size(), 3);
+            EXPECT_TRUE(scheduler.pending_decode_streams_.empty());
+            EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+            for (auto& stream : *decode) {
+                EXPECT_FALSE(stream->isContextStream());
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            auto waiter = scheduler.schedule();
+            ASSERT_TRUE(waiter.ok());
+            ASSERT_EQ(waiter->size(), 1);
+            EXPECT_TRUE(waiter->front()->isContextStream());
+            EXPECT_EQ(waiter->front()->inputLength(), 16);
+        }
+        ASSERT_TRUE(scheduler.stop().ok());
+        EXPECT_TRUE(scheduler.empty());
+        EXPECT_EQ(scheduler.onflightStreams(), 0);
+        EXPECT_EQ(cache_manager->freeBlocksNum(), 127);
     }
 }
 

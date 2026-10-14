@@ -5,6 +5,8 @@ import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
 
+import torch
+
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 

@@ -490,8 +490,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                                    + ctx.batch_idx * config_.position_id_len_factor);
                 }
             }
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block, stream);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block,
+                                          stream);
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
@@ -561,15 +566,20 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int begin_off = stream->prefixLength() * config_.position_id_len_factor;
-                int copy_len  = stream->contextLength() * config_.position_id_len_factor;
+                int  begin_off       = stream->prefixLength() * config_.position_id_len_factor;
+                int  copy_len        = stream->contextLength() * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
                        context_pos_ids.data_ptr<int>() + begin_off,
                        copy_len * sizeof(int));
             }
 
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block, stream);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block,
+                                          stream);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())

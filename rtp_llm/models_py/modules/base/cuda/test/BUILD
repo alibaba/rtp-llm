@@ -94,6 +94,14 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "topk_chunk_prefill_test",
+    srcs = ["get_topk_ragged_cp_test.py"],
+    main = "get_topk_ragged_cp_test.py",
+    deps = py_test_deps,
+    tags = ["manual"],
+)
+
 py_test (
     name = "get_topk_ragged_cp_test",
     srcs = ["get_topk_ragged_cp_test.py"],

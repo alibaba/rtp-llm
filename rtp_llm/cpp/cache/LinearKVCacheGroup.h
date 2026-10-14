@@ -23,18 +23,21 @@ public:
     MatchResult match(const CacheKeysType& cache_keys) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
-    bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0,
-                const RequiredPositions& required_positions = {}) override;
+    bool        malloc(BlockIds&                block_ids,
+                       int                      seq_len,
+                       bool                     enable_reuse_cache = false,
+                       int                      reserve_step       = 0,
+                       const RequiredPositions& required_positions = {}) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
-    NeedBlocksInfo getNeedBlocks(int  common_seq_len,
-                                 int  seq_len,
-                                 int  reserve_step,
-                                 int  reuse_blocks_len,
-                                 bool reuse_enabled = false,
+    NeedBlocksInfo getNeedBlocks(int                      common_seq_len,
+                                 int                      seq_len,
+                                 int                      reserve_step,
+                                 int                      reuse_blocks_len,
+                                 bool                     reuse_enabled      = false,
                                  const RequiredPositions& required_positions = {}) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 

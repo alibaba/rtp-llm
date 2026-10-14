@@ -11,6 +11,14 @@ flashinfer_deps = [
 ]
 
 py_test(
+    name = "headwise_chunk_prefill_test",
+    srcs = ["test_py_headwise.py"],
+    main = "test_py_headwise.py",
+    deps = py_test_deps + flashinfer_deps,
+    tags = ["manual"],
+)
+
+py_test(
     name = "test_py_headwise",
     srcs = [
         "test_py_headwise.py",

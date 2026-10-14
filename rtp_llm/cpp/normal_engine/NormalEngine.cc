@@ -349,7 +349,7 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
-    RuntimeConfig stream_runtime_config = runtime_config;
+    RuntimeConfig stream_runtime_config                            = runtime_config;
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,

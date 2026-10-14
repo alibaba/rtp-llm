@@ -104,9 +104,12 @@ int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled,
-    const RequiredPositions& required_positions) const {
+NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+                                              int                      seq_len,
+                                              int                      reserve_step,
+                                              int                      reuse_blocks_len,
+                                              bool                     reuse_enabled,
+                                              const RequiredPositions& required_positions) const {
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
     const int  active_tail_blocks      = activeTailBlocks();
@@ -115,9 +118,9 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
 
     const int seq_slots   = needBlocksNum(seq_len, 0);
     const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
-    const int common_slots = std::min(needBlocksNum(common_seq_len, 0), seq_slots);
-    const int ordinary_start = reuse_enabled ? reuse_blocks_len : 0;
-    auto common_required = [&](int pos) {
+    const int common_slots    = std::min(needBlocksNum(common_seq_len, 0), seq_slots);
+    const int ordinary_start  = reuse_enabled ? reuse_blocks_len : 0;
+    auto      common_required = [&](int pos) {
         return pos >= ordinary_start && pos < common_slots
                && shouldAllocateBlock(pos, common_slots, 0, step, effective_reuse_enabled, active_tail_blocks);
     };
@@ -143,7 +146,8 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
                 ++info.common_blocks;
             }
         } else {
-            const bool ordinary = pos >= ordinary_start && pos < seq_slots
+            const bool ordinary =
+                pos >= ordinary_start && pos < seq_slots
                 && shouldAllocateBlock(pos, seq_slots, 0, step, effective_reuse_enabled, active_tail_blocks);
             const bool reserved = pos >= std::max(seq_slots, ordinary_start) && pos < total_slots;
             if (!ordinary && !reserved) {
@@ -174,8 +178,11 @@ MatchResult SWAKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step,
-                            const RequiredPositions& required_positions) {
+bool SWAKVCacheGroup::malloc(BlockIds&                block_ids,
+                             int                      seq_len,
+                             bool                     enable_reuse_cache,
+                             int                      reserve_step,
+                             const RequiredPositions& required_positions) {
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlocks();

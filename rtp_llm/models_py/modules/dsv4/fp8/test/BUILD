@@ -12,6 +12,14 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_test(
+    name = "ring_chunk_prefill_test",
+    srcs = ["test_ring_write_mask.py"],
+    main = "test_ring_write_mask.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["manual"],
+)
+
 _DSV4_FP8_TESTS = [
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",

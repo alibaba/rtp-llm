@@ -133,7 +133,7 @@ TEST(BlockIdsTest, SharedKernelBlocksReuseStateWithoutChangingOwningRows) {
 TEST(BlockIdsTest, CyclicKernelBlocksKeepHistoryDistinctAndPreserveCanonicalTail) {
     BlockIds state;
     state.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8, 9, 10});
-    const auto&     kernel = state.kernelBlocks();
+    const auto&      kernel = state.kernelBlocks();
     BlockIndicesType execution(kernel.size());
     state.copyCyclicKernelBlocks(5, 3, execution.data());
     EXPECT_EQ(execution, (BlockIndicesType{7, 8, 9, 7, 8, 9, 10}));

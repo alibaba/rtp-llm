@@ -274,7 +274,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -290,7 +290,7 @@ public:
     int  currentChunkLen() const;  // tokens to compute in the current chunk
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     int  cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }

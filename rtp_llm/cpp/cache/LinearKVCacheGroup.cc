@@ -36,9 +36,12 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
 }
 
-NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled,
-    const RequiredPositions& required_positions) const {
+NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(int                      common_seq_len,
+                                                 int                      seq_len,
+                                                 int                      reserve_step,
+                                                 int                      reuse_blocks_len,
+                                                 bool                     reuse_enabled,
+                                                 const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
 
     // common_slots: blocks for common_seq_len (no reserve)
@@ -106,8 +109,11 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step,
-                               const RequiredPositions& required_positions) {
+bool LinearKVCacheGroup::malloc(BlockIds&                block_ids,
+                                int                      seq_len,
+                                bool                     enable_reuse_cache,
+                                int                      reserve_step,
+                                const RequiredPositions& required_positions) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);

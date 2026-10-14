@@ -153,6 +153,18 @@ py_test(
 
 # Test for PyFlashinferPrefillPagedAttnOp paged prefill attention implementation
 py_test(
+    name = "paged_mha_chunk_prefill_test",
+    main = "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+        "attention_ref.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + flashinfer_deps,
+    tags = ["manual"],
+)
+
+py_test(
     name = "test_py_flashinfer_paged_mha_prefill",
     srcs = [
         "test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
@@ -200,4 +212,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-

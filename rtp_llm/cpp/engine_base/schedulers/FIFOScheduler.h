@@ -68,10 +68,10 @@ private:
     };
 
     std::list<GenerateStreamPtr> selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
-    bool refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
-    bool partitionChunkContinuations();
-    void appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& tasks,
-                         const std::list<GenerateStreamPtr>& streams) const;
+    bool                         refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
+    bool                         partitionChunkContinuations();
+    void                         appendTaskInfos(std::vector<EngineScheduleInfo::TaskInfo>& tasks,
+                                                 const std::list<GenerateStreamPtr>&        streams) const;
     int64_t lastScheduleTime() override;
     bool    fitsPrefillTokenLimits(size_t                   admitted_stream_count,
                                    size_t                   admitted_tokens,

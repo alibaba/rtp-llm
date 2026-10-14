@@ -293,11 +293,11 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, int group_id, int32_t
     if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
         return false;
     }
-    const auto& context = resource_context_;
-    const auto& config = context.cache_manager->cacheConfig();
-    const auto block_size = config.cache_specs.at(group_id)->seq_size_per_block;
-    const auto tail = static_cast<size_t>(stream_->seqLength() - 1) / block_size;
-    const auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, group_id);
+    const auto& context    = resource_context_;
+    const auto& config     = context.cache_manager->cacheConfig();
+    const auto  block_size = config.cache_specs.at(group_id)->seq_size_per_block;
+    const auto  tail       = static_cast<size_t>(stream_->seqLength() - 1) / block_size;
+    const auto& ids        = batch_kv_cache_resource_->mutableBlockIds(batch, group_id);
     if (config.sharedChunkState(group_id)) {
         // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
         RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
@@ -310,15 +310,14 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, int group_id, int32_t
         return true;
     }
     const bool reuse = reuseCache();
-    const auto banks =
-        config.chunkCacheBlockCount(group_id, stream_->seqLength(), stream_->maxChunkSize(), reuse, stream_->reserveStep());
+    const auto banks = config.chunkCacheBlockCount(
+        group_id, stream_->seqLength(), stream_->maxChunkSize(), reuse, stream_->reserveStep());
     if (banks == 0) {
         return false;
     }
     RTP_LLM_CHECK_WITH_INFO(
         stream_->prefixLength() % block_size == 0 && stream_->currentChunkLen() <= stream_->maxChunkSize()
-            && (!stream_->isMiddleChunk()
-                || (stream_->prefixLength() + stream_->currentChunkLen()) % block_size == 0),
+            && (!stream_->isMiddleChunk() || (stream_->prefixLength() + stream_->currentChunkLen()) % block_size == 0),
         "cyclic chunk cache requires aligned prefixes and bounded grants");
     ids.copyCyclicKernelBlocks(tail, banks, dst);
     return true;

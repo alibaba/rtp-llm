@@ -33,5 +33,4 @@ py_test(
     srcs = ["engine_config_test.py"],
     data = ["//rtp_llm:sdk"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "SM103_CU13"},
 )

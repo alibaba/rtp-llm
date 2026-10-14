@@ -9,10 +9,10 @@ from typing import List, Optional, Tuple
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl import headwise_fp8
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
     HeadWisePrefillAttnOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl import headwise_fp8
 from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
     HeadWiseFP8PrefillAttnOp,
 )
@@ -172,7 +172,9 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     ) -> torch.Tensor:
         op = self._get_or_create_op(case)
         if not op.support(attn_inputs):
-            self.skipTest("HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)")
+            self.skipTest(
+                "HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)"
+            )
         op.prepare(attn_inputs)
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)
@@ -313,20 +315,38 @@ class TestHeadwiseFP8Chunk(unittest.TestCase):
         op = HeadWiseFP8PrefillAttnOp(
             config,
             parallel,
-            {"sink_token_num": 4, "swa_token_num": 64, "seqlen_threshold": 64, "0": [1]},
+            {
+                "sink_token_num": 4,
+                "swa_token_num": 64,
+                "seqlen_threshold": 64,
+                "0": [1],
+            },
         )
         inputs = PyAttentionInputs()
-        inputs.input_lengths = torch.tensor([chunk_len], device="cuda", dtype=torch.int32)
-        inputs.prefix_lengths = torch.tensor([prefix_len], device="cuda", dtype=torch.int32)
-        inputs.kv_cache_block_id_device = torch.tensor([[0, 1]], device="cuda", dtype=torch.int32)
+        inputs.input_lengths = torch.tensor(
+            [chunk_len], device="cuda", dtype=torch.int32
+        )
+        inputs.prefix_lengths = torch.tensor(
+            [prefix_len], device="cuda", dtype=torch.int32
+        )
+        inputs.kv_cache_block_id_device = torch.tensor(
+            [[0, 1]], device="cuda", dtype=torch.int32
+        )
         op.prepare(inputs)
         op._get_headwise_config(0)
         self.assertFalse(op.batch_items[0].use_headwise)
 
-        q = torch.randn((chunk_len, 1, head_dim), device="cuda", dtype=torch.bfloat16) / 4
-        k = (torch.randn((kv_len, 1, head_dim), device="cuda", dtype=torch.bfloat16) / 4).to(torch.float8_e4m3fn)
+        q = (
+            torch.randn((chunk_len, 1, head_dim), device="cuda", dtype=torch.bfloat16)
+            / 4
+        )
+        k = (
+            torch.randn((kv_len, 1, head_dim), device="cuda", dtype=torch.bfloat16) / 4
+        ).to(torch.float8_e4m3fn)
         v = (torch.randn_like(k.float()) / 4).to(torch.float8_e4m3fn)
-        cache = torch.zeros((2, 2, 1, page_size, head_dim), device="cuda", dtype=torch.float8_e4m3fn)
+        cache = torch.zeros(
+            (2, 2, 1, page_size, head_dim), device="cuda", dtype=torch.float8_e4m3fn
+        )
         for page in range(2):
             start, end = page * page_size, min((page + 1) * page_size, kv_len)
             cache[page, 0, 0, : end - start] = k[start:end, 0]
@@ -337,12 +357,16 @@ class TestHeadwiseFP8Chunk(unittest.TestCase):
         mask = torch.arange(kv_len, device="cuda")[None, :] <= (
             prefix_len + torch.arange(chunk_len, device="cuda")[:, None]
         )
-        reference = torch.nn.functional.scaled_dot_product_attention(
-            q.to(torch.float8_e4m3fn).float().transpose(0, 1),
-            k.float().transpose(0, 1),
-            v.float().transpose(0, 1),
-            attn_mask=mask,
-        ).transpose(0, 1).flatten(1)
+        reference = (
+            torch.nn.functional.scaled_dot_product_attention(
+                q.to(torch.float8_e4m3fn).float().transpose(0, 1),
+                k.float().transpose(0, 1),
+                v.float().transpose(0, 1),
+                attn_mask=mask,
+            )
+            .transpose(0, 1)
+            .flatten(1)
+        )
         torch.testing.assert_close(output.float(), reference, rtol=0.1, atol=0.05)
 
 

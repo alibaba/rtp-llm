@@ -1242,7 +1242,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.max_inited_kv_cache_streams    = t.size() >= 4 ? t[3].cast<int64_t>() : 0;
                     c.max_batch_tokens_without_cache = t.size() >= 5 ? t[4].cast<int64_t>() : 0;
                     c.max_batch_kv_len               = t.size() >= 6 ? t[5].cast<int64_t>() : 0;
-                    c.prefill_chunk_size = t.size() >= 7 ? t[6].cast<int64_t>() : 0;
+                    c.prefill_chunk_size             = t.size() >= 7 ? t[6].cast<int64_t>() : 0;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
                 }

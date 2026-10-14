@@ -135,23 +135,23 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     // Enable chunked prefill only for request shapes supported by the chunk window path.
-    const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    if (!input->fake_query && chunk_size > 0 && input->generate_config->max_new_tokens > 0
+    const auto chunk_size = std::min(runtime_config.fifo_scheduler_config.prefill_chunk_size,
+                                     runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+    if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
-        const char* reason = isGroup()                                       ? "force_batch" :
-                             hasNumBeams()                                   ? "num_beams" :
-                             returnLogits()                                  ? "return_logits" :
-                             calculateLoss()                                 ? "calculate_loss" :
-                             config.return_hidden_states                     ? "return_hidden_states" :
-                             config.return_all_hidden_states                 ? "return_all_hidden_states" :
-                             getReturnAllProbs() ? "return_all_probs" :
-                             multimodalFeaturesLength() != 0                 ? "multimodal" :
-                                                                               nullptr;
+        const char* reason = isGroup()                       ? "force_batch" :
+                             hasNumBeams()                   ? "num_beams" :
+                             returnLogits()                  ? "return_logits" :
+                             calculateLoss()                 ? "calculate_loss" :
+                             config.return_hidden_states     ? "return_hidden_states" :
+                             config.return_all_hidden_states ? "return_all_hidden_states" :
+                             getReturnAllProbs()             ? "return_all_probs" :
+                             multimodalFeaturesLength() != 0 ? "multimodal" :
+                                                               nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));
@@ -1141,7 +1141,8 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(
+            batch_id, special_tokens_.eos_token_id, inputLength() + generateConfig()->min_new_tokens)) {
         markSubGenerateFinished(batch_id);
     }
 }
@@ -1182,7 +1183,8 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (complete_token_ids_->matchStopWordsList(
+                batch_id, stop_words, inputLength() + generateConfig()->min_new_tokens)) {
             match = true;
             break;
         }

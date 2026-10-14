@@ -866,6 +866,34 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     expectPoolCountersEq(allocator, counters_before);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, ChunkBanksCapacityAndRelease) {
+    for (uint32_t linear_blocks : {3u, 5u}) {
+        auto config        = makeTinyMultiPoolHybridConfig(linear_blocks, 16);
+        config.linear_step = 1;
+        auto allocator     = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+        const auto before   = snapshotPoolCounters(allocator);
+        auto       resource = makeBatchResource(1, config);
+        auto       tokens   = makeCompleteTokenIds(1, 32, 4);
+        MallocInfo info{resource, tokens};
+        info.enable_device_cache          = false;
+        info.reuse_cache                  = false;
+        info.max_chunk_tokens             = 8;
+        info.enable_remove_skipped_blocks = false;
+        const auto result                 = allocator->malloc(info);
+        // Two chunk blocks plus the preceding state require three real banks;
+        // every pool also reserves the null block.
+        EXPECT_EQ(result.success, linear_blocks == 5u);
+        if (result.success) {
+            EXPECT_EQ(validBlockCount(resource->blocks(0, 0)), 3u);
+            EXPECT_EQ(validBlockCount(resource->blocks(0, 1)), 8u);
+            allocator->free(FreeInfo{resource, tokens});
+        }
+        EXPECT_EQ(resource->curBlocksNum(), 0u);
+        expectPoolCountersEq(allocator, before);
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);

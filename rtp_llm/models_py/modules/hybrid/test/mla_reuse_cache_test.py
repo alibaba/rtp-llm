@@ -86,6 +86,10 @@ class MLATest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+        os.environ.setdefault(
+            "DG_JIT_CACHE_DIR",
+            os.path.join(os.environ.get("TEST_TMPDIR", "/tmp"), "mla_deep_gemm"),
+        )
         torch.set_default_device(device)
 
     def _run_mla_test(
@@ -367,9 +371,11 @@ class MLATest(TestCase):
         inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32, device="cpu")
         inputs.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device="cpu")
         inputs.sequence_lengths = torch.empty(0, dtype=torch.int32, device="cpu")
-        inputs.kv_cache_block_id = torch.tensor(blocks, dtype=torch.int32, device="cpu")
-        inputs.kv_cache_block_id_device = inputs.kv_cache_block_id.to(device)
-        inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id
+        inputs.kv_cache_block_id_host = torch.tensor(
+            blocks, dtype=torch.int32, device="cpu"
+        )
+        inputs.kv_cache_block_id_device = inputs.kv_cache_block_id_host.to(device)
+        inputs.kv_cache_kernel_block_id_host = inputs.kv_cache_block_id_host
         inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_block_id_device
         return inputs
 
@@ -502,7 +508,9 @@ class MLATest(TestCase):
         fmha.absorb_opt_len = 1024
 
         def check_chunk(impl, start, end):
-            self.assertEqual(impl.absorb_fmha is not None, start > 0 and end - start < 1024)
+            self.assertEqual(
+                impl.absorb_fmha is not None, start > 0 and end - start < 1024
+            )
 
         self._chunked_replay(
             attn,

@@ -418,11 +418,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             group_type,
             param.cp_rank,
             param.cp_size);
-        const int publish_start_token = param.publish_start_tokens.defined() ?
-            param.publish_start_tokens.data_ptr<int32_t>()[batch_id] : 0;
+        const int publish_start_token =
+            param.publish_start_tokens.defined() ? param.publish_start_tokens.data_ptr<int32_t>()[batch_id] : 0;
         RTP_LLM_CHECK(publish_start_token >= 0);
         const size_t publish_start_block = group_type == CacheGroupType::FULL ?
-            static_cast<size_t>(publish_start_token) / canonical_seq_size_per_block : 0;
+                                               static_cast<size_t>(publish_start_token) / canonical_seq_size_per_block :
+                                               0;
         for (const auto& pair : block_plan) {
             if (static_cast<size_t>(pair.key_index) >= publish_start_block) {
                 addBlock(pair.key_index, pair.offset_index);

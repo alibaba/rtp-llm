@@ -7,6 +7,14 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+py_test(
+    name = "alltoall_chunk_prefill_test",
+    main = "test_alltoall_cp_impl.py",
+    srcs = ["test_alltoall_cp_impl.py"],
+    deps = py_test_deps + [":cp_test_utils"] + flashinfer_deps,
+    tags = ["manual"],
+)
+
 py_library(
     name = "cp_test_utils",
     srcs = ["cp_test_utils.py"],

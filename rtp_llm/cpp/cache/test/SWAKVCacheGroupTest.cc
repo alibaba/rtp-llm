@@ -200,7 +200,7 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenMatchesAllocation) {
     EXPECT_EQ(need1.common_blocks, 0);
     EXPECT_EQ(need2.extra_blocks, 0);
     EXPECT_EQ(need3.extra_blocks, 0);
-    BlockIds blocks;
+    BlockIds   blocks;
     const auto before = group.freeBlocksNum();
     ASSERT_TRUE(group.malloc(blocks, 20, false));
     EXPECT_EQ(before - group.freeBlocksNum(), need2.common_blocks);
@@ -208,8 +208,8 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenMatchesAllocation) {
 }
 
 TEST_F(SWAKVCacheGroupTest, ChunkBanksBackfillNullBlocksAndRecoverAfterFree) {
-    auto group = makeGroup(4);
-    BlockIds blocks;
+    auto       group = makeGroup(4);
+    BlockIds   blocks;
     const auto before = group.freeBlocksNum();
     ASSERT_TRUE(group.malloc(blocks, 32, false));
     const RequiredPositions banks{4, 5, 6, 7};

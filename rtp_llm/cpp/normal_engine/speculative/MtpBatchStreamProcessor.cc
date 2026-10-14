@@ -1126,18 +1126,18 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     }
 
     if (stream_groups) {
-        auto streams = stream_groups->allStreams();
-        const bool has_middle_chunk = std::any_of(streams.begin(), streams.end(),
-            [](const auto& stream) { return stream->isMiddleChunk(); });
+        auto       streams = stream_groups->allStreams();
+        const bool has_middle_chunk =
+            std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return stream->isMiddleChunk(); });
         if (has_middle_chunk) {
-            auto tails = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            auto mask = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-            int64_t row = 0;
+            auto    tails = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            auto    mask  = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+            int64_t row   = 0;
             for (const auto& stream : streams) {
                 for (int i = 0; i < stream->nextBatchSize(); ++i, ++row) {
                     RTP_LLM_CHECK(row < batch_size);
-                    const bool middle = stream->isMiddleChunk();
-                    mask.data_ptr<bool>()[row] = middle;
+                    const bool middle              = stream->isMiddleChunk();
+                    mask.data_ptr<bool>()[row]     = middle;
                     tails.data_ptr<int32_t>()[row] = middle ? stream->nextChunkBoundaryToken() : 0;
                 }
             }
@@ -1145,9 +1145,10 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
             host_holder.hold_host(mask);
             host_holder.hold_host(tails);
             new_all_tokens_d = new_all_tokens_d.clone();
-            new_all_tokens_d.select(1, token_stride - 1).copy_(torch::where(
-                mask.to(new_all_tokens_d.device(), true), tails.to(new_all_tokens_d.device(), true),
-                new_all_tokens_d.select(1, token_stride - 1)));
+            new_all_tokens_d.select(1, token_stride - 1)
+                .copy_(torch::where(mask.to(new_all_tokens_d.device(), true),
+                                    tails.to(new_all_tokens_d.device(), true),
+                                    new_all_tokens_d.select(1, token_stride - 1)));
         }
     }
 

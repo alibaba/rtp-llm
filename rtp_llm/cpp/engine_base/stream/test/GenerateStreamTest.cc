@@ -94,6 +94,72 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+static GenerateStreamPtr makeChunkStream(int input_length, RoleType role = RoleType::PREFILL, int max_new_tokens = 8) {
+    auto input                             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::arange(input_length, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = max_new_tokens;
+    input->generate_config->ignore_eos     = true;
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 128;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.prefill_chunk_size    = 16;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 8;
+    ResourceContext resource;
+    resource.role_type = role;
+    return std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+}
+
+TEST_F(GenerateStreamTest, ChunkPrefillWindowDoesNotPublishIntermediateTokens) {
+    for (bool speculative : {false, true}) {
+        SCOPED_TRACE(speculative);
+        auto stream = makeChunkStream(18);
+        ASSERT_EQ(stream->maxChunkSize(), 8);
+        EXPECT_EQ(stream->contextLength(), 18);
+        stream->setReuseLength(8);
+        stream->setInitialReuseLength(8);
+        stream->generate_status_->status = StreamState::RUNNING;
+        EXPECT_EQ(stream->currentExecuteTokens(), (std::vector<int>{8, 9, 10, 11, 12, 13, 14, 15}));
+        EXPECT_EQ(stream->nextChunkBoundaryToken(), 16);
+        EXPECT_EQ(stream->cacheStorePublishStartToken(), 0);
+        auto token = torch::tensor({{101}}, torch::kInt32);
+        if (speculative) {
+            stream->specUpdate({token, 1, 42, torch::Tensor(), torch::Tensor()});
+        } else {
+            stream->update({token, 1});
+        }
+        EXPECT_TRUE(stream->isContextStream());
+        EXPECT_EQ(stream->seqLength(), 18);
+        EXPECT_EQ(stream->reuseLength(), 16);
+        EXPECT_EQ(stream->initialReuseLength(), 8);
+        EXPECT_EQ(stream->cacheStorePublishStartToken(), 16);
+        EXPECT_EQ(stream->currentExecuteTokens(), (std::vector<int>{16, 17}));
+        ASSERT_TRUE(stream->isLastChunk());
+        stream->update({token, 1});
+        EXPECT_FALSE(stream->isContextStream());
+        EXPECT_EQ(stream->seqLength(), 19);
+    }
+}
+
+TEST_F(GenerateStreamTest, ChunkPrefillActivationAndCancellation) {
+    for (auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        for (int max_new_tokens : {0, 8}) {
+            auto stream = makeChunkStream(18, role, max_new_tokens);
+            ASSERT_FALSE(stream->hasError());
+            EXPECT_EQ(stream->chunkedPrefillEnabled(), role != RoleType::DECODE);
+        }
+    }
+    auto stream                      = makeChunkStream(18);
+    stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_TRUE(stream->isMiddleChunk());
+    stream->reportError(ErrorCode::CANCELLED, "cancel during chunked prefill");
+    stream->update({torch::tensor({{101}}, torch::kInt32), 1});
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->seqLength(), 18);
+    EXPECT_TRUE(stream->hasError());
+}
+
 TEST_F(GenerateStreamTest, testAsyncReleaseHandoffAfterWorkerDrains) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2});
     stream->incPendingAsyncBookkeeping();

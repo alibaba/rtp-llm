@@ -22,6 +22,14 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+py_test(
+    name = "mla_chunk_prefill_test",
+    main = "mla_reuse_cache_test.py",
+    srcs = ["mla_reuse_cache_test.py", "mla_attention_ref.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"] + flashinfer_deps,
+    tags = ["manual"],
+)
+
 py_test (
     name = "mla_attention_test",
     srcs = ["mla_attention_test.py", "mla_attention_ref.py"],
