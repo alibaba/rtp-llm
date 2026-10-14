@@ -188,7 +188,8 @@ template<typename T, typename DST_DTYPE>
 __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
                                             DST_DTYPE* __restrict__ output,
                                             const float* __restrict__ scale,
-                                            const int64_t num_elements) {
+                                            const int64_t num_elements,
+                                            const int64_t output_elements) {
     const int   gid        = blockIdx.x * blockDim.x + threadIdx.x;
     const int   grid_size  = blockDim.x * gridDim.x;
     float       safe_scale = fmax(1e-9, *scale);
@@ -220,6 +221,11 @@ __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
         float val   = fmax(-tensorrt_llm::common::FP8_E4M3_MAX,
                          fmin(static_cast<float>(input[idx]) * scale_val, tensorrt_llm::common::FP8_E4M3_MAX));
         output[idx] = static_cast<DST_DTYPE>(val);
+    }
+    // Padded GEMM rows share this launch; the amax above still uses only the
+    // real input. Default-sized outputs do not enter the loop.
+    for (int64_t idx = num_elements + gid; idx < output_elements; idx += grid_size) {
+        output[idx] = static_cast<DST_DTYPE>(0.0f);
     }
 }
 
@@ -373,6 +379,7 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
     CHECK_INPUT(output_s);
+    RTP_LLM_CHECK_WITH_INFO(output_q.numel() >= input.numel(), "FP8 quantized output must cover the input");
     if (is_static) {
         CHECK_EQ(output_s.numel(), 1);
     }
@@ -396,7 +403,8 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
             <<<grid, block, 0, stream>>>(static_cast<scalar_t*>(input.data_ptr()),
                                          static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
                                          static_cast<float*>(output_s.data_ptr()),
-                                         num_elements);
+                                         num_elements,
+                                         output_q.numel());
         return true;
     });
 }
