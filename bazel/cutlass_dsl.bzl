@@ -5,7 +5,7 @@ def _cutlass_install_impl(ctx):
     args.add("--version", ctx.attr.version)
     args.add_all(ctx.files.wheels)
     ctx.actions.run(
-        executable = ctx.executable._merger,
+        executable = ctx.attr._merger[DefaultInfo].files_to_run,
         arguments = [args],
         inputs = ctx.files.wheels,
         outputs = [output],
