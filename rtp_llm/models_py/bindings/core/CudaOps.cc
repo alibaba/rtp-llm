@@ -90,7 +90,7 @@ void validatePackedMaskLogitsInputs(const torch::Tensor& logits,
                             vocab_size);
 }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 template<typename Stream>
 void launchPackedMaskLogits(const torch::Tensor& logits,
                             const torch::Tensor& packed_allow_mask,
@@ -98,12 +98,12 @@ void launchPackedMaskLogits(const torch::Tensor& logits,
                             size_t               vocab_size,
                             Stream               stream) {
     validatePackedMaskLogitsInputs(logits, packed_allow_mask, row_indices, vocab_size);
-    RTP_LLM_CHECK_WITH_INFO(logits.is_cuda(), "packed mask CUDA logits must be on a CUDA device");
+    RTP_LLM_CHECK_WITH_INFO(logits.is_cuda(), "packed mask logits must be on a GPU device");
     RTP_LLM_CHECK_WITH_INFO(logits.device() == packed_allow_mask.device(),
-                            "packed mask CUDA logits and mask must be on the same device");
+                            "packed mask logits and mask must be on the same device");
     if (row_indices.defined()) {
         RTP_LLM_CHECK_WITH_INFO(logits.device() == row_indices.device(),
-                                "packed mask CUDA logits and row indices must be on the same device");
+                                "packed mask logits and row indices must be on the same device");
     }
     const int mask_rows   = static_cast<int>(packed_allow_mask.size(0));
     const int logits_rows = logits.dim() == 1 ? 1 : static_cast<int>(logits.size(0));
@@ -162,11 +162,8 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                                       size_t               vocab_size) {
     validatePackedMaskLogitsInputs(logits, packed_allow_mask, row_indices, vocab_size);
 
-    // ROCm and other backends without a native packed-mask kernel deliberately
-    // fall back to CPU. The work is O(mask_rows * vocab_size) over only the
-    // current logits and mask; it never replays the generated prefix. Blocking
-    // copies keep the temporary CPU tensors alive until masked logits reach the
-    // caller's device.
+    // CPU-only callers retain the packed-mask fallback. GPU callers use the
+    // CUDA/HIP kernel so an entire logits row never crosses the host boundary.
     auto logits_cpu = contiguousCpuTensor(logits);
     auto mask_cpu   = contiguousCpuTensor(packed_allow_mask);
     auto rows_cpu   = row_indices.defined() ? contiguousCpuTensor(row_indices) : torch::Tensor{};
@@ -432,7 +429,15 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,
                                   size_t               vocab_size) {
-    applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
+    if (logits.device().is_cpu()) {
+        applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
+        return;
+    }
+    launchPackedMaskLogits(logits,
+                           packed_allow_mask,
+                           row_indices,
+                           vocab_size,
+                           at::hip::getCurrentHIPStream(logits.device().index()).stream());
 }
 
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,

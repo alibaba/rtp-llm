@@ -90,6 +90,23 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+cc_test(
+    name = "packed_mask_logits_rocm_test",
+    srcs = ["PackedMaskLogitsRocmTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["MI308X-ROCM7"],
+)
+
 # Exercise the CPU fallback without initializing or allocating a GPU.
 cc_test(
     name = "packed_mask_logits_cpu_fallback_test",
