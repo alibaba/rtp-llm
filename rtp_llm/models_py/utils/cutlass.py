@@ -1,7 +1,6 @@
 import importlib
 import importlib.metadata
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -22,17 +21,6 @@ def _import_from(packages: Path) -> None:
 
 def setup_cutlass_import_path() -> None:
     """Select the complete Bazel or pip CUTLASS installation before kernel imports."""
-    explicit_root = os.environ.get("KIMI_K3_CUTLASS_DSL_ROOT")
-    if explicit_root:
-        if os.environ.get("MODEL_TYPE") not in ("kimi_k3", "kimi_k3_mtp"):
-            raise RuntimeError("KIMI_K3_CUTLASS_DSL_ROOT is only supported for K3")
-        root = Path(explicit_root).resolve(strict=True)
-        value = str(root)
-        if value not in sys.path:
-            sys.path.insert(0, value)
-        _import_from(root / "nvidia_cutlass_dsl" / "dsl_packages")
-        return
-
     try:
         import nvidia_cutlass_dsl
     except ImportError:

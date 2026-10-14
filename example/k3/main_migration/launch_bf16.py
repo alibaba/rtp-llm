@@ -112,7 +112,7 @@ def launch_config(args):
                 "RTP_LLM_MTP_ASYNC_PREPARE": "1",
             }
             if args.role == "DECODE"
-            else {"PREFILL_CHUNK_SIZE": "16384"}
+            else {"PREFILL_CHUNK_SIZE": "0"}
         ),
         "SP_TYPE": "mtp",
         "SP_MODEL_TYPE": "kimi_k3_mtp",

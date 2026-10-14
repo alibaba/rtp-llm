@@ -268,9 +268,7 @@ class ProducerIdentityTest(JitCacheTestBase):
         component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
         scopes = {"accelerator": "sm103"}
         with (
-            mock.patch.dict(
-                os.environ, {"MODEL_TYPE": "kimi_k3", "KIMI_K3_CUTLASS_DSL_ROOT": ""}
-            ),
+            mock.patch.dict(os.environ, {"MODEL_TYPE": "kimi_k3"}),
             mock.patch.object(jit.importlib.metadata, "version", return_value="4.7.1"),
             mock.patch.object(
                 k3_runtime,

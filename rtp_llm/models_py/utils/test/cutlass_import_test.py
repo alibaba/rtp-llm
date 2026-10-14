@@ -1,5 +1,4 @@
 import csv
-import os
 import subprocess
 import sys
 import tempfile
@@ -51,11 +50,8 @@ class CutlassImportTest(unittest.TestCase):
                 script,
             ]
         )
-        environment = os.environ.copy()
-        environment.pop("KIMI_K3_CUTLASS_DSL_ROOT", None)
         return subprocess.run(
             [sys.executable, "-c", code],
-            env=environment,
             capture_output=True,
             text=True,
             check=False,

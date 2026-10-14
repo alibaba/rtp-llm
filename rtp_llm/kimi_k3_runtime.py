@@ -91,20 +91,9 @@ def _flashinfer_cache_identity(scopes: Mapping[str, str]) -> tuple[str, ...] | N
 
 
 def _cute_dsl_cache_identity(scopes: Mapping[str, str]) -> tuple[str, ...]:
-    root = os.environ.get("KIMI_K3_CUTLASS_DSL_ROOT")
-    cutlass = (
-        isolated_package_identity(
-            root,
-            Path("nvidia_cutlass_dsl/dsl_packages/cutlass"),
-            "nvidia-cutlass-dsl",
-            companion_record_prefixes=("nvidia_cutlass_dsl_libs_",),
-        )
-        if root
-        else importlib.metadata.version("nvidia-cutlass-dsl")
-    )
     return (
         scopes["accelerator"],
-        cutlass,
+        importlib.metadata.version("nvidia-cutlass-dsl"),
         selected_package_identity("tokenspeed_mla", "tokenspeed-mla"),
     )
 
