@@ -76,6 +76,10 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    EPLBConfig              eplb_config;
+    QuantAlgo               quant_algo;
+    // Borrowed for construction; ExpertBalancer retains it under the GIL.
+    py::handle py_eplb;
 };
 
 enum GptModelInputIndex : size_t {
@@ -205,6 +209,9 @@ public:
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual bool                       updateEplbConfig(const EPLBConfig&) {
+        return true;
+    }
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -96,6 +97,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           base_params.vit_config,
                                                                           std::move(*gpt_weight),
                                                                           py::none(),
+                                                                          py::none(),
                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
@@ -143,6 +145,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.ffn_disaggregate_config,
                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight),
+                                                                           py::none(),
                                                                            py::none(),
                                                                            py_eplb)));
         model_id++;
@@ -516,9 +519,11 @@ void RtpLLMOp::stop() {
             http_server_.reset();
         }
         is_server_shutdown_ = true;
-        // bounded flush of remaining spans; never blocks process exit
         {
             pybind11::gil_scoped_release release;
+            // Join grammar workers and release their reporter while KMonitor is alive.
+            LogitsProcessorFactory::shutdown();
+            // bounded flush of remaining spans; never blocks process exit
             telemetry::TelemetryRuntime::shutdown();
         }
         stopKmonitorFactory();

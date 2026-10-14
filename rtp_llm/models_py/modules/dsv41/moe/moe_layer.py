@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv41.chunk_env import (
     dsv4_chunk_tokens_from_env,
     dsv4_global_chunk_tokens_configured,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 from .gate import Gate
 from .shared_expert import (
@@ -277,13 +278,17 @@ class MoE(nn.Module):
         return self._gate_pack_static and (not self._has_visual_tokens)
 
     def _run_chunk(
-        self, x: torch.Tensor, input_ids: torch.Tensor, out: torch.Tensor
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        out: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> None:
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     routed = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids
+                        x, self.gate, input_ids, expert_load=expert_load
                     )
                 out.copy_(routed)
                 return
@@ -292,7 +297,7 @@ class MoE(nn.Module):
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
                     routed = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids
+                        x, self.gate, input_ids, expert_load=expert_load
                     )
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
@@ -309,14 +314,14 @@ class MoE(nn.Module):
             weights, indices = self.gate(x, input_ids)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                routed = self._strategy(x, weights, indices, expert_load=expert_load)
             out.copy_(routed)
             return
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                routed = self._strategy(x, weights, indices, expert_load=expert_load)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -329,7 +334,11 @@ class MoE(nn.Module):
                 out.copy_(combined)
 
     def _forward_chunked(
-        self, x: torch.Tensor, input_ids_flat: torch.Tensor, shape: torch.Size
+        self,
+        x: torch.Tensor,
+        input_ids_flat: torch.Tensor,
+        shape: torch.Size,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
@@ -352,10 +361,16 @@ class MoE(nn.Module):
                 x[token_start:token_end],
                 input_ids_flat[token_start:token_end],
                 out[token_start:token_end],
+                expert_load=expert_load,
             )
         return out.view(shape)
 
-    def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
+    ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg = _rt.should_record_layer(self.layer_id)
@@ -381,12 +396,14 @@ class MoE(nn.Module):
                     x[dbg_pos_mask].contiguous(),
                 )
         if self._should_chunk(x.size(0)):
-            return self._forward_chunked(x, input_ids_flat, shape)
+            return self._forward_chunked(
+                x, input_ids_flat, shape, expert_load=expert_load
+            )
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     y = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids_flat
+                        x, self.gate, input_ids_flat, expert_load=expert_load
                     )
                 with record_function_range("dsv4.moe.add_shared"):
                     T = x.size(0)
@@ -400,7 +417,7 @@ class MoE(nn.Module):
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
                     y = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids_flat
+                        x, self.gate, input_ids_flat, expert_load=expert_load
                     )
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
@@ -439,7 +456,7 @@ class MoE(nn.Module):
                 )
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                y = self._strategy(x, weights, indices, expert_load=expert_load)
             if _dbg:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
                 if dbg_pos_mask is not None:
@@ -460,7 +477,7 @@ class MoE(nn.Module):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                y = self._strategy(x, weights, indices, expert_load=expert_load)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

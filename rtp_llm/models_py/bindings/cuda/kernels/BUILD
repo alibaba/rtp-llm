@@ -28,6 +28,17 @@ cuda_deps = [
 ]
 
 cc_library(
+    name = "expert_load",
+    srcs = ["expert_load.cu"],
+    hdrs = ["expert_load.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+)
+
+cc_library(
     name = "cuda_utils_common",
     hdrs = [
         "vec_dtypes.cuh",
