@@ -310,6 +310,7 @@ class PyModelInputs:
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor
+    expert_token_counts: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload

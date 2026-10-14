@@ -20,11 +20,17 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import fields, replace
 from datetime import timedelta
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from rtp_llm.models_py.utils.expert_load_monitor import (
+    ExpertLoadContext,
+    expert_load_for_layer,
+)
 
 
 def _load_helpers():
@@ -1883,6 +1889,8 @@ class CedCandidatePublicationTest(_SingleThreadTest):
                 routing_metadata=None,
                 routing_kwargs={},
                 engram_prefetch=None,
+                expert_token_counts=None,
+                expert_load_for_layer=expert_load_for_layer,
                 ced_in_l20=False,
                 ced_tail=None if absent else plan,
                 prefill_write_by_region=None,
@@ -1895,7 +1903,9 @@ class CedCandidatePublicationTest(_SingleThreadTest):
                 positions=None,
                 cu_seqlens=None,
                 v4=types.SimpleNamespace(
-                    _propagate_cp_ctx=lambda cp: None, swa_bounded_replay=False
+                    layers=[torch.nn.Module() for _ in range(40)],
+                    _propagate_cp_ctx=lambda cp: None,
+                    swa_bounded_replay=False,
                 ),
                 kv_cache=None,
                 block_tables_by_type=None,
@@ -2500,6 +2510,7 @@ class CedRouterProjectionTest(_SingleThreadTest):
                         torch.ones(4, 5, dtype=torch.bfloat16),
                         gate,
                         torch.arange(4),
+                        expert_load=None,
                     )
                 gate._ced_row_projection.assert_called_once()
                 pack.assert_called_once()
@@ -2720,11 +2731,16 @@ class CedEncoderSplitTest(_SingleThreadTest):
         )
         shared, seen, writes, captures = {}, [], [], []
         original = plan.original_context
+        expert_token_counts = torch.zeros((40, 3), dtype=torch.int32)
 
         def layer(i):
             def call(h, ids, positions, cu, **kwargs):
                 self.assertNotIn("ced_candidate_rows", shared)
                 self.assertNotEqual(i, 20)
+                self.assertEqual(
+                    kwargs["expert_load"].expert_token_counts.data_ptr(),
+                    expert_token_counts[i].data_ptr(),
+                )
                 expected_ctx = original if i < 20 else plan.context
                 self.assertEqual(h.shape[0], expected_ctx.chunk_length)
                 self.assertIs(positions, expected_ctx.global_positions)
@@ -2735,13 +2751,17 @@ class CedEncoderSplitTest(_SingleThreadTest):
 
         def split(h, ids, positions, supplied_plan, **kwargs):
             self.assertIs(supplied_plan, plan)
+            self.assertEqual(
+                kwargs["expert_load"].expert_token_counts.data_ptr(),
+                expert_token_counts[20].data_ptr(),
+            )
             self.assertIs(positions, original.global_positions)
             self.assertNotIn("ced_candidate_rows", shared)
             seen.append(20)
             return h[:32], ids[:32]
 
-        layers = [layer(i) for i in range(40)]
-        layers[20] = types.SimpleNamespace(forward_prefill_ced_l20=split)
+        layers = [torch.nn.Module() for _ in range(40)]
+        layers[20].forward_prefill_ced_l20 = split
         v4 = types.SimpleNamespace(
             layers=layers,
             swa_bounded_replay=False,
@@ -2757,6 +2777,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
             routing_metadata=None,
             routing_kwargs={},
             engram_prefetch=None,
+            expert_token_counts=expert_token_counts,
+            expert_load_for_layer=expert_load_for_layer,
             ced_in_l20=True,
             ced_tail=plan,
             prefill_write_by_region=None,
@@ -2885,7 +2907,13 @@ class CedEncoderSplitTest(_SingleThreadTest):
         self,
     ):
         root = Path(_CED.__file__).parent.parent
-        ns = {"torch": torch, "F": F, "Tuple": tuple}
+        ns = {
+            "torch": torch,
+            "F": F,
+            "Tuple": tuple,
+            "Optional": Optional,
+            "ExpertLoadContext": ExpertLoadContext,
+        }
         fallback = ast.parse((root / "hc/fallback_impl.py").read_text())
         nodes = [
             next(
@@ -3049,7 +3077,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
             attn._prefill_produce, attn._prefill_query = produce, query
             gate = CedRouterProjectionTest._gate()
 
-            def ffn(x, ids):
+            def ffn(x, ids, expert_load):
+                self.assertIsNone(expert_load)
                 self.assertEqual(gate._ced_row_projection, plan.project_indexer_weights)
                 return x * 0.25
 
@@ -3081,12 +3110,17 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, "query failure"):
                         ns["forward_prefill_ced_l20"](
-                            block, hidden, ids, common.position_ids, plan
+                            block,
+                            hidden,
+                            ids,
+                            common.position_ids,
+                            plan,
+                            expert_load=None,
                         )
                     block.ffn.assert_not_called()
                 else:
                     result, result_ids = ns["forward_prefill_ced_l20"](
-                        block, hidden, ids, common.position_ids, plan
+                        block, hidden, ids, common.position_ids, plan, expert_load=None
                     )
                     self.assertEqual(result.shape, (32, 4, 3))
                     self.assertTrue(torch.equal(result_ids, ids[rows]))

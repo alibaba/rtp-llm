@@ -53,6 +53,7 @@ class _FakeLayer(Block):
         nn.Module.__init__(self)
         self.layer_id = layer_id
         self.calls = calls
+        self.expert_load_calls = []
         object.__setattr__(self, "attn", _FakeAttention.__new__(_FakeAttention))
 
     def prefill_fast_callable(self):
@@ -64,9 +65,11 @@ class _FakeLayer(Block):
         input_ids,
         positions,
         cu_seqlens,
+        expert_load,
         kv_cache=None,
         block_tables_by_type=None,
     ):
+        self.expert_load_calls.append(expert_load)
         self.calls.append(
             (
                 "fast",
@@ -87,9 +90,11 @@ class _FakeLayer(Block):
         input_ids,
         positions,
         cu_seqlens,
+        expert_load,
         kv_cache=None,
         block_tables_by_type=None,
     ):
+        self.expert_load_calls.append(expert_load)
         self.calls.append(
             (
                 "normal",
@@ -146,6 +151,7 @@ class _PrefillForwardTestBase(unittest.TestCase):
         inputs = SimpleNamespace(
             attention_inputs=attn,
             input_ids=torch.tensor([3, 4, 5, 6], dtype=torch.long, device=device),
+            expert_token_counts=None,
         )
         with patch.object(prefill_forward, "set_cp_info"), patch.object(
             prefill_forward, "primary_attention_inputs", return_value=attn
@@ -172,7 +178,9 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
     def _forward_prefill_cu_seqlens(self, attn):
         input_ids = torch.arange(attn.combo_position_ids.numel(), dtype=torch.long)
-        inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn)
+        inputs = SimpleNamespace(
+            input_ids=input_ids, attention_inputs=attn, expert_token_counts=None
+        )
 
         with patch.object(
             prefill_forward, "primary_attention_inputs", return_value=attn
@@ -213,6 +221,43 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
+    def test_expert_load_views_follow_each_input_in_normal_and_cached_paths(self):
+        for fast in ("0", "1"):
+            v4 = _FakeV4()
+            batches = [torch.zeros((2, 4), dtype=torch.int32) for _ in range(2)] + [
+                None
+            ]
+            with self.subTest(fast=fast), patch.dict(
+                prefill_forward.os.environ, {"DSV4_PREFILL_FAST_PATH": fast}
+            ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
+                prefill_forward._fwd_dbg, "enabled", return_value=False
+            ), patch.object(
+                prefill_forward, "PrefillWorkspace"
+            ), patch.object(
+                prefill_forward, "build_and_propagate_prefill_meta_fp8"
+            ), patch.object(
+                prefill_forward, "clear_prefill_meta_shared_fp8"
+            ):
+                for expert_token_counts in batches:
+                    prefill_forward.forward_layers(
+                        v4,
+                        None,
+                        torch.tensor([3, 4]),
+                        torch.tensor([7, 8]),
+                        torch.tensor([0, 2]),
+                        None,
+                        expert_token_counts=expert_token_counts,
+                    )
+                    for layer_id, layer in enumerate(v4.layers):
+                        context = layer.expert_load_calls[-1]
+                        if expert_token_counts is None:
+                            self.assertIsNone(context)
+                        else:
+                            self.assertEqual(
+                                context.expert_token_counts.data_ptr(),
+                                expert_token_counts[layer_id].data_ptr(),
+                            )
+
     def test_fast_forward_keeps_layer_ranges_with_nested_ranges_disabled(self):
         v4 = _FakeV4()
         with patch.object(_profiler, "_RANGES_ENABLED", True), patch.dict(
@@ -235,6 +280,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 positions=torch.tensor([7, 8]),
                 cu_seqlens=torch.tensor([0, 2]),
                 block_tables_by_type=None,
+                expert_token_counts=None,
             )
 
         self.assertEqual(
@@ -285,6 +331,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 positions=torch.tensor([7, 8], dtype=torch.long),
                 cu_seqlens=torch.tensor([0, 2], dtype=torch.long),
                 block_tables_by_type=None,
+                expert_token_counts=None,
             )
 
         self.assertEqual(events, ["workspace", "propagate_cp", "embed"])
@@ -583,6 +630,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 cu_seqlens=cu_seqlens,
                 block_tables_by_type=block_tables,
                 attn_inputs=attn_inputs,
+                expert_token_counts=None,
             )
 
         self.assertEqual(
@@ -614,6 +662,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         inputs = SimpleNamespace(
             input_ids=torch.tensor([3, 4], dtype=torch.long),
             attention_inputs=attn,
+            expert_token_counts=None,
         )
 
         with patch.object(
@@ -731,6 +780,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 positions=torch.tensor([7, 8], dtype=torch.long),
                 cu_seqlens=torch.tensor([0, 2], dtype=torch.long),
                 block_tables_by_type=None,
+                expert_token_counts=None,
             )
 
         expected = v4.embed(input_ids)
@@ -762,6 +812,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     cu_seqlens=cu_seqlens,
                     block_tables_by_type=None,
                     capture_context=capture_context,
+                    expert_token_counts=None,
                 )
                 return out, norm.call_count
 
@@ -813,6 +864,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 input_ids,
                 positions,
                 cu_seqlens,
+                expert_load,
                 kv_cache=None,
                 block_tables_by_type=None,
             ):
@@ -866,6 +918,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     block_tables_by_type=None,
                     attn_inputs=attn_inputs,
                     capture_context=capture_context.for_forward(enabled),
+                    expert_token_counts=None,
                 )
                 norm.assert_called_once()
                 torch.testing.assert_close(out, expected if enabled else expected[:, -2:])
@@ -904,6 +957,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 cu_seqlens=cu_seqlens,
                 block_tables_by_type=block_tables,
                 attn_inputs=attn_inputs,
+                expert_token_counts=None,
             )
 
         self.assertEqual(
@@ -962,6 +1016,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 cu_seqlens=cu_seqlens,
                 block_tables_by_type=None,
                 attn_inputs=attn_inputs,
+                expert_token_counts=None,
             )
 
         kwargs = build_meta.call_args.kwargs
@@ -1004,6 +1059,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 cu_seqlens=cu_seqlens,
                 block_tables_by_type=None,
                 attn_inputs=attn_inputs,
+                expert_token_counts=None,
             )
 
         self.assertEqual(
@@ -1072,6 +1128,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 positions=positions,
                 cu_seqlens=cu_seqlens,
                 block_tables_by_type=None,
+                expert_token_counts=None,
             )
 
         self.assertEqual(

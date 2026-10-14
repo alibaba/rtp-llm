@@ -801,7 +801,7 @@ class DeepSeekV4Model(GptModelBase):
                         + _start
                     )
                     _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _strategy(_x_moe, _w_moe, _idx_moe, expert_load=None)
                     _torch.cuda.synchronize()
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()

@@ -104,6 +104,10 @@ class NativePrefillInputsTest(unittest.TestCase):
                 inputs = PyModelInputs()
                 inputs.input_ids = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
                 inputs.attention_inputs = {"swa_kv": attention}
+                if explicit:
+                    inputs.expert_token_counts = torch.zeros(
+                        (2, 3), dtype=torch.int32, device="cuda"
+                    )
                 expected = torch.tensor([0, 1, 9, 10, 11])
                 if explicit:
                     inputs.combo_position_ids = expected
@@ -114,6 +118,13 @@ class NativePrefillInputsTest(unittest.TestCase):
                     output = forward.forward_prefill(model, None, None, inputs)
                 torch.testing.assert_close(layers.call_args.args[3].long(), expected)
                 self.assertEqual(layers.call_args.args[4].tolist(), [0, 2, 5])
+                passed_counts = layers.call_args.kwargs["expert_token_counts"]
+                if explicit:
+                    self.assertEqual(
+                        passed_counts.data_ptr(), inputs.expert_token_counts.data_ptr()
+                    )
+                else:
+                    self.assertIsNone(passed_counts)
                 self.assertEqual(tuple(output.hidden_states.shape), (5, 4))
 
     @unittest.skipUnless(torch.cuda.is_available(), "native model imports need CUDA")

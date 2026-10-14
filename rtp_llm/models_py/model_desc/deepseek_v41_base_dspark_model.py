@@ -77,6 +77,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -919,6 +920,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        expert_token_counts: Optional[torch.Tensor],
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
@@ -949,6 +951,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         if layer_idx + 1 < len(self.v4.layers)
                         else None
                     ),
+                    expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
                     attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
                         layer_idx,
                         x_pre,
@@ -1005,6 +1008,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             block_table,
             tokens_per_block,
             graph_metadata,
+            expert_token_counts=inputs.expert_token_counts,
         )
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:

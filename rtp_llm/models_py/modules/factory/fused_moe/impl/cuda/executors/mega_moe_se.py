@@ -8,7 +8,7 @@ buffer/packer/warmup state from the routed-only ``mega_moe`` path.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -35,6 +35,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup im
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 from .mega_moe import (
@@ -300,7 +301,13 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 f"than input tokens={tokens}; aligned capacity is inconsistent"
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+    def _launch(
+        self,
+        y: torch.Tensor,
+        tokens: int,
+        device: torch.device,
+        expert_load: Optional[ExpertLoadContext],
+    ) -> None:
         import deep_gemm
 
         self._maybe_pre_kernel_barrier(tokens)
@@ -321,10 +328,19 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
             shared_recipe=_SHARED_RECIPE,
         )
 
-    def forward(self, x, weights, indices):
+    def forward(
+        self,
+        x,
+        weights,
+        indices,
+        expert_load: Optional[ExpertLoadContext],
+    ):
         """Return BF16 routed+shared output; participate even for local T=0."""
 
         tokens = x.size(0)
@@ -332,13 +348,14 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load)
         return y
 
     def forward_gate_pack(
         self,
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        expert_load: Optional[ExpertLoadContext],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route, pack, and stage shared-expert scales for MegaMoE-SE."""
 
@@ -379,7 +396,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             block_m,
         )
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
 

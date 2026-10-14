@@ -11,6 +11,13 @@ void EplbPlanTensors::init(int log_exp_num, int phy_exp_num) {
 
 ExpertBalancerPythonWrapper::ExpertBalancerPythonWrapper(py::object py_eplb): py_eplb_(std::move(py_eplb)) {}
 
+ExpertBalancerPythonWrapper::~ExpertBalancerPythonWrapper() {
+    if (py_eplb_) {
+        py::gil_scoped_acquire acquire;
+        py_eplb_ = py::object();
+    }
+}
+
 void ExpertBalancerPythonWrapper::createBalancePlan(torch::Tensor&   log_stats,
                                                     torch::Tensor&   gpu_loads,
                                                     EplbPlanTensors& eplb_plan) {

@@ -269,7 +269,7 @@ class StrategySelectTest(unittest.TestCase):
                         "API inspection belongs outside forward"
                     ),
                 ):
-                    strategy._launch(object(), 16, "cpu")
+                    strategy._launch(object(), 16, "cpu", expert_load=None)
                 launch.assert_called_once()
                 kwargs = launch.call_args.kwargs
                 self.assertEqual(kwargs["recipe"], (1, 1, 32))

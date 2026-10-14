@@ -47,6 +47,7 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
     prepare_model_gate_routing_metadata,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -285,6 +286,7 @@ def forward_layers(
     kv_cache: Optional[Any],
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
+    expert_token_counts: Optional[torch.Tensor],
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
@@ -335,6 +337,7 @@ def forward_layers(
                 preserve_output=layer_idx + 1 in capture_ids or _rt_on,
                 kv_cache=kv_cache,
                 routing_metadata=routing_metadata,
+                expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
             )
             if _rt_on:
                 _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
@@ -470,6 +473,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        expert_token_counts=inputs.expert_token_counts,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():

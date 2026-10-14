@@ -168,6 +168,7 @@ class MegaGateMoETest(unittest.TestCase):
 
         x = torch.ones((8, 256), dtype=torch.bfloat16)
         input_ids = torch.arange(8)
+        expert_load = object()
         weights = torch.full((8, 6), 1 / 6)
         indices = torch.arange(6).expand(8, 6)
         for chunk in (False, True):
@@ -200,21 +201,25 @@ class MegaGateMoETest(unittest.TestCase):
                         ):
                             if chunk:
                                 actual = torch.empty_like(x)
-                                moe._run_chunk(x, input_ids, actual)
+                                moe._run_chunk(
+                                    x, input_ids, actual, expert_load=expert_load
+                                )
                             else:
-                                actual = moe(x, input_ids)
+                                actual = moe(x, input_ids, expert_load=expert_load)
                         torch.testing.assert_close(
                             actual, x * (2 if includes_shared else 3)
                         )
                         if enabled:
                             native.assert_called_once_with(x, moe.gate, 3)
-                            strategy.assert_called_once_with(x, weights, indices)
+                            strategy.assert_called_once_with(
+                                x, weights, indices, expert_load=expert_load
+                            )
                             strategy.forward_with_gate_pack.assert_not_called()
                         else:
                             native.assert_not_called()
                             strategy.assert_not_called()
                             strategy.forward_with_gate_pack.assert_called_once_with(
-                                x, moe.gate, input_ids
+                                x, moe.gate, input_ids, expert_load=expert_load
                             )
                         self.assertEqual(
                             moe._shared_executor.finish.call_count,

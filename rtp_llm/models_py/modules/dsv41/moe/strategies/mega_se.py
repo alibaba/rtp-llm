@@ -430,7 +430,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             and (_get_mega_se_gate_pack_kernels() is not None)
         )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+    def _launch(
+        self, y: torch.Tensor, tokens: int, device: torch.device, expert_load
+    ) -> None:
         import deep_gemm
 
         self._maybe_pre_kernel_barrier(tokens)
@@ -450,19 +452,22 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
             **self._shared_recipe_kwargs,
         )
 
-    def forward(self, x, weights, indices):
+    def forward(self, x, weights, indices, expert_load):
         """Return BF16 routed+shared output; participate even for local T=0."""
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y
 
-    def forward_with_gate_pack(self, x, gate, input_ids):
+    def forward_with_gate_pack(self, x, gate, input_ids, expert_load):
         kernels = _get_mega_se_gate_pack_kernels()
         pack_nonhash, pack_hash, _ = kernels
         tokens = x.size(0)
@@ -501,7 +506,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y
 
 

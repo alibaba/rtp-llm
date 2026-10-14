@@ -81,6 +81,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 global expert IDs
+        expert_load,
     ) -> torch.Tensor:
         """DP+EP path: DeepEP normal dispatch → local per-expert compute
         → DeepEP combine. Requires ``init_deepep_wrapper`` to have been
@@ -123,6 +124,9 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             weights_p,
             expert_alignment=1,
         )
+
+        if expert_load is not None:
+            expert_load.record_ids(recv_topk_idx)
 
         # 3. Local per-expert compute. ACCL-EP's dispatch returns
         # ``recv_topk_idx`` in the LOCAL index space ``[0, n_local_experts)``

@@ -37,7 +37,7 @@ class TestAttention(torch.nn.Module):
 
 
 class TestFFN(torch.nn.Module):
-    def forward(self, x, input_ids):
+    def forward(self, x, input_ids, expert_load):
         return (
             x.float() * 0.125 + input_ids.reshape(*x.shape[:-1], 1).float() * 0.01
         ).to(x.dtype)
@@ -102,6 +102,7 @@ def run_blocks(blocks, hidden, input_ids, captures=(), attn_fn=None):
             next_layer=blocks[index + 1] if index + 1 < len(blocks) else None,
             preserve_output=index in captures,
             attn_fn=attn_fn,
+            expert_load=None,
         )
         if index in captures:
             assert isinstance(hidden, torch.Tensor)
@@ -131,13 +132,13 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         for block in (*baseline, *candidate):
             block._cp_sync_after_attn_done = True
         first = baseline[0]._forward_prefill_fast_fp8(
-            hidden, ids, positions, cu_seqlens
+            hidden, ids, positions, cu_seqlens, expert_load=None
         )
         expected = baseline[1]._forward_prefill_fast_fp8(
-            first, ids, positions, cu_seqlens
+            first, ids, positions, cu_seqlens, expert_load=None
         )
         pending = candidate[0]._forward_prefill_fast_fp8(
-            hidden, ids, positions, cu_seqlens, _defer_ffn_post=True
+            hidden, ids, positions, cu_seqlens, expert_load=None, _defer_ffn_post=True
         )
         self.assertIsInstance(pending, transition.PendingDecodePost)
         prepared = reference_transition(
@@ -150,7 +151,12 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             candidate[1].attn_norm,
         )
         actual = candidate[1]._forward_prefill_fast_fp8(
-            prepared[0], ids, positions, cu_seqlens, _prepared_attn=prepared
+            prepared[0],
+            ids,
+            positions,
+            cu_seqlens,
+            expert_load=None,
+            _prepared_attn=prepared,
         )
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(
@@ -171,10 +177,14 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         for block in (*baseline, *candidate):
             block._cp_sync_after_attn_done = True
         args = (ids, ids.clone(), torch.tensor([0, 10]))
-        expected = baseline[1].forward(baseline[0].forward(hidden, *args), *args)
-        first = candidate[0]._forward_prefill_fast_fp8(hidden, *args)
+        expected = baseline[1].forward(
+            baseline[0].forward(hidden, *args, expert_load=None),
+            *args,
+            expert_load=None,
+        )
+        first = candidate[0]._forward_prefill_fast_fp8(hidden, *args, expert_load=None)
         pending = candidate[1]._forward_prefill_fast_fp8(
-            first, *args, _defer_ffn_post=True
+            first, *args, expert_load=None, _defer_ffn_post=True
         )
         self.assertIsInstance(pending, transition.PendingDecodePost)
         torch.testing.assert_close(pending.materialize(), expected, rtol=0, atol=0)
@@ -330,7 +340,12 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
     def test_backend_error_propagates_without_materializing_post(self):
         blocks = make_blocks()
         pending = transition.forward_decode_layer(
-            blocks[0], self.hidden, None, self.ids, next_layer=blocks[1]
+            blocks[0],
+            self.hidden,
+            None,
+            self.ids,
+            next_layer=blocks[1],
+            expert_load=None,
         )
         self.assertIsInstance(pending, transition.PendingDecodePost)
         with patch.object(
@@ -339,17 +354,54 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             side_effect=RuntimeError("backend failure"),
         ), patch.object(pending.previous, "post", wraps=pending.previous.post) as post:
             with self.assertRaisesRegex(RuntimeError, "backend failure"):
-                transition.forward_decode_layer(blocks[1], pending, None, self.ids)
+                transition.forward_decode_layer(
+                    blocks[1], pending, None, self.ids, expert_load=None
+                )
             post.assert_not_called()
 
-    def test_custom_block_keeps_original_call_signature(self):
+    def test_monitor_context_follows_each_decode_call_through_fused_boundary(self):
+        blocks = make_blocks(count=2)
+        received = []
+
+        class RecordingFFN(TestFFN):
+            def forward(self, x, input_ids, expert_load):
+                received.append(expert_load)
+                return super().forward(x, input_ids, expert_load=expert_load)
+
+        for block in blocks:
+            block.ffn = RecordingFFN()
+        contexts = [object() for _ in range(4)]
+        with patch.object(
+            transition, "try_fused_post_pre", side_effect=reference_transition
+        ):
+            for step in range(2):
+                hidden = self.hidden
+                for index, block in enumerate(blocks):
+                    hidden = transition.forward_decode_layer(
+                        block,
+                        hidden,
+                        None,
+                        self.ids,
+                        next_layer=blocks[1] if index == 0 else None,
+                        expert_load=contexts[step * 2 + index],
+                    )
+        self.assertEqual(received, contexts)
+        for block in blocks:
+            self.assertFalse(hasattr(block.ffn, "expert_load_recorder"))
+
+    def test_custom_block_receives_disabled_monitor_context(self):
         class CustomBlock:
-            def forward_decode(self, hidden, metadata, input_ids, kv_cache=None):
+            def forward_decode(
+                self, hidden, metadata, input_ids, expert_load, kv_cache=None
+            ):
+                self.expert_load = expert_load
                 return hidden + 1
 
+        block = CustomBlock()
         result = transition.forward_decode_layer(
-            CustomBlock(), self.hidden, None, self.ids
+            block, self.hidden, None, self.ids, expert_load=None
         )
+        self.assertIsNone(block.expert_load)
         torch.testing.assert_close(result, self.hidden + 1, rtol=0, atol=0)
 
 

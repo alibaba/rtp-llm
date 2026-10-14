@@ -102,6 +102,9 @@ class TrtllmFp4Executor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         topk_ids = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
+        expert_load = payload.expert_load
+        if expert_load is not None:
+            expert_load.record_ids(topk_ids)
 
         topk = topk_ids.size(-1)
 

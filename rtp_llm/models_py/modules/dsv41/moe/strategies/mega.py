@@ -473,7 +473,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
         for token_count in token_counts:
             dist.barrier()
-            self.forward(x[:token_count], weights[:token_count], indices[:token_count])
+            self.forward(
+                x[:token_count],
+                weights[:token_count],
+                indices[:token_count],
+                expert_load=None,
+            )
             torch.cuda.synchronize(device)
         dist.barrier()
         self._warmup_gate_pack_jit(token_counts)
@@ -542,7 +547,11 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         )
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load,
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
         SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
@@ -573,11 +582,14 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
         return y
 
     def forward_with_gate_pack(
-        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
+        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None, expert_load
     ) -> torch.Tensor:
         """Run MegaMoE with router gate + input pack fused together."""
         kernels = _get_gate_pack_kernels()
@@ -632,6 +644,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
         return y
 

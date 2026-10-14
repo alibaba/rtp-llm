@@ -153,7 +153,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                 moe.dim, moe.layer_id, moe.max_tokens_per_rank = 3, layer, 3
                 moe._gate_pack_static = False
                 moe._routed_includes_shared = True
-                moe._strategy = lambda x, weights, indices: (
+                moe._strategy = lambda x, weights, indices, expert_load: (
                     x + weights.sum(dim=-1, keepdim=True) + indices[:, :1]
                 )
                 real_gate = _gate(hashed=True)
@@ -165,8 +165,12 @@ class GateRoutingMetadataTest(unittest.TestCase):
                     return real_gate(x, input_ids, **kwargs)
 
                 moe.gate = gate
-                expected = moe._forward_chunked(x, ids, x.shape).clone()
-                actual = moe._forward_chunked(x, ids, x.shape, metadata).clone()
+                expected = moe._forward_chunked(
+                    x, ids, x.shape, expert_load=None
+                ).clone()
+                actual = moe._forward_chunked(
+                    x, ids, x.shape, expert_load=None, routing_metadata=metadata
+                ).clone()
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                 chunk_metadata.append(seen)
         self.assertEqual(
@@ -257,6 +261,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                             torch.arange(3),
                             torch.tensor([0, 3]),
                             None,
+                            expert_token_counts=None,
                         )
 
                 else:
@@ -270,6 +275,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                             SimpleNamespace(
                                 batch_size=1, q_len_per_req=3, is_cuda_graph=False
                             ),
+                            expert_token_counts=None,
                         )
 
                 with _CountComparisons() as count:
@@ -334,7 +340,13 @@ class GateRoutingMetadataTest(unittest.TestCase):
                         )
                     )
                     prefill.forward_layers(
-                        model, None, ids, torch.arange(2), torch.tensor([0, 2]), None
+                        model,
+                        None,
+                        ids,
+                        torch.arange(2),
+                        torch.tensor([0, 2]),
+                        None,
+                        expert_token_counts=None,
                     )
                     initial = model.embed(ids).unsqueeze(-2)
                 else:
@@ -352,6 +364,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                         SimpleNamespace(
                             batch_size=1, q_len_per_req=2, is_cuda_graph=False
                         ),
+                        expert_token_counts=None,
                     )
                     self.assertEqual(
                         [
@@ -393,10 +406,15 @@ class GateRoutingMetadataTest(unittest.TestCase):
             with self.subTest(mode=mode), _CountComparisons() as count:
                 seen.clear()
                 if mode == "prefill":
-                    V4Transformer.forward(model, ids, apply_lm_head=False)
+                    V4Transformer.forward(
+                        model, ids, apply_lm_head=False, expert_token_counts=None
+                    )
                 else:
                     V4Transformer.forward_decode(
-                        model, ids, SimpleNamespace(batch_size=1, q_len_per_req=3)
+                        model,
+                        ids,
+                        SimpleNamespace(batch_size=1, q_len_per_req=3),
+                        expert_token_counts=None,
                     )
             self.assertEqual(count.count, 1)
             self.assertIs(seen[0], seen[1])

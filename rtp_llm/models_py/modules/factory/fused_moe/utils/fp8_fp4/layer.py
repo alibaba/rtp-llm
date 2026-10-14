@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
     record_function_range,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 
@@ -233,6 +234,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         self,
         x: torch.Tensor,
         input_ids: Optional[torch.Tensor],
+        expert_load: Optional[ExpertLoadContext],
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -291,6 +293,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                     hidden_states=x,
                     gate_payload=gate_payload,
                     activation="silu",
+                    expert_load=expert_load,
                 )
             assert topk_weights is not None and topk_ids is not None
             return self.fused_moe(
@@ -298,6 +301,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation="silu",
+                expert_load=expert_load,
             )
 
         if self._shared_executor is None:

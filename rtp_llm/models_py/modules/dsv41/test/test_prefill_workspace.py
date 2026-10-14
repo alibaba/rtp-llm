@@ -590,7 +590,13 @@ def test_v41_forward_uses_64_mib_buckets_and_v4_keeps_default():
             ):
                 try:
                     forward.forward_layers(
-                        v4, None, torch.empty(rows, device="meta"), None, None, None
+                        v4,
+                        None,
+                        torch.empty(rows, device="meta"),
+                        None,
+                        None,
+                        None,
+                        expert_token_counts=None,
                     )
                 except AllocationCaptured:
                     pass

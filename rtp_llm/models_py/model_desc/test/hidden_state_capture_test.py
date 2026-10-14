@@ -73,7 +73,7 @@ class _MoeLayer(nn.Module):
         self.hidden_increment = hidden_increment
         self.residual_increment = residual_increment
 
-    def forward(self, hidden_states, residual, fmha_impl, kv_cache=None):
+    def forward(self, hidden_states, residual, fmha_impl, expert_load, kv_cache=None):
         return DecodeLayerOutput(
             hidden_states + self.hidden_increment,
             residual + self.residual_increment,
@@ -93,7 +93,9 @@ class _Qwen3NextLayer(_MoeLayer):
         attn_meta=None,
     ):
         del attention_inputs, attn_meta
-        output = super().forward(hidden_states, residual, fmha_impl, kv_cache)
+        output = super().forward(
+            hidden_states, residual, fmha_impl, expert_load=None, kv_cache=kv_cache
+        )
         return output.hidden_states, output.residual
 
 
@@ -110,7 +112,9 @@ class _KimiLayer(_MoeLayer):
         attn_meta=None,
     ):
         del attention_inputs, attn_meta
-        return super().forward(hidden_states, residual, fmha_impl, kv_cache)
+        return super().forward(
+            hidden_states, residual, fmha_impl, expert_load=None, kv_cache=kv_cache
+        )
 
 
 class _VLEmbedding(nn.Module):
@@ -195,6 +199,7 @@ def _make_inputs(
     return SimpleNamespace(
         input_ids=torch.tensor(input_ids, dtype=dtype),
         capture_hidden_states=capture_hidden_states,
+        expert_token_counts=None,
     )
 
 
@@ -405,6 +410,7 @@ def _make_vl_inputs(capture_hidden_states: bool) -> SimpleNamespace:
             mm_extra_input=[torch.tensor([100.0, 100.0, 200.0, 200.0])],
         ),
         capture_hidden_states=capture_hidden_states,
+        expert_token_counts=None,
     )
 
 

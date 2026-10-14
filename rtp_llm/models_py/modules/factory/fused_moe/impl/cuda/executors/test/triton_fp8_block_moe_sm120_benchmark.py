@@ -217,7 +217,10 @@ def triton_call(
     executor: DeepGemmHybridExecutor, payload: ExpertForwardPayload
 ) -> torch.Tensor:
     return executor.execute_triton_fp8(
-        payload, activation="SiGLU", apply_router_weight_on_input=False
+        payload,
+        activation="SiGLU",
+        apply_router_weight_on_input=False,
+        expert_load=None,
     ).fused_expert_output
 
 
@@ -231,6 +234,7 @@ def deepgemm_call(
         a2_scale=None,
         apply_router_weight_on_input=False,
         extra_expert_args=None,
+        expert_load=None,
     ).fused_expert_output
 
 
@@ -365,6 +369,9 @@ def make_kernel_inputs(
             B_scale=b_scale,
             block_shape=[128, 128],
             scale_ue8m0=True,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
 
     keepalive = [

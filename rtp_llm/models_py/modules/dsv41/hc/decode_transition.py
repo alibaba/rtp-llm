@@ -70,7 +70,7 @@ def forward_decode_layer(
     hidden: torch.Tensor | PendingDecodePost,
     attn_metadata,
     input_ids: torch.Tensor,
-    *,
+    expert_load,
     next_layer=None,
     preserve_output: bool = False,
     kv_cache=None,
@@ -106,4 +106,6 @@ def forward_decode_layer(
     if prepared is not None or defer_post:
         kwargs["_prepared_attn"] = prepared
         kwargs["_defer_ffn_post"] = defer_post
-    return layer.forward_decode(hidden, attn_metadata, input_ids, **kwargs)
+    return layer.forward_decode(
+        hidden, attn_metadata, input_ids, expert_load=expert_load, **kwargs
+    )

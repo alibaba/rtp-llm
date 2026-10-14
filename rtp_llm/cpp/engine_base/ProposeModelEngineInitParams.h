@@ -48,6 +48,7 @@ struct ProposeModelEngineInitParams {
             base_params.vit_config,
             std::move(gpt_weights),
             py_model,
+            py::none(),
             py_eplb)) {}
 
     // Consturctor for deterministic propose model
