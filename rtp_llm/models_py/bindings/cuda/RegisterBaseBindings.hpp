@@ -251,6 +251,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    rtp_ops_m.def("dsv41_topk_v3_finite",
+                  &dsv41_topk_v3_finite,
+                  "DeepSeek V4.1 FP32/BF16 TopK with selected nonfinite entries filtered",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
@@ -266,6 +275,12 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("output"),
                   py::arg("filter_finite") = true);
     rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
+    rtp_ops_m.def("deepselect_bf16_dense",
+                  &deepselect_bf16_dense,
+                  py::arg("logits"),
+                  py::arg("ends"),
+                  py::arg("output"),
+                  py::arg("filter_finite") = true);
     rtp_ops_m.def("deepselect_bf16", &deepselect_bf16, py::arg("logits"), py::arg("ends"), py::arg("output"));
     rtp_ops_m.def("dsv4_top_k_per_row_prefill",
                   &dsv4_top_k_per_row_prefill,

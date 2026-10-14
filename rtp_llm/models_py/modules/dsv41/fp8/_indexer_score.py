@@ -111,19 +111,26 @@ def fp8_fp4_mqa_indexer_score(
     *,
     clean_logits: bool = True,
     max_seqlen_k: int = 0,
+    return_bf16: bool = False,
 ) -> torch.Tensor:
     """MX-mode FP4 prefill indexer logits via DeepGEMM.
 
     Both scale factors use DeepGEMM's packed-UE8M0 int32 form (group 32 along
     the head dim), matching the V4.1-Flash official indexer quantization.
+
+    ``return_bf16`` exposes request-local logits with their native row stride.
+    The caller must consume only ``end - start`` entries per row: padding is
+    unwritten. The default retains the fully masked FP32 compatibility ABI.
     """
     from ._v41_mqa_layout import normalize_mqa_logits
 
     # Upstream SM100 now consumes BF16 head weights and emits request-relative
     # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
     # the removed clean_logits argument or uninitialized tail values. The
-    # extended API forbids clean_logits for this request-relative output;
-    # normalize_mqa_logits below always writes the full masked selector tensor.
+    # extended API forbids clean_logits for request-relative output. Bounded
+    # selectors can read it directly; compatibility callers still normalize.
+    if return_bf16 and max_seqlen_k <= 0:
+        raise ValueError("BF16 MQA logits require an explicit request-local width")
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
     operation = _deep_gemm.fp8_fp4_mqa_logits
     options = (
@@ -140,6 +147,8 @@ def fp8_fp4_mqa_indexer_score(
         max_seqlen_k=width,
         **options,
     )
+    if return_bf16:
+        return scores
     return normalize_mqa_logits(
         scores, cu_seqlen_ks, cu_seqlen_ke, width, relative=max_seqlen_k > 0
     )
@@ -186,6 +195,8 @@ def fp8_fp4_paged_indexer_score(
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # entries per cache block (= pool.shape[1])
     max_ctx_len: int,  # output T dim (physical capacity)
+    *,
+    return_bf16: bool = False,
 ) -> torch.Tensor:
     """MX-mode FP4 paged indexer logits via DeepGEMM.
 
@@ -225,6 +236,8 @@ def fp8_fp4_paged_indexer_score(
         indices=request_ids,
         **options,
     )
+    if return_bf16:
+        return scores
     ends = lengths.view(-1)
     return normalize_mqa_logits(
         scores, torch.zeros_like(ends), ends, max_ctx_len, relative=True

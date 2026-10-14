@@ -158,7 +158,9 @@ def try_select_batched(
     targets = iter(grouped.split_rows(out))
     # Keep the score generator directly in the loop: zip/enumerate can retain
     # its previous yielded tuple while allocating the next score chunk.
-    for rows, logits, visible, bounds in grouped.groups(mask_tail=False):
+    for rows, logits, visible, bounds in grouped.groups(
+        mask_tail=False, return_bf16=topk.supports_bf16()
+    ):
         target = next(targets)
         count = min(attn.index_topk, logits.shape[1])
         if count != target.shape[1]:

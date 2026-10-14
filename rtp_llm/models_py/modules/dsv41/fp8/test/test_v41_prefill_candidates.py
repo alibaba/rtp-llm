@@ -1,5 +1,6 @@
 """Exact prefill candidate selection, packed flags, and graph replay tests."""
 
+import itertools
 import os
 import unittest
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_candidates as fused
 
 def reference_select(logits, visible, block_size, topk_blocks):
     """Frozen old attention_v41.select_candidate_blocks, including sorted=True."""
+    logits = logits.float()  # Old dense BF16 logits were normalized to FP32.
     nblocks = (logits.shape[1] + block_size - 1) // block_size
     padded = F.pad(
         logits, (0, nblocks * block_size - logits.shape[1]), value=-torch.inf
@@ -37,9 +39,9 @@ def reference_mask(logits, candidates, block_size):
     return logits.masked_fill_(~allowed[:, columns], -torch.inf)
 
 
-def make_case(rows, width, seed=41):
+def make_case(rows, width, seed=41, dtype=torch.float32):
     torch.manual_seed(seed)
-    storage = torch.randn(rows, width + 256, device="cuda")
+    storage = torch.randn(rows, width + 256, device="cuda", dtype=dtype)
     logits = storage[:, :width]
     visible_storage = torch.randint(0, width + 1, (rows * 2,), device="cuda")
     visible = visible_storage[::2]
@@ -72,6 +74,13 @@ def metadata(rows=17, width=32768):
 
 
 class V41PrefillCandidatesCPU(unittest.TestCase):
+    def test_bf16_and_fp32_use_the_same_candidate_contract(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            logits, visible = metadata(width=32769)
+            logits.dtype = dtype
+            with self.subTest(dtype=dtype):
+                self.assertTrue(fused.is_supported(logits, visible, 8, 2048))
+
     def test_default_gate_and_unsupported_block_size(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(fused.is_supported(*metadata(), 8, 2048))
@@ -82,7 +91,7 @@ class V41PrefillCandidatesCPU(unittest.TestCase):
 
     def test_layout_dtype_shape_and_grad_gates(self):
         for field, value in (
-            ("dtype", torch.bfloat16),
+            ("dtype", torch.float16),
             ("ndim", 3),
             ("shape", (0, 32768)),
             ("shape", (17, 0)),
@@ -141,11 +150,13 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
             dtype=torch.int32,
             device="cuda",
         )
-        for block in (1, 2, 4, 8, 16, 32):
+        for block, dtype in itertools.product(
+            (1, 2, 4, 8, 16, 32), (torch.float32, torch.bfloat16)
+        ):
             width = 521 * block - 1
             torch.manual_seed(33000 + block)
             raw = patterns[torch.randint(len(patterns), (4, width + 17), device="cuda")]
-            raw = raw.view(torch.float32)[:, :width]
+            raw = raw.view(torch.float32).to(dtype)[:, :width]
             ends = torch.tensor(
                 [0, 1, width - 3, width], device="cuda", dtype=torch.int32
             )
@@ -153,7 +164,9 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                 torch.arange(width, device="cuda")[None] >= ends[:, None], -torch.inf
             )
             nblocks = (width + block - 1) // block
-            expected = F.pad(clean, (0, nblocks * block - width), value=-torch.inf)
+            expected = F.pad(
+                clean.float(), (0, nblocks * block - width), value=-torch.inf
+            )
             expected = expected.reshape(4, nblocks, block).amax(-1)
             expected.scatter_(
                 1,
@@ -161,7 +174,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
                 torch.where(ends > 0, torch.inf, -torch.inf)[:, None],
             )
             for fused_epilogue in (False, True):
-                with self.subTest(block=block, fused=fused_epilogue):
+                with self.subTest(block=block, dtype=dtype, fused=fused_epilogue):
                     tokens = torch.arange(512, device="cuda", dtype=torch.int32)[
                         None
                     ].repeat(4, 1)
@@ -197,11 +210,15 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
     def test_publication_filter_graph_replay_matches_masked_reference(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
-        for width in (1033, 32769):
+        for width, dtype in itertools.product(
+            (1033, 32769), (torch.float32, torch.bfloat16)
+        ):
             for bitmap in (False, True):
-                with self.subTest(width=width, bitmap=bitmap):
+                with self.subTest(width=width, bitmap=bitmap, dtype=dtype):
                     torch.manual_seed(33001)
-                    logits = torch.randn(4, width + 17, device="cuda")[:, :width]
+                    logits = torch.randn(4, width + 17, device="cuda", dtype=dtype)[
+                        :, :width
+                    ]
                     ends = torch.full((4,), width, device="cuda", dtype=torch.int32)
                     bounds = (torch.zeros_like(ends), ends)
                     tokens = torch.empty(4, 512, device="cuda", dtype=torch.int32)
@@ -348,12 +365,12 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
             fused.build_flags(unordered, logits.shape[1], block), flags, rtol=0, atol=0
         )
         torch.testing.assert_close(
-            logits.view(torch.int32), before.view(torch.int32), rtol=0, atol=0
+            logits.view(torch.uint8), before.view(torch.uint8), rtol=0, atol=0
         )
         reference = reference_mask(before, expected, block)
         self.assertTrue(fused.mask_candidates(logits, flags, block))
         torch.testing.assert_close(
-            logits.view(torch.int32), reference.view(torch.int32), rtol=0, atol=0
+            logits.view(torch.uint8), reference.view(torch.uint8), rtol=0, atol=0
         )
 
     @torch.no_grad()
@@ -364,14 +381,12 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
 
     @torch.no_grad()
     def test_boundaries_nan_infinity_ties_and_partial_blocks(self):
-        for width, block, k in (
-            (1, 1, 3),
-            (37, 8, 7),
-            (2059, 8, 257),
-            (32769, 8, 2048),
+        for (width, block, k), dtype in itertools.product(
+            ((1, 1, 3), (37, 8, 7), (2059, 8, 257), (32769, 8, 2048)),
+            (torch.float32, torch.bfloat16),
         ):
-            with self.subTest(width=width):
-                logits, visible = make_case(11, width)
+            with self.subTest(width=width, dtype=dtype):
+                logits, visible = make_case(11, width, dtype=dtype)
                 visible[:] = width
                 visible[0] = 0
                 logits[0] = -torch.inf
