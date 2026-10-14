@@ -7,6 +7,14 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class BaseNorm(nn.Module):
+    # Whether forward() accepts non-contiguous inputs with stride[-1] == 1 and
+    # row strides that differ from the row width. Callers may hand a strided
+    # view (e.g. a split of a fused projection output) straight to the norm
+    # only when this is True; otherwise they must materialize a contiguous
+    # copy first. Implementations whose kernel only handles contiguous rows
+    # keep the conservative default.
+    supports_strided_input: bool = False
+
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__()
         self.weight = weight

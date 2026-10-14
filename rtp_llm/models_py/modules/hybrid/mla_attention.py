@@ -188,7 +188,14 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q.contiguous())
+            # Pass the strided split view straight into the norm when the
+            # backend accepts strided rows; this removes the .contiguous()
+            # copy while keeping the norm math identical (the kernel reads
+            # the same row elements via their stride and writes a fresh
+            # contiguous output).
+            q_c = self.q_a_layernorm(
+                q if self.q_a_layernorm.supports_strided_input else q.contiguous()
+            )
             q = self.q_b_proj(q_c)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
@@ -207,7 +214,13 @@ class MlaAttention(nn.Module):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+        # Strided split view into the norm when supported; see the q-side
+        # comment above for the contiguity-copy removal rationale.
+        compressed_kv = self.kv_a_layernorm(
+            compressed_kv
+            if self.kv_a_layernorm.supports_strided_input
+            else compressed_kv.contiguous()
+        )
 
         topk_indices = None
         if self.indexer is not None:

@@ -60,6 +60,10 @@ class LayerNorm(BaseLayerNorm):
 
 
 class RMSNorm(BaseNorm):
+    # aiter's rms_norm stride contract is not verified for non-contiguous
+    # rows, so callers keep materializing contiguous inputs on ROCm.
+    supports_strided_input = False
+
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 

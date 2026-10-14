@@ -12,6 +12,14 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class RMSNorm(BaseNorm):
+    # flashinfer 0.6.9 rmsnorm dispatches to a strided cute kernel for
+    # non-contiguous 2D/3D inputs (stride[-1] == 1; row strides must be
+    # divisible by the kernel vector width, e.g. 8 elements for bf16/fp16,
+    # and H must match the weight width). Unsupported strides raise a loud
+    # ValueError from the cute runtime instead of silently corrupting results,
+    # so strided views can be passed through without a contiguous copy.
+    supports_strided_input = True
+
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
 

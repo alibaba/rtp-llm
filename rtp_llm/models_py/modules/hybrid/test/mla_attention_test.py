@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 device = torch.device(f"cuda")
 
@@ -17,7 +18,8 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
-from rtp_llm.models_py.modules import MlaAttention
+from rtp_llm.models_py.modules import MlaAttention, RMSNorm
+from rtp_llm.models_py.modules.base.common.norm import RMSNormTorch
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferDecodeImpl,
     MlaFlashInferPrefillImpl,
@@ -462,6 +464,352 @@ class MLATest(TestCase):
                 num_tokens=params[0], hidden_size=params[1], page_size=params[2]
             ):
                 self._run_mla_test(*params)
+
+
+class RecordingNorm(nn.Module):
+    """Delegates to the wrapped norm while recording each input's layout."""
+
+    def __init__(self, inner: nn.Module, supports_strided: bool):
+        super().__init__()
+        self.inner = inner
+        self.supports_strided_input = supports_strided
+        self.inputs = []
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.inputs.append(
+            (
+                tuple(hidden_states.shape),
+                tuple(hidden_states.stride()),
+                hidden_states.is_contiguous(),
+            )
+        )
+        return self.inner(hidden_states)
+
+
+class StridedRmsNormTest(TestCase):
+    """Split-view RMSNorm equivalence for the MLA contiguous-copy removal.
+
+    MlaAttention feeds the q_lora/kv_lora split views (stride[-1] == 1, row
+    stride equal to the fused projection width) straight into RMSNorm when
+    the backend norm declares ``supports_strided_input``. This pins the
+    contract: the strided call must produce the same elements as the
+    contiguous call on the shapes the removal covers.
+    """
+
+    # (q_lora_rank, kv_lora_rank, rope_head_dim)
+    MLA_SPLIT_SHAPES = [
+        (768, 512, 64),  # Xing4.0-29B-A4B-FP8 real split (config.json)
+        (1536, 512, 64),  # DeepSeek-style
+    ]
+    ROWS = 4096
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        torch.manual_seed(0)
+
+    def test_strided_split_view_matches_contiguous_norm(self):
+        if not RMSNorm.supports_strided_input:
+            raise SkipTest("platform RMSNorm does not declare strided support")
+        for q_lora, kv_lora, rope in self.MLA_SPLIT_SHAPES:
+            fused_width = q_lora + kv_lora + rope
+            with self.subTest(q_lora=q_lora, kv_lora=kv_lora, rope=rope):
+                fused = torch.randn(
+                    self.ROWS,
+                    fused_width,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                split_views = (
+                    ("q", fused[:, :q_lora]),
+                    ("kv", fused[:, q_lora : q_lora + kv_lora]),
+                )
+                for name, view in split_views:
+                    with self.subTest(split=name):
+                        width = view.shape[-1]
+                        weight = torch.randn(width, dtype=torch.bfloat16, device=device)
+                        norm = RMSNorm(weight, eps=1e-6)
+                        # Precondition: the view is genuinely strided (rows
+                        # packed at the fused width, last dim contiguous).
+                        # Otherwise this would compare the contiguous path
+                        # with itself and assert nothing about the removal.
+                        self.assertEqual(view.stride(-1), 1)
+                        self.assertEqual(view.stride(0), fused_width)
+                        self.assertNotEqual(view.stride(0), width)
+                        self.assertFalse(view.is_contiguous())
+
+                        out_strided = norm(view)
+                        out_contig = norm(view.contiguous())
+
+                        # The norm must still materialize a contiguous output
+                        # for the downstream projections.
+                        self.assertTrue(out_strided.is_contiguous())
+                        self.assertEqual(tuple(out_strided.shape), (self.ROWS, width))
+                        max_diff = (
+                            (out_strided.float() - out_contig.float())
+                            .abs()
+                            .max()
+                            .item()
+                        )
+                        self.assertTrue(
+                            torch.equal(out_strided, out_contig),
+                            f"strided vs contiguous norm mismatch, max abs diff {max_diff}",
+                        )
+                        # Semantic guard: both agree with the fp32 reference
+                        # math on the same elements within bf16 rounding
+                        # (1 bf16 ULP is a 2^-8 relative step, so a couple
+                        # of ULPs of drift is the expected boundary).
+                        ref = RMSNormTorch(weight, eps=1e-6)(view.contiguous())
+                        self.assertTrue(
+                            torch.allclose(
+                                out_strided.float(),
+                                ref.float(),
+                                rtol=1 / 64,
+                                atol=1 / 64,
+                            )
+                        )
+
+
+class MlaLoraStridedNormTest(TestCase):
+    """End-to-end MLA with q_lora_rank > 0 and the strided split norms.
+
+    MlaAttention must hand the non-contiguous q_lora/kv_lora split views to
+    the norms when they support strided rows, and keep materializing
+    contiguous copies otherwise. Both branches must match the reference
+    module output.
+    """
+
+    Q_LORA_RANK = 1536
+    KV_LORA_RANK = 512
+    ROPE_HEAD_DIM = 64
+    # One sequence of length SEQ_LEN whose last token already ran: the new
+    # query rows number SEQ_LEN - 1 (>1 so the split views handed to the
+    # norms are genuinely non-contiguous rows of the fused projection).
+    SEQ_LEN = 3
+    HIDDEN_SIZE = 2048
+    PAGE_SIZE = 64
+
+    @property
+    def NUM_TOKENS(self) -> int:
+        return self.SEQ_LEN - 1
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        torch.set_default_device(device)
+        torch.manual_seed(0)
+
+    def _build_config(self):
+        self.config = ModelConfig()
+        self.config.attn_config.head_num = 16
+        self.config.num_layers = 27
+        self.config.max_seq_len = 1024
+        self.config.vocab_size = 102400
+        self.config.attn_config.size_per_head = 192
+        self.config.hidden_size = self.HIDDEN_SIZE
+        self.config.attn_config.nope_head_dim = 128
+        self.config.attn_config.rope_head_dim = self.ROPE_HEAD_DIM
+        self.config.attn_config.kv_lora_rank = self.KV_LORA_RANK
+        self.config.attn_config.v_head_dim = 128
+        self.config.attn_config.q_lora_rank = self.Q_LORA_RANK
+        self.config.attn_config.tokens_per_block = 64
+        self.config.attn_config.kernel_tokens_per_block = 64
+        self.config.attn_config.softmax_extra_scale = 1.0
+        self.config.attn_config.use_mla = True
+        self.config.quant_config = None
+        self.parallelism_config = ParallelismConfig()
+        self.parallelism_config.tp_size = 1
+        self.parallelism_config.tp_rank = 0
+
+    def _build_weights(self):
+        attn = self.config.attn_config
+        head_num = attn.head_num
+        weights = {}
+        weights[W.mla_fusedqkrope_w] = torch.randn(
+            [
+                self.HIDDEN_SIZE,
+                self.Q_LORA_RANK + self.KV_LORA_RANK + self.ROPE_HEAD_DIM,
+            ],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        weights[W.mla_q_a_ln_gamma] = torch.randn(
+            [self.Q_LORA_RANK], dtype=torch.bfloat16, device=device
+        )
+        weights[W.mla_q_b_w] = torch.randn(
+            [
+                self.Q_LORA_RANK,
+                head_num * (attn.nope_head_dim + attn.rope_head_dim),
+            ],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        weights[W.mla_kv_a_ln_gamma] = torch.randn(
+            [self.KV_LORA_RANK], dtype=torch.bfloat16, device=device
+        )
+        weights[W.mla_kc] = torch.randn(
+            [head_num, attn.nope_head_dim, self.KV_LORA_RANK],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        weights[W.mla_vc] = torch.randn(
+            [head_num, self.KV_LORA_RANK, attn.v_head_dim],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
+                self.KV_LORA_RANK,
+                head_num * (attn.nope_head_dim + attn.v_head_dim),
+            ],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        weights[W.attn_o_w] = torch.randn(
+            [head_num * attn.v_head_dim, self.HIDDEN_SIZE],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        return weights
+
+    def _build_attn_inputs(self):
+        sequence_lengths = [self.SEQ_LEN]
+        batch_size = len(sequence_lengths)
+        seq_page_sizes = [math.ceil(x / self.PAGE_SIZE) for x in sequence_lengths]
+        kvcache_block_id = torch.zeros(
+            [batch_size, max(seq_page_sizes)],
+            dtype=torch.int32,
+            device=torch.device("cpu"),
+        )
+        bias = 1
+        for i in range(batch_size):
+            kvcache_block_id[i, : seq_page_sizes[i]] = torch.arange(
+                bias,
+                bias + seq_page_sizes[i],
+                dtype=torch.int32,
+                device=torch.device("cpu"),
+            )
+            bias += seq_page_sizes[i]
+
+        sequence_lengths_minus_1 = [x - 1 for x in sequence_lengths]
+        sequence_lengths_t = torch.tensor(
+            sequence_lengths_minus_1, dtype=torch.int32, device=torch.device("cpu")
+        )
+        prefix_lengths_t = torch.zeros(
+            len(sequence_lengths_t) - len(sequence_lengths) + 1,
+            dtype=torch.int32,
+            device=torch.device("cpu"),
+        )
+
+        attn_inputs: PyAttentionInputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.prefix_lengths = prefix_lengths_t
+        attn_inputs.sequence_lengths = torch.tensor(
+            [], dtype=torch.int32, device=torch.device("cpu")
+        )
+        attn_inputs.input_lengths = sequence_lengths_t
+        attn_inputs.kv_cache_block_id = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
+        attn_inputs.kv_cache_kernel_block_id = kvcache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kvcache_block_id.to(device)
+        return attn_inputs
+
+    def _run_mla_forward(self, mla, q_recorder, kv_recorder, supports_strided: bool):
+        q_recorder.supports_strided_input = supports_strided
+        kv_recorder.supports_strided_input = supports_strided
+        return mla(self.hidden, self.fmha_impl, None)
+
+    def test_strided_norm_path_is_identical_to_contiguous_fallback(self):
+        if not RMSNorm.supports_strided_input:
+            raise SkipTest("platform RMSNorm does not declare strided support")
+        self._build_config()
+        weights = self._build_weights()
+        attn_inputs = self._build_attn_inputs()
+        layer_weights: List[Dict[str, torch.Tensor]] = [weights]
+
+        attn_configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
+        self.fmha_impl = MlaFlashInferPrefillImpl(
+            attn_configs,
+            attn_inputs,
+            layer_weights,
+            create_cos_sin_cache(),
+            quant_config=self.config.quant_config,
+        )
+        mla = MlaAttention(
+            self.config.attn_config,
+            self.parallelism_config,
+            weights,
+            0,
+            self.config.layernorm_eps,
+            self.config.quant_config,
+        )
+        q_recorder = RecordingNorm(mla.q_a_layernorm, True)
+        kv_recorder = RecordingNorm(mla.kv_a_layernorm, True)
+        mla.q_a_layernorm = q_recorder
+        mla.kv_a_layernorm = kv_recorder
+        mla_ref = MlaAttentionRef(
+            self.config.attn_config,
+            weights,
+            0,
+            self.config.layernorm_eps,
+            self.config.quant_config,
+        )
+        self.hidden = torch.randn(
+            [self.NUM_TOKENS, self.HIDDEN_SIZE],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+
+        out_strided = self._run_mla_forward(mla, q_recorder, kv_recorder, True)
+        out_fallback = self._run_mla_forward(mla, q_recorder, kv_recorder, False)
+        out_ref = mla_ref(self.hidden)
+
+        fused_width = self.Q_LORA_RANK + self.KV_LORA_RANK + self.ROPE_HEAD_DIM
+        q_shape, q_stride, q_contig = q_recorder.inputs[0]
+        kv_shape, kv_stride, kv_contig = kv_recorder.inputs[0]
+        self.assertEqual(q_shape, (self.NUM_TOKENS, self.Q_LORA_RANK))
+        self.assertEqual(kv_shape, (self.NUM_TOKENS, self.KV_LORA_RANK))
+        # The raw split views reach the norms: rows still packed at the fused
+        # width, so no intermediate .contiguous() copy happened.
+        self.assertEqual(q_stride, (fused_width, 1))
+        self.assertEqual(kv_stride, (fused_width, 1))
+        self.assertFalse(q_contig)
+        self.assertFalse(kv_contig)
+
+        # The fallback run must have materialized contiguous rows instead.
+        q_fb_shape, q_fb_stride, q_fb_contig = q_recorder.inputs[1]
+        kv_fb_shape, kv_fb_stride, kv_fb_contig = kv_recorder.inputs[1]
+        self.assertEqual(q_fb_stride, (self.Q_LORA_RANK, 1))
+        self.assertEqual(kv_fb_stride, (self.KV_LORA_RANK, 1))
+        self.assertTrue(q_fb_contig)
+        self.assertTrue(kv_fb_contig)
+
+        # End-to-end equivalence of this change: feeding the split views to
+        # the norm directly must be numerically identical to materializing
+        # contiguous copies first (same weights, same input, same kernels).
+        self.assertTrue(torch.equal(out_strided, out_fallback))
+
+        # Reference sanity check. Note the flashinfer prefill impl vs this
+        # torch reference already diverges at two query rows with random
+        # weights (measured no-lora control: cosine ~0.97), so the bar here
+        # is gross-error detection; tight norm math is pinned by
+        # StridedRmsNormTest against the fp32 reference.
+        out_norm = out_strided / (torch.norm(out_strided) + 1e-8)
+        out_ref_norm = out_ref / (torch.norm(out_ref) + 1e-8)
+        self.assertTrue(torch.allclose(out_norm, out_ref_norm, atol=0.05, rtol=0.05))
+        cosine_sim = F.cosine_similarity(
+            out_strided.flatten().unsqueeze(0), out_ref.flatten().unsqueeze(0), dim=1
+        )
+        self.assertTrue(
+            torch.allclose(
+                torch.tensor(1.0).to(device).to(cosine_sim.dtype),
+                cosine_sim,
+                atol=0.05,
+                rtol=0.05,
+            )
+        )
 
 
 if __name__ == "__main__":
