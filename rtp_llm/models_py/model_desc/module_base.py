@@ -51,6 +51,8 @@ class GptModelBase(nn.Module):
         )
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
+        self._tp_collective_batch_capacity = int(max_generate_batch_size)
+        self._tp_collective_workspace = None
 
         self.kv_cache: Optional[KVCache] = None
         self._linear_replay_cache = None
@@ -69,6 +71,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_index = 0
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
+        self._initialize_tp_collectives()
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
             self._linear_replay_cache = next(
@@ -96,6 +99,52 @@ class GptModelBase(nn.Module):
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
         return True
+
+    def _initialize_tp_collectives(self) -> None:
+        """Reserve TP projection communication for every SP model before warmup."""
+        if (
+            self.parallelism_config.tp_size <= 1
+            or not getattr(self.parallelism_config, "enable_sp", False)
+            or self._tp_collective_workspace is not None
+        ):
+            return
+        embedding = self.weight.get_global_weight(W.embedding)
+        if embedding is None or embedding.device.type != "cuda":
+            embedding = next(
+                (
+                    module.weight
+                    for module in self.modules()
+                    if isinstance(getattr(module, "weight", None), torch.Tensor)
+                    and module.weight.device.type == "cuda"
+                ),
+                None,
+            )
+            if embedding is None:
+                return
+        from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+        from rtp_llm.models_py.distributed.tp_collective_workspace import (
+            configure_tp_collectives,
+        )
+
+        tp_size = self.parallelism_config.tp_size
+        # Cover the request-padded verify layout as well as power-of-two graph
+        # buckets. Prompt work larger than this capacity uses its existing path.
+        batch = max(self._tp_collective_batch_capacity, 1)
+        batch = 1 << (batch - 1).bit_length()
+        steps = max(int(self.config.gen_num_per_cycle) + 1, 1)
+        max_m = (batch + tp_size - 1) // tp_size * tp_size * steps
+        fp8 = any(
+            getattr(module, "scale_ue8m0", False)
+            and getattr(module, "K", 0) == self.config.hidden_size
+            for module in self.modules()
+        )
+        self._tp_collective_workspace = configure_tp_collectives(
+            _get_group(Group.TP),
+            embedding.device,
+            max_m=max_m,
+            width=int(self.config.hidden_size),
+            fp8=fp8,
+        )
 
     def finalize_linear_replay(self, replay_inputs, steps: int) -> None:
         from rtp_llm.models_py.triton_kernels.linear_replay import finalize_linear_replay

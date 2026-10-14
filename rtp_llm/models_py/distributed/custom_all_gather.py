@@ -1,6 +1,6 @@
 """Multicast AG workspaces, configured collectively before warmup/capture.
 
-TP2/4/8/16 / K=7168 / SM100 or SM103 use one NVLink domain, including
+TP2/4/8/16 / SM100 or SM103 use one NVLink domain, including
 cross-host fabric cliques with CUDA FABRIC allocations.
 FP8 communicates values and packed UE8M0 scales together, without requantizing.
 """
@@ -81,7 +81,8 @@ def create_custom_all_gather(
     max_m is the gathered output capacity (TP times the per-rank input rows).
     """
     world_size = group.size()
-    if world_size not in (2, 4, 8, 16) or k != 7168:
+    alignment = 128 if fp8 else 8
+    if world_size not in (2, 4, 8, 16) or k <= 0 or k % alignment:
         return None
     if max_m <= 0 or max_m % world_size:
         raise ValueError("custom AG capacity must be positive and divisible by TP size")
@@ -121,8 +122,6 @@ def create_custom_all_gather(
         uuids = [item[1] for item in peers_metadata]
         hostnames = [item[0] for item in peers_metadata]
         cross_host = len(set(hostnames)) > 1
-        if cross_host:
-            raise RuntimeError("Decode FP8 staging AllGather requires one host")
         if (
             any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
             or len(set(uuids)) != world_size
@@ -255,14 +254,16 @@ class CustomAllGather:
         # Copy it without changing the group's selected communication backend.
         return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
 
-    def all_gather(self, local_input, *, staging):
+    def all_gather(self, local_input, *, staging, out=None):
         if self.fp8:
             raise TypeError("BF16 AG requires a BF16 workspace")
         m = local_input.shape[0] * self.world_size
         if not 0 < m <= self.storage["values"].shape[0]:
             raise ValueError("BF16 AG exceeds configured capacity")
         local_input = self._aligned(local_input)
-        output = self.storage["values"][:m]
+        if out is not None and not staging:
+            raise ValueError("caller-owned output requires staging AllGather")
+        output = self.storage["values"][:m] if out is None else out
         blocks, threads = self._launch(m, staging)
         if staging:
             self.staging_kernel(
