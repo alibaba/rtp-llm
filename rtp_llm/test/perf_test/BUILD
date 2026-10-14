@@ -1096,7 +1096,6 @@ py_test(
         "--seq_size_per_block", "64",
         "--enable_cuda_graph", "1",
         "--enable_fp32_lm_head", "false",
-        "--warm_up", "1",
     ],
 )
 
@@ -1195,6 +1194,5 @@ py_test(
         "--seq_size_per_block", "2048",
         "--enable_cuda_graph", "1",
         "--enable_fp32_lm_head", "false",
-        "--warm_up", "1",
     ],
 )
