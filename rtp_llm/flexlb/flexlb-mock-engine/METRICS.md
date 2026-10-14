@@ -75,3 +75,9 @@ Memory `mock_memory_cache_available_blocks` 包括可回收条目，`mock_memory
 一次 batch 算一个 RPC，不能当请求数。关闭入口不暂停已有任务推进；受理计数在关闭后不得增长。
 
 来源类型、PromQL、窗口和缺失规则必须随 run 归档。未知指标、单位冲突和必需样本缺失应显式失败；日志、文件或 debug API 证据须独立声明，不建立降级回退链。
+
+## WorkerStatus 状态上报
+
+`rtp_llm_rpc_worker_status_qps` 统计完成状态读取并形成响应的 WorkerStatus RPC；无响应故障不增加完成计数。HTTP 使用累计计数的独立 scrape 差分，Whale 按每个 RPC 上报一次 QPS 事件。`mock_worker_status_rpcs_total` 保存累计完成次数用于重新计算速率。
+
+`rtp_llm_rpc_worker_status_total_rt_us` 与 real `LocalRpcServer::reportWorkerStatusTime` 对齐：从 RPC 入口到状态读取结束，排除响应编码与网络往返。HTTP 导出最近事件的 Gauge 值，Whale 上报每个事件；HTTP 样本的最大值不代表全体 RPC 最大值或 p99。Prefill 与 Decode 均提供这两个指标。

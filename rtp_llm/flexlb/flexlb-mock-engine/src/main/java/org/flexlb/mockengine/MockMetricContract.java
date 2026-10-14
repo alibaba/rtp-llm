@@ -19,6 +19,9 @@ final class MockMetricContract {
     }
 
     static final List<Metric> ALL = List.of(
+        metric("rtp_llm_rpc_worker_status_qps", "worker_status_qps", "completed WorkerStatus RPCs per second; independent scrape reader", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.BOTH, Aggregation.SUM, Sampling.EVENT),
+        metric("rtp_llm_rpc_worker_status_total_rt_us", "worker_status_rt_us", "latest WorkerStatus state-read duration; excludes response encoding and network", Type.GAUGE, Unit.MICROSECONDS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
+        metric("mock_worker_status_rpcs_total", "worker_status_rpcs_total", "completed WorkerStatus RPC counter for lossless rate derivation", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("mock_context_compute_tokens_total", "context_compute_tokens_total", "cumulative computed input tokens", Type.COUNTER, Unit.TOKENS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("mock_context_tokens_total", "context_tokens_total", "cumulative input tokens including hits", Type.COUNTER, Unit.TOKENS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("mock_hit_tokens_total", "hit_tokens_total", "cache hit tokens of completed prefill requests", Type.COUNTER, Unit.TOKENS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),

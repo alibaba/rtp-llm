@@ -274,6 +274,8 @@ public final class JavaMockEngineCluster {
     private static void configureWhaleMetrics(FastRpcService service, WhaleMockMonitor whaleMonitor) {
         if (whaleMonitor != null) service.schedulerMetricReporter =
                 values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
+        if (whaleMonitor != null) service.statusMetricReporter =
+                latency -> whaleMonitor.reportWorkerStatus(service.whaleMetricTags(), latency);
         if (whaleMonitor != null) service.eventMetricReporter =
                 values -> whaleMonitor.reportEvent(values, service.whaleMetricTags());
         if (whaleMonitor != null) service.cacheEvictionReporter = (scope, ms) -> {
@@ -1399,6 +1401,10 @@ public final class JavaMockEngineCluster {
         private final LongAdder lifetimeContextTokens = new LongAdder();
         private final LongAdder lifetimeContextRequests = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
+        private final CounterRateMetrics workerStatusRates = new CounterRateMetrics();
+        private final CounterRateMetrics.Reader prometheusWorkerStatus = new CounterRateMetrics.Reader();
+        private final AtomicLong workerStatusRtUs = new AtomicLong();
+        java.util.function.LongConsumer statusMetricReporter = ignored -> {};
         private final CounterRateMetrics decodeTps = new CounterRateMetrics();
         private final CounterRateMetrics.Reader prometheusDecodeTps = new CounterRateMetrics.Reader();
         private final AtomicLong hitTokensTotal = new AtomicLong();
@@ -1815,6 +1821,7 @@ public final class JavaMockEngineCluster {
         @Override
         public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                     StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
+            long statusStarted = System.nanoTime();
             stats.statusRpcs.increment();
             // status_no_respond: hang the RPC — no onNext/onCompleted ever,
             // mirroring generateStreamCall's noRespond handling.
@@ -1861,6 +1868,7 @@ public final class JavaMockEngineCluster {
                     visibleCompletions.forEach(t -> returned.add(t.task.getRequestId()));
                 }
             }
+            long statusReadUs = Math.max(0, (System.nanoTime() - statusStarted) / 1000);
             // Append the captured snapshot only: no extra RPC or debug HTTP
             // observer, and no file I/O inside the status critical section.
             if (snapshotEvent != null) {
@@ -1956,6 +1964,9 @@ public final class JavaMockEngineCluster {
             // This event describes the post-filter response sent to the client.
             // It is emitted only for explicitly targeted fault-injection requests.
             if (deliveryEvent != null) engineEventLog.write(deliveryEvent);
+            workerStatusRates.add(1);
+            workerStatusRtUs.set(statusReadUs);
+            statusMetricReporter.accept(statusReadUs);
             observer.onNext(status.build());
             observer.onCompleted();
         }
@@ -6534,6 +6545,7 @@ public final class JavaMockEngineCluster {
 
         /** Settle the HTTP reader once per scrape; snapshots themselves are read-only. */
         void drainTpsWindows() {
+            prometheusWorkerStatus.sample(workerStatusRates.snapshot(), System.nanoTime());
             prometheusDecodeTps.sample(decodeTps.snapshot(), System.nanoTime());
             prometheusPrefillTps.sample(prefillTps.snapshot(), System.nanoTime());
         }
@@ -6701,6 +6713,9 @@ public final class JavaMockEngineCluster {
             snap.put("decode_step_tokens_total", decodeTps.snapshot().tokens());
             snap.putAll(prometheusPrefillTps.last());
             snap.put("generate_tps", prometheusDecodeTps.lastTokens());
+            snap.put("worker_status_qps", prometheusWorkerStatus.last());
+            snap.put("worker_status_rt_us", workerStatusRtUs.get());
+            snap.put("worker_status_rpcs_total", workerStatusRates.snapshot().tokens());
             snap.put("decode_wall_tps", prometheusDecodeTps.last());
             snap.put("hit_tokens_total", hitTokensTotal.get());
             snap.put("inflight", getInflightCount());

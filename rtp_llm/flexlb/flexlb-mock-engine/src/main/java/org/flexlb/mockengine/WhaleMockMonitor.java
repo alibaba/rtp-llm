@@ -84,6 +84,15 @@ final class WhaleMockMonitor implements AutoCloseable {
         reportEvent(values, labels);
     }
 
+    synchronized void reportWorkerStatus(Map<String, String> labels, long latencyUs) {
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        String qps = "rtp_llm_rpc_worker_status_qps", latency = "rtp_llm_rpc_worker_status_total_rt_us";
+        if (registered.add(qps)) monitor.register(qps, FlexMetricType.QPS);
+        if (registered.add(latency)) monitor.register(latency, FlexMetricType.GAUGE);
+        monitor.report(qps, tags, 1.0);
+        monitor.report(latency, tags, latencyUs);
+    }
+
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         metrics.forEach((name, value) -> {

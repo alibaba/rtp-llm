@@ -16,6 +16,8 @@ def metric_contract(producer, identity, calculation):
         source, population, accuracy = 'prometheus', 'surviving_prefill_engines', 'counter_delta'
     elif identity == 'cache_gate/offered_qps_deviation':
         source, population, accuracy = 'client_journal', 'baseline_initial_fleet_and_post_survivors', 'request_ledger'
+    elif identity in {'cache_gate/status_min_qps', 'cache_gate/status_max_rt_us'}:
+        source, population, accuracy = 'prometheus', 'baseline_fleet_and_transition_post_survivors', 'sampled'
     elif identity in {'cache_gate/' + key for key in ('baseline_min_half_hit', 'baseline_half_spread',
                                                     'min_window_completed', 'collapse_detected')}:
         source, population, accuracy = 'prometheus', 'baseline_initial_fleet_and_post_survivors', 'counter_delta'

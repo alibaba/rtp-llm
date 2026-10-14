@@ -7,7 +7,6 @@ from traffic.synthetic.generator import materialize as generate
 from traffic.prefix_lineage import encode,decode
 from traffic.lineage_model import LineageModel, LineageExpander
 from adapters.load_client import client_environment
-from traffic.playback.configuration import PlaybackConfigurationCodec
 
 
 class TrafficSourceTest(unittest.TestCase):

@@ -101,7 +101,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
-            "prefill-tps", "prefill-qps", "client-latency",
+            "prefill-tps", "prefill-qps", "client-latency", "worker-status",
         ])
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
@@ -142,7 +142,7 @@ class CacheGateTest(unittest.TestCase):
                     cache_evictions=t,
                     waiting=100 if t > 20 else 0,
                     running=1,
-                    prefill_ms_avg=200,
+                    prefill_ms_avg=200, worker_status_qps=50, worker_status_rt_us=100,
                 )
             rows.append(
                 dict(
@@ -164,7 +164,7 @@ class CacheGateTest(unittest.TestCase):
                 baseline_min_hit=0.7,
                 min_completed=10,
                 qps=10,
-                qps_tolerance=0.1,
+                qps_tolerance=0.1, status_min_qps=10, status_max_rt_us=10000,
                 absolute_min_hit=0.4,
                 max_drop=0.25,
                 observe_s=60,
@@ -179,7 +179,7 @@ class CacheGateTest(unittest.TestCase):
             post_start=20,
             post_end=80,
             max_pacing_lag_ms=0,
-            events=[],
+            events=[dict(id="withdraw_start", t=20, epoch_s=1020)],
         )
 
     def test_healthy_overload_and_removed_counters(self):
@@ -415,7 +415,7 @@ class CacheGateTest(unittest.TestCase):
                 row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1",
                                                 waiting=9999, admission_open=0)
         self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
-        evidence["events"] = [dict(id="withdraw_start", epoch_s=1020)]
+        evidence["events"] = [dict(id="withdraw_start", epoch_s=1020, t=20)]
         records = [dict(rid=1, prefill="p1", status="exception", error="removed",
                         send_start_epoch_ms=1021000, total_ms=200)]
         attribute_client(evidence, dict(complete=True, records=records))

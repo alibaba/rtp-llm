@@ -20,7 +20,6 @@ environment:
     device_tree: false
     memory_tree: false
   config_overrides:
-    # 共享预热采用 1e9 ms 亲和预算；正反变体从相同暖缓存起点比较。
     cache_affinity_max_extra_ttft_ms: 1000000000
   master_test_control: true
 execution:
@@ -70,7 +69,6 @@ parameters:
     topology_timeout_s: 37
     analysis_timeout_s: 300
     warmup_min_s: 900
-    # 正向保留预热策略作为对照；反向变体仅在缩容前把此值改为 0。
     post_affinity_ms: 1000000000
     startup_timeout_s: 900
   observation:
@@ -138,6 +136,14 @@ parameters:
             metric: mock/rejected_rpcs_total
             labels:
               role: prefill
+          worker_status_qps:
+            metric: mock/worker_status_qps
+            labels:
+              role: prefill
+          worker_status_rt_us:
+            metric: mock/worker_status_rt_us
+            labels:
+              role: prefill
     capture:
       max_samples: 1500
       max_bytes: 67108864
@@ -199,6 +205,24 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
+    status_qps:
+      metric: cache_gate/status_min_qps
+      unit: requests/s
+      windows:
+      - baseline
+      - transition
+      - post
+      op: ge
+      expected: 10
+    status_latency:
+      metric: cache_gate/status_max_rt_us
+      unit: us
+      windows:
+      - baseline
+      - transition
+      - post
+      op: le
+      expected: 10000
 variants:
 - id: affinity_disabled
   parameters:

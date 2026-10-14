@@ -51,6 +51,8 @@ metrics:
   - master/flexlb_auto_tpm_decode_reserved_count
   - master/flexlb_auto_tpm_decode_running_count
   - master/dispatch_qps
+  - mock/worker_status_qps
+  - mock/worker_status_rt_us
 charts:
   events:
     warmup_start:
@@ -239,6 +241,26 @@ charts:
       axis: ratio
       color: '#1677ff'
       hidden: false
+    mock/worker_status_qps_fleet:
+      metric_id: mock/worker_status_qps_fleet
+      labels:
+        role: prefill
+      name: P 每引擎上报 QPS 最小值
+      group: 状态上报
+      unit: requests/s
+      axis: qps
+      color: '#1677ff'
+      hidden: false
+    mock/worker_status_rt_us_fleet:
+      metric_id: mock/worker_status_rt_us_fleet
+      labels:
+        role: prefill
+      name: P 状态读取耗时最大采样值
+      group: 状态上报
+      unit: us
+      axis: latency
+      color: '#fa8c16'
+      hidden: false
   panels:
   - id: cache-hit
     title: Prefill 缓存命中率 · P 数量
@@ -281,8 +303,8 @@ charts:
       count:
         title: 上报 P 数量
         position: right
-    caption: Waiting / Running 来自归档 Prometheus 的 Prefill 原始时间序列；平均值按当时仍上报的
-      P 计算。右轴为仍上报监控的 P 数量，可能包含拒新后排空的被摘机。缺采保留断线，不补零。
+    caption: Waiting / Running 来自归档 Prometheus 的 Prefill 原始时间序列；平均值按当时仍上报的 P 计算。右轴为仍上报监控的
+      P 数量，可能包含拒新后排空的被摘机。缺采保留断线，不补零。
     empty_caption: 缺少监控数据；不从 gate 窗口、snapshot、日志或请求文件补算曲线。
     curve_ids:
     - mock/waiting_avg
@@ -351,6 +373,21 @@ charts:
     - client/schedule_p99_seconds
     - client/total_p99_seconds
     - mock/engine_count
+  - id: worker-status
+    title: WorkerStatus 上报 QPS / 服务端状态读取延迟
+    axes:
+      qps:
+        title: 每引擎 RPC / 秒
+        position: left
+      latency:
+        title: 服务端读取耗时 / 微秒
+        position: right
+    caption: 对齐 real WorkerStatus 指标：QPS 来自完成状态 RPC；耗时止于状态读取，排除响应编码和网络。曲线覆盖当前 P；门禁在缩容期间仅检查最终存活
+      P。延迟为最大 Gauge 采样值，不是 p99。
+    empty_caption: 缺少状态上报序列时不补零。
+    curve_ids:
+    - mock/worker_status_qps_fleet
+    - mock/worker_status_rt_us_fleet
 sections:
   audit:
     title: 监控曲线审计
