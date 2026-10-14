@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <sstream>
 
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -129,10 +130,44 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
         return absl::OkStatus();
     }
 
+    const auto& cache_config = cache_manager_->cacheConfig();
+    const auto  cp_mapper    = cache_manager_->cpSlotMapper();
+    const bool  reuse_cache  = stream->streamCacheResource().reuseCache();
     const int64_t seq_length = stream->seqLength();
     const int64_t rows       = stream->currentBatchSize();
     const int64_t block_size = stream->seqSizePerBlock();
     if (seq_length > 0 && rows > 0 && block_size > 0) {
+        for (const auto& group : cache_config.groups()) {
+            const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
+                                      && group.policy.group_type == CacheGroupType::LINEAR;
+            std::string error_msg;
+            if (cache_config.linear_step != 1) {
+                error_msg = "[chunked_prefill] requires linear_step=1, got "
+                            + std::to_string(cache_config.linear_step);
+            } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
+                       && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+                error_msg = "[chunked_prefill] cache group [" + group.tag
+                            + "] does not support BLOCK_ROUND_ROBIN with CP cache sharding";
+            } else if (group.policy.shared_chunk_state
+                       && (block_size % 128 != 0 || group.seqSizePerBlock() % 128 != 0)) {
+                error_msg = "[chunked_prefill] shared state cache group [" + group.tag
+                            + "] requires 128-token aligned base and group blocks (base=" + std::to_string(block_size)
+                            + ", group=" + std::to_string(group.seqSizePerBlock()) + ")";
+            } else if (linear_reuse && group.seqSizePerBlock() % 64 != 0) {
+                error_msg = "[chunked_prefill] LINEAR cache reuse requires 64-token aligned group blocks, got "
+                            + std::to_string(group.seqSizePerBlock());
+            } else if (group.policy.group_type != CacheGroupType::FULL && !group.policy.shared_chunk_state
+                       && block_size % group.seqSizePerBlock() != 0) {
+                // Prefix reuse still requires chunk boundaries to align to native sparse blocks.
+                error_msg = "[chunked_prefill] cache group [" + group.tag
+                            + "] requires base block size to be a multiple of group block size (base="
+                            + std::to_string(block_size) + ", group=" + std::to_string(group.seqSizePerBlock()) + ")";
+            } else {
+                continue;
+            }
+            stream->reportError(ErrorCode::INVALID_PARAMS, error_msg);
+            return absl::InvalidArgumentError(error_msg);
+        }
         return absl::OkStatus();
     }
 
@@ -199,7 +234,7 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
 }
 
 std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams) {
-    if (prefill_chunk_size_ <= 0 || (!active_streams.empty() && isPrefillOnly(active_streams.front()))) {
+    if (prefill_chunk_size_ <= 0) {
         return active_streams;
     }
 
@@ -246,7 +281,11 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             }
             it = finish_invalid_stream(it,
                                        ErrorCode::INVALID_PARAMS,
-                                       "full prefill budget cannot produce a positive aligned grant");
+                                       "full prefill budget cannot produce a positive aligned grant (budget="
+                                           + std::to_string(prefill_chunk_size_) + ", rows=" + std::to_string(rows)
+                                           + ", block_size=" + std::to_string(block_size)
+                                           + ", remaining=" + std::to_string(remaining)
+                                           + "); increase prefill_chunk_size or reduce num_return_sequences");
             continue;
         }
 

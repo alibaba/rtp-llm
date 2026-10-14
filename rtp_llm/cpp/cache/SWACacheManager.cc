@@ -108,18 +108,26 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
                                               const RequiredPositions& required_positions) const {
-    (void)common_seq_len;
     const int      step                    = std::max(1, linear_step_);
     const bool     effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
     const int      active_tail_blocks      = activeTailBlockCount();
     NeedBlocksInfo info;
 
-    const int seq_slots   = needBlocksNum(seq_len, 0);
-    const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
+    const int seq_slots    = needBlocksNum(seq_len, 0);
+    const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
+    const int common_slots = std::min(needBlocksNum(common_seq_len, 0), seq_slots);
 
     const int ordinary_start = reuse_enabled ? reuse_blocks_len : 0;
-    info.common_blocks       = 0;
-    for (int i = ordinary_start; i < seq_slots; ++i) {
+    auto common_required = [&](int pos) {
+        return pos >= ordinary_start && pos < common_slots
+               && shouldAllocateBlock(pos, common_slots, 0, step, effective_reuse_enabled, active_tail_blocks);
+    };
+    for (int i = ordinary_start; i < common_slots; ++i) {
+        if (common_required(i)) {
+            ++info.common_blocks;
+        }
+    }
+    for (int i = std::max(common_slots, ordinary_start); i < seq_slots; ++i) {
         if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks)) {
             ++info.extra_blocks;
         }
@@ -130,13 +138,19 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
             continue;
         }
         const int  pos = static_cast<int>(position);
+        if (pos < common_slots) {
+            if (!common_required(pos)) {
+                ++info.common_blocks;
+            }
+            continue;
+        }
         const bool ordinary_seq_position =
             pos >= ordinary_start && pos < seq_slots
             && shouldAllocateBlock(
                 pos, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks);
         const bool ordinary_reserve_position = pos >= std::max(seq_slots, ordinary_start) && pos < total_slots;
         if (!ordinary_seq_position && !ordinary_reserve_position) {
-            ++info.common_blocks;
+            ++info.extra_blocks;
         }
     }
 

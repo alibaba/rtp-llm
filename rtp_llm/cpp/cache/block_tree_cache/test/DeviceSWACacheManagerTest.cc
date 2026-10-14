@@ -205,14 +205,17 @@ TEST_F(DeviceSWACacheManagerTest, GetNeedBlocks_ReuseFullOverlap) {
     EXPECT_EQ(need.extra_blocks, 0);
 }
 
-TEST_F(DeviceSWACacheManagerTest, GetNeedBlocks_CommonSeqLenIgnored) {
+TEST_F(DeviceSWACacheManagerTest, GetNeedBlocks_CommonTailIsShared) {
     auto group = makeGroup(4);
     auto need1 = group.getNeedBlocks(0, 20, 0, 0, false);
     auto need2 = group.getNeedBlocks(20, 20, 0, 0, false);
-    auto need3 = group.getNeedBlocks(100, 20, 0, 0, false);
-    EXPECT_EQ(need1.extra_blocks, need2.extra_blocks);
-    EXPECT_EQ(need2.extra_blocks, need3.extra_blocks);
+    auto need3 = group.getNeedBlocks(16, 20, 0, 0, false);
     EXPECT_EQ(need1.common_blocks, 0);
+    EXPECT_EQ(need1.extra_blocks, 2);
+    EXPECT_EQ(need2.common_blocks, 2);
+    EXPECT_EQ(need2.extra_blocks, 0);
+    EXPECT_EQ(need3.common_blocks, 2);
+    EXPECT_EQ(need3.extra_blocks, 1);
 }
 
 // ==================== malloc (default step=0, acts like step=1, tail-only) ====================

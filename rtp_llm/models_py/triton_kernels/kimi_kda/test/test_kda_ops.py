@@ -251,6 +251,57 @@ class TestKdaOps(unittest.TestCase):
                     f"test_prefill_vs_naive PASSED B={B} T={seq_len} (o={sim_o:.6f}, s={sim_s:.6f})"
                 )
 
+    @torch.inference_mode()
+    def test_chunked_prefill_then_decode_preserves_state(self):
+        q, k, v, g, beta, A_log, dt_bias, initial = make_kda_inputs(2, 274)
+        initial.normal_(std=0.1)
+        reference, ref_state = naive_recurrent_kda(
+            q, k, v, g, beta, K**-0.5, initial.clone(), A_log, dt_bias
+        )
+        for chunk_tokens in (128, 256):
+            with self.subTest(chunk_tokens=chunk_tokens):
+                state = initial.clone()
+                for start in range(0, 273, chunk_tokens):
+                    end = min(start + chunk_tokens, 273)
+                    chunks = [
+                        tensor[:, start:end].contiguous()
+                        for tensor in (q, k, v, g, beta)
+                    ]
+                    output, state, _ = chunk_kda(
+                        *chunks,
+                        initial_state=state,
+                        output_final_state=True,
+                        use_qk_l2norm_in_kernel=True,
+                        use_gate_in_kernel=True,
+                        return_intermediate_states=True,
+                        A_log=A_log,
+                        dt_bias=dt_bias,
+                    )
+                    self.assertGreater(
+                        cos_sim(output, reference[:, start:end]), COS_THRESH
+                    )
+                    # The first token after a boundary depends most strongly
+                    # on the preceding chunk; a whole-chunk cosine can hide it.
+                    self.assertGreater(
+                        cos_sim(output[:, :1], reference[:, start : start + 1]),
+                        COS_THRESH,
+                    )
+                decoded, final_state = fused_recurrent_kda(
+                    q[:, 273:274].contiguous(),
+                    k[:, 273:274].contiguous(),
+                    v[:, 273:274].contiguous(),
+                    g[:, 273:274].contiguous(),
+                    beta[:, 273:274].contiguous(),
+                    initial_state=state,
+                    A_log=A_log,
+                    dt_bias=dt_bias,
+                    inplace_final_state=False,
+                    use_qk_l2norm_in_kernel=True,
+                    use_gate_in_kernel=True,
+                )
+                self.assertGreater(cos_sim(decoded, reference[:, 273:274]), COS_THRESH)
+                self.assertGreater(cos_sim(final_state, ref_state), COS_THRESH)
+
     def test_prefill_then_decode(self):
         q_all, k_all, v_all, g_all, beta_all, A_log, dt_bias, state = make_kda_inputs(
             1, 12

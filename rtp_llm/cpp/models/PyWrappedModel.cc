@@ -491,12 +491,18 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[payload_row];
-            group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
+            group_inputs.kv_cache_block_id = inputs.kv_cache_block_id[payload_row];
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
                                                                             group_inputs.kv_cache_block_id.cpu() :
                                                                             group_inputs.kv_cache_block_id;
+            }
+            if (group.kernelBlocksPerKvBlock() == 1) {
+                // Attention needs the cyclic execution IDs; CacheStore keeps the publication table above.
+                group_inputs.kv_cache_block_id        = group_inputs.kv_cache_kernel_block_id;
+                group_inputs.kv_cache_block_id_device = group_inputs.kv_cache_kernel_block_id_device;
+            } else {
+                group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             }
         }
         by_tag.emplace(group.tag, std::move(group_inputs));

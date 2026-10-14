@@ -81,6 +81,10 @@ public:
         return createContextStreamImpl(input_ids, runtime_config_, ResourceContext{}, nullptr);
     };
 
+    void enableHiddenStateCapture() {
+        model_config_.hidden_state_capture_layer_ids = {0};
+    }
+
     GenerateStreamPtr createChunkedContextStream(const std::vector<int>& input_ids,
                                                  RoleType                role_type  = RoleType::PREFILL,
                                                  int64_t                 chunk_size = 8,
@@ -1468,9 +1472,36 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
             input_ids, test_case.role, /*chunk_size=*/8,
             [](GenerateInput&, GenerateConfig& config) { config.max_new_tokens = 0; });
         EXPECT_FALSE(prefill_only->hasError());
-        EXPECT_FALSE(prefill_only->chunkedPrefillEnabled());
-        EXPECT_EQ(prefill_only->contextLength(), input_ids.size());
+        EXPECT_EQ(prefill_only->chunkedPrefillEnabled(), test_case.enabled);
     }
+
+    GenerateStreamBuilder capture_builder;
+    capture_builder.enableHiddenStateCapture();
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        auto capture_prefill_only = capture_builder.createChunkedContextStream(
+            input_ids, role, /*chunk_size=*/8,
+            [](GenerateInput&, GenerateConfig& config) { config.max_new_tokens = 0; });
+        EXPECT_TRUE(capture_prefill_only->hasError());
+        EXPECT_EQ(capture_prefill_only->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(capture_prefill_only->curBlocksNum(), 0);
+        EXPECT_FALSE(capture_prefill_only->chunkedPrefillEnabled());
+        EXPECT_EQ(capture_prefill_only->stopReason(), "chunked prefill incompatible: hidden_state_capture");
+    }
+
+    auto non_chunked_prefill_only = capture_builder.createChunkedContextStream(
+        input_ids, RoleType::PREFILL, /*chunk_size=*/0,
+        [](GenerateInput&, GenerateConfig& config) { config.max_new_tokens = 0; });
+    EXPECT_FALSE(non_chunked_prefill_only->hasError());
+    EXPECT_FALSE(non_chunked_prefill_only->chunkedPrefillEnabled());
+
+    auto fake_prefill_only = capture_builder.createChunkedContextStream(
+        input_ids, RoleType::PREFILL, /*chunk_size=*/8,
+        [](GenerateInput& input, GenerateConfig& config) {
+            input.fake_query      = true;
+            config.max_new_tokens = 0;
+        });
+    EXPECT_FALSE(fake_prefill_only->hasError());
+    EXPECT_FALSE(fake_prefill_only->chunkedPrefillEnabled());
 
     struct RejectionCase {
         const char*            name;

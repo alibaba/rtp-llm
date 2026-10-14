@@ -117,9 +117,17 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    // Enable chunked prefill only for request shapes supported by the chunk window path.
+    // TorchSpec target hidden-state capture publishes one result per request and cannot be split across chunks.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    if (!input->fake_query && chunk_size > 0 && !input->generate_config->isPrefillOnly()
+    if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
+        && !model_config.hidden_state_capture_layer_ids.empty()
+        && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
+        reportEvent(StreamEvents::Error,
+                    ErrorCode::INVALID_PARAMS,
+                    "chunked prefill incompatible: hidden_state_capture");
+        return;
+    }
+    if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
         const char* reason = isGroup()                                       ? "force_batch" :
