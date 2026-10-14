@@ -155,8 +155,8 @@ def prepare_indexer_q_and_weights(
 
     Unsupported query layouts retain the gather/cast/scale/clone/RoPE/quant
     chain; CUDA/JIT errors in the supported fused path still propagate.
-    Keep FP32 weights for dense paged decode. BF16 is available for sparse
-    consumers, with the same post-scaling rounding in the fallback.
+    Select the consumer's weight dtype, with the same post-scaling rounding
+    in the fallback. Current DeepGEMM FP4 scoring consumes BF16 weights.
     """
     from ._v41_indexer_q_triton import try_fused_indexer_q
 
@@ -238,7 +238,7 @@ def score_decode_indexer(
             freqs_cis,
             positions,
             rope_head_dim,
-            weights_out_dtype=torch.float32,
+            weights_out_dtype=torch.bfloat16,
         )
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)
@@ -273,6 +273,7 @@ def score_decode_indexer(
         physical_lengths,
         block_size,
         physical_capacity,
+        return_bf16=True,
     )
     compact = torch.empty(b * s, max_ctx_len, dtype=torch.float32, device=q.device)
     _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](

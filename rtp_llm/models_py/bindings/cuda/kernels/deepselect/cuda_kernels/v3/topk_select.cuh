@@ -65,6 +65,23 @@ public:
         uint32_t lane_idx = threadIdx.x % 32;
 
         if (end_vocab_idx <= args.topk) {
+            if constexpr (Config::canonicalize_nan) {
+                static_assert(!Config::sorted_value && !Config::sorted_index && !Config::return_value);
+                const auto* input =
+                    static_cast<const ValueT*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
+                auto* output =
+                    static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+                for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
+                    bool valid = slot < end_vocab_idx;
+                    if constexpr (Config::filter_finite) {
+                        if (valid) {
+                            valid = (__bfloat16_as_ushort(__ldg(input + slot)) & 0x7fffu) < 0x7f80u;
+                        }
+                    }
+                    output[slot] = valid ? static_cast<OutIdxT>(slot) : static_cast<OutIdxT>(-1);
+                }
+                return;
+            }
             EpilogueT::template topk_select_epilogue<true>(
                 (ValueT*)smem.surviving_topk_pairs[0],
                 (uint32_t*)(smem.surviving_topk_pairs[1]),
@@ -118,10 +135,29 @@ public:
 
         // `__syncthreads_or` is also the barrier that makes the last `reconstruct`'s writes visible before
         // `stage_output_and_epilogue` reads the survivor buffer.
-        have_nan = __syncthreads_or(have_nan) != 0;
-        if (have_nan) {
-            BF16Base::take_action_when_have_nan(args, batch_idx);
+        if constexpr (Config::canonicalize_nan) {
+            // Dense selection canonicalizes NaNs in registers before ranking.
+            // Selected pair values retain enough information to filter every
+            // nonfinite entry without re-reading or converting the score row.
+            __syncthreads();
+            auto* output =
+                static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
+            for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
+                const uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
+                const uint32_t index = static_cast<uint32_t>(pair);
+                bool           valid = index < end_vocab_idx;
+                if constexpr (Config::filter_finite) {
+                    valid = valid && ((pair >> 32) & 0x7fffu) < 0x7f80u;
+                }
+                output[slot] = valid ? static_cast<OutIdxT>(index) : static_cast<OutIdxT>(-1);
+            }
             return;
+        } else {
+            have_nan = __syncthreads_or(have_nan) != 0;
+            if (have_nan) {
+                BF16Base::take_action_when_have_nan(args, batch_idx);
+                return;
+            }
         }
 
         BF16Base::template stage_output_and_epilogue<Config::sorted_index>(

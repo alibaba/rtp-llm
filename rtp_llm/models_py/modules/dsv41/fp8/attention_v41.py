@@ -493,7 +493,9 @@ def mask_candidate_logits(logits, candidates, block_size):
     return logits.masked_fill_(~allowed[:, columns], -torch.inf)
 
 
-def _apply_prefill_candidates(shared, logits, visible, rows, block_size, topk, publish):
+def _apply_prefill_candidates(
+    shared, logits, visible, rows, block_size, topk, publish, *, mask_tail=False
+):
     """Publish candidates once and reuse their bounded bitmap across HCA sources.
 
     Single-request chunks use row slices, so output/bitmap views need no
@@ -529,9 +531,18 @@ def _apply_prefill_candidates(shared, logits, visible, rows, block_size, topk, p
             out=candidates[rows],
             flags=flags,
             build_bitmap=not shared.get("prefill_sparse_candidates", False),
+            mask_tail=mask_tail,
         )
         if result is None:
-            block_ids = select_candidate_blocks(logits, visible, block_size, topk)
+            if mask_tail:
+                from ._v41_grouped_prefill_score import _mask_tail_kernel
+
+                _mask_tail_kernel[(logits.shape[0],)](
+                    logits, visible, logits.shape[1], logits.stride(0), 256
+                )
+            block_ids = select_candidate_blocks(
+                logits.float(), visible, block_size, topk
+            )
             candidates[rows, : block_ids.shape[1]] = block_ids
             # A partially initialized bitmap must never reach a consumer.
             shared.pop("prefill_candidate_mask", None)
@@ -1855,17 +1866,8 @@ class AttentionV41FP8(AttentionFP8):
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
-            # Only candidate consumers use BF16 sparse reduction. The source
-            # indexer and every dense fallback retain their FP32 arithmetic.
-            sparse_weights = (
-                fused_indexer
-                and shared.get("candidates") is not None
-                and candidate_source >= 0
-                and self.layer_id > candidate_source
-                and candidate_size == 8
-                and self.index_topk == 512
-                and prefill_deepselect.is_available(x.device)
-            )
+            # Both dense and sparse DeepGEMM FP4 scorers consume BF16 weights.
+            # Round once after the same FP32 scale inside fused Q preparation.
             prepared = (
                 indexer_q_fusion.try_fused_indexer_q(
                     q.unsqueeze(1),
@@ -1873,9 +1875,7 @@ class AttentionV41FP8(AttentionFP8):
                     self.freqs_cis,
                     positions,
                     self.rope_head_dim,
-                    weights_out_dtype=(
-                        torch.bfloat16 if sparse_weights else torch.float32
-                    ),
+                    weights_out_dtype=torch.bfloat16,
                 )
                 if fused_indexer
                 else None
@@ -1890,9 +1890,10 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 if fused_indexer:
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
+                    weights = weights.to(torch.bfloat16)
                 else:
                     q = fp8_roundtrip(q)
-            dense_weights = weights if weights.dtype == torch.float32 else None
+            dense_weights = weights
             if fused_indexer and len(globals_by_req) > 1:
                 from ._v41_batched_prefill_select import try_select_batched
 
@@ -2033,14 +2034,6 @@ class AttentionV41FP8(AttentionFP8):
                                 out[output_rows] = mapped
                         continue
                     if fused_indexer:
-                        if dense_weights is None:
-                            # A sparse layout can be rejected per request. Do
-                            # not upcast rounded BF16 weights: recover exactly
-                            # the original FP32 scaling from the projection.
-                            dense_weights = (
-                                raw_weights.float()
-                                * (self.index_head_dim * self.index_n_heads) ** -0.5
-                            )
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
                         ):
@@ -2051,6 +2044,7 @@ class AttentionV41FP8(AttentionFP8):
                                 keys.scale,
                                 dense_weights[chunk],
                                 visible,
+                                return_bf16=prefill_topk.supports_bf16(),
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
@@ -2073,6 +2067,7 @@ class AttentionV41FP8(AttentionFP8):
                                 candidate_size,
                                 candidate_blocks,
                                 publish_candidates,
+                                mask_tail=logits.dtype == torch.bfloat16,
                             )
                     k = min(self.index_topk, key_count)
                     target = out[output_rows, :k] if contiguous else None
@@ -2084,6 +2079,12 @@ class AttentionV41FP8(AttentionFP8):
                         out=target,
                     )
                     if selected is None:
+                        if logits.dtype == torch.bfloat16:
+                            from ._v41_grouped_prefill_score import _mask_tail_kernel
+
+                            _mask_tail_kernel[(logits.shape[0],)](
+                                logits, visible, logits.shape[1], logits.stride(0), 256
+                            )
                         scores, selected = logits.topk(k, dim=-1)
                         selected = torch.where(scores.isfinite(), selected, -1).int()
                     if selected is not target:
