@@ -77,11 +77,26 @@ class GptOssRenderer(ReasoningToolBaseRenderer):
         super()._customize_jinja_env(env)
         # harmony template calls strftime_now("%Y-%m-%d") in the system
         # header; the base renderer only provides raise_exception.
+        # RTP_LLM_HARMONY_NOW pins that date (YYYY-MM-DD) so smoke goldens
+        # stay reproducible across midnight — the rendered system header
+        # embeds the date, so an unpinned clock makes every golden
+        # expire daily. Unset: the real clock (production behavior).
         import datetime
+        import os
 
-        env.globals.setdefault(
-            "strftime_now", lambda fmt: datetime.datetime.now().strftime(fmt)
-        )
+        pinned = os.environ.get("RTP_LLM_HARMONY_NOW", "")
+
+        def _strftime_now(fmt: str) -> str:
+            if pinned:
+                try:
+                    return datetime.datetime.strptime(pinned, "%Y-%m-%d").strftime(
+                        fmt
+                    )
+                except ValueError:
+                    pass
+            return datetime.datetime.now().strftime(fmt)
+
+        env.globals.setdefault("strftime_now", _strftime_now)
 
 
 register_renderer("gpt_oss", GptOssRenderer)

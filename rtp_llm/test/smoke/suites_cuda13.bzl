@@ -157,6 +157,9 @@ def cuda13_suites():
             smoke_test(
                 name="gptoss_20b_tp1_sm103",
                 task_info="data/model/gpt_oss/g_o_20b_tp1_sm103.json",
+                # pin the harmony system-header date so the golden is
+                # reproducible across midnight (see gpt_oss_renderer).
+                envs=["RTP_LLM_HARMONY_NOW=2026-10-14"],
                 smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 200000 --reserver_runtime_mem_mb 16384",
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
@@ -171,15 +174,30 @@ def cuda13_suites():
             smoke_test(
                 name="gptoss_20b_reuse_sm103",
                 task_info="data/model/gpt_oss/g_o_20b_reuse_sm103.json",
+                # pin the harmony system-header date so the golden is
+                # reproducible across midnight (see gpt_oss_renderer).
+                envs=["RTP_LLM_HARMONY_NOW=2026-10-14"],
                 smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 20480 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
             smoke_test(
                 name="gptoss_120b_tp1_sm103",
                 task_info="data/model/gpt_oss/g_o_120b_tp1_sm103.json",
+                # pin the harmony system-header date so the golden is
+                # reproducible across midnight (see gpt_oss_renderer).
+                envs=["RTP_LLM_HARMONY_NOW=2026-10-14"],
                 # 120b: ~61GB packed weights on one B300 (275GB) — size the KV
                 # pool to fit weights + runtime reserve.
                 smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 180000 --reserver_runtime_mem_mb 16384",
+                gpu_type=[cuda13_x86_test_gpu()],
+            ),
+            smoke_test(
+                name="gptoss_120b_reuse_sm103",
+                task_info="data/model/gpt_oss/g_o_120b_reuse_sm103.json",
+                # pin the harmony system-header date so the golden is
+                # reproducible across midnight (see gpt_oss_renderer).
+                envs=["RTP_LLM_HARMONY_NOW=2026-10-14"],
+                smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 160000 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
         ],

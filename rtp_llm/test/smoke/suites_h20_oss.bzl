@@ -669,6 +669,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "gptoss_20b_tp1_h20",
                 task_info = "data/model/gpt_oss/g_o_20b_tp1_h20.json",
+                # pin the harmony system-header date for golden reproducibility.
+                envs = ["RTP_LLM_HARMONY_NOW=2026-10-14"],
                 # ~27GB BF16-dequant weights on 96GB H20.
                 smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 40000 --reserver_runtime_mem_mb 16384",
                 gpu_type = ["H20_CU13"],
@@ -676,6 +678,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "gptoss_20b_reuse_h20",
                 task_info = "data/model/gpt_oss/g_o_20b_reuse_h20.json",
+                # pin the harmony system-header date for golden reproducibility.
+                envs = ["RTP_LLM_HARMONY_NOW=2026-10-14"],
                 smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 40000 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
                 gpu_type = ["H20_CU13"],
             ),
