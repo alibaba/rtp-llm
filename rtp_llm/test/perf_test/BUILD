@@ -1100,6 +1100,9 @@ py_test(
         "--decode_test_length", "1",
         "--num_measures", "3",
         "--max_seq_len", "131200",
+        # KV-pool activation headroom for the 128K single-shot prefill (see
+        # xing4_0_fp8_prefill_128k_only).
+        "--reserver_runtime_mem_mb", "24576",
         "--tp_size", "1",
         "--dp_size", "1",
         "--seq_size_per_block", "64",
@@ -1131,10 +1134,20 @@ py_test(
         "--cache_commit_tail_tokens", "2048",
         "--cache_measure_runs", "3",
         "--max_seq_len", "131200",
+        # KV-pool activation headroom for the 128K legs (same fix as the
+        # pure-prefill 128K target).
+        "--reserver_runtime_mem_mb", "24576",
         "--tp_size", "1",
         "--dp_size", "1",
         "--seq_size_per_block", "64",
         "--use_all_gather", "1",
+        # The prefix cache must be on for the cache-grid workload dimension
+        # to produce hits (engine default is off): memory cache sized to hold
+        # the 118784-token prefix KV (~5.5GB bf16 MLA).
+        "--reuse_cache", "1",
+        "--enable_device_cache", "0",
+        "--enable_memory_cache", "1",
+        "--memory_cache_size_mb", "8192",
     ],
     tags = ["manual", "SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
@@ -1201,6 +1214,226 @@ py_test(
         "--enable_cuda_graph", "1",
         "--decode_capture_config", "1,2,4,8,16,32,64",
         "--moe_strategy", "fp8_per_block_no_dp_masked",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+
+# Final T3 decode matrix: TPOT<=20/15ms search with MTP jointly enabled
+# (graph + async + sp_type mtp). Run only after the graph+MTP replay fix is
+# validated by //rtp_llm/test/smoke:xing4_0_fp8_graph_mtp_sm103.
+py_test(
+    name = "xing4_0_fp8_tps20_mtp_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "1",
+        "--target_tpot", "20",
+        "--input_len", "65536,131072",
+        "--concurrency_limit", "64",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+        "--sp_type", "mtp",
+        "--sp_model_type", "xing4_0_mtp",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--sp_act_type", "BF16",
+        "--gen_num_per_cycle", "3",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_tps15_mtp_tp1",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "1",
+        "--target_tpot", "15",
+        "--input_len", "65536,131072",
+        "--concurrency_limit", "64",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--max_seq_len", "131200",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+        "--sp_type", "mtp",
+        "--sp_model_type", "xing4_0_mtp",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--sp_act_type", "BF16",
+        "--gen_num_per_cycle", "3",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+
+# Diagnostic: graph+MTP at a 64K-scale max_seq_len (the 131200 capture scale
+# hard-crashes the backend on the first request; the 8192 smoke passes).
+# Same shape as tps20_mtp but max_seq_len 66000, 64K input only.
+py_test(
+    name = "xing4_0_fp8_tps20_mtp_66k",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "1",
+        "--target_tpot", "20",
+        "--input_len", "65536",
+        "--concurrency_limit", "64",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--max_seq_len", "66000",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64",
+        "--moe_strategy", "fp8_per_block_no_dp_masked",
+        "--sp_type", "mtp",
+        "--sp_model_type", "xing4_0_mtp",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--sp_act_type", "BF16",
+        "--gen_num_per_cycle", "3",
+    ],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+
+# Xing4.0 three-arch step-6 gates: PRO5000 (RTX_5000_PRO_CU13 pool, FUSE
+# checkpoint visible on worker 234) and H20 (H20_CU13 pool, workers without
+# FUSE use the whale-mirror staging smoke path; perf targets here use the
+# FUSE path for PRO5000 only). Eager forms first; graph variants after
+# on-pool validation.
+py_test(
+    name = "xing4_0_fp8_grid_pro5000",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--tokenizer_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--batch_size", "1,8,16,32,64",
+        "--input_len", "1024,4096",
+        "--partial", "1",
+        "--decode_test_length", "30",
+        "--num_measures", "5",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "xing4_0_fp8_prefill_pro5000",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--tokenizer_path", "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+        "--partial", "2",
+        "--input_len", "1024,4096",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
+    ],
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+
+# Diagnostic: 128K-only prefill (the 64K-then-128K restart sequence in
+# xing4_0_fp8_prefill_tp1_long crashes the second server; a single-leg run
+# discriminates the teardown-race hypothesis).
+py_test(
+    name = "xing4_0_fp8_prefill_128k_only",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "xing4_0",
+        "--checkpoint_path", "/mnt/nas1/hf/Xing4.0-29B-A4B-FP8",
+        "--partial", "2",
+        "--input_len", "131072",
+        "--decode_test_length", "1",
+        "--num_measures", "3",
+        "--max_seq_len", "131200",
+        # The auto-sized KV pool grabs nearly all device memory (reserve
+        # defaults to 1024MB); a 128K single-shot prefill needs ~15-25GB of
+        # transient activations and OOMs at the hc norm output. Reserve 24GB
+        # so the pool leaves activation headroom.
+        "--reserver_runtime_mem_mb", "24576",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--seq_size_per_block", "64",
+        "--use_all_gather", "1",
     ],
     tags = ["manual", "SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
