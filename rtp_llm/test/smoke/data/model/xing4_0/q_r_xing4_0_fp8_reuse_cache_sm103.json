@@ -54,7 +54,7 @@
                 }
             },
             "result": {
-                "response": "\n\n**Answer:**\n1. Physics\n2.",
+                "response": "\n\n1. Physics\n2. Chemistry\n3.",
                 "finished": true,
                 "aux_info": {
                     "input_len": 113,
@@ -143,12 +143,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\nA. Bias is a natural part of the scientific",
-                        "finished": true
+                        "response": "\n\nA. Bias is a natural part of the scientific"
                     },
                     {
-                        "response": "\nIt is located in the countries of Nepal and China.",
-                        "finished": true
+                        "response": "\nIt is located in the countries of Nepal and China."
                     }
                 ]
             }

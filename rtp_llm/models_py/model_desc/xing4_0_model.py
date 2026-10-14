@@ -19,7 +19,7 @@ sinkhorn rounds, comb applied untransposed, clamps read from the model config.
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import torch
 from torch import nn
@@ -41,6 +41,10 @@ from rtp_llm.models_py.modules import (
 )
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.utils import maybe_squeeze_hc_1d
+from rtp_llm.models_py.modules.xing4.hc import (
+    xing4_hc_triton_entries,
+    xing4_hc_use_fused,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -69,6 +73,23 @@ class Xing4HCUnit(HCUnitBase):
       * comb = exp(clamp(comb_w*s + b, +-h_res) - rowmax) then
         hc_sinkhorn_iters rounds of (row +eps, col +eps) normalization;
       * post-out = post (x) x + comb @ residual                (comb untransposed).
+
+    Execution backends (factory: ``XING4_HC_IMPL``, see
+    ``rtp_llm/models_py/modules/xing4/hc/__init__.py``; default "triton" on a
+    CUDA bf16 stream, everything else — including CPU tensors, other dtypes
+    and import failures — automatically uses "torch" and logs one line):
+
+      * fused: K1 row RMSNorm -> F.linear GEMM (untouched, fp32 ``mixes``,
+        ``_fn_for`` dtype cache) -> K2 gates/sinkhorn -> K3 collapse, and K4
+        for the post combination; no chunk branch (no [T, hc*dim] fp32
+        intermediate exists to bound).
+      * torch: the eager chain below, kept verbatim as the reference and the
+        fallback; it retains the ``XING4_HC_FALLBACK_CHUNK_TOKENS`` chunking.
+
+    Both backends return identical shapes/dtypes: ``y [..., dim]``,
+    ``post [..., hc_mult, 1]``, ``comb [..., hc_mult, hc_mult]`` in the stream
+    dtype, with all hyperparameters (norm_eps/hc_eps/sinkhorn_iters/clamp)
+    read from this instance's attributes.
     """
 
     def __init__(
@@ -87,6 +108,7 @@ class Xing4HCUnit(HCUnitBase):
         self._scale = maybe_squeeze_hc_1d(self.scale)
         self._fn_stream_dtype: Optional[torch.Tensor] = None
         self._fn_stream_dtype_ref = None
+        self._mix_constants_fp32: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
     def _fn_for(self, dtype: torch.dtype) -> torch.Tensor:
         if (
@@ -99,11 +121,80 @@ class Xing4HCUnit(HCUnitBase):
             self._fn_stream_dtype_ref = self.fn
         return self._fn_stream_dtype
 
+    def _mix_constants_for(
+        self, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """fp32 CUDA (base, scale) copies for the fused mix kernel (K2).
+
+        The casts are value-exact (fp32 stays fp32; bf16 widens losslessly),
+        so the cached tensors are numerically identical to the eager path's
+        type promotion of ``self.base`` / ``self._scale`` against the fp32
+        mixes. Mirrors the ``_fn_for`` caching discipline.
+        """
+        cached = self._mix_constants_fp32
+        if (
+            cached is None
+            or cached[0].device != device
+            or cached[0].shape != self.base.shape
+            or cached[1].shape != self._scale.shape
+        ):
+            cached = (
+                self.base.to(device=device, dtype=torch.float32).contiguous(),
+                self._scale.to(device=device, dtype=torch.float32).contiguous(),
+            )
+            self._mix_constants_fp32 = cached
+        return cached
+
+    def _use_fused_pre(self, x: torch.Tensor) -> bool:
+        # K2 is compiled for the production hc=4 (24-wide) mixer and K3 takes
+        # 3D strides or contiguous higher-rank streams; anything else stays
+        # on the eager reference path.
+        return (
+            self.hc_mult == 4
+            and xing4_hc_use_fused(x)
+            and (x.is_contiguous() or x.dim() == 3)
+        )
+
+    def _pre_fused(
+        self, x: torch.Tensor, dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused _pre_impl: K1 norm -> F.linear GEMM -> K2 mix -> K3 collapse."""
+        hc = self.hc_mult
+        entries = xing4_hc_triton_entries()
+        # K1: x[..., hc, H] -> flat_normed with x.flatten(-2) shape, one
+        # launch, fp32 square accumulation in registers (no [T, hc*H] fp32
+        # intermediate, hence no chunking on this path).
+        flat_normed = entries.row_rms_norm(x, self.norm_eps)
+        # GEMM preserved verbatim (the hc_fn F.linear share stays out of the
+        # fusion numerator); mixes stays fp32 exactly like the eager .float().
+        mixes = torch.nn.functional.linear(flat_normed, self._fn_for(dtype)).float()
+        mixes = mixes.reshape(-1, (hc + 2) * hc)
+        # K2: gates + clamp/exp + sinkhorn comb in one launch; its single exit
+        # cast lands exactly where the reference casts pre/post/comb.
+        base_fp32, scale_fp32 = self._mix_constants_for(mixes.device)
+        pre, post, comb = entries.mix(
+            mixes,
+            base_fp32,
+            scale_fp32,
+            sinkhorn_iters=self.hc_sinkhorn_iters,
+            eps=self.hc_eps,
+            clamp_min=self.h_res_clamp_min,
+            clamp_max=self.h_res_clamp_max,
+            out_dtype=dtype,
+        )
+        # K3: y[..., H] = sum_i pre[..., i] * x[..., i, H]; K2 already cast
+        # pre to the stream dtype, mirroring the reference's pre.to(dtype).
+        y = entries.collapse(pre, x)
+        leading = x.shape[:-2]
+        return y, post.view(*leading, hc, 1), comb.view(*leading, hc, hc)
+
     def _mixes(self, x_flat: torch.Tensor, rsqrt: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         flat_normed = (x_flat.float() * rsqrt).to(dtype)
         return torch.nn.functional.linear(flat_normed, self._fn_for(dtype)).float()
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag: Optional[str] = None):
+        if self._use_fused_pre(x):
+            return self._pre_fused(x, x.dtype)
         shape, dtype = x.size(), x.dtype
         hc = self.hc_mult
         x_flat = x.flatten(-2)
@@ -157,6 +248,23 @@ class Xing4HCUnit(HCUnitBase):
             y = torch.sum(pre.to(dtype).unsqueeze(-1) * x_view, dim=-2)
         return y.to(dtype), post.to(dtype).unsqueeze(-1), comb.to(dtype)
 
+    def _use_fused_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> bool:
+        # K4 (xing4_hc_post) takes contiguous CUDA bf16 tensors and casts
+        # post/comb itself; anything else stays on the eager reference path.
+        return (
+            self.hc_mult == 4
+            and xing4_hc_use_fused(x)
+            and residual.dtype == x.dtype
+            and residual.device == x.device
+            and all(t.is_contiguous() for t in (x, residual, post, comb))
+        )
+
     def _post_impl(
         self,
         x: torch.Tensor,
@@ -164,6 +272,10 @@ class Xing4HCUnit(HCUnitBase):
         post: torch.Tensor,
         comb: torch.Tensor,
     ) -> torch.Tensor:
+        if self._use_fused_post(x, residual, post, comb):
+            # K4: first + comb @ residual in one launch, with the reference's
+            # dtype casts and the post[..., 1] squeeze handled by the wrapper.
+            return xing4_hc_triton_entries().post(x, residual, post, comb)
         post_b = post.squeeze(-1) if post.dim() == residual.dim() else post
         first = post_b.to(x.dtype).unsqueeze(-1) * x.unsqueeze(-2)
         second = torch.matmul(comb.to(x.dtype), residual.to(x.dtype))
