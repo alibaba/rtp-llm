@@ -131,6 +131,12 @@ def http_deps():
     )
 
     http_file(
+        name = "hf3fs_rpm_aarch64",
+        urls = ["https://github.com/alibaba/tair-kvcache/releases/download/__binary-dependency-0.0.2/libhf3fs_api_shared-1.2.1-1.aarch64.rpm"],
+        sha256 = "94c10e4aa3916600b6e2fcb531f137a53ecc38bf7e19662ce09b6bec16ee7462",
+    )
+
+    http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv-cache-manager-client-2026_04_29_14_29.rpm",
