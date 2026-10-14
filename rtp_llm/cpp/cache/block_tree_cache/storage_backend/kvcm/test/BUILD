@@ -74,7 +74,9 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
+    ],
 )
 
 cc_test_wrapper(
