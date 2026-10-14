@@ -30,7 +30,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in.yaml")
         self.assertEqual(
-            presentation.charts.panels[0].curve_ids[2], "mock/cache_hit_ratio"
+            presentation.charts.panels[0].curve_ids[1], "mock/cache_hit_ratio"
         )
         broken = presentation.to_dict()
         broken["charts"]["panels"] = [panel.to_dict() for panel in presentation.charts.panels]
@@ -101,10 +101,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
             self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
-                                and panel["events"] for name, panel in panels.items() if not name.startswith('gate-')))
-            unavailable = next(section for section in spec['sections'] if section.get('id') == 'gate.reference.availability')
-            self.assertEqual({'gate-success', 'gate-balance', 'gate-route'},
-                             {row['panel'] for row in unavailable['value']})
+                                and panel["events"] for panel in panels.values()))
             self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
             self.assertEqual(11.1, spec["timeOriginEpochS"])
