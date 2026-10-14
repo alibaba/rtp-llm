@@ -41,7 +41,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | 观测快照 / 冻结观测窗口 | `observation_snapshot_schema_version` / `observation_window_schema_version` | 1 |
 | 性能证据 | `performance_evidence_schema_version` | 2 |
 | 性能分析 | `performance_analysis_schema_version` | 2 |
-| cache 分析 | `cache_scale_in_analysis_schema_version` | 3 |
+| cache 分析 | `cache_scale_in_analysis_schema_version` | 4 |
 | 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
 | Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 

@@ -106,12 +106,11 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
-    for identity in ('derived/survivor_hit_ratio', 'derived/status_min_rolling_qps', 'derived/status_p99_rt_us'):
+    for identity in ('derived/survivor_hit_ratio',):
         style = presentation.charts.curves[identity]
         for observation in store.document['metrics'].get(identity, []):
-            phase = observation['labels'].get('phase')
             curves.append(materialize(identity, style, observation['points'],
-                name=style.name + (' · ' + phase if phase else ''),
+                name=style.name,
                 origin=evidence_origin(evidence), provenance=observation['provenance'],
                 description=observation['provenance'].get('calculation', 'frozen case measurement')))
     audit = prepared["audit"]

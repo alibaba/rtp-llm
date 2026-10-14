@@ -130,6 +130,30 @@ class CacheGateTest(unittest.TestCase):
         sparse = project_panels(curves[:2], view("cache_scale_in.yaml"))
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
+    def test_status_reporting_is_observation_only(self):
+        reference = analyze(self.evidence())
+        self.assertEqual(reference['verdict'], 'PASS')
+        for qps, latency in ((0, 1000000), (None, None)):
+            evidence = self.evidence()
+            for row in evidence['samples']:
+                for engine in row['engines'].values():
+                    engine['worker_status_qps'] = qps
+                    engine['worker_status_rt_us'] = latency
+            self.assertEqual(analyze(evidence), reference)
+        evidence = self.evidence()
+        for row in evidence['samples']:
+            for engine in row['engines'].values():
+                engine.pop('worker_status_qps')
+                engine.pop('worker_status_rt_us')
+        self.assertEqual(analyze(evidence), reference)
+
+    def test_status_reporting_chart_retains_original_metrics(self):
+        presentation = view('cache_scale_in.yaml').to_dict()
+        panel = next(p for p in presentation['charts']['panels'] if p['id'] == 'worker-status')
+        self.assertEqual(panel['curve_ids'], ['mock/worker_status_qps_fleet',
+                                             'mock/worker_status_rt_us_fleet'])
+        self.assertFalse(any('derived/status_' in key for key in presentation['charts']['curves']))
+
     def evidence(self, hit=0.8):
         rows = []
         for t in range(81):
@@ -165,7 +189,7 @@ class CacheGateTest(unittest.TestCase):
                 baseline_min_hit=0.7,
                 min_completed=10,
                 qps=10,
-                qps_tolerance=0.1, status_min_qps=10, status_max_rt_us=10000,
+                qps_tolerance=0.1,
                 absolute_min_hit=0.4,
                 max_drop=0.25,
                 observe_s=60,

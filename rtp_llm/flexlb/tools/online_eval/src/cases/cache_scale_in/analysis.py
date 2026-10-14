@@ -6,7 +6,6 @@ import math
 from bisect import bisect_right
 
 from analysis.statistics import counter_delta, select_window
-from cases.cache_scale_in.status_reporting import summarize as status_reporting
 
 
 COUNTERS = (
@@ -319,13 +318,9 @@ def analyze(evidence):
             run, previous_end = 0, None
     observed = ("unknown" if not windows or any(not w["valid"] for w in windows)
                 else "collapse" if first_collapse is not None else "stable")
-    from analysis.checks import evaluate, invalid_check
+    from analysis.checks import evaluate
     from analysis.gates import gate_checks
-    status_windows, status_qps, status_latency, status_errors = status_reporting(evidence)
-    errors.extend(status_errors)
     verdict, checks = gate_checks([
-        evaluate('status_min_rolling_qps', status_qps, 'ge', p['status_min_qps']) if status_qps is not None else invalid_check('status_min_rolling_qps'),
-        evaluate('status_p99_rt_us', status_latency, 'le', p['status_max_rt_us']) if status_latency is not None else invalid_check('status_p99_rt_us'),
         evaluate("collapse_detected", int(first_collapse is not None), "eq", int(expected == "collapse"),
                  evidence=dict(op="eq", threshold=threshold, sustain_s=p["sustain_s"],
                                first_collapse_s=first_collapse)),
@@ -336,8 +331,7 @@ def analyze(evidence):
     hits = [w["hit"] for w in halves]
     measured = [*halves, *windows]
     rates = [abs(w["sent_qps"] / p["qps"] - 1) if w["sent_qps"] is not None else None for w in measured]
-    gate_metrics = dict(status_min_rolling_qps=status_qps, status_p99_rt_us=status_latency,
-        status_max_rt_us=max((w["max_rt_us"] for w in status_windows.values() if w["max_rt_us"] is not None), default=None),
+    gate_metrics = dict(
         baseline_min_half_hit=min(hits) if all(v is not None for v in hits) else None,
         baseline_half_spread=abs(hits[0]-hits[1]) if all(v is not None for v in hits) else None,
         min_window_completed=min(w["completed"] for w in measured),
@@ -345,9 +339,8 @@ def analyze(evidence):
         collapse_detected=int(first_collapse is not None),
     )
     return dict(
-        cache_scale_in_analysis_schema_version=3,
+        cache_scale_in_analysis_schema_version=4,
         gate_metrics=gate_metrics,
-        status_reporting=status_windows,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
         drain_diagnostics=[dict(index=i, code="DRAIN_INCOMPLETE", remaining_work=row.get("remaining_work"))

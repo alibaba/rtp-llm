@@ -133,7 +133,7 @@ def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
     from monitoring.contracts import MetricUnavailable
     freeze_metrics(tmp_path,"cache_scale_in")
     evidence=dict(provenance=dict(env_epoch=1),clock=dict(origin_epoch_s=100),survivors=["p"])
-    result=dict(verdict="INVALID",windows=[dict(end=10,hit=.9,errors=[])],gate_metrics={},status_reporting={})
+    result=dict(verdict="INVALID",windows=[dict(end=10,hit=.9,errors=[])],gate_metrics={})
     produce(tmp_path,evidence,result)
     with pytest.raises(MetricUnavailable):
         MetricStore.read(tmp_path).select("derived/survivor_hit_ratio")

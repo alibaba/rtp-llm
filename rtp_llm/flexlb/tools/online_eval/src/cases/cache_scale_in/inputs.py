@@ -35,7 +35,7 @@ ENGINE_FIELDS = {"worker_status_qps": "requests/s", "worker_status_rt_us": "us",
 def engine_counters(spec):
     from cases.cache_scale_in.analysis import COUNTERS
 
-    required = set(COUNTERS) | {"waiting", "running", "cache_evictions", "prefill_ms_avg", "admission_open", "worker_status_qps", "worker_status_rt_us"}
+    required = set(COUNTERS) | {"waiting", "running", "cache_evictions", "prefill_ms_avg", "admission_open"}
     fields = metric_fields(spec)
     if not required <= set(fields):
         raise ValueError("parameters.observation.inputs.engine_counters: missing or invalid metric bindings; missing required fields " + str(sorted(required - set(fields))))
@@ -54,8 +54,6 @@ def engine_counters(spec):
 from case_api.check_inputs import CheckSet, CheckSpec
 
 CHECKS = CheckSet('cache_gate', {
-    'status_qps': CheckSpec('status_min_qps', 'status_min_rolling_qps', 'ge', 'requests/s', ('baseline', 'transition', 'post')),
-    'status_latency': CheckSpec('status_max_rt_us', 'status_p99_rt_us', 'le', 'us', ('baseline', 'transition', 'post')),
     'offered_load': CheckSpec('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('baseline', 'post'), number=FRACTION),
     'baseline_hit': CheckSpec('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', ('baseline',), number=FRACTION),
     'baseline_stability': CheckSpec('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', ('baseline',), number=FRACTION),

@@ -97,24 +97,6 @@ charts:
   - observation_end
   - sending_stopped
   curves:
-    derived/status_min_rolling_qps:
-      metric_id: derived/status_min_rolling_qps
-      labels: {}
-      name: P 门禁 QPS：每引擎 10 秒滚动均值最小值
-      group: 状态上报
-      unit: requests/s
-      axis: qps
-      color: '#52c41a'
-      hidden: false
-    derived/status_p99_rt_us:
-      metric_id: derived/status_p99_rt_us
-      labels: {}
-      name: P 门禁 RT：最差引擎阶段采样 p99
-      group: 状态上报
-      unit: us
-      axis: latency
-      color: '#722ed1'
-      hidden: false
     master/cpu_usage_percent:
       metric_id: master/cpu_usage_percent
       labels: {}
@@ -290,7 +272,7 @@ charts:
       metric_id: mock/worker_status_qps_fleet
       labels:
         role: prefill
-      name: P 瞬时上报 QPS 最小值（诊断）
+      name: P 上报 QPS 最小采样值
       group: 状态上报
       unit: requests/s
       axis: qps
@@ -431,13 +413,11 @@ charts:
       latency:
         title: 服务端读取耗时 / 微秒
         position: right
-    caption: 原始曲线覆盖当前上报 P；门禁 baseline 检查初始 P，transition/post 仅检查 survivors。QPS 先对每引擎作 10 秒时间加权滚动均值，再取最小值；RT 先取每引擎阶段采样 p99，再取最大值，横线在整个阶段结束后计算。最大 RT 保留诊断展示，不参与阈值判定。RT 是最近一次状态读取耗时 Gauge 的采样统计，不是所有 RPC 的 p99，排除编码和网络耗时。
+    caption: 展示当前上报 P 的 QPS 最小采样值和状态读取耗时最大采样值，仅作观测，不参与门禁。QPS 为已完成状态上报 RPC 的采样速率；RT 为最近一次状态读取耗时 Gauge，排除编码和网络耗时，不代表所有 RPC 的延迟分位数。
     empty_caption: 缺少状态上报序列时不补零。
     curve_ids:
     - mock/worker_status_qps_fleet
     - mock/worker_status_rt_us_fleet
-    - derived/status_min_rolling_qps
-    - derived/status_p99_rt_us
   - id: master-cpu
     title: Master JVM / 系统 CPU 利用率 · 可见 CPU 数
     axes:

@@ -205,24 +205,6 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
-    status_qps:
-      metric: cache_gate/status_min_rolling_qps
-      unit: requests/s
-      windows:
-      - baseline
-      - transition
-      - post
-      op: ge
-      expected: 10
-    status_latency:
-      metric: cache_gate/status_p99_rt_us
-      unit: us
-      windows:
-      - baseline
-      - transition
-      - post
-      op: le
-      expected: 10000
 variants:
 - id: affinity_disabled
   parameters:
