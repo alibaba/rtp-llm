@@ -52,6 +52,8 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 ## 编译与执行边界
 
+Master discovery pass 对缺失引擎的退役锁只做非阻塞尝试；锁忙时由下一轮重试相同 generation。缓存索引清理不能阻塞本轮存活引擎的状态轮询。过期判断、generation 校验和正式退役仍在持锁后执行。
+
 编译按 document、variant、profile 三层展开，读取声明、preset 和实现源码，但不启动服务。环境声明与标量合同由 `environment_declaration` 维护，Master patch 由 `master_patch` 校验，preset、profile 渲染、偏离检查和快照冻结由 `environment_resolver` 负责。
 
 内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。

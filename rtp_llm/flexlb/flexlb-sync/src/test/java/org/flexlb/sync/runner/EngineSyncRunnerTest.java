@@ -108,6 +108,26 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void busyMissingGenerationDoesNotBlockSurvivorPolling() throws Exception {
+        WorkerStatus missing = RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
+        discover(workerDirectory, missing);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.2", 8080)));
+        var caller = java.util.concurrent.Executors.newSingleThreadExecutor();
+        missing.lock.lock();
+        try {
+            caller.submit(engineSyncRunner).get(1, java.util.concurrent.TimeUnit.SECONDS);
+            verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+            assertTrue(workerDirectory.isCurrentStatus(RoleType.PREFILL, missing.getIpPort(), missing));
+        } finally {
+            missing.lock.unlock();
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void should_handle_null_worker_status_gracefully() {
         EngineSyncRunner runnerWithEmptyDirectory = new EngineSyncRunner(
                 modelName,

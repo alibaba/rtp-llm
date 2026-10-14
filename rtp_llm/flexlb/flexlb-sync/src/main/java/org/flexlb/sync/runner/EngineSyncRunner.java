@@ -379,7 +379,12 @@ public class EngineSyncRunner implements Runnable {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
-        workerStatus.lock.lock();
+        // Discovery polling must not queue behind a removed generation's
+        // cache-index cleanup. Another pass can retry this exact identity;
+        // surviving workers still need their status RPCs on this pass.
+        if (!workerStatus.lock.tryLock()) {
+            return;
+        }
         try {
             if (!workerDirectory.isCurrentStatus(
                     roleType, workerIpPort, workerStatus)) {
