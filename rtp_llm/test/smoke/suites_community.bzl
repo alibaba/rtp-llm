@@ -56,7 +56,10 @@ def community_measurement_suites():
     The reuse scenarios are token-identity self-checks (no cross-arch
     goldens needed), so they are the first target on a new architecture;
     golden cases for those pools follow after their first green run."""
-    reuse_args = "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --warm_up 0 --max_seq_len 16384 --seq_size_per_block 2048 --concurrency_limit 4 --enable_cuda_graph 1 --enable_fp32_lm_head false --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0"
+    # sm103 (B300): trtllm-gen kernel lookup fails at numTokensPerPage=2048;
+    # use the standard page size 128 without CUDA graph for validation (the
+    # block-crossing corruption is specific to graph+async; eager mode is safe).
+    reuse_args = "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --warm_up 0 --max_seq_len 16384 --seq_size_per_block 128 --concurrency_limit 4 --enable_cuda_graph 0 --enable_fp32_lm_head false --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_remote_cache 0"
     for name, gpu in (
         ("lfm2_reuse_cache_sm103", "SM103_CU13"),
         ("lfm2_reuse_cache_sm12x", "RTX_5000_PRO_CU13"),
