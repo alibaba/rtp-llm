@@ -56,6 +56,14 @@ void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
                           std::vector<std::string>             group_tags,
                           BackingLayout                        backing_layout) {
+    if (topology_ != nullptr && topology_ == topology && group_tags_ == group_tags
+        && uses_physical_payload_geometry_ == (backing_layout.payload_bytes > 0)
+        && (backing_layout.payload_bytes == 0 || backing_layout.payload_bytes == payload_bytes_)
+        && enable_crc_ == backing_layout.crc_enabled
+        && storage_bytes_ == (backing_layout.storage_bytes == 0 ? payload_bytes_ : backing_layout.storage_bytes)) {
+        group_set_id_ = group_set_id;
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
@@ -85,12 +93,67 @@ void GroupSet::initialize(size_t                               group_set_id,
     }
     RTP_LLM_CHECK_WITH_INFO(physical_payload_bytes > 0, "GroupSet physical payload must be positive");
 
-    group_set_id_  = group_set_id;
-    topology_      = std::move(topology);
-    group_tags_    = std::move(group_tags);
-    payload_bytes_ = physical_payload_bytes;
-    enable_crc_    = backing_layout.crc_enabled;
-    storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+    group_set_id_      = group_set_id;
+    topology_          = std::move(topology);
+    group_tags_        = std::move(group_tags);
+    payload_bytes_     = physical_payload_bytes;
+    enable_crc_        = backing_layout.crc_enabled;
+    storage_bytes_     = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+    copy_3d_templates_ = initializeCopy3DTemplates();
+}
+
+std::vector<DeviceHostCopyTemplate> GroupSet::initializeCopy3DTemplates() const {
+    std::vector<DeviceHostCopyTemplate> templates;
+    if (topology_ == nullptr || group_tags_.empty() || group_tags_.size() != device_pools_.size()) {
+        return {};
+    }
+    size_t host_offset  = 0;
+    int    device_index = -1;
+    for (size_t member = 0; member < device_pools_.size(); ++member) {
+        const auto& pool       = device_pools_[member];
+        const auto& group_base = group(group_tags_[member]);
+        const auto  layer_ids  = topology_->layerIdsForGroup(group_tags_[member]);
+        if (!pool || !pool->getBaseAddress() || pool->deviceIndex() < 0 || group_base.kvScaleStrideBytes() != 0) {
+            return {};
+        }
+        if (device_index < 0) {
+            device_index = pool->deviceIndex();
+        } else if (device_index != pool->deviceIndex()) {
+            return {};
+        }
+        const size_t width    = group_base.kvBlockStrideBytes();
+        const size_t capacity = pool->getTotalSizeBytes();
+        if (reinterpret_cast<uintptr_t>(pool->getBaseAddress()) > UINTPTR_MAX - capacity) {
+            return {};
+        }
+        size_t layer_begin = 0;
+        for (const auto& layout : pool->memoryLayouts()) {
+            if (width == 0 || layout.block_num == 0 || layout.layer_num == 0 || layout.kv_block_stride_bytes != width
+                || layout.kv_scale_stride_bytes != 0 || layout.hasScale()
+                || layout.block_num > std::numeric_limits<size_t>::max() / width || layer_begin > layer_ids.size()
+                || layout.layer_num > layer_ids.size() - layer_begin) {
+                return {};
+            }
+            const size_t pitch  = layout.block_num * width;
+            const size_t offset = layout.kv_cache_offset_bytes;
+            if (offset > capacity || layout.layer_num > (capacity - offset) / pitch
+                || layout.layer_num > layout.kv_block_pool_size_bytes / pitch || host_offset > payload_bytes_
+                || layout.layer_num > (payload_bytes_ - host_offset) / width) {
+                return {};
+            }
+            auto* base = static_cast<uint8_t*>(pool->getBaseAddress()) + offset;
+            templates.push_back({member, base, host_offset, width, layout.layer_num, pitch});
+            host_offset += width * layout.layer_num;
+            layer_begin += layout.layer_num;
+        }
+        if (layer_begin != layer_ids.size()) {
+            return {};
+        }
+    }
+    if (host_offset != payload_bytes_) {
+        return {};
+    }
+    return templates;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {
