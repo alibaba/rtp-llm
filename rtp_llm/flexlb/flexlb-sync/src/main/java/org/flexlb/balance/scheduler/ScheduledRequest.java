@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Prioritized;
 
 import java.util.Objects;
@@ -105,9 +106,18 @@ public final class ScheduledRequest implements Prioritized {
         var input = ctx().getGenerateInputPb();
         // Input/external-input/DP-slot envelopes, priority and config length growth.
         // Charge a separate DP envelope per item, which also bounds mixed-DP batches.
-        return (input == null ? 0L : input.size()) + 64L
+        long size = (input == null ? 0L : input.size()) + 64L
                 + roleAddressSizeUpperBound(prefill())
                 + roleAddressSizeUpperBound(decode());
+        // Batch dispatch also carries the ViT address from this request's route.
+        if (routeResponse != null && routeResponse.getServerStatus() != null) {
+            for (ServerStatus status : routeResponse.getServerStatus()) {
+                if (status.getRole() == RoleType.VIT) {
+                    size += roleAddressSizeUpperBound(status);
+                }
+            }
+        }
+        return size;
     }
 
     private static long roleAddressSizeUpperBound(ServerStatus status) {
