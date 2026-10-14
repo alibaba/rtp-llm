@@ -109,6 +109,19 @@ _DSV4_FP8_CPU_TESTS = [
 ]
 
 py_test(
+    name = "test_v41_sparse_decode",
+    srcs = [
+        "test_v41_sparse_decode.py",
+        "test_v41_decode_attention_fusion.py",
+    ],
+    main = "test_v41_sparse_decode.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
+
+py_test(
     name = "test_v41_candidate_topk",
     srcs = ["test_v41_candidate_topk.py"],
     deps = _DSV4_FP8_TEST_DEPS,

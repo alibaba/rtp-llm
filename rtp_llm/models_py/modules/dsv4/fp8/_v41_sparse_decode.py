@@ -7,10 +7,14 @@ BF16 logits; enabling this path explicitly opts into that precision boundary.
 
 from typing import NamedTuple
 
-import deep_gemm
 import torch
 import triton
 import triton.language as tl
+
+try:
+    import deep_gemm
+except ImportError:
+    deep_gemm = None
 
 from rtp_llm.models_py.modules.dsv4.fp8._v41_decode_indexer import (
     prepare_indexer_q_and_weights,
@@ -23,6 +27,24 @@ BLOCK_SIZE = 8
 NUM_HEADS = 32
 HEAD_DIM = 128
 TOKEN_TOPK = 512
+
+
+def is_supported(candidates):
+    """Unsupported backends/layouts keep dense scoring; kernel errors propagate."""
+    if (
+        not candidates.is_cuda
+        or candidates.ndim != 2
+        or candidates.dtype != torch.int32
+        or candidates.shape[1] not in (512, 1024, 2048)
+        or not candidates.is_contiguous()
+    ):
+        return False
+    return (
+        callable(getattr(deep_gemm, "get_paged_sparse_mqa_logits_metadata", None))
+        and callable(getattr(deep_gemm, "fp8_fp4_paged_sparse_mqa_logits", None))
+        and callable(getattr(rtp_llm_ops, "topk_v3", None))
+        and torch.cuda.get_device_capability(candidates.device)[0] == 10
+    )
 
 
 class SparseDecodePlan(NamedTuple):
