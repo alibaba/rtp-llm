@@ -20,7 +20,7 @@ A model can override the auto-pick via:
   - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
   - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
-  - ``DSV41_MEGA_SHARED_EXPERT=1`` to opt native group-32 prefill/decode into Mega-SE
+  - ``DSV41_MEGA_SHARED_EXPERT=0`` to keep native group-32 shared experts separate
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
 """
@@ -262,11 +262,12 @@ def select_strategy(
 
     # Native shared activations use K32 for both weight recipes. V4.1's
     # 32x32 checkpoint scales need a different weight layout from V4's
-    # block-128 scales. Keep its new fusion opt-in for both prefill and decode.
+    # block-128 scales. Enable its fusion by default for prefill and decode;
+    # either shared-expert switch can explicitly retain the routed-only path.
     separate_shared = cfg.shared_fp8_block_size == 32
     native_shared_enabled = (
         separate_shared
-        and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "0") == "1"
+        and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "1") == "1"
         and os.environ.get("DSV4_USE_MEGA_MOE_SE", "1") != "0"
     )
     if separate_shared and forced == "mega_fused":

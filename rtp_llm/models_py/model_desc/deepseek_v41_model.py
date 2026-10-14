@@ -222,20 +222,22 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 self._prepare_engram(inputs)
                 attn = as_tagged_attention_inputs(inputs.attention_inputs)
                 if (
-                    (engram_cpu_lookup_enabled() or engram_lookup_prefetch_enabled())
+                    not self._is_decode_role
                     and bool(attn.is_prefill)
                     and not bool(getattr(attn, "is_target_verify", False))
                     and not _is_decode_fmha(fmha_impl)
                     and self.v4.embed.weight.is_cuda
                     and not torch.cuda.is_current_stream_capturing()
                 ):
-                    if engram_cpu_lookup_enabled():
+                    if engram_cpu_lookup_enabled(is_decode_role=self._is_decode_role):
                         prefetch = EngramCPULookupPrefetch(
                             self,
                             getattr(inputs, "engram_token_windows_host", None),
                             int(self._v4_args.v41_config.get("image_token_id", 129264)),
                         )
-                    else:
+                    elif engram_lookup_prefetch_enabled(
+                        is_decode_role=self._is_decode_role
+                    ):
                         prefetch = EngramLookupPrefetch(
                             (layer_id, self.v4.layers[layer_id])
                             for layer_id, _ in self._engram_layers

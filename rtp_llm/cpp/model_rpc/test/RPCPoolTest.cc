@@ -150,15 +150,15 @@ TEST(RPCPoolTest, ReadyPreflightCancellationStopsWaitBeforeDeadline) {
     TcpBlackhole      blackhole;
     RPCPool           pool;
     std::atomic<bool> cancelled{false};
-    std::thread cancel_thread([&cancelled]() {
+    std::thread       cancel_thread([&cancelled]() {
         std::this_thread::sleep_for(30ms);
         cancelled.store(true, std::memory_order_release);
     });
 
-    const auto begin  = std::chrono::steady_clock::now();
-    auto       result = pool.getReadyConnection(blackhole.address(),
-                                          std::chrono::system_clock::now() + 2s,
-                                          [&cancelled]() { return cancelled.load(std::memory_order_acquire); });
+    const auto begin = std::chrono::steady_clock::now();
+    auto result = pool.getReadyConnection(blackhole.address(), std::chrono::system_clock::now() + 2s, [&cancelled]() {
+        return cancelled.load(std::memory_order_acquire);
+    });
     const auto elapsed_ms = elapsedMs(begin);
     cancel_thread.join();
 
@@ -176,6 +176,10 @@ TEST(RPCPoolTest, ReadyPreflightReusesReadyChannel) {
     auto second = pool.getReadyConnection(server.address(), 2s);
     ASSERT_TRUE(second.ok()) << second.status();
     EXPECT_EQ(second->channel, first->channel);
+
+    auto no_wait = pool.getReadyConnection(server.address(), std::chrono::system_clock::now() - 1ms);
+    ASSERT_TRUE(no_wait.ok()) << no_wait.status();
+    EXPECT_EQ(no_wait->channel, first->channel);
 }
 
 TEST(RPCPoolTest, OldGenerationCannotEraseReadyReplacement) {
