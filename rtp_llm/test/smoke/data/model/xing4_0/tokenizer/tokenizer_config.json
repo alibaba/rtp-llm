@@ -1,0 +1,132 @@
+{
+  "tokenizer_class": "Xing4_0Tokenizer",
+  "auto_map": {
+    "AutoTokenizer": [
+      "tokenization_xing4_0.Xing4_0Tokenizer",
+      null
+    ]
+  },
+  "added_tokens_decoder": {
+    "1": {
+      "content": "<_start>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2": {
+      "content": "<_end>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "3": {
+      "content": "<_pad>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "4": {
+      "content": "<_user>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "5": {
+      "content": "<_bot>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "6": {
+      "content": "<_system>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "9": {
+      "content": "<think>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "10": {
+      "content": "</think>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "11": {
+      "content": "<tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "12": {
+      "content": "</tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "13": {
+      "content": "<tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "14": {
+      "content": "</tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "additional_special_tokens": [
+    "<_start>",
+    "<_end>",
+    "<_pad>",
+    "<_user>",
+    "<_bot>",
+    "<_system>",
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<tool_response>",
+    "</tool_response>"
+  ],
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "use_fast": false,
+  "clean_up_tokenization_spaces": false,
+  "split_special_tokens": false,
+  "model_max_length": 100000000,
+  "sp_model_kwargs": {},
+  "bos_token": "<_start>",
+  "eos_token": "<_end>",
+  "pad_token": "<_pad>"
+}
+

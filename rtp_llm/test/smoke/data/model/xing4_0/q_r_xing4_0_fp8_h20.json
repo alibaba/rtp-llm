@@ -16,5 +16,6 @@
                 "finished": true
             }
         }
-    ]
+    ],
+    "tokenizer_path": "rtp_llm/test/smoke/data/model/xing4_0/tokenizer"
 }
