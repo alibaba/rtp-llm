@@ -2027,6 +2027,15 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
+    // Attention preparation and input initialization run on the caller's
+    // stream. Order the capture stream after them before warming stream-local
+    // backends (for example MegaMHC) on the stream that will actually capture.
+    // This dependency is initialization-only; graph replay is unchanged.
+    auto inputs_ready = cuda_graph::makeGraphEvent();
+    inputs_ready.record(cuda_graph::graphGetCurrentStream());
+    inputs_ready.block(capture_stream_);
+    CudaGraphStreamLife stream_life(capture_stream_);
+
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
@@ -2037,19 +2046,39 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d; draining submitted GPU work before rethrow", key_type, key);
+        // A backend can submit work and then throw. Inputs and attention
+        // metadata belong to the caller stream, so restoring that stream and
+        // destroying the runner before these reads finish would allow unsafe
+        // allocator reuse. Keep the original exception even if draining fails.
+        try {
+            cuda_graph::graphDeviceSynchronize();
+        } catch (const std::exception& e) {
+            capture_session_may_be_dirty_.store(true, std::memory_order_release);
+            RTP_LLM_LOG_ERROR("WarmUp failure drain failed for %s %d; retaining runner: %s", key_type, key, e.what());
+        } catch (...) {
+            capture_session_may_be_dirty_.store(true, std::memory_order_release);
+            RTP_LLM_LOG_ERROR(
+                "WarmUp failure drain failed for %s %d; retaining runner: unknown exception", key_type, key);
+        }
         throw;
     }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
         // sync before capture
-        cuda_graph::graphDeviceSynchronize();
+        try {
+            cuda_graph::graphDeviceSynchronize();
+        } catch (...) {
+            // A failed drain cannot establish that cross-stream warmup reads
+            // have finished, even when both Python forwards returned normally.
+            capture_session_may_be_dirty_.store(true, std::memory_order_release);
+            throw;
+        }
 
-        CudaGraphStreamLife stream_life(capture_stream_);
-        auto&               graph               = graph_instances_[key].graph_;
-        std::string         output_dot_filename = "";
+        auto&       graph               = graph_instances_[key].graph_;
+        std::string output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
             graph.enable_debug_mode();
             std::string key_type_str = std::string(key_type);
