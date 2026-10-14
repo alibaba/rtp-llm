@@ -1,7 +1,7 @@
 {
   "_comment": "autojev-27b decision smoke: linear readout head over chat-template prompts, original release served in place. Golden from the reference readout math on the checkpoint weights.",
   "model_type": "qwen35_dense",
-  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/autojev-27b",
+  "model_path": "/mnt/fuse/smoke-test/hf/denis-pplx--autojev-27b--6f5b557e037f5edb25c7dc92dbc6553e5a19c015",
   "query_result": [
     {
       "endpoint": "/v1/classifier",

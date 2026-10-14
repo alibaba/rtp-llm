@@ -1,7 +1,7 @@
 {
   "_comment": "JEV-27B-VL decision smoke: 264-row verbalizer head, bare-v1 prompt, LoRA-merged serving copy. Golden from the reference System-1 math on the merged checkpoint.",
   "model_type": "qwen35_dense",
-  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/jev-27b-vl-rtp",
+  "model_path": "/mnt/fuse/smoke-test/hf/autotrust--JEV-27B-VL--da7a40b6450584e5843fab57bb4d80e092b377e0",
   "query_result": [
     {
       "endpoint": "/v1/classifier",
@@ -198,5 +198,8 @@
         ]
       }
     }
-  ]
+  ],
+  "lora_infos": {
+    "jev": "/mnt/fuse/smoke-test/hf/autotrust--JEV-27B-VL--da7a40b6450584e5843fab57bb4d80e092b377e0/adapter_vllm"
+  }
 }

@@ -1,7 +1,7 @@
 {
   "_comment": "kev-0.5b decision smoke: pointer head over kev branches, served from the converted copy on the 3fs models volume. Golden from the reference System-1 math on the base+LoRA-merged checkpoint.",
   "model_type": "qwen_2",
-  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/kev-0.5b-rtp",
+  "model_path": "/mnt/fuse/smoke-test/hf/jaredpalmer--kev-0.5b--9ce2fd39db3a397c89733f94af948e3d1fdfffcd",
   "query_result": [
     {
       "endpoint": "/v1/classifier",
