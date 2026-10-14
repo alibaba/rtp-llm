@@ -1095,11 +1095,12 @@ py_test(
     args = [
         "--checkpoint_path", "/data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B",
         "--model_type", "minicpmv4_7",
+        "--act_type", "BF16",
         "--input_len_min", "128",
         "--input_len_max", "512",
         "--output_len_min", "64",
         "--output_len_max", "256",
-        "--concurrency_limit", "32",
+        "--concurrency_limit", "8",
         "--seq_size_per_block", "2048",
     ],
     tags = ["manual", "H20_CU13"],
