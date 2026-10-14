@@ -53,14 +53,6 @@ except Exception:  # pragma: no cover - triton unavailable in this environment
 
 logger = logging.getLogger(__name__)
 
-# Router-gate/shared-gate GEMV fusion token ceiling.  The merged [hidden, E+1]
-# GEMM removes the N=1 gate projection's dot+reduce kernel pair (measured
-# 3 kernels -> 1, graph 8.4us -> 3.3us at T=1 on H20), but E+1=257 output
-# columns break the 128-wide GEMM tiling and lose to the separate GEMMs for
-# prefill-sized token counts (measured ~2.8x at T=599).  Decode capture sets
-# (1-32) and small batches stay well below the ceiling.
-_FUSED_ROUTER_GATE_MAX_TOKENS = 64
-
 
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
@@ -88,39 +80,6 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        # Router-gate / shared-gate GEMV fusion: concatenate the two gate
-        # weights along the output axis (both use the loader's [in, out] gate
-        # layout, so every output column keeps its own dot product) so small
-        # batches pay one [hidden, E + 1] GEMM instead of [hidden, E] +
-        # [hidden, 1].  Per-forward gated by _FUSED_ROUTER_GATE_MAX_TOKENS;
-        # prefill keeps the unfused path (the 257-column GEMM loses to the
-        # separate GEMMs there).  Restricted to CUDA unquantized gates: on ROCm
-        # shared_expert_gate is not pre-swizzled during loading (layout
-        # mismatch on cat), and quantized gate weights carry scales the merged
-        # weight would need to reproduce.  The merged linear owns the only
-        # extra memory (one [hidden, E + 1] copy); both weight views stay live.
-        router_gate_weight = weights.get(W.moe_gate)
-        shared_gate_weight = weights.get(W.shared_expert_gate)
-        if (
-            is_cuda()
-            and router_gate_weight is not None
-            and shared_gate_weight is not None
-            and router_gate_weight.dtype == shared_gate_weight.dtype
-            and router_gate_weight.dtype
-            in (torch.float16, torch.bfloat16, torch.float32)
-        ):
-            merged_gate_weight = torch.cat(
-                [router_gate_weight, shared_gate_weight], dim=-1
-            )  # [hidden, E + 1]
-            self.fused_router_gate = LinearFactory.create_linear(
-                merged_gate_weight,
-                bias=None,
-                weight_scales=None,
-                quant_config=quant_config,
-                hw_kernel_config=hw_kernel_config,
-            )
-        else:
-            self.fused_router_gate = None
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
@@ -272,22 +231,14 @@ class GenericMoeLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         shared_gate_output: Optional[torch.Tensor] = None
-        if (
-            self.fused_router_gate is not None
-            and num_tokens <= _FUSED_ROUTER_GATE_MAX_TOKENS
-        ):
-            # [T, E + 1]: the first E columns feed routing, the last column is
-            # the shared-expert gate.  Both are sliced views; SelectTopk's
-            # .float() materializes the routing slice contiguously, and the
-            # [T, 1] gate view is consumed by SigmoidGateScaleAdd's strided
-            # load, so neither slice pays a copy.
-            router_and_gate = self.fused_router_gate(hidden_states)
-            router_logits = router_and_gate[:, :-1]
-            shared_gate_output = router_and_gate[:, -1:]
-        else:
-            # Prefill / large batches: separate router GEMM; the shared gate
-            # column is computed lazily by the merge helpers.
-            router_logits = self.gate(hidden_states)
+        # Separate router GEMM; the shared gate column is computed lazily by
+        # the merge helpers.  The former merged [hidden, E + 1] GEMV was
+        # measured NOT bit-identical to the separate [hidden, E] router GEMM
+        # (element-level router-logit diffs up to ~1.0 at T=2048 shapes,
+        # runs/minicpmv47_h20_20261013/build_logs/ab_router_concat.py), which
+        # flips top-k expert selection and shifts the golden-pinned numerics
+        # of every generic-MoE consumer, so the merge is retired.
+        router_logits = self.gate(hidden_states)
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),

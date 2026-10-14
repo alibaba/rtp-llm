@@ -405,10 +405,16 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
-            # fused_l2norm_qk normalizes q+k in a single BT-tiled kernel (~2x the
-            # per-row l2norm_fwd bandwidth). Parity with two l2norm_fwd calls is
-            # validated on both CUDA and ROCm (fla/test/test_l2norm.py::TestFusedL2NormQK).
-            q, k = fused_l2norm_qk(q, k)
+            if is_amd:
+                q, k = fused_l2norm_qk(q, k)
+            else:
+                # NOTE: fused_l2norm_qk is NOT bit-identical to two l2norm_fwd
+                # calls on CUDA (measured element-level diffs at [1,T,H,128]
+                # shapes, runs/minicpmv47_h20_20261013/build_logs/ab_l2norm_qk.py),
+                # which shifts golden-pinned numerics of every chunk-path
+                # consumer. Keep the per-tensor kernel on CUDA.
+                q = l2norm_fwd(q)
+                k = l2norm_fwd(k)
 
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,

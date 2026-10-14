@@ -1,12 +1,13 @@
-"""MoE gating fusion kernels.
+"""BLOCK_H heuristics shared by the MoE gating Triton kernels.
 
-Provides fused elementwise operations for MoE shared-expert gating patterns,
-avoiding intermediate tensor allocations and redundant memory round-trips.
+The fused single-kernel gate-scale-add that used to live here was retired:
+its in-register fp32 -> bf16 -> fp32 materialization rounds are folded away
+by the Triton/LLVM pipeline, so it was not bit-identical to the per-op aten
+chain.  modules/base/cuda/moe_gating.py now composes the bit-exact
+sigmoid_mul_triton / topk_sum_triton kernels (common/moe_combine.py) with a
+trailing aten add_.
 """
 
-from typing import Optional
-
-import torch
 import triton
 import triton.language as tl
 
@@ -22,70 +23,9 @@ _MAX_BLOCK_H = 4096  # Maximum BLOCK_H: prevents register spilling
 
 
 # ---------------------------------------------------------------------------
-# Triton kernel
-# ---------------------------------------------------------------------------
-
-
-@triton.jit
-def _SigmoidGateScaleAdd_kernel(
-    gate_ptr,  # [T, 1]  — scalar gate output from shared_expert_gate linear
-    shared_ptr,  # [T, H]  — shared expert MLP output
-    experts_ptr,  # [T, TOPK, H] routed experts output (TOPK=1: [T, H] layout)
-    output_ptr,  # [T, H]  — result (aliases experts_ptr when TOPK == 1)
-    T,
-    H,
-    stride_gate_t,  # gate stride along token dim (elements)
-    stride_shared_t,  # shared stride along token dim (elements)
-    stride_experts_t,  # experts row stride (TOPK * H when TOPK > 1)
-    stride_out_t,  # output stride along token dim (elements)
-    TOPK: tl.constexpr,  # top-k slots folded into the sum (1 = classic path)
-    BLOCK_H: tl.constexpr,
-):
-    """Fused: output[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + sum_k experts[t, k, :]
-
-    The top-k accumulation runs in fp32 in ascending k order, matching
-    torch.sum(dim=1) on the unsummed [T, TOPK, H] view.  With TOPK == 1 the
-    kernel is the classic in-place gate-scale-add (output aliases experts).
-
-    Grid: (T, ceil(H / BLOCK_H))
-      - axis-0: token index
-      - axis-1: hidden-dimension block index
-    """
-    tid = tl.program_id(axis=0)  # token index
-    hid = tl.program_id(axis=1)  # hidden block index
-
-    # ------------------------------------------------------------------
-    # 1. Load scalar gate for this token; compute sigmoid in fp32
-    # ------------------------------------------------------------------
-    gate_val = tl.load(gate_ptr + tid * stride_gate_t).to(tl.float32)
-    gate_val = tl.sigmoid(gate_val)  # 1 / (1 + exp(-x)), numerically stable
-
-    # ------------------------------------------------------------------
-    # 2. Compute the hidden-dim slice this program is responsible for
-    # ------------------------------------------------------------------
-    h_offsets = hid * BLOCK_H + tl.arange(0, BLOCK_H)
-    mask = h_offsets < H
-
-    # ------------------------------------------------------------------
-    # 3. Load shared-expert output and accumulate the experts output
-    # ------------------------------------------------------------------
-    shared_base = shared_ptr + tid * stride_shared_t
-    experts_base = experts_ptr + tid * stride_experts_t
-
-    shared_vec = tl.load(shared_base + h_offsets, mask=mask, other=0.0)
-    accumulator = tl.zeros([BLOCK_H], dtype=tl.float32)
-    for k in range(TOPK):
-        experts_vec = tl.load(
-            experts_base + k * H + h_offsets, mask=mask, other=0.0
-        )
-        accumulator += experts_vec.to(tl.float32)
-
-    # ------------------------------------------------------------------
-    # 4. Fused computation in fp32, then cast back to original dtype
-    # ------------------------------------------------------------------
-    result = gate_val * shared_vec.to(tl.float32) + accumulator
-    tl.store(output_ptr + tid * stride_out_t + h_offsets, result.to(shared_vec.dtype), mask=mask)
-
+# Retired: the fused single-kernel gate-scale-add.  See
+# modules/base/cuda/moe_gating.py for the bit-exact decomposition that
+# replaced it.
 
 # ---------------------------------------------------------------------------
 # BLOCK_H selector
@@ -114,70 +54,3 @@ def _select_block_h(T: int, H: int) -> int:
     target_h_blocks = max(1, _MIN_TOTAL_PROGRAMS // max(T, 1))
     ideal = triton.next_power_of_2(max(1, H // target_h_blocks))
     return max(_MIN_BLOCK_H, min(_MAX_BLOCK_H, ideal))
-
-
-# ---------------------------------------------------------------------------
-# Low-level functional entry point (used by the nn.Module wrapper)
-# ---------------------------------------------------------------------------
-
-
-def sigmoid_gate_scale_add_triton(
-    gate: torch.Tensor,
-    shared: torch.Tensor,
-    experts: torch.Tensor,
-    topk_sum: Optional[int] = None,
-) -> torch.Tensor:
-    """Launch the fused Triton kernel.
-
-    topk_sum is None or 1 (classic path): computes in-place on *experts*
-        experts[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + experts[t, :]
-    with experts [T, H]; the same tensor object is returned.
-
-    topk_sum > 1 (deferred combine): *experts* is the unsummed routed output
-    [T, topk_sum, H] (row stride topk_sum * H, contiguous last dim) and the
-    top-k reduction is fused into the kernel:
-        out[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + sum_k experts[t, k, :]
-    The fp32 accumulation over ascending k matches torch.sum's reduce order;
-    a fresh [T, H] tensor is allocated and returned (torch.sum allocated the
-    same intermediate, so the total allocation count is unchanged).
-
-    Args:
-        gate:    [T, 1]  — scalar gate; dtype fp16 / bf16 / fp32.
-        shared:  [T, H]  — shared expert MLP output.
-        experts: [T, H] or [T, topk_sum, H] routed experts output.
-        topk_sum: deferred top-k to fold into the sum, None for the classic path.
-
-    Returns:
-        experts (classic, in-place) or the summed [T, H] result (topk_sum).
-    """
-    T, H = shared.shape
-    assert gate.ndim == 2 and gate.size(1) == 1
-    assert shared.dim() == 2 and shared.stride(1) == 1
-    if topk_sum is not None and topk_sum > 1:
-        assert experts.dim() == 3 and experts.size(0) == T and experts.size(2) == H
-        assert experts.stride(2) == 1
-        output = torch.empty_like(shared)
-        experts_row_stride = experts.stride(0)
-    else:
-        assert experts.dim() == 2 and experts.shape == shared.shape
-        assert experts.stride(1) == 1
-        # Classic path: the result aliases the experts buffer in-place.
-        output = experts
-        experts_row_stride = experts.stride(0)
-    BLOCK_H = _select_block_h(T, H)
-    grid = (T, triton.cdiv(H, BLOCK_H))
-    _SigmoidGateScaleAdd_kernel[grid](
-        gate,
-        shared,
-        experts,
-        output,
-        T,
-        H,
-        gate.stride(0),
-        shared.stride(0),
-        experts_row_stride,
-        output.stride(0),
-        TOPK=1 if topk_sum is None else topk_sum,
-        BLOCK_H=BLOCK_H,
-    )
-    return output

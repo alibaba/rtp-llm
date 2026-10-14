@@ -34,10 +34,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
-    scatter_qkv,
-    scatter_qkv_l2norm,
-)
+from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     AiterFlydslGdnDecodeStateMetadata,
     _is_aiter_flydsl_gdn_decode_disabled,
@@ -559,28 +556,29 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
-        # CUDA: fused split+contiguous+l2norm (single pass over mixed_qkv) —
-        # q/k come out contiguous and pre-normalized, replacing
-        # scatter_qkv/torch.split plus the in-chunk fused_l2norm_qk; the FLA
-        # paths below then run with use_qk_l2norm_in_kernel=False. The former
-        # M >= 2048 threshold is dropped on this path: the fused kernel wins
-        # at every M (the old small-M microbench did not count the
-        # input_guard .contiguous() clones plus the separate l2norm kernels).
-        # ROCm keeps the original branches: the aiter/flydsl prefill paths
-        # consume un-normalized q/k with their own in-kernel l2norm.
+        # CUDA: scatter_qkv is a bit-exact layout copy of the torch.split
+        # chain (same bytes, one kernel); q/k normalization stays inside the
+        # FLA chunk path via use_qk_l2norm_in_kernel=True, whose CUDA branch
+        # is two per-tensor l2norm_fwd kernels — bit-identical to the
+        # pre-fusion numerics. scatter_qkv_l2norm's fused l2norm was measured
+        # NOT bit-identical to 2x l2norm_fwd (element-level diffs), which
+        # shifts golden-pinned numerics of every chunk-path consumer, so the
+        # former M >= 2048 threshold is kept dropped only for the pure-copy
+        # scatter_qkv. ROCm keeps the original branches: the aiter/flydsl
+        # prefill paths consume un-normalized q/k with their own in-kernel
+        # l2norm.
         use_qk_l2norm_in_kernel = True
         if (
             torch.version.hip is None
             and self.local_num_k_heads == self.local_num_v_heads
         ):
-            query, key, value = scatter_qkv_l2norm(
+            query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
                 self.local_num_v_heads,
                 self.head_k_dim,
                 self.head_v_dim,
             )
-            use_qk_l2norm_in_kernel = False
         elif self.head_k_dim == self.head_v_dim:
             # Fused split+contiguous at every token count: the former
             # M >= 2048 threshold left small prefills on torch.split's

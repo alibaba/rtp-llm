@@ -1,7 +1,8 @@
 """CUDA-specific MoE gating module.
 
-nn.Module wrapper around the Triton kernel in
-rtp_llm.models_py.triton_kernels.common.moe_gating.
+Bit-exact decomposition of the aten shared-expert gating chain using the
+verified Triton kernels from
+rtp_llm.models_py.triton_kernels.common.moe_combine.
 """
 
 from typing import Optional
@@ -9,19 +10,35 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.triton_kernels.common.moe_gating import (
-    sigmoid_gate_scale_add_triton,
+from rtp_llm.models_py.triton_kernels.common.moe_combine import (
+    sigmoid_mul_supported,
+    sigmoid_mul_triton,
+    topk_sum_supported,
+    topk_sum_triton,
 )
 
 
 class SigmoidGateScaleAdd(nn.Module):
-    """Fused sigmoid-gate-scale-add module for MoE shared-expert gating (CUDA/Triton).
+    """Sigmoid-gate-scale-add module for MoE shared-expert gating (CUDA/Triton).
 
-    Fuses three PyTorch ops (sigmoid, mul, add) into a single Triton kernel,
-    avoiding one intermediate [T, H] tensor allocation and two extra memory
-    round-trips.  With ``topk_sum`` the routed experts' top-k reduction is
-    folded in as well, replacing the separate ``sum(dim=1)`` aten launch and
-    its [T, H] intermediate round-trip.
+    Computes the aten chain ``sigmoid(gate) * shared + experts`` (plus the
+    ``sum(dim=1)`` fold for a deferred [T, topk, H] routed output) with
+    bit-identical results:
+
+    - ``sigmoid_mul_triton`` replaces ``torch.sigmoid(gate) * shared`` — a
+      single kernel, bit-exact vs the two-op aten chain.
+    - ``topk_sum_triton`` replaces ``experts.sum(dim=1)`` — replicates the
+      aten reduce_kernel's fp32 ILP-4 accumulation order, bit-exact.
+    - the trailing ``add_`` stays on aten (its fp32-opmath round matches).
+
+    A single fully-fused kernel was tried and retired: keeping the rounded
+    multiply result as an add operand requires an in-register
+    fp32 -> bf16 -> fp32 materialization that the Triton/LLVM pipeline folds
+    away, so the fused kernel computed the whole chain in fp32 with one
+    final rounding — not bit-identical to the per-op aten chain (measured
+    element-level diffs; see
+    runs/minicpmv47_h20_20261013/build_logs/ab_moe_gating.py in the RUN
+    notes).
     """
 
     def forward(
@@ -35,9 +52,9 @@ class SigmoidGateScaleAdd(nn.Module):
             experts[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + experts[t, :]
 
         With topk_sum > 1, *experts* is the unsummed routed output
-        [T, topk_sum, H] and the top-k sum is fused into the kernel:
+        [T, topk_sum, H]; the top-k sum is folded in first and a fresh
+        [T, H] tensor is returned:
             out[t, :] = sigmoid(gate[t, 0]) * shared[t, :] + sum_k experts[t, k, :]
-        writing a fresh [T, H] tensor (returned).
 
         Args:
             gate:    [T, 1]  — scalar gate from shared_expert_gate linear layer.
@@ -62,6 +79,11 @@ class SigmoidGateScaleAdd(nn.Module):
             assert (
                 shared.is_cuda and experts.is_cuda and gate.is_cuda
             ), "All tensors must be on CUDA"
+            experts = (
+                topk_sum_triton(experts)
+                if topk_sum_supported(experts)
+                else experts.sum(dim=1)
+            )
         else:
             assert (
                 shared.shape == experts.shape
@@ -74,4 +96,8 @@ class SigmoidGateScaleAdd(nn.Module):
         if T == 0 or H == 0:
             return experts
 
-        return sigmoid_gate_scale_add_triton(gate, shared, experts, topk_sum)
+        if sigmoid_mul_supported(gate, shared):
+            experts.add_(sigmoid_mul_triton(gate, shared))
+        else:
+            experts.add_(torch.sigmoid(gate) * shared)
+        return experts

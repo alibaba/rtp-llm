@@ -22,7 +22,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Hmm, the user just asked who I am in a short sentence. That's straightforward. I should state my identity clearly as a MiniCPa model from Model",
+                            "content": "Hmm, the user just asked who I am in a short sentence. This is a straightforward identity question. I should state my name clearly and simply. I'm",
                             "partial": false
                         },
                         "finish_reason": "length"
