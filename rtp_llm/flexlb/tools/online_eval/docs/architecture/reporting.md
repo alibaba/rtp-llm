@@ -136,25 +136,3 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 `components.py` 提供纯组件和元数据构造，`report_model.py` 提供实验条件及比较，`core.py` 管理 bundle 发布、核验和发现；公共入口由 `reporting` 包导出。视图配置与共享测量身份持有递归只读映射和元组；`to_dict()` 返回独立可编辑的数据树，显式复制不改变共享值对象。发布一次解析 `RunPresentation`，标题、检查与 provenance 复用该上下文。
 
 `assets/report.html` 提供布局和样式，并将冻结 payload 交给 `report_controller.js`。页面控制器分派时序、散点和分类图；时序交互由 `multi_curve.js` 承担，坐标轴设置共用 `FlexReport.axisOptions`。这些脚本由 renderer 内联，HTML 无需服务器或网络资源。
-
-
-## 按图选择门禁参考线
-
-selected view 的 panel 可通过 `gate_lines` 显式选择冻结门禁提供的参考线。每个绑定指定 `check`、`reference`（默认 `threshold`）和本 panel 的 `curve_id`；`name`、`color`、`hidden` 只控制展示。配置不接受阈值数值、公式或窗口覆盖，不从当前场景 YAML 重算门禁。
-
-```yaml
-gate_lines:
-- check: success
-  reference: threshold
-  curve_id: request_success
-  name: 整窗成功率下界
-  hidden: false
-```
-
-执行侧在既有门禁结果的 `gate_references` 中冻结实际阈值、比较方向、目标绘图指标、身份标签、数值单位、口径说明和绝对 epoch 秒窗口。分阶段检查放在 check 的 evidence 中；公共报告 check 模型保留这些信息。每条参考线由 case 的 Python 计算程序声明，报告配置只能引用已声明的能力。profile 生效阈值和运行时推导的内部阈值均在执行侧解析；布尔或计数判定的 expected 不自动成为其他指标曲线上的门槛。
-
-加载 view 时校验参考线身份、panel 成员关系、绘图 metric、标签和源单位。绑定曲线显式声明 `source_unit`，参考线使用同一条曲线的 `scale`、展示单位和轴。未知引用、重复绑定、跨 panel 绑定或口径不匹配在执行前失败。
-
-报告按冻结窗口生成独立虚线段，再与观测曲线一起投影到报告时间轴；多个窗口之间不连线，不自动延伸到执行侧未声明的预热、过渡或排空阶段。WorkerStatus 等检查若显式覆盖过渡阶段，参考线按该检查冻结的阶段窗口显示。实际请求首末时间描述采样覆盖，不替代声明窗口。门禁未执行、事件缺失或参考值不可用时显示原因，不回退成全时间线。参考线不是观测数据，不能消除面板的缺采提示。图例显示冻结阈值和适用窗口，不将参考线端点作为观测样本计算选区平均。
-
-整窗均值、整窗分位数和滚动窗口阈值在提示中说明统计口径，线段经过某个采样点不代表对该点执行了一次判定。持续时间规则仍由门禁负责；内部阈值线可说明持续时间条件，报告不重新检测持续超限。

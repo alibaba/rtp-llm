@@ -60,5 +60,4 @@ def load_gate(directory, name):
 def gate_check(identity, result, path, expected):
     return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
                        detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
-                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"],
-                                     gate_references=result.get('gate_references', [])))
+                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"]))

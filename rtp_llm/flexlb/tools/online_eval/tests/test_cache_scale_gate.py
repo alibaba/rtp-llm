@@ -55,9 +55,7 @@ class CacheGateTest(unittest.TestCase):
             "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"})
         ):
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
-        self.assertEqual(next(s for s in spec["panels"][0]["series"]
-                              if s.get('metric_id') == 'derived/survivor_hit_ratio'
-                              and s.get('source_type') != 'configuration')['name'], "YAML survivor")
+        self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
 
     def test_dispatch_query_is_explicit_diagnostic_and_remains_archived(self):
         with tempfile.TemporaryDirectory() as d:
@@ -87,7 +85,6 @@ class CacheGateTest(unittest.TestCase):
         template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["panels"][0]["title"] = "YAML panel"
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
-        template["charts"]["panels"][0]["gate_lines"] = []
         prepared = dict(
             curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
@@ -104,7 +101,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
-            "prefill-tps", "prefill-qps", "client-latency", "worker-status", "worker-status-gate", "master-cpu",
+            "prefill-tps", "prefill-qps", "client-latency", "worker-status", "master-cpu",
         ])
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
@@ -309,7 +306,7 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, result)
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
-            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"] if s.get('source_type') != 'configuration' and s.get('metric_id') != 'derived/baseline_hit_ratio'}
+            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
             self.assertEqual(curves, {"Survivor window hit ratio":
                                      [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
             self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
@@ -337,7 +334,7 @@ class CacheGateTest(unittest.TestCase):
                 }},
             }))
             spec = write_report(root, e, analyze(e))
-            self.assertEqual([s["name"] for s in spec["panels"][0]["series"] if s.get('source_type') != 'configuration' and s.get('metric_id') != 'derived/baseline_hit_ratio'],
+            self.assertEqual([s["name"] for s in spec["panels"][0]["series"]],
                              ["Survivor window hit ratio"])
             self.assertEqual(spec["panels"][2]["id"], "prefill-queue")
             self.assertEqual([s["name"] for s in spec["panels"][2]["series"]],

@@ -193,39 +193,6 @@ charts:
       axis: count
       color: '#a0d911'
       hidden: false
-    ha_gate/success_rate:
-      metric_id: ha_gate/success_rate
-      labels: {}
-      name: 窗口请求成功率
-      group: 整窗门禁测量
-      unit: '%'
-      axis: share_pct
-      scale: 100
-      color: '#52c41a'
-      hidden: false
-      source_unit: ratio
-    ha_gate/prefill_max_share:
-      metric_id: ha_gate/prefill_max_share
-      labels: {}
-      name: 窗口最热 Prefill 占比
-      group: 整窗门禁测量
-      unit: '%'
-      axis: share_pct
-      scale: 100
-      color: '#f5222d'
-      hidden: false
-      source_unit: ratio
-    ha_gate/target_share:
-      metric_id: ha_gate/target_share
-      labels: {}
-      name: 窗口目标 Master 路由占比
-      group: 整窗门禁测量
-      unit: '%'
-      axis: share_pct
-      scale: 100
-      color: '#1677ff'
-      hidden: false
-      source_unit: ratio
   panels:
   - id: request_qps
     title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
@@ -294,72 +261,6 @@ charts:
         title: 最热 / 平均 (倍)
         position: right
         min: 0
-  - id: gate-success
-    title: HA 整窗请求成功率
-    curve_ids:
-    - ha_gate/success_rate
-    gate_lines:
-    - check: baseline_success
-      curve_id: ha_gate/success_rate
-      name: baseline_success 门禁线
-    - check: b_success
-      curve_id: ha_gate/success_rate
-      name: b_success 门禁线
-    - check: a_success
-      curve_id: ha_gate/success_rate
-      name: a_success 门禁线
-    - check: both_success
-      curve_id: ha_gate/success_rate
-      name: both_success 门禁线
-    axes:
-      share_pct:
-        title: 比例（%）
-        position: left
-        min: 0
-        max: 100
-    caption: 点为对应声明窗口的整窗统计，虚线为该窗口门槛；不是逐秒断言。
-    empty_caption: 没有有效门禁测量；参考线不代表观测数据可用。
-  - id: gate-balance
-    title: HA 整窗最热 Prefill 分配占比
-    curve_ids:
-    - ha_gate/prefill_max_share
-    gate_lines:
-    - check: b_balance
-      curve_id: ha_gate/prefill_max_share
-      name: b_balance 门禁线
-    - check: a_balance
-      curve_id: ha_gate/prefill_max_share
-      name: a_balance 门禁线
-    - check: both_balance
-      curve_id: ha_gate/prefill_max_share
-      name: both_balance 门禁线
-    axes:
-      share_pct:
-        title: 比例（%）
-        position: left
-        min: 0
-        max: 100
-    caption: 点为对应声明窗口的整窗统计，虚线为该窗口门槛；不是逐秒断言。
-    empty_caption: 没有有效门禁测量；参考线不代表观测数据可用。
-  - id: gate-route
-    title: HA 整窗目标 Master 路由占比
-    curve_ids:
-    - ha_gate/target_share
-    gate_lines:
-    - check: b_route
-      curve_id: ha_gate/target_share
-      name: b_route 门禁线
-    - check: a_route
-      curve_id: ha_gate/target_share
-      name: a_route 门禁线
-    axes:
-      share_pct:
-        title: 比例（%）
-        position: left
-        min: 0
-        max: 100
-    caption: 点为对应声明窗口的整窗统计，虚线为该窗口门槛；不是逐秒断言。
-    empty_caption: 没有有效门禁测量；参考线不代表观测数据可用。
 sections:
   sources:
     title: 数据来源与完整性
