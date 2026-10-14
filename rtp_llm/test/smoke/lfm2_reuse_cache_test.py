@@ -111,7 +111,22 @@ class Lfm2ReuseCacheTest(unittest.TestCase):
         return actual, aux, extra
 
     def assert_token_identity(self, ref, actual):
-        """Cached and no-cache responses must carry identical tokens."""
+        """Cached and no-cache responses must carry identical tokens.
+
+        Primary assertion is the output token id sequence
+        (extra_outputs.output_ids, requested via return_output_ids);
+        detokenized text is checked as a secondary assertion so a
+        detokenizer regression cannot silently mask an id divergence.
+        """
+        ref_ids = (ref.get("extra_outputs") or {}).get("output_ids")
+        actual_ids = (actual.get("extra_outputs") or {}).get("output_ids")
+        self.assertIsNotNone(
+            ref_ids, "return_output_ids did not populate extra_outputs.output_ids"
+        )
+        self.assertIsNotNone(
+            actual_ids, "return_output_ids did not populate extra_outputs.output_ids"
+        )
+        self.assertEqual(ref_ids, actual_ids)
         self.assertEqual(ref["choices"][0]["message"]["content"],
                          actual["choices"][0]["message"]["content"])
 

@@ -6,8 +6,11 @@ runtime launcher), so prefill attention on RTX PRO 5000 runs the
 Ampere-generation tiled kernel. Measured on d1-3B 31K prefill (H64 GQA 32:8
 causal, bf16): 52 TF on sm120 vs 138 TF on sm90's tma_ws variant and 942 TF
 on sm103a's trtllm-gen fmha. flash-attn 2.8.3 (pinned dependency) ships
-tuned kernels for the same varlen GQA causal shapes on sm120; this impl
-reuses it for the eager non-prefix prefill path.
+tuned kernels for the same varlen GQA causal shapes on sm120 since
+build 2.8.4 (the pinned 2.8.3.post1 r1 wheel shipped only sm_80/sm_90
+cubins with no PTX, so sm_120 raised cudaErrorNoKernelImageForDevice);
+this impl reuses flash-attn 2.8.4+ for the eager non-prefix prefill
+path.
 
 The generation-prefill CUDA-graph backend keeps selecting fmha_v2 on
 sm12x (its graph support contract is covered by dedicated tests), so this
@@ -32,12 +35,36 @@ from rtp_llm.ops.compute_ops import (
 try:
     # The wheel is optional per platform lock; an unavailable binary stays a
     # clean factory miss instead of an import error.
+    import flash_attn as _flash_attn_module
     from flash_attn import flash_attn_varlen_func
 
     _HAS_FLASH_ATTN_2 = True
 except (ImportError, OSError, RuntimeError):
+    _flash_attn_module = None
     flash_attn_varlen_func = None
     _HAS_FLASH_ATTN_2 = False
+
+
+def _has_sm120_kernels() -> bool:
+    """flash-attn builds before 2.8.4 carry no sm_120 cubins.
+
+    Importability only proves the extension loads, not that kernels exist
+    for this arch: the 2.8.3.post1 r1 wheel imports cleanly on sm_120 and
+    then raises cudaErrorNoKernelImageForDevice at the first launch.
+    Guard on the version so old wheels keep their original (fmha_v2)
+    routing instead of newly crashing through this impl.
+    """
+    if not _HAS_FLASH_ATTN_2:
+        return False
+    try:
+        version = tuple(
+            int(part)
+            for part in _flash_attn_module.__version__.split(".")[:2]
+            if part.isdigit()
+        )
+    except (AttributeError, ValueError):
+        return False
+    return version >= (2, 8)
 
 # Head dims with tuned FA2 kernels across Ampere..Blackwell consumer.
 _SUPPORTED_HEAD_DIMS = (64, 96, 128, 192, 256)
@@ -83,7 +110,7 @@ class FlashAttn2PrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if not _HAS_FLASH_ATTN_2 or not is_sm12x():
+        if not _has_sm120_kernels() or not is_sm12x():
             return False
         if (
             attn_configs.use_mla

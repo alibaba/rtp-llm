@@ -35,6 +35,7 @@ class TestFlashAttn2PrefillImpl(TRTLLMFMHAv2TestBase):
         head_num,
         head_num_kv,
         head_dim,
+        data_type="fp16",
     ):
         tokens_per_block = 64
         rope_base = 10000
@@ -46,6 +47,7 @@ class TestFlashAttn2PrefillImpl(TRTLLMFMHAv2TestBase):
             head_num_kv=head_num_kv,
             size_per_head=head_dim,
             seq_size_per_block=tokens_per_block,
+            data_type=data_type,
         )
         attn_configs.rope_config.style = rope_style
         attn_configs.rope_config.dim = head_dim
@@ -121,6 +123,19 @@ class TestFlashAttn2PrefillImpl(TRTLLMFMHAv2TestBase):
     def test_impl_mha_matches_torch(self):
         self._run_impl_rope_correctness(
             RopeStyle.Base, [64], head_num=8, head_num_kv=8, head_dim=64
+        )
+
+    def test_impl_bf16_gqa_hd64_matches_torch(self):
+        # The production gate configuration (d1-3B: bf16, GQA 32:8, hd 64,
+        # sm120) - kept as a numeric golden so the exact gate config has
+        # direct coverage, not only fp16 variants.
+        self._run_impl_rope_correctness(
+            RopeStyle.Base,
+            [128, 64],
+            head_num=32,
+            head_num_kv=8,
+            head_dim=64,
+            data_type="bf16",
         )
 
 

@@ -100,7 +100,7 @@ def whl_deps():
             "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
             "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl",
             "fast-hadamard-transform@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl",
-            "flash_attn@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl",
+            "flash_attn@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.4%2Bb27cdc3.cu132-cp310-cp310-linux_x86_64.whl",
             "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
             "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
             "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_x86_64.whl",
