@@ -684,6 +684,9 @@ def h20_oss_suites():
             ),
             smoke_test(
                 name = "minicpmv4_7_35b",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
                 gpu_type = ["H20_CU13"],
@@ -697,6 +700,9 @@ def h20_oss_suites():
             # eager golden exactly.
             smoke_test(
                 name = "minicpmv4_7_35b_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b_graph.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288",
                 gpu_type = ["H20_CU13"],
@@ -705,6 +711,9 @@ def h20_oss_suites():
             # MiniCPM-V-4.7-35B-A3B-FP8 (compressed-tensors W8 per-channel).
             smoke_test(
                 name = "minicpmv4_7_35b_fp8",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b_fp8.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
                 gpu_type = ["H20_CU13"],
@@ -714,6 +723,9 @@ def h20_oss_suites():
             # target hidden at layers [3,11,19,27,35]).
             smoke_test(
                 name = "minicpmv4_7_35b_dspark",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b_dspark.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
                 gpu_type = ["H20_CU13"],
@@ -727,6 +739,9 @@ def h20_oss_suites():
             # so this case pins its own golden like minicpmv4_7_35b_graph.
             smoke_test(
                 name = "minicpmv4_7_35b_dspark_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b_dspark_graph.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
                 envs = [
@@ -748,6 +763,9 @@ def h20_oss_suites():
             # the qwen3_moe moe_generation_prefill_cuda_graph case above).
             smoke_test(
                 name = "minicpmv4_7_35b_fp8_dspark_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
                 task_info = "data/model/minicpmv47/q_r_35b_fp8_dspark.json",
                 smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
                 envs = [
