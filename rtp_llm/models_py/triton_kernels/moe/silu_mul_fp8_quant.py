@@ -67,8 +67,11 @@ def _silu_mul_fp8_quant_packed_kernel(
 ):
     N_2: tl.constexpr = N // 2
 
-    pid_pack = tl.program_id(0).to(tl.int64)  # which packed-int32 column (= 4 groups)
-    pid_m = tl.program_id(1).to(tl.int64)  # which BLOCK_M row tile
+    # M row tiles on grid axis 0 (2^31 limit); packed-group columns (a
+    # handful) on axis 1 (65535 limit) — prefill M=seq*topk exceeds 65536
+    # row tiles, which the old axis-1 placement could not hold.
+    pid_m = tl.program_id(0).to(tl.int64)  # which BLOCK_M row tile
+    pid_pack = tl.program_id(1).to(tl.int64)  # which packed-int32 column (= 4 groups)
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
@@ -168,8 +171,8 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     ACT_ALPHA: tl.constexpr,  # sigmoid slope on gate; 1.0 == SiLU
     UP_SHIFT: tl.constexpr,  # additive shift on up; 0.0 == legacy
 ):
-    pid_pack = tl.program_id(0).to(tl.int64)
-    pid_m = tl.program_id(1).to(tl.int64)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_pack = tl.program_id(1).to(tl.int64)
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
@@ -297,7 +300,7 @@ def silu_mul_fp8_quant_packed(
         output_scale_packed = output_scale
 
     BLOCK_M = 8
-    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
+    grid = ((M + BLOCK_M - 1) // BLOCK_M, num_packed_groups)
 
     num_warps = max(4, group_size // 32)
     num_stages = 2
@@ -380,7 +383,7 @@ def silu_mul_fp8_quant_packed_from_parts(
         return output_q, output_scale_packed
 
     BLOCK_M = 8
-    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
+    grid = ((M + BLOCK_M - 1) // BLOCK_M, num_packed_groups)
     has_clamp = clamp_limit > 0
     _silu_mul_fp8_quant_packed_split_kernel[grid](
         gate,
