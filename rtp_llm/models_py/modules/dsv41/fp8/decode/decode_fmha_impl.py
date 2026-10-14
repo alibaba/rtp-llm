@@ -81,6 +81,12 @@ class DSv4DecodeFmhaImplFP8:
     from stable addresses.
     """
 
+    # CudaGraphRunner can leave captured host mirrors untouched for this
+    # backend. Preparation consumes only device lengths / block tables, and
+    # replay reads the persistent device buffers built from them. The runner
+    # preserves stream dependencies and padding of those device inputs.
+    cuda_graph_uses_device_metadata = True
+
     def __init__(
         self,
         config: DSv4DecodeFmhaImplConfigFP8,
@@ -166,4 +172,5 @@ class DSv4DecodeFmhaImplFP8:
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
+            require_device_metadata=True,
         )

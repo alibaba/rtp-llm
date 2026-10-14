@@ -712,9 +712,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_    = params.model_config_.data_type;
+    hidden_size_  = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_ = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -827,10 +827,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -869,6 +869,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && std::any_of(cache_config.topology().groups().begin(),
                        cache_config.topology().groups().end(),
                        [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
+    v41_async_cache_reservation_ = v41AsyncCacheReservationAllowed(
+        params.model_config_.model_type, role_type_, params.parallelism_config.tp_size, is_linear_attention_model_);
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
@@ -910,7 +912,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1897,6 +1899,25 @@ void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list
     // DROP_BROAD_SYNC keeps its device-state overlap unchanged.
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
     spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+}
+
+bool MtpExecutor::v41AsyncCacheReservationAllowed(const std::string& model_type,
+                                                  RoleType           role_type,
+                                                  int                tp_size,
+                                                  bool               linear_attention) {
+    return model_type == "deepseek_v41" && role_type == RoleType::DECODE && tp_size == 1 && !linear_attention;
+}
+
+std::shared_ptr<torch::Event> MtpExecutor::bookkeepingReadyEvent(bool v41_async_reservation,
+                                                                 const std::shared_ptr<torch::Event>& transfer_event,
+                                                                 const std::shared_ptr<torch::Event>& draft_event) {
+    // The existing draft event is recorded on the same engine stream after
+    // accept D2H and the last KV-consuming commit. Reuse that later fence for
+    // the worker's existing single wait: publishing completion can then release
+    // a finished/cancelled stream without racing its final draft KV accesses.
+    RTP_LLM_CHECK_WITH_INFO(!v41_async_reservation || draft_event != nullptr,
+                            "V4.1 async cache reservation requires the final draft KV-use event");
+    return v41_async_reservation ? draft_event : transfer_event;
 }
 
 bool MtpExecutor::mustWaitBeforeStreamPreparation(bool stream_async,
@@ -3008,8 +3029,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
 
     torch::Tensor next_kv_cache_block_id;
     torch::Tensor next_kv_cache_kernel_block_id;
-    if (is_linear_attention_model_ && useDeviceInput() && kv_cache_block_id.defined() && kv_cache_block_id.is_cuda()
-        && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
+    if ((is_linear_attention_model_ || v41_async_cache_reservation_) && useDeviceInput() && kv_cache_block_id.defined()
+        && kv_cache_block_id.is_cuda() && kv_cache_kernel_block_id.defined() && kv_cache_kernel_block_id.is_cuda()) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id.dim() == 3 && kv_cache_block_id.size(1) == batch_size,
                                 "MTP physical cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
@@ -3024,7 +3045,16 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
         const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
-        if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
+        // Non-linear groups keep the same page table after acceptance. They
+        // also need an immutable snapshot: without one the scheduler must
+        // join host bookkeeping before preparing every subsequent round.
+        // Linear groups additionally require room for the acceptance swaps.
+        // The scheduler either joins at capacity boundaries or, for eligible
+        // V4.1 decode, grows and republishes under the stream mutex using the
+        // conservative length bound and the allocator's retained SWA tail.
+        if (!is_linear_attention_model_
+            || hasLinearCacheSnapshotCapacity(
+                all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);
             next_kv_cache_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
                 kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size);
@@ -3073,7 +3103,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             selectMtpPreviousSeqLenUpperBound(pending, previous_state.next_seq_len_upper_bound, host_seq_len);
         RTP_LLM_CHECK_WITH_INFO(state.previous_seq_len_upper_bound > 0,
                                 "pending MTP bookkeeping requires a published sequence-length upper bound");
-        state.next_seq_len_upper_bound = state.previous_seq_len_upper_bound + static_cast<int>(propose_step_ + 1);
+        state.next_seq_len_upper_bound      = state.previous_seq_len_upper_bound + static_cast<int>(propose_step_ + 1);
+        state.allow_async_cache_reservation = v41_async_cache_reservation_ && useDeviceInput();
+        state.max_mtp_advance               = static_cast<int>(propose_step_ + 1);
         stream->setMtpAsyncDeviceState(std::move(state));
 
         probs_batch_off += next_batch_size;
@@ -3081,10 +3113,12 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
 
     // --- Launch async worker (unchanged) ---
-    auto* processor          = batch_stream_processor_.get();
-    auto  spec_decode_copy   = spec_decode_output;
-    auto  draft_prefill_copy = std::move(draft_prefill_output);
-    auto  stream_groups_copy = stream_groups;
+    auto* processor                      = batch_stream_processor_.get();
+    auto  spec_decode_copy               = spec_decode_output;
+    spec_decode_copy.transfer_done_event = bookkeepingReadyEvent(
+        v41_async_cache_reservation_ && useDeviceInput(), spec_decode_output.transfer_done_event, draft_event);
+    auto draft_prefill_copy = std::move(draft_prefill_output);
+    auto stream_groups_copy = stream_groups;
 
     auto streams_for_inc = stream_groups_copy.allStreams();
     for (auto& s : streams_for_inc) {

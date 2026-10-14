@@ -125,6 +125,21 @@ TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp
                   /*pending=*/true, /*previous_next_bound=*/-1, /*host_seq_len=*/96));
 }
 
+TEST(MtpExecutorPolicyTest, V41DecodeReservationKeepsGenericAndPrefillPolicies) {
+    EXPECT_TRUE(MtpExecutor::v41AsyncCacheReservationAllowed("deepseek_v41", RoleType::DECODE, 1, false));
+    EXPECT_FALSE(MtpExecutor::v41AsyncCacheReservationAllowed("deepseek_v41", RoleType::PREFILL, 1, false));
+    EXPECT_FALSE(MtpExecutor::v41AsyncCacheReservationAllowed("deepseek_v41", RoleType::DECODE, 4, false));
+    EXPECT_FALSE(MtpExecutor::v41AsyncCacheReservationAllowed("deepseek_v41", RoleType::DECODE, 1, true));
+    EXPECT_FALSE(MtpExecutor::v41AsyncCacheReservationAllowed("deepseek_v4", RoleType::DECODE, 1, false));
+
+    auto transfer = std::make_shared<torch::Event>(torch::kCUDA);
+    auto commit   = std::make_shared<torch::Event>(torch::kCUDA);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(true, transfer, commit), commit);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit), transfer);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr), transfer);
+    EXPECT_ANY_THROW(MtpExecutor::bookkeepingReadyEvent(true, transfer, nullptr));
+}
+
 TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {
     auto verify_positions = torch::tensor(
         {10, 20, 30, 11, 21, 31, 12, 22, 32, 13, 23, 33, 100, 200, 300, 101, 201, 301, 102, 202, 302, 103, 203, 303},
@@ -771,12 +786,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1128,9 +1143,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {

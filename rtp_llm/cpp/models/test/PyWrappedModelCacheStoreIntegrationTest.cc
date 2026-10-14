@@ -50,12 +50,52 @@ struct PyWrappedModelTestPeer {
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
+
+    static torch_ext::PyAttentionInputs buildAttentionInputs(PyWrappedModel& model, const GptModelInputs& inputs) {
+        model.d2d_copies_.clear();
+        auto result = model.buildPyAttentionInputs(inputs);
+        fusedCopy(model.d2d_copies_);
+        return result;
+    }
 };
 
 namespace {
 
 constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
+
+// Keep wrapper initialization outside the profiled metadata-only call. This
+// exercises the production builder and deferred H2D flush without a model,
+// cache allocation, graph capture, or forward synchronization in the fixture.
+class AttentionInputBuilder {
+public:
+    explicit AttentionInputBuilder(py::object py_model) {
+        Weights weights;
+        weights.layers.resize(1);
+        GptModelDescription description;
+        description.data_type = DataType::TYPE_BF16;
+        GptModelInitParams params{weights, description, std::nullopt};
+        params.hw_kernel_config.enable_cuda_graph = false;
+        model_                                    = std::make_unique<PyWrappedModel>(params, std::move(py_model));
+    }
+
+    torch_ext::PyAttentionInputs build(const torch::Tensor& input_lengths,
+                                       const torch::Tensor& prefix_lengths,
+                                       const torch::Tensor& sequence_lengths,
+                                       const torch::Tensor& combo_tokens,
+                                       bool                 is_target_verify) {
+        GptModelInputs inputs;
+        inputs.input_lengths    = input_lengths;
+        inputs.prefix_lengths   = prefix_lengths;
+        inputs.sequence_lengths = sequence_lengths;
+        inputs.combo_tokens     = combo_tokens;
+        inputs.is_target_verify = is_target_verify;
+        return PyWrappedModelTestPeer::buildAttentionInputs(*model_, inputs);
+    }
+
+private:
+    std::unique_ptr<PyWrappedModel> model_;
+};
 
 struct MetricSnapshot {
     std::string          name;
@@ -383,9 +423,9 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+                                              {static_cast<int64_t>(group_tags.size()),
+                                               static_cast<int64_t>(batch_size),
+                                               static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -1549,6 +1589,9 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
+    py::class_<rtp_llm::test::AttentionInputBuilder>(m, "AttentionInputBuilder")
+        .def(py::init<py::object>())
+        .def("build", &rtp_llm::test::AttentionInputBuilder::build);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
