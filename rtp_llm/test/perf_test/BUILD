@@ -1080,7 +1080,7 @@ py_test(
 )
 
 py_test(
-    name = "minicpmv47_35b_offline_bench_tp2_h20",
+    name = "minicpmv47_35b_offline_bench_tp1_h20",
     main = "offline_bench_test.py",
     srcs = ["offline_bench_test.py"],
     timeout = "eternal",
@@ -1095,7 +1095,6 @@ py_test(
     args = [
         "--checkpoint_path", "/data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B",
         "--model_type", "minicpmv4_7",
-        "--tp_size", "2",
         "--input_len_min", "128",
         "--input_len_max", "512",
         "--output_len_min", "64",
@@ -1104,5 +1103,5 @@ py_test(
         "--seq_size_per_block", "2048",
     ],
     tags = ["manual", "H20_CU13"],
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
