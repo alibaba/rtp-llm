@@ -454,6 +454,7 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+        self._layer_sinks: dict = {}
 
     @classmethod
     def support(
@@ -475,7 +476,53 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        sinks = self._layer_sinks.get(int(layer_idx)) if layer_idx is not None else None
+        if sinks is not None:
+            out = self._apply_layer_sinks(out, fmha_input, sinks)
+        return out
+
+    def register_layer_attn_extras(self, layer_sinks, layer_window_left):
+        """Per-head attention sinks via LSE post-correction (TRT v2 prefill).
+
+        window_left is not enforced on this backend (causal prefill).
+        """
+        self._layer_sinks = {
+            int(k): v for k, v in (layer_sinks or {}).items() if v is not None
+        }
+
+    def _apply_layer_sinks(self, out, fmha_input, sinks):
+        import math as _math
+
+        from rtp_llm.models_py.triton_kernels.attention.paged_kv_lse import (
+            ragged_kv_lse,
+        )
+
+        cfg = self.fmha_impl
+        q = (
+            fmha_input[:, : cfg.q_size]
+            .reshape(-1, cfg.head_num, cfg.head_dim)
+            .float()
+        )
+        kv = fmha_input[:, cfg.q_size :].reshape(
+            -1, 2, cfg.kv_head_num, cfg.head_dim
+        )
+        k = kv[:, 0]
+        cu = self.fmha_params.cu_seqlens
+        lse = ragged_kv_lse(
+            q,
+            k,
+            cu,
+            cu,
+            cfg.head_num,
+            cfg.kv_head_num,
+            cfg.head_dim,
+            1.0 / _math.sqrt(cfg.head_dim),
+        )
+        scale = torch.sigmoid(lse - sinks[: lse.shape[1]].to(lse.dtype)[None, :])
+        shape0 = out.shape
+        out3 = out.reshape(-1, lse.shape[1], out.shape[-1] // lse.shape[1])
+        return (out3.float() * scale[..., None]).to(out.dtype).view(shape0)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)

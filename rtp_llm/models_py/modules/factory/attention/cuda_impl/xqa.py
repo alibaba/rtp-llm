@@ -63,6 +63,7 @@ class XQAImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.config = attn_configs
         self.fmha_impl = XQAAttnOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
 
@@ -74,6 +75,7 @@ class XQAImpl(FMHAImplBase):
         # C++ XQAParams keeps the host pinned sequence-length mirror captured
         # here. CudaGraphRunner refreshes this exact storage before each replay.
         self._fmha_sequence_lengths_ptr = attn_inputs.sequence_lengths.data_ptr()
+        self._layer_sinks: dict = {}
 
     @classmethod
     def support(
@@ -215,7 +217,69 @@ class XQADecodeImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        out = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        sinks = self._layer_sinks.get(int(layer_idx)) if layer_idx is not None else None
+        if sinks is not None and kv_cache is not None:
+            out = self._apply_layer_sinks(out, fmha_input, kv_cache, sinks)
+        return out
+
+    def register_layer_attn_extras(self, layer_sinks, layer_window_left):
+        """Per-head attention sinks via LSE post-correction (XQA decode).
+
+        window_left is not enforced on this backend (causal decode).
+        """
+        self._layer_sinks = {
+            int(k): v for k, v in (layer_sinks or {}).items() if v is not None
+        }
+
+    def _apply_layer_sinks(self, out, q, kv_cache, sinks):
+        import math as _math
+
+        paged = kv_cache.kv_cache_base
+        if paged is None:
+            return out
+        if paged.dim() == 2:
+            paged = common.reshape_paged_kv_cache(
+                paged,
+                self.config.kv_head_num,
+                self.config.kernel_tokens_per_block,
+                self.config.size_per_head,
+            )
+        # q arrives as [tokens, q_size+2*kv_size] or [tokens, H, D]; isolate Q.
+        q3 = q[:, : self.config.head_num * self.config.size_per_head].reshape(
+            -1, self.config.head_num, self.config.size_per_head
+        )
+        ps = int(self.config.kernel_tokens_per_block)
+        page_table = self.fmha_params.page_table
+        seq_lens = self.fmha_params.seq_lens.reshape(-1)[: page_table.shape[0]]
+        batch = int(seq_lens.numel())
+        n_pages = (seq_lens.to(torch.int64) + ps - 1) // ps
+        indptr = torch.zeros(
+            batch + 1, dtype=torch.int32, device=seq_lens.device
+        )
+        indptr[1:] = torch.cumsum(n_pages, 0).to(torch.int32)
+        ar = torch.arange(page_table.shape[1], device=page_table.device)
+        mask = ar[None, :].expand(batch, -1) < n_pages[:, None]
+        indices = page_table[:batch][mask].to(torch.int32)
+        last_len = (seq_lens.to(torch.int64) - (n_pages - 1) * ps).to(
+            torch.int32
+        )
+        lse = paged_kv_lse(
+            q3,
+            paged,
+            indptr,
+            indices,
+            last_len,
+            self.config.head_num,
+            self.config.kv_head_num,
+            self.config.size_per_head,
+            ps,
+            1.0 / _math.sqrt(self.config.size_per_head),
+        )
+        scale = torch.sigmoid(lse - sinks[: lse.shape[1]].to(lse.dtype)[None, :])
+        shape0 = out.shape
+        out3 = out.reshape(-1, lse.shape[1], out.shape[-1] // lse.shape[1])
+        return (out3.float() * scale[..., None]).to(out.dtype).view(shape0)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)

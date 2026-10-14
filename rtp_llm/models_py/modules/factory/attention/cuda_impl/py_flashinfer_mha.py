@@ -705,6 +705,12 @@ class PyFlashinferPrefillPagedAttnOp(_LayerSinksMixin):
                     self.page_size,
                     1.0 / math.sqrt(self.head_dim_qk),
                 )
+                import os as _os
+                if _os.environ.get("GPT_OSS_SINK_DEBUG"):
+                    print(
+                        f"[sinkdbg] PRE {type(self).__name__} L{layer_idx} q={tuple(q_eff.shape)} lse0={lse.flatten()[:4].tolist()} s0={sinks[:3].tolist()}",
+                        flush=True,
+                    )
                 result = self._apply_layer_sinks(result, lse, sinks)
             else:
                 result = self.prefill_wrapper.run(
@@ -806,6 +812,12 @@ class PyFlashinferPrefillAttnOp(_LayerSinksMixin):
         sinks = self._sinks_for(layer_idx)
         if sinks is not None:
             out, lse = self.prefill_wrapper.run(q, k, v, return_lse=True)
+            import os as _os
+            if _os.environ.get("GPT_OSS_SINK_DEBUG"):
+                print(
+                    f"[sinkdbg] DEC {type(self).__name__} L{layer_idx} q={tuple(q.shape)} lse0={lse.flatten()[:4].tolist()} s0={sinks[:3].tolist()}",
+                    flush=True,
+                )
             return self._apply_layer_sinks(out, lse, sinks)
         if q.dtype == torch.float8_e4m3fn:
             # FlashInfer's FA3 FP8 need scale_q, scale_k, scale_v and an output matching the planned dtype.

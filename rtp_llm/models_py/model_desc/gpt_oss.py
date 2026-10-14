@@ -264,7 +264,15 @@ class GptOssModel(GptModelBase):
         impls = (
             fmha_impl.values() if isinstance(fmha_impl, dict) else [fmha_impl]
         )
+        import os as _os
         for impl in impls:
+            if _os.environ.get("GPT_OSS_SINK_DEBUG"):
+                print(
+                    f"[sinkdbg] REG impl={type(impl).__name__} has_extras="
+                    f"{hasattr(impl, 'register_layer_attn_extras')} "
+                    f"sinks={len(self._layer_sinks)}",
+                    flush=True,
+                )
             register = getattr(impl, "register_layer_attn_extras", None)
             if register is not None:
                 register(self._layer_sinks, self._layer_window_left)
