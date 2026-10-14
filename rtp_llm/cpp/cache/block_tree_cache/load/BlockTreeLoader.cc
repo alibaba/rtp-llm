@@ -411,6 +411,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             device_refs_released = device_refs_released || release_transferred_refs;
             continue;
         }
+
         MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         if (desc.source_tier == Tier::DEVICE) {
             if (release_transferred_refs) {
@@ -517,6 +518,26 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
                                        bool                                            aggregate_success,
                                        std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+    std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
+    const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
+        for (size_t index = 0; index < result.block_errors.size(); ++index) {
+            const auto& desc = transfer.descriptors()[index];
+            if (result.block_errors[index] != CacheCopyError::CRC_MISMATCH
+                || desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
+                continue;
+            }
+            CacheKeysType cache_keys;
+            for (TreeNode* node = desc.node; node != tree_->root(); node = node->parent) {
+                cache_keys.push_back(node->cache_key);
+            }
+            std::reverse(cache_keys.begin(), cache_keys.end());
+            corrupted.push_back({std::move(cache_keys), desc.group_set_id, desc.source_tier});
+        }
+    };
+    // Capture both tiers before resource settlement or a cascading drop can destroy a source node.
+    collect_corrupted(task.host_to_device_task, task.host_result);
+    collect_corrupted(task.disk_to_device_task, task.disk_result);
+
     const bool                    settlement_success = aggregate_success && validateLoadTaskLocked(task);
     bool                          state_settled      = false;
     std::unordered_set<TreeNode*> detached_nodes;
@@ -574,19 +595,8 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
         }
     }
-    std::vector<TransferDescriptor> corrupted;
-    const auto collect_corrupted = [&corrupted](const TransferTask& transfer, const TransferResult& result) {
-        for (size_t index = 0; index < result.block_errors.size(); ++index) {
-            const auto& desc = transfer.descriptors()[index];
-            if (result.block_errors[index] == CacheCopyError::CRC_MISMATCH && !desc.node->detached) {
-                corrupted.push_back(desc);
-            }
-        }
-    };
-    collect_corrupted(task.host_to_device_task, task.host_result);
-    collect_corrupted(task.disk_to_device_task, task.disk_result);
-    evictor_.invalidateSources(corrupted);
     tree_->removePendingNodes(detached_nodes);
+    evictor_.invalidateSources(corrupted);
     settled_(state_settled);
     return settlement_success;
 }

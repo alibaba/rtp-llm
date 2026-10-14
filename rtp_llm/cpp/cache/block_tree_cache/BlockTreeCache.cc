@@ -273,7 +273,6 @@ bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
-    tree_->reclaimDetachedNodes();
     if (check_watermark) {
         checkWatermark();
     }

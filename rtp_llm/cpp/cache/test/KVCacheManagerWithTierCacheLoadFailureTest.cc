@@ -3,7 +3,7 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordDeletesSubtreeAndAllowsRecompute) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordPreservesFullAndAllowsRecomputeAfterReclaim) {
     ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA));
 }
 
@@ -11,7 +11,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptFullRecordDeletesSubtreeAndAl
     ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::FULL));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordRejectsPendingChildAtCommit) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordPreservesPendingChildSources) {
     ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA, /*pending_child=*/true));
 }
 

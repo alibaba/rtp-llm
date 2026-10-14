@@ -771,25 +771,20 @@ TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
     EXPECT_EQ(changed.keys, snapshot.keys);
 }
 
-TEST_F(BlockTreeCacheTest, WorkflowSettlementReclaimsDetachedNodesWithoutMutationOrWatermark) {
+TEST_F(BlockTreeCacheTest, InvalidationReleasesIdleSubtreeImmediately) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     cache_->insert({100, 200}, resources, Tier::DEVICE);
 
+    const auto                  before_drop = cache_->getKeySnapshot();
     std::lock_guard<std::mutex> lock(cache_->mutex_);
-    const auto                path = cache_->tree_->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    const TransferDescriptor source(path[0], 0, 0, Tier::DEVICE, Tier::NONE, {42});
-    cache_->evictor_.invalidateSources({source});
-    ASSERT_EQ(cache_->tree_->detached_nodes_.size(), 2u);
-    const auto version = cache_->mutation_version_;
+    cache_->evictor_.invalidateSources({{{100}, 0, Tier::DEVICE}});
 
-    cache_->onWorkflowSettledLocked(false, false);
-
-    EXPECT_TRUE(cache_->tree_->detached_nodes_.empty());
-    EXPECT_EQ(cache_->mutation_version_, version);
     EXPECT_TRUE(cache_->tree_->findNode({100, 200}).empty());
+    EXPECT_TRUE(cache_->tree_->pending_node_pool_.empty());
+    EXPECT_TRUE(cache_->tree_->cacheKeys().empty());
+    EXPECT_GT(cache_->tree_->keyVersion(), before_drop.version);
     const auto& pool = cache_->tree_->groupSets()[0]->devicePools()[0];
     EXPECT_FALSE(pool->isAllocated(42));
     EXPECT_FALSE(pool->isAllocated(43));

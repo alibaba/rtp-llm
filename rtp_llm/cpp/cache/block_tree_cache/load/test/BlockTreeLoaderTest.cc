@@ -568,6 +568,12 @@ public:
     }
 
     void complete(size_t first, size_t end, int corrupt_group = -1, bool whole_batch = false) {
+        const std::vector<size_t> corrupt_groups =
+            corrupt_group < 0 ? std::vector<size_t>{} : std::vector<size_t>{static_cast<size_t>(corrupt_group)};
+        complete(first, end, corrupt_groups, whole_batch);
+    }
+
+    void complete(size_t first, size_t end, const std::vector<size_t>& corrupt_groups, bool whole_batch) {
         std::vector<std::pair<TransferTask, std::shared_ptr<TransferBatchAsyncContext>>> batches;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -579,7 +585,8 @@ public:
             TransferResult result;
             result.expandBlockErrors(task.descriptors().size());
             for (size_t index = 0; index < task.descriptors().size(); ++index) {
-                if (static_cast<int>(task.descriptors()[index].group_set_id) == corrupt_group) {
+                if (std::find(corrupt_groups.begin(), corrupt_groups.end(), task.descriptors()[index].group_set_id)
+                    != corrupt_groups.end()) {
                     if (result.ok()) {
                         std::fill(result.block_errors.begin(), result.block_errors.end(), CacheCopyError::NOT_EXECUTED);
                     }
@@ -632,7 +639,7 @@ void releaseTargets(const RequestRefs& refs) {
     }
 }
 
-TEST(BlockTreeLoaderTest, SwaCorruptionDetachesItsSubtreeAndPreservesEarlierPrefix) {
+TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath) {
     if (!cudaAvailable())
         GTEST_SKIP() << "CUDA not available";
     FullSWAEnvironmentOptions options;
@@ -653,19 +660,22 @@ TEST(BlockTreeLoaderTest, SwaCorruptionDetachesItsSubtreeAndPreservesEarlierPref
     const auto bad = *std::find_if(
         owner->loadDescs().begin(), owner->loadDescs().end(), [](const auto& desc) { return desc.group_set_id == 1; });
     ASSERT_EQ(bad.path_index, 2u);
-    const auto prefix    = env->cache->tree_->findNode({env->keys[0], env->keys[1]});
+    const auto path      = env->cache->tree_->findNode(env->keys);
     const auto bad_block = bad.source_blocks.front();
     engine->complete(0, 2, 1);
     owner->waitDone();
     EXPECT_FALSE(owner->success());
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
-    EXPECT_EQ(env->cache->tree_->findNode(env->keys), prefix);
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+    EXPECT_EQ(env->cache->tree_->findNode(env->keys), path);
     EXPECT_FALSE(env->host_pools[1]->isAllocated(bad_block));
-    EXPECT_EQ(env->cache->tree_->size(), 2u);
-    for (const auto& pool : env->host_pools) {
-        EXPECT_EQ(pool->usedBlocksNum(), 2u);
+    EXPECT_EQ(env->cache->tree_->size(), 4u);
+    EXPECT_EQ(env->host_pools[0]->usedBlocksNum(), 4u);
+    EXPECT_EQ(env->host_pools[1]->usedBlocksNum(), 3u);
+    for (size_t i = 0; i < path.size(); ++i) {
+        EXPECT_TRUE(path[i]->group_set_resources[0].hasTier(Tier::HOST));
+        EXPECT_EQ(path[i]->group_set_resources[1].hasTier(Tier::HOST), i != bad.path_index);
     }
-    // Matching stops before the corrupt SWA subtree, including its healthy FULL records.
+    // One surviving SWA block after the hole cannot fill the two-block window.
     auto later = env->cache->match(env->keys).async_context;
     ASSERT_NE(later, nullptr);
     EXPECT_EQ(later->matchedBlocks(), 2u);
@@ -675,7 +685,7 @@ TEST(BlockTreeLoaderTest, SwaCorruptionDetachesItsSubtreeAndPreservesEarlierPref
     env->expectFullyReclaimed();
 }
 
-TEST(BlockTreeLoaderTest, SwaBatchCorruptionReclaimsOverlappingSubtreesOnce) {
+TEST(BlockTreeLoaderTest, SwaBatchCorruptionPreservesDescendantsBeyondWindow) {
     if (!cudaAvailable())
         GTEST_SKIP() << "CUDA not available";
     FullSWAEnvironmentOptions options;
@@ -696,6 +706,7 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionReclaimsOverlappingSubtreesOnce) {
     engine->complete(0, 2, 1, /*whole_batch=*/true);
     owner->waitDone();
     EXPECT_FALSE(owner->success());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
     size_t invalidated = 0;
     for (const auto& desc : owner->loadDescs()) {
         if (desc.group_set_id == 1) {
@@ -704,10 +715,25 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionReclaimsOverlappingSubtreesOnce) {
         }
     }
     EXPECT_EQ(invalidated, 2u);
-    EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
-    auto later = env->cache->match(env->keys);
-    EXPECT_TRUE(later.async_context == nullptr || later.async_context->empty());
+    EXPECT_EQ(env->cache->tree_->size(), 4u);
+    EXPECT_EQ(env->host_pools[0]->usedBlocksNum(), 4u);
+    EXPECT_EQ(env->host_pools[1]->usedBlocksNum(), 2u);
+    const auto path = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(path.size(), 4u);
+    for (size_t i = 0; i < path.size(); ++i) {
+        EXPECT_TRUE(path[i]->group_set_resources[0].hasTier(Tier::HOST));
+        EXPECT_EQ(path[i]->group_set_resources[1].hasTier(Tier::HOST), i >= 2);
+    }
+    // The surviving two-block SWA window makes the complete FULL prefix reusable.
+    auto later = env->cache->match(env->keys).async_context;
+    ASSERT_NE(later, nullptr);
+    EXPECT_EQ(later->matchedBlocks(), 4u);
+    for (const auto& desc : later->loadDescs()) {
+        if (desc.group_set_id == 1) {
+            EXPECT_GE(desc.path_index, 2u);
+        }
+    }
+    EXPECT_TRUE(later->abortPending());
     releaseTargets(refs);
     env->reclaimAll();
     env->expectFullyReclaimed();
@@ -715,7 +741,7 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionReclaimsOverlappingSubtreesOnce) {
 
 class BlockTreeLoaderCorruptionTest: public ::testing::TestWithParam<size_t> {};
 
-TEST_P(BlockTreeLoaderCorruptionTest, CorruptionDetachesBeforeDescendantCopyAndAllowsReplacement) {
+TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescendantSettles) {
     if (!cudaAvailable())
         GTEST_SKIP() << "CUDA not available";
     FullSWAEnvironmentOptions options;
@@ -736,18 +762,28 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionDetachesBeforeDescendantCopyAndA
     ASSERT_TRUE(engine->waitForBatches(2));
     auto child = env->cache->match(env->keys).async_context;
     ASSERT_NE(child, nullptr);
-    auto      child_refs = bindTargets(*env, child);
-    TreeNode* old_leaf   = env->cache->tree_->findNode(env->keys).back();
+    auto       child_refs  = bindTargets(*env, child);
+    TreeNode*  old_leaf    = env->cache->tree_->findNode(env->keys).back();
+    const auto before_drop = env->cache->getKeySnapshot();
     ASSERT_TRUE(child->commit());
     ASSERT_TRUE(engine->waitForBatches(4));
-    // Multiple corrupt ancestors in the same batch detach the subtree only once.
-    engine->complete(0, 2, GetParam(), /*whole_batch=*/true);
+    // FULL corruption removes the path while the pending pool retains the busy leaf.
+    engine->complete(0, 2, 0, /*whole_batch=*/true);
     owner->waitDone();
     EXPECT_FALSE(owner->success());
     EXPECT_FALSE(child->done());
     EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_EQ(env->cache->tree_->detached_nodes_.size(), 1u);
+    EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
+    ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
     EXPECT_EQ(old_leaf->parent, nullptr);
+    const auto after_drop = env->cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
+    EXPECT_GT(after_drop.version, before_drop.version);
+    for (const auto& resource : old_leaf->group_set_resources) {
+        EXPECT_TRUE(resource.transfer_detached);
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
+    }
     for (const auto& pool : env->host_pools) {
         EXPECT_EQ(pool->usedBlocksNum(), 1u);
     }
@@ -762,21 +798,43 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionDetachesBeforeDescendantCopyAndA
         replacement_resources.push_back(std::move(resources));
     }
     env->cache->insert(env->keys, replacement_resources, Tier::DEVICE);
-    auto replacement = env->cache->tree_->findNode(env->keys);
-    ASSERT_EQ(replacement.size(), env->keys.size());
-    EXPECT_NE(replacement.back(), old_leaf);
-    auto matched = env->cache->match(env->keys);
-    EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
-    env->releaseMatch(matched);
-    // A second failure on an already detached descendant must not touch the replacement.
+    // Reinsert the prefix, but stop before the key still owned by the pending leaf.
+    const auto replacement_prefix = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(replacement_prefix.size(), env->keys.size() - 1);
+    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
+    const auto replacement_snapshot = env->cache->getKeySnapshot();
+    EXPECT_EQ(replacement_snapshot.keys, (CacheKeysType{env->keys[0], env->keys[1]}));
+    for (const auto& resource : old_leaf->group_set_resources) {
+        EXPECT_TRUE(resource.transfer_detached);
+        EXPECT_TRUE(resource.hasTier(Tier::HOST));
+        EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+    }
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        const auto& pools = env->groups[group]->devicePools();
+        for (size_t i = 0; i < env->keys.size(); ++i) {
+            for (size_t member = 0; member < pools.size(); ++member) {
+                EXPECT_EQ(pools[member]->refCount(env->request_blocks[group][i][member]), i < 2 ? 2u : 1u);
+            }
+        }
+    }
+    // A later FULL or SWA CRC failure must not drop the replacement prefix.
     engine->complete(2, 4, GetParam());
     child->waitDone();
     EXPECT_FALSE(child->success());
-    EXPECT_EQ(env->cache->tree_->findNode(env->keys), replacement);
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_EQ(env->cache->tree_->findNode(env->keys), replacement_prefix);
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+    EXPECT_EQ(env->cache->getKeySnapshot().keys, replacement_snapshot.keys);
+    EXPECT_EQ(env->cache->getKeySnapshot().version, replacement_snapshot.version);
     for (const auto& pool : env->host_pools) {
         EXPECT_EQ(pool->usedBlocksNum(), 0u);
     }
+    env->cache->insert(env->keys, replacement_resources, Tier::DEVICE);
+    const auto replacement = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(replacement.size(), env->keys.size());
+    EXPECT_TRUE(std::equal(replacement_prefix.begin(), replacement_prefix.end(), replacement.begin()));
+    auto matched = env->cache->match(env->keys);
+    EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
+    env->releaseMatch(matched);
     for (size_t group = 0; group < env->groups.size(); ++group) {
         for (const auto& blocks : env->request_blocks[group]) {
             for (size_t member = 0; member < blocks.size(); ++member) {
@@ -791,7 +849,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionDetachesBeforeDescendantCopyAndA
     env->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeLoaderCorruptionTest, CorruptionRacingPendingCommitReleasesEachReferenceOnce) {
+TEST(BlockTreeLoaderTest, FullCorruptionRacingPendingCommitReleasesEachReferenceOnce) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -819,9 +877,9 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionRacingPendingCommitReleasesEachR
         ready.wait();
         return pending->commit();
     });
-    auto               fail   = std::async(std::launch::async, [engine, ready, group = GetParam()] {
+    auto               fail   = std::async(std::launch::async, [engine, ready] {
         ready.wait();
-        engine->complete(0, 2, group);
+        engine->complete(0, 2, 0);
     });
     start.set_value();
     EXPECT_EQ(commit.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -829,20 +887,25 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionRacingPendingCommitReleasesEachR
     fail.get();
     owner->waitDone();
     env->cache->task_pool_->waitForIdle();
+    const size_t batch_count = engine->batchCount();
     EXPECT_EQ(env->cache->getStats().tree_node_count, 0u);
-    // If commit won, its copy still owns the retired node until this completion.
-    engine->complete(2, engine->batchCount());
+    EXPECT_EQ(env->cache->tree_->pending_node_pool_.size(), batch_count > 2 ? 1u : 0u);
+    const auto after_drop = env->cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
+    // If commit won, the pending pool retains the busy leaf until its copy completes.
+    engine->complete(2, batch_count);
     pending->waitDone();
     env->cache->task_pool_->waitForIdle();
     EXPECT_FALSE(owner->success());
     EXPECT_FALSE(pending->success());
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+    EXPECT_EQ(env->cache->getKeySnapshot().version, after_drop.version);
     releaseTargets(owner_refs);
     releaseTargets(pending_refs);
     env->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeLoaderCorruptionTest, CorruptionReclaimsIdleDescendantsOutsideTheLoadBatch) {
+TEST(BlockTreeLoaderTest, FullCorruptionReclaimsIdleDescendantsOutsideTheLoadBatch) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -863,12 +926,12 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionReclaimsIdleDescendantsOutsideTh
     ASSERT_TRUE(engine->waitForBatches(2));
 
     // Both descriptors of the selected GroupSet fail; their idle descendants have no load completion of their own.
-    engine->complete(0, 2, GetParam(), /*whole_batch=*/true);
+    engine->complete(0, 2, 0, /*whole_batch=*/true);
     owner->waitDone();
     env->cache->task_pool_->waitForIdle();
     EXPECT_FALSE(owner->success());
     EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
     EXPECT_TRUE(env->cache->loader_.load_join_registry_.records_.empty());
     for (const auto& pool : env->host_pools) {
         EXPECT_EQ(pool->usedBlocksNum(), 0u);
@@ -877,7 +940,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, CorruptionReclaimsIdleDescendantsOutsideTh
     env->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeLoaderCorruptionTest, PendingCommitRejectsCorruptSubtreeAndReclaimsItsNode) {
+TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNode) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -900,29 +963,37 @@ TEST_P(BlockTreeLoaderCorruptionTest, PendingCommitRejectsCorruptSubtreeAndRecla
     ASSERT_NE(pending, nullptr);
     auto pending_refs = bindTargets(*env, pending);
 
-    engine->complete(0, 2, GetParam(), /*whole_batch=*/true);
+    engine->complete(0, 2, 0, /*whole_batch=*/true);
     owner->waitDone();
     env->cache->task_pool_->waitForIdle();
     EXPECT_FALSE(owner->success());
     EXPECT_FALSE(pending->done());
+    EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
     EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_EQ(env->cache->tree_->detached_nodes_.size(), 1u);
+    ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
+    const auto after_drop = env->cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
+    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+        EXPECT_TRUE(resource.transfer_detached);
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
+    }
     ASSERT_TRUE(pending->commit());
     env->cache->task_pool_->waitForIdle();
     EXPECT_TRUE(pending->done());
     EXPECT_FALSE(pending->success());
     EXPECT_EQ(engine->batchCount(), 2u);
     EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+    EXPECT_EQ(env->cache->getKeySnapshot().version, after_drop.version);
     EXPECT_TRUE(env->cache->loader_.load_join_registry_.records_.empty());
     releaseTargets(owner_refs);
     releaseTargets(pending_refs);
     env->expectFullyReclaimed();
 }
 
-INSTANTIATE_TEST_SUITE_P(FullAndSwa, BlockTreeLoaderCorruptionTest, ::testing::Values(size_t{0}, size_t{1}));
+INSTANTIATE_TEST_SUITE_P(DescendantFullAndSwa, BlockTreeLoaderCorruptionTest, ::testing::Values(size_t{0}, size_t{1}));
 
-TEST(BlockTreeLoaderTest, BatchSettlementReclaimsOldDetachedNodesAndNewCorruption) {
+TEST(BlockTreeLoaderTest, BatchSettlementHandlesCorruptionInEveryGroupAndAncestor) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -941,27 +1012,19 @@ TEST(BlockTreeLoaderTest, BatchSettlementReclaimsOldDetachedNodesAndNewCorruptio
     auto refs = bindTargets(*env, owner);
     ASSERT_TRUE(owner->commit());
     ASSERT_TRUE(engine->waitForBatches(2));
-    {
-        std::lock_guard<std::mutex> lock(env->cache->mutex_);
-        TreeNode*                   leaf = env->cache->tree_->findNode(env->keys).back();
-        // Retire the leaf while this batch still owns its transfer, then fail the remaining prefix too.
-        const TransferDescriptor source(
-            leaf, 0, 2, Tier::HOST, Tier::DEVICE, leaf->group_set_resources[0].getBlocks(Tier::HOST));
-        env->cache->evictor_.invalidateSources({source});
-        EXPECT_EQ(env->cache->tree_->detached_nodes_.size(), 1u);
-        EXPECT_EQ(env->cache->tree_->size(), 2u);
-    }
-    engine->complete(0, 2, 0, /*whole_batch=*/true);
+    // Both groups report failures for overlapping nodes. A FULL drop can free
+    // sources referenced by later failure records in this same settlement.
+    engine->complete(0, 2, std::vector<size_t>{0, 1}, /*whole_batch=*/true);
     owner->waitDone();
     env->cache->task_pool_->waitForIdle();
     EXPECT_FALSE(owner->success());
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
     EXPECT_TRUE(env->cache->loader_.load_join_registry_.records_.empty());
     releaseTargets(refs);
     env->expectFullyReclaimed();
 }
 
-TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionReclaimsPendingLoadsOnCommitOrAbort) {
+TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndReclaimsFullPendingLoad) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1022,15 +1085,26 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionReclaimsPendingLoadsOnCo
     EXPECT_FALSE(second->success());
     EXPECT_FALSE(first_pending->done());
     EXPECT_FALSE(second_pending->done());
-    EXPECT_EQ(env->cache->tree_->size(), 0u);
-    EXPECT_EQ(env->cache->tree_->detached_nodes_.size(), 2u);
+    EXPECT_EQ(env->cache->tree_->size(), 3u);
+    EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
+    ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
+    const auto after_drop = env->cache->getKeySnapshot();
+    EXPECT_EQ(after_drop.keys.size(), other_keys.size());
+    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+        EXPECT_TRUE(resource.transfer_detached);
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
+    }
+    EXPECT_EQ(env->cache->tree_->findNode(other_keys).size(), 3u);
+    EXPECT_EQ(env->host_pools[0]->usedBlocksNum(), 4u);
+    EXPECT_EQ(env->host_pools[1]->usedBlocksNum(), 2u);
     ASSERT_TRUE(first_pending->commit());
     {
         std::lock_guard<std::mutex> lock(env->cache->mutex_);
-        EXPECT_EQ(env->cache->tree_->detached_nodes_.size(), 1u);
-        for (const auto& pool : env->host_pools) {
-            EXPECT_EQ(pool->usedBlocksNum(), 1u);
-        }
+        EXPECT_EQ(env->cache->tree_->size(), 3u);
+        EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
+        EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+        EXPECT_EQ(env->host_pools[0]->usedBlocksNum(), 3u);
+        EXPECT_EQ(env->host_pools[1]->usedBlocksNum(), 1u);
     }
     ASSERT_TRUE(env->cache->abortPendingLoad(second_pending));
     env->cache->task_pool_->waitForIdle();
@@ -1039,12 +1113,25 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionReclaimsPendingLoadsOnCo
     EXPECT_FALSE(first_pending->success());
     EXPECT_FALSE(second_pending->success());
     EXPECT_EQ(engine->batchCount(), 4u);
-    EXPECT_TRUE(env->cache->tree_->detached_nodes_.empty());
+    EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
+    EXPECT_EQ(env->cache->getKeySnapshot().keys, after_drop.keys);
+    EXPECT_EQ(env->cache->getKeySnapshot().version, after_drop.version);
     EXPECT_TRUE(env->cache->loader_.load_join_registry_.records_.empty());
     releaseTargets(first_refs);
     releaseTargets(second_refs);
     releaseTargets(first_pending_refs);
     releaseTargets(second_pending_refs);
+    const auto surviving_path = env->cache->tree_->findNode(other_keys);
+    ASSERT_EQ(surviving_path.size(), 3u);
+    for (size_t i = 0; i < surviving_path.size(); ++i) {
+        EXPECT_TRUE(surviving_path[i]->group_set_resources[0].hasTier(Tier::HOST));
+        EXPECT_EQ(surviving_path[i]->group_set_resources[1].hasTier(Tier::HOST), i == 2);
+        for (const auto& resource : surviving_path[i]->group_set_resources) {
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            EXPECT_FALSE(resource.transfer_detached);
+        }
+    }
+    env->reclaimAll();
     env->expectFullyReclaimed();
 }
 

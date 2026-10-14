@@ -1703,7 +1703,7 @@ protected:
             waiting_child = cache->match(seed.cache_keys).async_context;
             ASSERT_NE(waiting_child, nullptr);
             // The second request joins the root and reserves the child;
-            // defer commit until the root's CRC failure detaches the subtree.
+            // defer commit until the root's CRC failure has settled.
             EXPECT_FALSE(waiting_child->done());
             engine->release();
         }
@@ -1711,14 +1711,70 @@ protected:
             failed.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         EXPECT_FALSE(failed.async_context->success());
         EXPECT_FALSE(failed.async_context->errorInfo().ok());
+        const auto after_failure = cache->getKeySnapshot();
+        if (corrupt_type == CacheGroupType::FULL) {
+            EXPECT_TRUE(after_failure.keys.empty());
+            EXPECT_TRUE(cache->tree()->findNode(seed.cache_keys).empty());
+            EXPECT_EQ(cache->tree()->pending_node_pool_.size(), pending_child ? 1u : 0u);
+            if (pending_child) {
+                const auto pending_node = cache->tree()->pending_node_pool_.find(seed.cache_keys.back());
+                ASSERT_NE(pending_node, cache->tree()->pending_node_pool_.end());
+                EXPECT_EQ(pending_node->second->parent, nullptr);
+                for (const auto& resource : pending_node->second->group_set_resources) {
+                    EXPECT_TRUE(resource.transfer_detached);
+                    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
+                }
+            }
+        }
         if (waiting_child) {
             EXPECT_FALSE(waiting_child->done());
             const size_t submits_before = engine->submittedDescriptorCount();
+            size_t                                                   expected_submits = 0;
+            std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> child_targets;
+            if (corrupt_type == CacheGroupType::SWA) {
+                for (size_t i = 0; i < waiting_child->loadDescs().size(); ++i) {
+                    if (waiting_child->joinedLoads()[i]) {
+                        continue;
+                    }
+                    const auto&      desc = waiting_child->loadDescs()[i];
+                    BlockIndicesType targets;
+                    for (const auto& pool : cache->groupSets()[desc.group_set_id]->devicePools()) {
+                        const auto blocks = pool->malloc(1);
+                        ASSERT_TRUE(blocks.has_value());
+                        pool->incRef(*blocks);
+                        targets.push_back(blocks->front());
+                        child_targets.emplace_back(pool, blocks->front());
+                    }
+                    waiting_child->setTargetBlocks(i, std::move(targets));
+                    ++expected_submits;
+                }
+                EXPECT_GT(expected_submits, 0u);
+            }
             ASSERT_TRUE(waiting_child->commit());
             ASSERT_TRUE(waitForAsyncContextDoneFor(
                 waiting_child, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
             EXPECT_FALSE(waiting_child->success());
-            EXPECT_EQ(engine->submittedDescriptorCount(), submits_before);
+            EXPECT_EQ(engine->submittedDescriptorCount(), submits_before + expected_submits);
+            if (corrupt_type == CacheGroupType::SWA) {
+                for (size_t i = 0; i < waiting_child->loadDescs().size(); ++i) {
+                    if (waiting_child->joinedLoads()[i]) {
+                        continue;
+                    }
+                    const auto& desc        = waiting_child->loadDescs()[i];
+                    const auto& child_group = cache->groupSets()[desc.group_set_id];
+                    for (size_t member = 0; member < desc.target_blocks.size(); ++member) {
+                        EXPECT_TRUE(groupBlockPayloadMatches(manager_,
+                                                             cache_config_,
+                                                             child_group->groupTags()[member],
+                                                             desc.target_blocks[member],
+                                                             desc.path_index));
+                    }
+                }
+            }
+            for (const auto& [pool, block] : child_targets) {
+                EXPECT_EQ(pool->refCount(block), 1u);
+                pool->decRef(block);
+            }
             // match() transfers joined target references to its caller even
             // when the caller has not materialized an allocator request yet.
             for (size_t i = 0; i < waiting_child->loadDescs().size(); ++i) {
@@ -1730,10 +1786,42 @@ protected:
             }
         }
         BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+        EXPECT_EQ(cache->getKeySnapshot().keys, after_failure.keys);
+        EXPECT_EQ(cache->getKeySnapshot().version, after_failure.version);
         EXPECT_FALSE(lowerPoolForTier(group, source_tier)->isAllocated(bad_block));
-        EXPECT_TRUE(cache->tree()->findNode(seed.cache_keys).empty());
-        expectPoolSnapshotsEq(initial_lower, snapshotLowerPools(*cache, GetParam()));
+        if (corrupt_type == CacheGroupType::SWA) {
+            const auto retained = snapshotPathResources(*cache, seed.cache_keys);
+            ASSERT_TRUE(retained.has_value());
+            ASSERT_EQ(retained->size(), seed.cache_keys.size());
+            for (size_t path = 0; path < retained->size(); ++path) {
+                for (const auto& current_group : cache->groupSets()) {
+                    const size_t group_id = current_group->groupSetId();
+                    const auto&  resource = (*retained)[path][group_id];
+                    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+                    EXPECT_FALSE(resource.transfer_detached);
+                    if (path == 0 && group_id == group->groupSetId()) {
+                        EXPECT_TRUE(resource.is_empty());
+                        continue;
+                    }
+                    const auto block = lowerBlockForTier(resource, source_tier);
+                    EXPECT_EQ(block, lowerBlockForTier((*before)[path][group_id], source_tier));
+                    ASSERT_FALSE(isNullBlockIdx(block));
+                    const auto pool = lowerPoolForTier(current_group, source_tier);
+                    EXPECT_TRUE(pool->isAllocated(block));
+                    EXPECT_EQ(pool->treeRefCount(block), 1u);
+                }
+            }
+        } else {
+            EXPECT_TRUE(cache->tree()->findNode(seed.cache_keys).empty());
+            expectPoolSnapshotsEq(initial_lower, snapshotLowerPools(*cache, GetParam()));
+        }
         manager_->free(FreeInfo{failed_resource, tokens});
+        if (corrupt_type == CacheGroupType::SWA) {
+            // Preserved lower-tier FULL values can block DEVICE adoption. Reclaim
+            // them through ordinary eviction before checking recompute insertion.
+            ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
+        }
 
         auto       retry_resource = makeResource(cache_config_);
         MallocInfo retry_info{retry_resource, tokens};

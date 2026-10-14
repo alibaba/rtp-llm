@@ -1191,6 +1191,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFa
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
     EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
     EXPECT_EQ(cache->getKeySnapshot().version, after_drop.version);
+    EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();
     releaseDeviceBlocks(*cache, device_pool, target_blocks);
