@@ -120,5 +120,20 @@ class CacheEnvTest(unittest.TestCase):
         self.assertEqual(env["DG_JIT_CACHE_DIR"], "/configured")
 
 
+class BackendPythonpathPrefixTest(unittest.TestCase):
+    def test_returns_stable_cache_entries_in_order(self):
+        env = {"_JIT_CACHE_PATHS": os.pathsep.join(("/cache/a", "/cache/b"))}
+        self.assertEqual(
+            cache_env.backend_pythonpath_prefix(env), ["/cache/a", "/cache/b"]
+        )
+
+    def test_skips_empty_entries(self):
+        env = {"_JIT_CACHE_PATHS": f"{os.pathsep}/cache/a{os.pathsep}"}
+        self.assertEqual(cache_env.backend_pythonpath_prefix(env), ["/cache/a"])
+
+    def test_absent_variable_yields_no_prefix(self):
+        self.assertEqual(cache_env.backend_pythonpath_prefix({}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,9 +89,12 @@ cc_library(
 cc_library(
     name = "scaled_fp4_quant",
     srcs = ["scaled_fp4_quant.cu"],
-    hdrs = ["scaled_fp4_quant.h"],
+    hdrs = [
+        "scaled_fp4_quant.h",
+        "nvfp4_quant.cuh",
+    ],
     deps = [
-        "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        "@cutlass4.0//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

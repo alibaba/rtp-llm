@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional, Type
+from typing import Any, Optional
 
 import torch
 
@@ -12,9 +12,7 @@ from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
     PyAttentionInputs,
-    XQAAttnOp,
 )
-from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 
 # Constants
 DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
@@ -54,111 +52,6 @@ class XQAParams:
     o_scale: float = 1.0
 
 
-class XQAImpl(FMHAImplBase):
-
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = XQAAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-
-        self.attn_inputs = attn_inputs
-
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # C++ XQAParams keeps the host pinned sequence-length mirror captured
-        # here. CudaGraphRunner refreshes this exact storage before each replay.
-        self._fmha_sequence_lengths_ptr = attn_inputs.sequence_lengths.data_ptr()
-
-    @classmethod
-    def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
-    ) -> bool:
-        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
-        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
-        # through to PyFlashinferPaged. See blockers.md R-4.
-        if is_sm12x():
-            return False
-        fmha_impl = XQAAttnOp(attn_configs)
-        return fmha_impl.support(attn_inputs)
-
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        else:
-            fmha_input = qkv
-
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
-
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        if attn_inputs.sequence_lengths.data_ptr() != self._fmha_sequence_lengths_ptr:
-            raise DecodeRopeContractError(
-                "XQA CUDA graph replay must reuse the captured host sequence_lengths buffer"
-            )
-
-        update_params = getattr(self.fmha_impl, "update", None)
-        # The C++ fast-path update consumes device-resident inputs published by
-        # the RTP_LLM_DEVICE_INPUT pipeline; fall back to the host update when
-        # the gatherer kept metadata host-resident (default).
-        block_id_device = attn_inputs.kv_cache_kernel_block_id_device
-        device_inputs_ready = (
-            block_id_device is not None
-            and block_id_device.numel() > 0
-            and block_id_device.is_cuda
-            and attn_inputs.input_lengths.is_cuda
-        )
-        if not callable(update_params) or not device_inputs_ready:
-            common.update_attention_params(
-                self.fmha_impl,
-                self.rope_kvcache_impl,
-                self.fmha_params,
-                self.rope_params,
-                attn_inputs,
-            )
-        else:
-            update_params(self.fmha_params, attn_inputs)
-            update_offset = getattr(self.fmha_impl, "update_kv_cache_offset", None)
-            if callable(update_offset):
-                update_offset(
-                    self.rope_params.kv_cache_offset,
-                    attn_inputs.kv_cache_kernel_block_id_device,
-                )
-            else:
-                new_rope_params = self.rope_kvcache_impl.prepare(
-                    attn_inputs, forbid_reallocation=True
-                )
-                common.copy_kv_cache_offset(
-                    self.rope_params.kv_cache_offset,
-                    new_rope_params.kv_cache_offset,
-                )
-
-        if self.need_rope_kv_cache:
-            # Idempotent even when prepare() above already refreshed it. Keeping
-            # the explicit call here makes every update branch honor the same
-            # RoPE replay invariant.
-            self.rope_params.sequence_lengths = (
-                self.rope_kvcache_impl.refresh_sequence_lengths(
-                    attn_inputs, forbid_reallocation=True
-                )
-            )
-
-
 class XQADecodeImpl(FMHAImplBase):
 
     def __init__(
@@ -186,8 +79,7 @@ class XQADecodeImpl(FMHAImplBase):
         # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
         # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
         # sm_120a binding anyway. Gate it off so decode dispatch falls through
-        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
-        # XQAImpl.support gate.
+        # to PyFlashinferDecodeImpl (the working sm_120 path).
         if is_sm12x():
             return False
         if get_sm()[0] not in [9, 10]:
@@ -240,27 +132,13 @@ class XQADecodeImpl(FMHAImplBase):
 
 
 def _load_xqa_fn():
-    """Load the XQA kernel function, handling rtp_kernel/flashinfer API differences.
-
-    Always prefer flashinfer.xqa.xqa directly over rtp_kernel.xqa.xqa, because
-    rtp_kernel's wrapper calls load_xqa_best_config() which overrides the caller's
-    nb_sub_seq_per_seq / use_qgmma with a config-file lookup (defaulting to
-    nb_sub_seq=4 when no config file exists). XQAWrapper.forward() already
-    computes these values adaptively, so the rtp_kernel override is harmful.
-    """
+    """Load FlashInfer's XQA kernel. rtp_kernel no longer ships an XQA wrapper."""
     import inspect
 
-    try:
-        from flashinfer.xqa import xqa as fi_xqa
+    from flashinfer.xqa import xqa as fi_xqa
 
-        needs_sf = "k_sf_cache" in inspect.signature(fi_xqa).parameters
-        return fi_xqa, needs_sf
-    except ImportError:
-        pass
-
-    from rtp_kernel.xqa import xqa
-
-    return xqa, False
+    needs_sf = "k_sf_cache" in inspect.signature(fi_xqa).parameters
+    return fi_xqa, needs_sf
 
 
 class XQAWrapper:
@@ -505,33 +383,3 @@ class XQAWrapper:
             xqa_kwargs["v_sf_cache"] = None
         self._xqa_fn(**xqa_kwargs)
         return output
-
-
-def get_xqa_impl() -> Type[FMHAImplBase]:
-    """
-    Select the appropriate XQA implementation based on CUDA version and flashinfer availability.
-
-    Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
-    otherwise falls back to XQAImpl.
-    """
-    try:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 8):
-            try:
-                from flashinfer.xqa import xqa
-
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
-                )
-                return XQADecodeImpl
-            except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
-                )
-                return XQAImpl
-        else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-            return XQAImpl
-    except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-        return XQAImpl
