@@ -271,3 +271,16 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+# TEMPORARY diagnostic probe for the shared flashinfer JIT cache poisoning
+# (see runs/minicpmv47_h20_20261013/issues/ci_flashinfer_jit_cache_poisoning.md):
+# runs on the H20 CI worker hosting the poisoned norm op, dumps the op's ninja
+# graph verbatim and the staleness verdicts. Remove after the diagnosis lands.
+py_test(
+    name = "flashinfer_poison_probe_test",
+    srcs = ["flashinfer_poison_probe_test.py"],
+    deps = [
+        "//rtp_llm/test/utils:jit_sys_path_setup",
+    ],
+    tags = ["H20_CU13"],
+)

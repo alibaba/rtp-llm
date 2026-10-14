@@ -269,17 +269,41 @@ def bootstrap_remote_jit_dir():
         logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
 
+def _read_ninja_graph(op_dir: Path, max_files: int = 16) -> str:
+    """Concatenate the op's ninja files, following include/subninja statements.
+
+    FlashInfer splits the generated graph across the op's build.ninja and
+    included fragments; the fragments may sit outside the op directory, so a
+    plain directory glob misses the paths written into them.
+    """
+    seen: set[Path] = set()
+    queue: list[Path] = [op_dir / "build.ninja"]
+    chunks: list[str] = []
+    while queue and len(seen) < max_files:
+        path = queue.pop(0)
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        chunks.append(text)
+        for m in re.finditer(r"^(?:include|subninja)\s+(\S+)", text, re.M):
+            target = Path(m.group(1))
+            if not target.is_absolute():
+                target = (path.parent / target).resolve()
+            queue.append(target)
+    return "".join(chunks)
+
+
 def _flashinfer_op_is_stale(op_dir: Path) -> bool:
     # The compile inputs / depfiles may live in an included ninja fragment
-    # rather than the top-level build.ninja, so scan every ninja file in the
-    # op directory -- the runfiles-anchor rule applies to whichever file the
+    # rather than the top-level build.ninja, so scan the full reachable
+    # graph -- the runfiles-anchor rule applies to whichever file the
     # generator wrote the paths into.
-    try:
-        rules = "".join(
-            p.read_text(errors="ignore")
-            for p in sorted(op_dir.glob("*.ninja"))
-        )
-    except OSError:
+    rules = _read_ninja_graph(op_dir)
+    if not rules:
         return False
     # FlashInfer embeds the absolute paths of the package instance that
     # generated the rules -- include flags, compile inputs, depfiles and the
