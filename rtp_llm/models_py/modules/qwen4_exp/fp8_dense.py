@@ -79,9 +79,22 @@ class Qwen4Fp8Linear(nn.Module):
             scaled_fp8_per_tensor_quant,
         )
 
-        quantized, scale = scaled_fp8_per_tensor_quant(rows.contiguous())
         padding = (-rows.shape[0]) % 16
-        if padding:
+        padded_output = None
+        if (
+            padding
+            and os.environ.get("RTP_LLM_QWEN4_FP8_PADDED_QUANT_EXPERIMENTAL", "0")
+            == "1"
+        ):
+            padded_output = torch.empty(
+                (rows.shape[0] + padding, rows.shape[1]),
+                device=rows.device,
+                dtype=torch.float8_e4m3fn,
+            )
+        quantized, scale = scaled_fp8_per_tensor_quant(
+            rows.contiguous(), output=padded_output
+        )
+        if padding and padded_output is None:
             quantized = F.pad(quantized, (0, 0, 0, padding))
         out = torch._scaled_mm(
             quantized,
