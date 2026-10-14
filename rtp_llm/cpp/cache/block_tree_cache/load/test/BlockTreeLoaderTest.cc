@@ -168,6 +168,8 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
+    EXPECT_EQ(result.full_key_hit_blocks, options.path_length);
+    EXPECT_EQ(result.joint_valid_blocks, options.path_length);
     EXPECT_EQ(result.matched_device_blocks, 0u);
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
@@ -498,6 +500,10 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
         find_result.back(), group_set_id, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
     environment->cache->evictor_.suspendCandidate(find_result.back(), group_set_id, Tier::HOST);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
+    const BlockTreeMatchResult unavailable = environment->cache->match(environment->keys);
+    EXPECT_EQ(unavailable.full_key_hit_blocks, 1u);
+    EXPECT_EQ(unavailable.joint_valid_blocks, 0u);
+    EXPECT_EQ(unavailable.matched_device_blocks, 0u);
     ASSERT_TRUE(environment->cache->loader_.changeTransferState(
         find_result.back(), group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);

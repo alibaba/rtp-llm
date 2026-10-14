@@ -36,6 +36,7 @@
 #include <memory>
 #include <limits>
 #include <thread>
+#include <utility>
 
 using namespace std;
 
@@ -1039,6 +1040,125 @@ TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength
     EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
+TEST_F(StreamCacheResourceTest, CacheReuseAttemptsKeepFrozenEndpointsAcrossRetry) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    kmonitor::MetricsTags tags;
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    stream_->setMetricsReporter(reporter);
+    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_EQ(info.request_layout->request_seq_len, 6);
+            MallocResult result{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+            result.query_length        = info.request_layout->request_seq_len;
+            result.full_key_hit_length = 4;
+            return result;
+        }))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            MallocResult result{true, 0};
+            result.query_length        = info.request_layout->request_seq_len;
+            result.full_key_hit_length = 0;
+            return result;
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Return(MallocResult{true, 0}));
+
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
+    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 4);
+    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 0);
+    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "failed");
+    EXPECT_FALSE(resource.cache_reuse_metrics_.attempt_retried);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
+    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 0);
+    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 0);
+    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "success");
+    EXPECT_TRUE(resource.cache_reuse_metrics_.attempt_retried);
+
+    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (const auto& [outcome, retried] :
+         {std::pair<const char*, const char*>{"failed", "false"}, {"success", "true"}}) {
+        kmonitor::MetricsTags attempt_tags;
+        attempt_tags.AddTag("outcome", outcome);
+        attempt_tags.AddTag("retried", retried);
+        auto* series = metrics->attempt_qps_metric->DeclareMetric(&attempt_tags);
+        ASSERT_NE(series, nullptr);
+        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+        series->Snapshot(&record, 1000);
+        EXPECT_TRUE(metrics->attempt_qps_metric->UndeclareMetric(series));
+        ASSERT_EQ(record.Values().size(), 1u);
+        EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), 1);
+    }
+}
+
+TEST(CacheReuseMetricsTest, FullKeyGapIsCountedOnceWithBothObservedReasons) {
+    kmonitor::MetricsTags tags;
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    RtpLLMCacheReuseMetricsCollector collector;
+    collector.report_attempt_metrics = true;
+    collector.attempt_outcome        = "success";
+    collector.query_length           = 8;
+    collector.full_key_hit_length    = 6;
+    collector.joint_valid_hit_length = 4;
+    collector.restored_length        = 2;
+    collector.load_attempted         = true;
+    collector.load_success           = false;
+    reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+
+    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    auto* gap = metrics->full_key_gap_length_metric->DeclareMetric(&tags);
+    ASSERT_NE(gap, nullptr);
+    kmonitor::MetricsRecord gap_record(nullptr, nullptr, 0);
+    gap->Snapshot(&gap_record, 1000);
+    EXPECT_TRUE(metrics->full_key_gap_length_metric->UndeclareMetric(gap));
+    ASSERT_EQ(gap_record.Values().size(), 1u);
+    EXPECT_DOUBLE_EQ(std::stod(gap_record.Values().front()->Value()), 4);
+
+    for (const char* reason : {"joint_resource_invalid", "load_failed"}) {
+        kmonitor::MetricsTags reason_tags;
+        reason_tags.AddTag("reason", reason);
+        auto* series = metrics->full_key_gap_reason_qps_metric->DeclareMetric(&reason_tags);
+        ASSERT_NE(series, nullptr);
+        kmonitor::MetricsRecord reason_record(nullptr, nullptr, 0);
+        series->Snapshot(&reason_record, 1000);
+        EXPECT_TRUE(metrics->full_key_gap_reason_qps_metric->UndeclareMetric(series));
+        ASSERT_EQ(reason_record.Values().size(), 1u);
+        EXPECT_DOUBLE_EQ(std::stod(reason_record.Values().front()->Value()), 1);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseEndpointsSurviveIncrementalAllocationFailure) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) {
+            MallocResult result{true, 0};
+            result.query_length           = info.request_layout->request_seq_len;
+            result.full_key_hit_length    = 4;
+            result.joint_valid_hit_length = 2;
+            return result;
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
+
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 4);
+    EXPECT_EQ(resource.cache_reuse_metrics_.joint_valid_hit_length, 2);
+    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "failed");
+}
+
 TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     prepareResource(/*reuse_cache=*/true);
     StreamCacheResource& resource             = stream_->streamCacheResource();
@@ -1159,7 +1279,9 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     result.match_end_time_us    = malloc_begin_time_us;
     result.malloc_begin_time_us = malloc_begin_time_us;
     result.load_attempted       = true;
+    result.query_length         = 6;
     resource.recordCacheReuseMallocResult(result);
+    resource.cache_reuse_attempt_pending_ = true;
     resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false, false);
 
     resource.releaseResource();
@@ -1167,6 +1289,9 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_wait_latency);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
+    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "cancelled");
 }
 
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFalse) {
@@ -1361,10 +1486,16 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) {
+            MallocResult result{true, /*reuse_len=*/2, 0, load_context};
+            result.query_length        = info.request_layout->request_seq_len;
+            result.full_key_hit_length = 6;
+            return result;
+        }));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
     ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_TRUE(resource.cache_reuse_attempt_pending_);
     EXPECT_EQ(stream_->reuseLength(), 2);
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
@@ -1372,6 +1503,13 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_TRUE(load_context->completeTransfers(1, true));
     EXPECT_TRUE(load_context->completeTransfers(1, true));
     ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
+    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "success");
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
     EXPECT_EQ(stream_->reuseLength(), 6);
     EXPECT_EQ(stream_->initialReuseLength(), 6);
     EXPECT_EQ(stream_->localReuseLength(), 6);

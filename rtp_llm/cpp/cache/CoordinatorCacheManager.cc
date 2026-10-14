@@ -142,6 +142,9 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             incr_result.match_end_time_us          = init_result.match_end_time_us;
             incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
             incr_result.load_attempted             = init_result.load_attempted;
+            incr_result.query_length               = init_result.query_length;
+            incr_result.full_key_hit_length        = init_result.full_key_hit_length;
+            incr_result.joint_valid_hit_length     = init_result.joint_valid_hit_length;
             return finalize_init_failure(std::move(incr_result));
         }
         if (pending_async_context != nullptr) {
@@ -218,7 +221,9 @@ MallocResult CoordinatorCacheManager::malloc(const MallocInfo& malloc_info) {
         }
         return result;
     } else {
-        return incrMalloc(malloc_info);
+        auto result = incrMalloc(malloc_info);
+        result.query_length = requestSeqLength(malloc_info);
+        return result;
     }
 }
 
@@ -395,6 +400,8 @@ std::shared_ptr<LoadAsyncContext> CoordinatorCacheManager::prepareKVCache(const 
     }
     BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
+    prepared.full_key_hit_blocks                  = match_result.full_key_hit_blocks;
+    prepared.joint_valid_blocks                   = match_result.joint_valid_blocks;
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -453,6 +460,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     const int reuse_unit_tokens = static_cast<int>(reuse_tokens);
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
+    const int64_t        query_length       = seq_len;
     int64_t              match_cost_time_us = 0;
     int64_t              match_end_time_us  = 0;
     PreparedKVCache      prepared;
@@ -484,6 +492,10 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         load_attempted     = load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
+    const int64_t full_key_hit_length =
+        static_cast<int64_t>(prepared.full_key_hit_blocks) * reuse_unit_tokens;
+    const int64_t joint_valid_hit_length =
+        static_cast<int64_t>(prepared.joint_valid_blocks) * reuse_unit_tokens;
 
     const auto rollback = [&]() -> MallocResult {
         load_attempted = load_attempted || load_context != nullptr;
@@ -493,9 +505,12 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         load_context.reset();
         rollbackInitMalloc(*kv_resource, prepared.referenced_blocks, prepared.original_sizes);
         MallocResult result{false, 0};
-        result.match_cost_time_us = match_cost_time_us;
-        result.match_end_time_us  = match_end_time_us;
-        result.load_attempted     = load_attempted;
+        result.match_cost_time_us  = match_cost_time_us;
+        result.match_end_time_us   = match_end_time_us;
+        result.load_attempted      = load_attempted;
+        result.query_length        = query_length;
+        result.full_key_hit_length = full_key_hit_length;
+        result.joint_valid_hit_length = joint_valid_hit_length;
         if (prepared.materialize_status != MallocStatus::NONE) {
             result.status = prepared.materialize_status;
         }
@@ -517,8 +532,11 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             static_cast<int>(deferred_prepared->matched_device_blocks) * reuse_unit_tokens,
                             match_cost_time_us,
                             load_context};
-        result.match_end_time_us = match_end_time_us;
-        result.load_attempted    = load_attempted;
+        result.match_end_time_us   = match_end_time_us;
+        result.load_attempted      = load_attempted;
+        result.query_length        = query_length;
+        result.full_key_hit_length = full_key_hit_length;
+        result.joint_valid_hit_length = joint_valid_hit_length;
         return result;
     }
 
@@ -527,8 +545,11 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     }
     MallocResult result{
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
-    result.match_end_time_us = match_end_time_us;
-    result.load_attempted    = load_attempted;
+    result.match_end_time_us   = match_end_time_us;
+    result.load_attempted      = load_attempted;
+    result.query_length        = query_length;
+    result.full_key_hit_length = full_key_hit_length;
+    result.joint_valid_hit_length = joint_valid_hit_length;
     return result;
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -18,6 +19,9 @@ struct TreeNode {
     TreeNode*                                   parent{nullptr};
     std::vector<GroupSetResource>               group_set_resources;
     bool                                        is_resident{false};  // Must never change from true to false.
+    // Monotonic observability timestamps. A node can outlive its usable cache state.
+    int64_t attached_at_us{0};
+    int64_t cache_live_since_us{0};
 };
 
 }  // namespace rtp_llm

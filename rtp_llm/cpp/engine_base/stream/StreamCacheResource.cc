@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <limits>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
@@ -106,6 +107,9 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     if (allocator_load_context_) {
+        // releaseResource also runs under GenerateStream's status mutex.
+        const auto status = stream_->statusInfoWithoutLock();
+        finishCacheReuseAttempt(!status.hasError() || status.code() == ErrorCode::CANCELLED ? "cancelled" : "failed");
         if (!resource_context_.cache_manager->abortPendingLoad(allocator_load_context_)) {
             RTP_LLM_LOG_DEBUG("allocator load was already committed or completed before release");
         }
@@ -241,8 +245,10 @@ absl::Status StreamCacheResource::initKVBlock() {
                                      && resource_context_.cache_manager->needsPrefillHitSnapshot());
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
+    cache_reuse_attempt_pending_ = true;
     recordCacheReuseMallocResult(result);
     if (!result.success) {
+        finishCacheReuseAttempt("failed");
         malloc_failed_times_++;
         switch (result.status) {
             case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
@@ -265,6 +271,9 @@ absl::Status StreamCacheResource::initKVBlock() {
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
+    if (!allocator_load_context_) {
+        finishCacheReuseAttempt("success");
+    }
     return absl::OkStatus();
 }
 
@@ -280,6 +289,9 @@ void StreamCacheResource::clearCacheReuseState() {
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
     cache_reuse_metrics_.block_aligned_input_length = result.block_aligned_input_length;
+    cache_reuse_metrics_.query_length               = result.query_length;
+    cache_reuse_metrics_.full_key_hit_length        = result.full_key_hit_length;
+    cache_reuse_metrics_.joint_valid_hit_length      = result.joint_valid_hit_length;
     cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
     malloc_begin_time_us_                           = result.malloc_begin_time_us;
@@ -310,6 +322,35 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
         cache_reuse_metrics_.match_to_ready_latency_us = std::max<int64_t>(currentTimeUs() - malloc_begin_time_us_, 0);
         cache_reuse_metrics_.report_match_to_ready_latency = true;
     }
+}
+
+void StreamCacheResource::finishCacheReuseAttempt(const char* outcome) {
+    if (!cache_reuse_attempt_pending_) {
+        return;
+    }
+    cache_reuse_attempt_pending_ = false;
+    cache_reuse_metrics_.attempt_outcome = outcome;
+    cache_reuse_metrics_.attempt_retried = malloc_failed_times_ > 0;
+    cache_reuse_metrics_.restored_length =
+        std::string_view(outcome) == "success" ? stream_->initialReuseLength() : 0;
+    // TP0 owns the logical allocation attempt. CP shards share the global
+    // query endpoint, so reporting from every rank would multiply samples.
+    if (!stream_->metrics_reporter_ || !resource_context_.cache_manager
+        || !resource_context_.cache_manager->isAllocatorOwner()) {
+        return;
+    }
+    RtpLLMCacheReuseMetricsCollector attempt;
+    attempt.query_length          = cache_reuse_metrics_.query_length;
+    attempt.full_key_hit_length   = cache_reuse_metrics_.full_key_hit_length;
+    attempt.joint_valid_hit_length = cache_reuse_metrics_.joint_valid_hit_length;
+    attempt.restored_length       = cache_reuse_metrics_.restored_length;
+    attempt.attempt_outcome       = outcome;
+    attempt.attempt_retried       = cache_reuse_metrics_.attempt_retried;
+    attempt.load_attempted        = cache_reuse_metrics_.load_attempted;
+    attempt.load_success          = cache_reuse_metrics_.load_success;
+    attempt.report_attempt_metrics = true;
+    kmonitor::MetricsTags tags;
+    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &attempt);
 }
 
 absl::Status StreamCacheResource::finalizeAllocatorLoad() {
@@ -358,6 +399,12 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     allocator_load_context_.reset();
 
+    // A PREFILL load failure may legally fall back to its already delivered
+    // DEVICE prefix; use the returned status to classify the cache attempt.
+    const bool cache_attempt_success = load_success ||
+        (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE);
+    finishCacheReuseAttempt(cache_attempt_success ? "success" : "failed");
+
     if (load_success) {
         return absl::OkStatus();
     }
@@ -389,7 +436,7 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
     cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
     resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
-    cache_reuse_metrics_.report_reuse_metrics = true;
+    cache_reuse_metrics_.report_reuse_metrics  = true;
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);

@@ -44,9 +44,66 @@ struct BlockTreeNodeRangeResult {
     bool   cycle_complete{false};
 };
 
+struct BlockTreeChainSegmentSnapshot {
+    size_t              start_tokens{0};
+    size_t              end_tokens{0};
+    bool                end_is_leaf{false};
+    std::vector<size_t> recoverable_points_tokens;
+};
+
+struct BlockTreeResourceLeafSnapshot {
+    CacheGroupType group_type{CacheGroupType::FULL};
+    Tier           tier{Tier::DEVICE};
+    size_t         leaf_count{0};
+};
+
+struct BlockTreeObservabilitySnapshot {
+    size_t  node_count{0};
+    size_t  root_child_count{0};
+    size_t  leaf_count{0};
+    size_t  linear_count{0};
+    size_t  branch_count{0};
+    size_t  max_child_count{0};
+    size_t  chain_segment_count{0};
+    size_t  max_chain_tokens{0};
+    size_t  max_depth_tokens{0};
+    size_t  leaf_depth_sum_tokens{0};
+    size_t  max_leaf_depth_tokens{0};
+    size_t  branch_depth_sum_tokens{0};
+    size_t  max_branch_depth_tokens{0};
+    size_t  recoverable_point_count{0};
+    size_t  stored_cache_count{0};
+    size_t  pure_content_count{0};
+    size_t  incomplete_state_count{0};
+    size_t  temporarily_busy_count{0};
+    size_t  max_recoverable_depth_tokens{0};
+    size_t  recoverable_depth_sum_tokens{0};
+    size_t  first_recoverable_point_count{0};
+    size_t  nearest_ancestor_gap_count{0};
+    size_t  nearest_ancestor_gap_sum_tokens{0};
+    size_t  nearest_ancestor_gap_max_tokens{0};
+    int64_t node_age_sum_us{0};
+    int64_t node_age_max_us{0};
+    int64_t live_cache_age_sum_us{0};
+    int64_t live_cache_age_max_us{0};
+    size_t  completed_cache_lifetime_count{0};
+    int64_t completed_cache_lifetime_sum_us{0};
+    int64_t completed_cache_lifetime_max_us{0};
+    size_t  observation_count{0};
+    int64_t observation_cpu_sum_us{0};
+    int64_t observation_cpu_max_us{0};
+    int64_t snapshot_cpu_us{0};
+    // Detail is available for explicit baseline capture; online metrics use bounded summaries.
+    std::vector<BlockTreeChainSegmentSnapshot> chain_segments;
+    std::vector<size_t>                        child_count_histogram;
+    std::vector<size_t>                        leaf_depths_tokens;
+    std::vector<size_t>                        branch_depths_tokens;
+    std::vector<BlockTreeResourceLeafSnapshot> resource_leaves;
+};
+
 class BlockTree {
 public:
-    explicit BlockTree(std::vector<GroupSetPtr> group_sets);
+    explicit BlockTree(std::vector<GroupSetPtr> group_sets, size_t reuse_unit_tokens = 1);
     ~BlockTree();
 
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
@@ -87,11 +144,15 @@ public:
                                                   size_t                                      max_nodes,
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
+    // The owning BlockTreeCache mutex protects both state transitions and snapshots.
+    void                           observeCacheState(const TreeNode* node);
+    BlockTreeObservabilitySnapshot observabilitySnapshot(bool include_detail = true) const;
+
     // All publication operations require the owning BlockTreeCache mutex.
     // Only complete, matchable DEVICE values in every required group are advertised.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
-    void            refreshPublishedState(const TreeNode* node);
+    void            refreshPublishedState(const TreeNode* node, bool observe_cache_state = true);
 
 private:
     void                               removePublishedKey(CacheKeyType key);
@@ -119,6 +180,13 @@ private:
     // Indexed together with node_pool_ for contiguous snapshot copies.
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};
+    size_t        reuse_unit_tokens_{1};
+    size_t        completed_cache_lifetime_count_{0};
+    int64_t       completed_cache_lifetime_sum_us_{0};
+    int64_t       completed_cache_lifetime_max_us_{0};
+    size_t        observation_count_{0};
+    int64_t       observation_cpu_sum_us_{0};
+    int64_t       observation_cpu_max_us_{0};
 };
 
 }  // namespace rtp_llm

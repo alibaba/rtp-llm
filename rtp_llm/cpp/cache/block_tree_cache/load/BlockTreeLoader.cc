@@ -148,8 +148,14 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                                                         const CacheKeysType&               cache_keys,
                                                         const std::function<bool(size_t)>& valid_prefix) {
     BlockTreeMatchResult result;
+    // Capture the existing complete-key path before resource validity and
+    // DEVICE readiness shorten the path used for recovery.
+    result.full_key_hit_blocks = path.size();
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    const bool had_path       = !path.empty();
+    const bool has_valid_path = had_path && validMatch(path, candidate_valid, valid_prefix);
+    result.joint_valid_blocks = path.size();
+    if (had_path && !has_valid_path && !storage_backend_) {
         return result;
     }
     const int64_t access_time_us = currentTimeUs();

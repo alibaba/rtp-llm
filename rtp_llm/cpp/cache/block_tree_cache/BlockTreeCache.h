@@ -137,6 +137,7 @@ public:
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    BlockTreeObservabilitySnapshot            observabilitySnapshot() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);

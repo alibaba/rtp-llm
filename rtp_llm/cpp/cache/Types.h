@@ -149,7 +149,13 @@ struct MallocResult {
     int64_t malloc_begin_time_us       = 0;
     int64_t load_prepare_latency_us    = 0;
     int64_t block_aligned_input_length = 0;
-    bool    load_attempted             = false;
+    // Immutable per-attempt endpoints: full global query N, existing complete
+    // key path H, and the prefix still valid after the joint resource check.
+    // The latter is diagnostic only; successful delivery determines R.
+    int64_t query_length           = 0;
+    int64_t full_key_hit_length    = 0;
+    int64_t joint_valid_hit_length = 0;
+    bool    load_attempted         = false;
 };
 
 struct FreeInfo {

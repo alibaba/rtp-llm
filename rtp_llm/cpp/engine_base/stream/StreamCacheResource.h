@@ -132,6 +132,7 @@ public:
 private:
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
+    void         finishCacheReuseAttempt(const char* outcome);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
 
@@ -149,6 +150,7 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
+    bool                             cache_reuse_attempt_pending_ = false;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

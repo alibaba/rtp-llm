@@ -225,6 +225,8 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
+        size_t                         full_key_hit_blocks   = 0;
+        size_t                         joint_valid_blocks    = 0;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;

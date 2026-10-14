@@ -21,6 +21,7 @@ class MetricsReporter;
 namespace rtp_llm {
 
 struct BlockTreeQueueSizes;
+struct BlockTreeObservabilitySnapshot;
 
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
@@ -95,6 +96,7 @@ public:
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
+    void reportTreeObservability(const BlockTreeObservabilitySnapshot& snapshot) const;
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
          collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;

@@ -236,13 +236,21 @@ std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots()
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
 }
 
+BlockTreeObservabilitySnapshot BlockTreeCache::observabilitySnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->observabilitySnapshot();
+}
+
 void BlockTreeCache::reportMetrics() const {
     std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
+    BlockTreeObservabilitySnapshot                   tree_snapshot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
+        tree_snapshot = tree_->observabilitySnapshot(false);
     }
     metrics_reporter_->reportEvictableCandidateCount(snapshots);
+    metrics_reporter_->reportTreeObservability(tree_snapshot);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }

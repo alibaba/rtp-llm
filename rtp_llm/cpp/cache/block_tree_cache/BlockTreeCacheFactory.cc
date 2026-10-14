@@ -646,7 +646,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     auto         task_pool           = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.task_pool_size), business_queue_size, "BlockTreeCacheTaskPool");
 
-    auto tree = std::make_unique<BlockTree>(std::move(group_sets));
+    const size_t reuse_unit_tokens =
+        cache_config.cache_key_layout_resolved ? cache_config.reuse_unit_tokens : cache_config.seq_size_per_block;
+    auto tree = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
 
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
                                                    std::move(config),
