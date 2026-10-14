@@ -308,6 +308,10 @@ charts:
       hidden: false
   panels:
   - id: cache-hit
+    gate_lines:
+    - reference: survivor_hit_floor
+      curve_id: derived/survivor_hit_ratio
+      name: Survivor collapse 参考下界
     title: Prefill 缓存命中率 · P 数量
     curve_ids:
     - derived/survivor_hit_ratio

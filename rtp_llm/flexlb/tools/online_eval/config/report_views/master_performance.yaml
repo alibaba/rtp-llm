@@ -230,6 +230,16 @@ charts:
       hidden: false
   panels:
   - id: engine-tps
+    gate_lines:
+    - reference: mock/rtp_llm_context_tps
+      curve_id: mock/rtp_llm_context_tps_engine_mean/P
+      name: P context TPS 整窗下界
+    - reference: mock/rtp_llm_context_tps_with_cache
+      curve_id: mock/rtp_llm_context_tps_with_cache_engine_mean/P
+      name: P context TPS（含缓存）整窗下界
+    - reference: mock/mock_decode_wall_tps
+      curve_id: mock/mock_decode_wall_tps_engine_mean/D
+      name: D generate TPS 整窗下界
     title: 三项引擎 TPS 与门禁线
     curve_ids:
     - mock/rtp_llm_context_tps_engine_mean/P

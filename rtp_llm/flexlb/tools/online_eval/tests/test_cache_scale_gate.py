@@ -85,6 +85,7 @@ class CacheGateTest(unittest.TestCase):
         template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["panels"][0]["title"] = "YAML panel"
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
+        template["charts"]["panels"][0].pop("gate_lines")
         prepared = dict(
             curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
@@ -306,7 +307,8 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, result)
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
-            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
+            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]
+                      if s.get("source_type") != "configuration"}
             self.assertEqual(curves, {"Survivor window hit ratio":
                                      [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
             self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
@@ -334,7 +336,8 @@ class CacheGateTest(unittest.TestCase):
                 }},
             }))
             spec = write_report(root, e, analyze(e))
-            self.assertEqual([s["name"] for s in spec["panels"][0]["series"]],
+            self.assertEqual([s["name"] for s in spec["panels"][0]["series"]
+                              if s.get("source_type") != "configuration"],
                              ["Survivor window hit ratio"])
             self.assertEqual(spec["panels"][2]["id"], "prefill-queue")
             self.assertEqual([s["name"] for s in spec["panels"][2]["series"]],

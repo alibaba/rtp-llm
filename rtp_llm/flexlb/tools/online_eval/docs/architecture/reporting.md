@@ -136,3 +136,23 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 `components.py` 提供纯组件和元数据构造，`report_model.py` 提供实验条件及比较，`core.py` 管理 bundle 发布、核验和发现；公共入口由 `reporting` 包导出。视图配置与共享测量身份持有递归只读映射和元组；`to_dict()` 返回独立可编辑的数据树，显式复制不改变共享值对象。发布一次解析 `RunPresentation`，标题、检查与 provenance 复用该上下文。
 
 `assets/report.html` 提供布局和样式，并将冻结 payload 交给 `report_controller.js`。页面控制器分派时序、散点和分类图；时序交互由 `multi_curve.js` 承担，坐标轴设置共用 `FlexReport.axisOptions`。这些脚本由 renderer 内联，HTML 无需服务器或网络资源。
+
+### 可选门禁参考线
+
+选定视图的已有 panel 可以声明 `gate_lines`，每项只包含 `reference`、`curve_id` 和 `name`。
+`reference` 指向 case 报告提供的本次运行参考值，`curve_id` 必须属于当前 panel。
+例如：
+
+```yaml
+gate_lines:
+- reference: survivor_hit_floor
+  curve_id: derived/survivor_hit_ratio
+  name: Survivor collapse 参考下界
+```
+
+case 报告将冻结结果和运行证据转成 `Threshold(value, start, end)`；值采用绑定曲线的原始单位，
+窗口采用该 panel 的局部秒坐标。通用绘图函数按曲线已有的 scale、axis 和 color 添加窗口内水平虚线。
+未启用的可选门禁传入 `None`，不画线；未知引用和非法窗口报错。
+绘图不增加观测指标或 panel，不补缺失样本，不改变原曲线和时间轴，不重新执行门禁。
+是否通过仍以检查表为准；图例显示参考值和窗口，不把参考线端点当观测样本计算平均值。
+没有适合直接对照的观测曲线时，可以不配置参考线。

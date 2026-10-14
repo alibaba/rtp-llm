@@ -145,6 +145,11 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
+    from reporting.gate_lines import Threshold, apply_gate_lines
+    spec['panels'] = apply_gate_lines(spec['panels'], presentation, {
+        'survivor_hit_floor': Threshold(result['threshold'], evidence['post_start'], evidence['post_end'])
+        if evidence['post_start'] < evidence['post_end'] else None,
+    })
     from reporting.events import attach_events
     origin = evidence_origin(evidence)
     return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))

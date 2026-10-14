@@ -197,6 +197,23 @@ class PresetSelection:
 
 
 @dataclass(frozen=True)
+class GateLine:
+    reference: str
+    curve_id: str
+    name: str
+
+    @classmethod
+    def read(cls, value):
+        mapping(value, {'reference', 'curve_id', 'name'}, {'reference', 'curve_id', 'name'}, 'invalid gate line')
+        if not all(text(item) for item in value.values()):
+            raise ValueError('invalid gate line')
+        return cls(**value)
+
+    def to_dict(self):
+        return vars(self).copy()
+
+
+@dataclass(frozen=True)
 class PanelPresentation:
     id: str
     title: str
@@ -206,6 +223,7 @@ class PanelPresentation:
     caption: str = ''
     empty_caption: str = '没有有效观测数据；缺失值不补零。'
     event_ids: tuple[str, ...] | None = None
+    gate_lines: tuple[GateLine, ...] = ()
 
     @classmethod
     def read(cls, value):
@@ -226,10 +244,16 @@ class PanelPresentation:
         events = value.get('event_ids')
         if events is not None and (not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events)):
             raise ValueError('invalid panel event_ids')
+        lines = value.get('gate_lines', [])
+        if not isinstance(lines, list):
+            raise ValueError('gate_lines must be a list')
+        bindings = tuple(GateLine.read(line) for line in lines)
+        if len({(line.reference, line.curve_id) for line in bindings}) != len(bindings):
+            raise ValueError('duplicate gate line')
         return cls(value['id'], value['title'], tuple(curves),
             tuple((key, AxisPresentation.read(axis)) for key, axis in axes.items()),
             tuple((key, PresetSelection.read(selector)) for key, selector in presets.items()),
-            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events) if events is not None else None)
+            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events) if events is not None else None, bindings)
 
     def to_dict(self):
         result = dict(id=self.id, title=self.title, curve_ids=list(self.curve_ids),
@@ -239,11 +263,15 @@ class PanelPresentation:
             result['caption'] = self.caption
         if self.presets:
             result['presets'] = {key: value.to_dict() for key, value in self.presets}
+        if self.gate_lines:
+            result['gate_lines'] = [line.to_dict() for line in self.gate_lines]
         if self.event_ids is not None:
             result['event_ids'] = list(self.event_ids)
         return result
 
     def validate_bindings(self, curves):
+        if any(line.curve_id not in self.curve_ids for line in self.gate_lines):
+            raise ValueError('invalid panel gate line: must bind a curve in the same panel')
         axes = dict(self.axes)
         for identity in self.curve_ids:
             if identity not in curves:

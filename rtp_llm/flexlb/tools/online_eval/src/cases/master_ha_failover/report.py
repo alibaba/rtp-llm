@@ -26,7 +26,8 @@ def build_spec(payload, presentation):
                 curve_id, style, row["points"], origin=anchor, labels=labels,
                 unit=store.document["definitions"][identity]["unit"], provenance=row["provenance"],
             ))
-    panels = project_panels(curves, presentation)
+    from reporting.gate_lines import apply_gate_lines
+    panels = apply_gate_lines(project_panels(curves, presentation), presentation, {})
     sections = [
         view_details(presentation, "sources", dict(metadata, metric_classification=inventory,
             metrics=payload["metric_directory"] + "/metrics.json",
