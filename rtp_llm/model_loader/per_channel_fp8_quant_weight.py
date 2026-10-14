@@ -140,6 +140,15 @@ def _ckpt_base_matches_quant_exclude(
                             acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
         exclude_modules: A set of concrete module paths that are excluded from quantization
                          (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
+        concrete_names: The module paths this template expands to in the checkpoint
+                        being loaded, one per layer instance. Supplying them lets a
+                        ``re:`` entry be judged against what the checkpoint actually
+                        contains instead of against a fixed probe set, which is the
+                        only way to answer the question for a pattern written to a
+                        fixed number of digits. Callers that iterate
+                        ``WeightModule.weights`` have them; omit to probe the
+                        template instead.
+
 
     Returns:
         True if the template (with '{i}' replaced by a wildcard for digits) matches any
@@ -182,7 +191,13 @@ def _ckpt_base_matches_regex_exclude(
     exclude_modules: set,
     concrete_names: Optional[Sequence[str]] = None,
 ) -> bool:
-    """Return whether a regex ignore matches the whole weight template."""
+    """Return whether a regex ignore matches the whole weight template.
+
+    ``concrete_names`` is the module paths this template expands to in this
+    checkpoint; when given, a ``re:`` entry matches only if it matches all of
+    them. See ``_regex_ignore_covers_template`` for why that is the question
+    being asked, and what the probe fallback does instead.
+    """
     for exclude in exclude_modules:
         if not exclude.startswith("re:"):
             continue
