@@ -102,7 +102,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                                            long requestTimeoutMs,
                                                            ServiceType serviceType,
                                                            boolean retryOnBrokenConnection) {
-        CompletableFuture<R> resultFuture = new CompletableFuture<>();
+        RpcResponseFuture<R> resultFuture = new RpcResponseFuture<>();
         long startTime = System.nanoTime();
         String channelKey = createKey(ip, port, serviceType);
         GrpcReporter.Call metrics = grpcReporter.start(channelKey, ip, port, serviceType.getOperationName(), startTime);
@@ -123,8 +123,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             invoker.updateLastUsedTime();
             final Invoker finalInvoker = invoker;
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
-                    RpcServiceGrpc.newFutureStub(finalInvoker.getChannel()),
-                    MultimodalRpcServiceGrpc.newFutureStub(finalInvoker.getChannel())
+                    RpcServiceGrpc.newFutureStub(resultFuture.observe(finalInvoker.getChannel())),
+                    MultimodalRpcServiceGrpc.newFutureStub(resultFuture.observe(finalInvoker.getChannel()))
             ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
             ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
@@ -132,7 +132,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    if (metrics != null) { metrics.complete(response, null); }
+                    if (metrics != null) { metrics.complete(resultFuture.responseBytes(), null); }
                     resultFuture.complete(response);
                 }
 
@@ -152,7 +152,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                 ip, port, serviceType, resultFuture, startTime, metrics);
                     } else {
                         Logger.debug("Exception during async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, t);
-                        if (metrics != null) { metrics.complete(null, t); }
+                        if (metrics != null) { metrics.complete(-1, t); }
                         resultFuture.completeExceptionally(t);
                     }
                 }
@@ -160,7 +160,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
         } catch (Exception e) {
             Logger.debug("Exception initiating async {} gRPC call for {}:{}", serviceType.getOperationName(), ip, port, e);
-            if (metrics != null) { metrics.complete(null, e); }
+            if (metrics != null) { metrics.complete(-1, e); }
             resultFuture.completeExceptionally(e);
         }
 
@@ -173,7 +173,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                                long requestTimeoutMs,
                                                String ip, int port,
                                                ServiceType serviceType,
-                                               CompletableFuture<R> resultFuture,
+                                               RpcResponseFuture<R> resultFuture,
                                                long originalStartTime, GrpcReporter.Call metrics) {
         try {
             ManagedChannel newChannel = createChannel(channelKey);
@@ -182,8 +182,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Logger.debug("Retrying async gRPC call with new channel for {}:{} {}", ip, port, serviceType);
 
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
-                    RpcServiceGrpc.newFutureStub(newInvoker.getChannel()),
-                    MultimodalRpcServiceGrpc.newFutureStub(newInvoker.getChannel())
+                    RpcServiceGrpc.newFutureStub(resultFuture.observe(newInvoker.getChannel())),
+                    MultimodalRpcServiceGrpc.newFutureStub(resultFuture.observe(newInvoker.getChannel()))
             ).withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
             ListenableFuture<R> listenableFuture = grpcCall.apply(stubWrapper);
@@ -191,21 +191,21 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    if (metrics != null) { metrics.complete(response, null); }
+                    if (metrics != null) { metrics.complete(resultFuture.responseBytes(), null); }
                     resultFuture.complete(response);
                 }
 
                 @Override
                 public void onFailure(Throwable t) {
                     Logger.debug("Async retry failed for {}:{} {}", ip, port, serviceType, t);
-                    if (metrics != null) { metrics.complete(null, t); }
+                    if (metrics != null) { metrics.complete(-1, t); }
                     resultFuture.completeExceptionally(t);
                 }
             }, Runnable::run);
 
         } catch (Exception e) {
             Logger.debug("Exception during async retry for {}:{} {}", ip, port, serviceType, e);
-            if (metrics != null) { metrics.complete(null, e); }
+            if (metrics != null) { metrics.complete(-1, e); }
             resultFuture.completeExceptionally(e);
         }
     }

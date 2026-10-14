@@ -28,9 +28,7 @@ import java.util.stream.Collectors;
  * trim the exposition surface down to exactly the series their collector
  * consumes.
  *
- * <p>The property defaults to {@link #DEFAULT_METRIC_WHITELIST} — the six
- * core link latency metrics, kept as a preset so the default exposition
- * stays minimal. Set the whitelist to the bare {@code flexlb_} prefix to
+ * <p>The property defaults to {@link #DEFAULT_METRIC_WHITELIST} — core link latency and synchronization diagnostics, kept as a bounded preset. Set the whitelist to the bare {@code flexlb_} prefix to
  * expose every {@code flexlb_*} series.
  *
  * <p>Matching semantics — entries are <b>prometheus-form prefixes or full
@@ -67,7 +65,7 @@ public class WhitelistMetricsFilterConfig {
     private static final String COUNTER_SUFFIX = "_total";
 
     /**
-     * Default whitelist preset: the six core link latency metrics
+     * Default whitelist preset: core link latency and synchronization diagnostics
      * (prometheus form; the counter exposition {@code _total} suffix is
      * matched as well). These are the metrics retained when no
      * {@code flexlb.monitor.metric-whitelist} property is set, keeping the
@@ -87,7 +85,12 @@ public class WhitelistMetricsFilterConfig {
                     + "flexlb_app_flexlb_route_submit_time_ms,"
                     + "flexlb_app_routing_queue_wait_time_ms,"
                     + "flexlb_app_flexlb_dispatch_ack_time_ms,"
-                    + "flexlb_app_engine_balancing_master_dispatch_reason";
+                    + "flexlb_app_engine_balancing_master_dispatch_reason,"
+                    + "flexlb_app_grpc_,flexlb_app_sync_,flexlb_app_executor_,"
+                    + "flexlb_app_netty_,flexlb_app_jvm_,flexlb_app_cache_diff_,"
+                    + "flexlb_app_engine_balancing_thread_pool_info,"
+                    + "flexlb_app_engine_balancing_event_loop_group_info,"
+                    + "flexlb_grpc_server_executor_";
 
     private final PrefixAllowSet allowedMetrics;
 

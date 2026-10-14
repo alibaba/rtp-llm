@@ -1,6 +1,5 @@
 package org.flexlb.engine.grpc.monitor;
 
-import com.google.protobuf.MessageLite;
 import io.grpc.Status;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -86,13 +85,13 @@ public class GrpcReporter {
         private volatile boolean retried;
         Call(Peer peer,long startNs){this.peer=peer;this.startNs=startNs;}
         public void retryStarted(){retried=true;}
-        public void complete(Object response,Throwable failure){
+        public void complete(long responseBytes,Throwable failure){
             if(finished){return;}finished=true;
             int retry=retried?1:0;Status.Code code=failure==null?Status.Code.OK:Status.fromThrowable(failure).getCode();
             double ms=(System.nanoTime()-startNs)/1e6;
             try{
                 peer.duration[retry].accept(ms);peer.result(retry,code).accept(1);
-                if(failure==null&&response instanceof MessageLite pb){peer.bytes[retry].accept(pb.getSerializedSize());}
+                if(failure==null&&responseBytes>=0){peer.bytes[retry].accept(responseBytes);}
                 if(failure!=null){
                     long now=System.nanoTime(),last=peer.lastErrorLogNs.get();
                     if(now-last>=10_000_000_000L&&peer.lastErrorLogNs.compareAndSet(last,now)){

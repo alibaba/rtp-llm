@@ -1,6 +1,6 @@
 # gRPC 与状态同步观测口径
 
-网络大小按成功 RPC 响应的 protobuf `getSerializedSize()` 字节数计算，不是线上压缩后的网络流量，也不是对象在堆中的占用。失败不填零字节。
+网络大小按成功 RPC 响应的解码输入长度（protobuf 序列化字节数）计算，不是线上压缩后的网络流量，也不是对象在堆中的占用。失败不填零字节。
 
 ## 复用指标
 
@@ -40,12 +40,14 @@
 
 Timer 使用有限 SLO 桶，不在每个引擎上分配 HDR percentile 直方图。byte Summary 使用 1KiB、16KiB、256KiB、1/4/16/64/256MiB 桶，含 +Inf；max 是 Micrometer 时间窗口最大值，瞬时响应大小在 snapshot 日志中。Worker generation、version、GC id 只进日志，不进持久指标标签。
 
-单引擎定位沿用默认开启的 engine tags；显式配置 `flexlb.monitor.per-engine-tags=false` 会删除 engineIp 和 enginePort，日志仍保留地址，单引擎 Gauge 不再有定位意义，不得当作全舰队最大值。启用 metric-whitelist 时必须加入所需的新指标，否则不会导出。标签预绑定后的白名单按启动配置使用，运行中不动态切换。
+单引擎定位沿用默认开启的 engine tags；显式配置 `flexlb.monitor.per-engine-tags=false` 会删除 engineIp 和 enginePort，日志仍保留地址，单引擎 Gauge 不再有定位意义，不得当作全舰队最大值。默认白名单增加本清单的有界指标前缀，保留原六项链路指标；显式白名单仍按用户配置执行。metric-whitelist 沿用 Prometheus 前缀格式，例如 `flexlb_app_grpc_,flexlb_app_sync_,flexlb_app_executor_,flexlb_app_netty_,flexlb_app_jvm_,flexlb_app_cache_diff_`，不能填 `app.grpc.*` 点号格式；必须加入所需前缀，否则不会导出。标签预绑定后的白名单按启动配置使用，运行中不动态切换。
 
 ## 三类结构化日志
 
-1. `snapshot_changed` / `cache_diff` / `sync_slow`：地址、role、generation、版本、条目数、response bytes、扫描/增删量、分段耗时、状态年龄。snapshot / diff 每地址最多 1 条/秒；slow 每地址每服务最多 1 条/10秒，含 suppressed。
+1. `snapshot_changed` / `cache_diff` / `sync_slow`：地址、role、generation、版本、条目数、response bytes、扫描/增删量、分段耗时、状态年龄。status snapshot 每地址最多 1 条/10秒，cache snapshot / diff 每地址最多 1 条/秒；slow 每地址每服务最多 1 条/10秒，含 suppressed。
 2. `rpc_failed` / `executor_rejected` / `worker_retiring` / `cache_apply_failed`：最终 grpc code、原因分类、失败类别、过期时响应和提交年龄、阶段；拒绝瞬间包含 queue size/capacity、active、最长等待/运行、heap used。RPC/池异常各最多 1 条/10秒；真实生命周期事件保留。已存在的 WorkerStatus 创建日志用于关联恢复。
 3. `gc_state`：GC id、collector、cause、起止 epoch、pause、heap before/after、最近条目数/byte 预算、pending response bytes、状态采样时间和距 GC 结束的年龄。GC 线程只拷贝标量至固定环缓冲，独立采样线程写日志；大于一秒的 STW 会让状态样本变旧，时间字段必须保留。
+
+字节数在 gRPC response marshaller 中记录：KnownLength 直接取 available 并保持原 stream 的解析快路，其他 stream 仅累计 read/skip 字节，不调用大消息的 getSerializedSize、不重编码。元数据保存在 CompletableFuture 的标量字段，异步与已完成 future 都可读取；没有元数据的外部 future 用 -1 表示未知，不填伪造字节数。
 
 监控不持有 protobuf、集合、任务详情或 key 内容，不主动 GC、不做 heap 遍历、不逐 key 打点、不按请求输出新日志。每个 executor task 添加一个小计时包装；标签与 meter 预绑定复用。每秒采样复杂度是 Worker 和线程数，队列仅 peek，不扫描队列；remove/purge/shutdownNow 仍保持原有 Future / 取消语义。

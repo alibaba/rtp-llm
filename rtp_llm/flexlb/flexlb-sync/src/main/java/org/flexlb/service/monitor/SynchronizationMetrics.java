@@ -122,7 +122,7 @@ public final class SynchronizationMetrics {
             var snapshot=status.getCacheStatus();if(snapshot!=null)cache+=snapshot.getCacheKeySize();
             tasks+=status.committedEngineObservation().runningTaskList().size();
             if(status.statusObservation.phase>0)tasks+=status.statusObservation.finishedTaskCount;
-            locals+=local.size(status.getIpPort());pending+=status.statusObservation.payloadBytes+status.cacheObservation.payloadBytes;
+            locals+=local.size(status.getIpPort());pending+=Math.max(0,status.statusObservation.payloadBytes)+Math.max(0,status.cacheObservation.payloadBytes);
         }
         for(WorkerMeters m:workers.values())if(m.seenCycle!=now)m.absent();
         cacheEntries=cache;statusTasks=tasks;localEntries=locals;globalEntries=global.totalBlocks();globalMappings=global.totalMappings();pendingPayloadBytes=pending;sampleUs=now;

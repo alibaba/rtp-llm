@@ -112,10 +112,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             engineHealthReporter.ensureSyncMetrics(workerStatus);
             workerStatus.cacheObservation.started();
 
-            engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
-                            requestTimeoutMs, roleType)
-                    .thenApply(cacheStatusPB -> {
-                        workerStatus.cacheObservation.received(cacheStatusPB.getSerializedSize(),cacheStatusPB.getCacheKeysMap().size(),0);
+            var responseFuture = engineGrpcService.getCacheStatusAsync(ip, grpcPort, workerStatus, currentCacheVersion,
+                            requestTimeoutMs, roleType);
+            responseFuture.thenApply(cacheStatusPB -> {
+                        workerStatus.cacheObservation.received(org.flexlb.engine.grpc.RpcResponseFuture.responseBytes(responseFuture),cacheStatusPB.getCacheKeysMap().size(),0);
                         logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                                         + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                                 ipPort, roleType.name(), cacheStatusPB.getCacheKeysMap().size(), cacheStatusPB.getVersion(),

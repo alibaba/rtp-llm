@@ -88,11 +88,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
             engineHealthReporter.ensureSyncMetrics(workerStatus);
             workerStatus.statusObservation.started();
             pollLease.statusRpcStarted(syncRequestTimeoutMs);
-            engineGrpcService.getWorkerStatusAsync(
+            var responseFuture = engineGrpcService.getWorkerStatusAsync(
                             ip, grpcPort, latestFinishedTaskVersion,
-                            syncRequestTimeoutMs, roleType)
-                    .thenApply(response -> {
-                        workerStatus.statusObservation.received(response.getSerializedSize(),
+                            syncRequestTimeoutMs, roleType);
+            responseFuture.thenApply(response -> {
+                        workerStatus.statusObservation.received(org.flexlb.engine.grpc.RpcResponseFuture.responseBytes(responseFuture),
                                 response.getRunningTaskInfoCount(),response.getFinishedTaskListCount());
                         return EngineStatusConverter.convertToStatusObservation(workerStatus, response);
                     })
@@ -222,7 +222,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 if (responseVersion > cursor.statusVersion()) {
                     if(org.flexlb.diagnostics.SyncObservation.logNow(
                             workerStatus.statusObservation.lastSnapshotLogUs,
-                            workerStatus.statusObservation.suppressedSnapshots,1_000_000L)) {
+                            workerStatus.statusObservation.suppressedSnapshots,10_000_000L)) {
                         logger.info("event=snapshot_changed service=status address={} role={} generation={} old_version={} new_version={} response_bytes={} running_tasks={} finished_tasks={} suppressed={}",
                                 ipPort,roleType,workerStatus.getGenerationId(),cursor.statusVersion(),responseVersion,
                                 workerStatus.statusObservation.payloadBytes,observation.runningTasks().size(),observation.finishedTasks().size(),
