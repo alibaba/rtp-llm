@@ -164,7 +164,7 @@ class RequestAdmissionResourceLeakTest {
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         Response response = victim.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode(), response.getCode());
-        assertEquals(GlobalQueueCoordinator.QUEUE_FULL_REJECTION_MESSAGE, response.getErrorMessage());
+        assertEquals(RequestRegistry.PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE + " 62", response.getErrorMessage());
         lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
         lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(

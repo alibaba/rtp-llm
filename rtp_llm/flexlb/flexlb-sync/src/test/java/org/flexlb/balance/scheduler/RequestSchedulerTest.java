@@ -838,7 +838,8 @@ class RequestSchedulerTest {
             CompletableFuture<Response> returned = fixture.scheduler.submit(nextRequest);
 
             assertSame(nextFuture, returned);
-            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), returned.get(5, TimeUnit.SECONDS).getCode());
+            assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(),
+                    returned.get(5, TimeUnit.SECONDS).getCode());
             assertFalse(fixture.future.isDone());
             assertEquals(1, fixture.scheduler.getQueuedRequestCount());
             verify(fixture.router, never()).select(nextRequest, null);

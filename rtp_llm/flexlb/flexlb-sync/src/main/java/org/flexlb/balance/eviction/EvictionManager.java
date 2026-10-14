@@ -383,7 +383,7 @@ public class EvictionManager {
                                        DecodeEndpoint decodeEp,
                                        DecodeBinding request,
                                        RouteAdmission admission) {
-        String detail = "preempted by higher-priority request " + ctx.getRequestId();
+        String detail = RequestRegistry.PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE + " " + ctx.getRequestId();
         boolean returnInstructions = preemption.getEngineCancellation().getMode()
                 == EngineCancellationConfig.Mode.RETURN;
         DecodePreemptionCoordinator.PreemptionCommand command =

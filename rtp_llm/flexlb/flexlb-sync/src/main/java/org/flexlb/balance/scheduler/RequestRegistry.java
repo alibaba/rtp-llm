@@ -50,6 +50,8 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 @Component
 public class RequestRegistry {
 
+    public static final String PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE = "preempted by higher-priority request";
+
     private final RequestCompletionPublisher completionPublisher;
     private final RequestTerminalCleanup terminalCleanup;
 
@@ -515,7 +517,7 @@ public class RequestRegistry {
     }
 
     void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
+        finishYielded(victim, PREEMPTED_BY_HIGHER_PRIORITY_MESSAGE + " " + incoming.requestId());
         requestReporter.reportVictim(victim.priority(), incoming.priority(),
                 "prefill_queued", "prefill_inflight_requests");
         requestReporter.reportPriorityPreempt("prefill_queued");
