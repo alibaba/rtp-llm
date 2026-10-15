@@ -385,7 +385,10 @@ class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
         self.scale = scale
         self.scale_2 = scale_2
         self.input_scale = input_scale
-        self._block_size = max(quant_config.group_size(), NVFP4_BLOCK_SIZE)
+        # NVFP4 fixes the e2m1 block at 16 (mm_fp4 validates block_size=16);
+        # the base quant's group_size (e.g. FP8_PER_BLOCK's 128) does not
+        # apply to the layered FFN quantization.
+        self._block_size = NVFP4_BLOCK_SIZE
 
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
