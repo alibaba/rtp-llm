@@ -120,12 +120,25 @@ fixture 显式替换该引擎的缓存状态响应键集合，独立于推理请
 `JavaMockEngineCluster` 和 `MockLruBlockCache`。
 
 
-## Mock 支持范围与对齐合同
+## Mock 支持范围与行为验证
 
-Mock 的协议合同、近似模型和测试工具能力分别声明在 [feature contracts](../../../../flexlb-mock-engine/src/test/resources/mock-feature-contracts.json)。每个生产 Java 模块必须归属于一项能力，声明测试入口和支持范围。具有 real 参照的条目记录对应源码哈希；源码变化必须先核对语义及回归向量，再更新合同。哈希检查表示需要重新核对，不等于已经执行 real GPU 差分。
+下表按功能说明实现参照、验证内容和模拟边界，UT 列提供代表入口。具体行为由 Maven 执行的测试断言维护；表中内容不表示完整测试覆盖或已经完成真实 GPU 差分。
+
+| 功能 | Mock / real 参照 | 已验证行为 | 模拟边界与缺口 | 代表 UT |
+|---|---|---|---|---|
+| FIFO 准入 | `MockPrefillBatchPolicy`；[FIFOScheduler.cc](../../../../../cpp/engine_base/schedulers/FIFOScheduler.cc) | token、矩形预算、CP 对齐及候选选择边界 | 形状与准入规则，不验证真实模型执行 | [MockPrefillBatchPolicyTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockPrefillBatchPolicyTest.java) |
+| PD 生命周期与取消 | `MockPrefillSession`、`JavaMockEngineCluster`；[PrefillBatchRpcServer.cc](../../../../../cpp/model_rpc/PrefillBatchRpcServer.cc)、[DecodeRpcServer.cc](../../../../../cpp/model_rpc/DecodeRpcServer.cc) | 预留、Fetch 交接、取消释放、终态唯一性及跨进程断链 | 公开输出链路限单返回序列；协议回归不验证实际推理 | [PrefillFetchLifecycleTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/PrefillFetchLifecycleTest.java)、[WhaleIndependentProcessTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/WhaleIndependentProcessTest.java) |
+| KV 缓存 | `MockLruBlockCache`、`MockMemoryBlockCache`；[DeviceBlockPool.cc](../../../../../cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc) | 容量、引用释放、host 命中和树驱逐的模型不变量 | 不验证真实 KV tensor、DMA、hybrid/SWA 多池或磁盘数据正确性 | [CacheReferenceAccountingTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/CacheReferenceAccountingTest.java)、[MockMemoryBlockCacheTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockMemoryBlockCacheTest.java)、[TreeEvictionTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/TreeEvictionTest.java) |
+| 性能、EOS 与 MTP | `MockPerformanceModel`、`MockEosModel`、`MockDecodeStepMetrics` | 配置公式、吞吐锚点、输出长度规则及接受 token 记账 | 校准后的近似模型，不模拟实际采样、stop words 或 draft/verify 推理 | [ProductionCaliberDecodeTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ProductionCaliberDecodeTest.java)、[WhaleEosModelTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/WhaleEosModelTest.java)、[MockDecodeStepMetricsTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockDecodeStepMetricsTest.java) |
+| 指标 | `WhaleMockMonitor` 及记账器；[RtpLLMMetrics.cc](../../../../../cpp/metrics/RtpLLMMetrics.cc)、[PrefillCacheHitMetricsReporter.cc](../../../../../cpp/cache/PrefillCacheHitMetricsReporter.cc) | 指标名、分母、执行 token 记账与采样锁序 | 只覆盖明确上报并测试的指标，不代表 real 全部指标 | [MetricAlignmentTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MetricAlignmentTest.java)、[TpsMetricsAccountingTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/TpsMetricsAccountingTest.java)、[WhaleMonitorLockOrderTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/WhaleMonitorLockOrderTest.java) |
+| 故障与成员变化 | `DynamicEngineManager`、`ExpiringRequestIds`、`ShutdownTasks` | 优雅排空、强制关闭、代际隔离和 fence 保留 | 测试环境生命周期，不代表生产部署或容器回收保证 | [DynamicEngineScaleTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/DynamicEngineScaleTest.java)、[ExpiringRequestIdsTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ExpiringRequestIdsTest.java)、[ShutdownTasksTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ShutdownTasksTest.java) |
+| 回放与客户端路由 | `PlaybackPlan`、`MasterTargetRouter`、`ClientEventJournal` | 确定性播放计划、路由切换与请求事件完整性 | 负载和证据生成工具，不验证 real 引擎内部行为 | [PlaybackPlanTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/PlaybackPlanTest.java)、[MasterTargetRouterTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MasterTargetRouterTest.java)、[ClientEventJournalTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ClientEventJournalTest.java) |
+| 测试支撑 | `MockRpcExecutors`、`CacheSyncFixture` | 共享执行器的回调交付、合成缓存状态与可控变化 | 不模拟每个 Pod 的 CPU 配额；fixture 独立于推理 KV 容量 | [MockRpcExecutorsTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/MockRpcExecutorsTest.java)、[CacheSyncFixtureTest](../../../../flexlb-mock-engine/src/test/java/org/flexlb/mockengine/CacheSyncFixtureTest.java) |
+
+新增功能或改变支持范围时更新对应行及行为测试；拆分、重命名内部辅助类不要求额外登记。real 实现变化时，按相关函数的语义核对上述行为及回归用例，不通过整文件哈希判断是否对齐。
 
 取消 fence、已接受取消和已完成请求历史按单调时钟保留十分钟，与仅供诊断的限条数历史独立；诊断淘汰不能使有效 fence 提前消失。进程崩溃世代清空这些内存历史。
 
 公开入场路径仅支持单返回序列，不支持 beam 和多返回序列。相关输入在创建请求状态和 KV 租约前返回 UNIMPLEMENTED；Prefill 的形状计费工具可用于核对 real 的宽度公式，但不代表输出链路支持这些宽度。
 
-性能曲线、EOS 和 MTP 接受 token 数是近似模型，不模拟实际采样、stop words 或 draft/verify 推理。统一块池和 host cache 元数据不验证真实 KV tensor、DMA、hybrid/SWA 多池或磁盘数据正确性。新增测试必须声明验证的是模型内部不变量、协议路径还是跨进程行为，不能用测试数量替代支持范围。
+测试应明确验证的是模型内部不变量、协议路径还是跨进程行为，用具体断言表达预期及错误分支。
