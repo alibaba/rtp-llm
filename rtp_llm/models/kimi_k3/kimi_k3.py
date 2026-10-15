@@ -7,11 +7,11 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight, KimiK3Weight
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.ops import (
     CacheCpPolicyDesc,
     DataType,
@@ -41,6 +41,7 @@ class KimiK3RuntimeConfig:
     kda_use_full_rank_gate: bool
     mtp_source_layer: Optional[int] = None
     kda_prefill_backend: str = "rtp"
+    media_placeholder_token_id: Optional[int] = None
 
 
 class KimiK3ModelConfig(ModelConfig):
@@ -141,7 +142,14 @@ class KimiK3(BaseModel):
 
         with open(config_path, encoding="utf-8") as reader:
             config_json = json.load(reader)
-        return cls._from_config_json(config_json, ckpt_path)
+        config = cls._from_config_json(config_json, ckpt_path)
+        if not config.is_mtp:
+            from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_config import (
+                configure_kimi_k3_multimodal,
+            )
+
+            configure_kimi_k3_multimodal(config, config_json)
+        return config
 
     @classmethod
     def _from_config_json(
@@ -534,6 +542,32 @@ class KimiK3Mtp(KimiK3):
                 draft_model_config, field
             ):
                 raise ValueError(f"K3 target/draft cannot share incompatible {field}")
+        media_id = target_model.model_config.mm_related_params.special_token_ids.get(
+            "image_token_index"
+        )
+        if media_id is not None:
+            if (
+                not isinstance(media_id, int)
+                or isinstance(media_id, bool)
+                or not 0 <= media_id < draft_model_config.input_vocab_size
+            ):
+                raise ValueError("K3 target media token must be within the vocabulary")
+            draft_ids = draft_model_config.mm_related_params.special_token_ids
+            draft_runtime = draft_model_config.k3_runtime_config
+            for draft_media_id in (
+                draft_ids.get("image_token_index"),
+                draft_runtime.media_placeholder_token_id,
+            ):
+                if draft_media_id is not None and (
+                    not isinstance(draft_media_id, int)
+                    or isinstance(draft_media_id, bool)
+                    or draft_media_id != media_id
+                ):
+                    raise ValueError("K3 target/draft media token IDs must match")
+            draft_ids["image_token_index"] = media_id
+            draft_model_config.k3_runtime_config = replace(
+                draft_runtime, media_placeholder_token_id=media_id
+            )
         return (W.embedding, W.lm_head)
 
     @classmethod
@@ -573,12 +607,28 @@ class KimiK3Mtp(KimiK3):
         config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.NONE
         ]
+        media_token_id = config_json.get("media_placeholder_token_id")
+        if media_token_id is not None and (
+            not isinstance(media_token_id, int)
+            or isinstance(media_token_id, bool)
+            or not 0 <= media_token_id < config.input_vocab_size
+        ):
+            raise ValueError(
+                "K3 MTP media_placeholder_token_id must be a vocabulary ID"
+            )
         config.k3_runtime_config = replace(
             config.k3_runtime_config,
             attn_res_block_size=0,
             mtp_source_layer=source_layer,
+            media_placeholder_token_id=media_token_id,
         )
         config.mm_model_config.is_multimodal = False
+        if media_token_id is not None:
+            # The draft uses the media token's vocabulary embedding without
+            # constructing its own ViT or consuming external image features.
+            config.mm_related_params.special_token_ids["image_token_index"] = (
+                media_token_id
+            )
         if not config.k3_runtime_config.mla_use_nope:
             raise ValueError("K3 MTP requires NoPE MLA")
         if ckpt_path:

@@ -8,6 +8,7 @@ message TensorPB {
         INT32 = 1;
         FP16 = 2;
         BF16 = 3;
+        UINT8 = 4;
     }
     DataType data_type = 1;
     repeated int64 shape = 2;
@@ -15,6 +16,7 @@ message TensorPB {
     bytes int32_data = 4;
     bytes fp16_data = 5;
     bytes bf16_data = 6;
+    bytes uint8_data = 7;
 }
 
 message IntVector {

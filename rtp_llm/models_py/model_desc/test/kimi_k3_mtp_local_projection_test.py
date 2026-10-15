@@ -9,6 +9,13 @@ from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.ops import RoleType
 
 
+class ReplicatedCpuEmbedding(nn.Embedding):
+    """Full-width CPU table; the modeling-boundary protocol needs no gather."""
+
+    def forward(self, tokens, *, tp_gather=None):
+        return super().forward(tokens)
+
+
 class KimiK3MtpLocalProjectionTest(unittest.TestCase):
     def test_fp8_collective_flags_do_not_initialize_bf16_draft(self):
         model = object.__new__(KimiK3MtpModel)
@@ -26,7 +33,9 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            self.assertTrue(model.initialize(SimpleNamespace(kv_cache=None)))
+            self.assertTrue(
+                model.initialize(SimpleNamespace(kv_cache=None, is_decode_role=False))
+            )
         self.assertIsNone(model._fp8_collective)
 
     def test_local_projection_matches_full_projection_slice(self):
@@ -35,7 +44,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         nn.Module.__init__(model)
         model.tp_size = 4
         model.tp_rank = 2
-        model.embed_tokens = nn.Embedding(128, 16)
+        model.embed_tokens = ReplicatedCpuEmbedding(128, 16)
         model.enorm = nn.LayerNorm(16)
         model.hnorm = nn.LayerNorm(16)
         model.eh_proj = nn.Linear(32, 16, bias=False)
@@ -43,6 +52,8 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             input_ids=torch.randint(0, 128, (32,)),
             combo_position_ids=torch.arange(32),
             input_hiddens=torch.randn(32, 16),
+            embedding_inputs=SimpleNamespace(text_tokens_mask=None),
+            multimodal_inputs=SimpleNamespace(multimodal_features=[]),
         )
         embedding = model.embed_tokens(inputs.input_ids)
         full = model.eh_proj(torch.cat((
