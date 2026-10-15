@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -239,7 +240,14 @@ def select_candidates(
     # mostly-empty static grid (see _candidate_pool_bounded_kernel). The
     # scores.topk fallback and the nblocks<=count dense epilogue read the full
     # score row and keep the padded static kernel.
-    bounded_pool = nblocks > count and count in (512, 1024, 2048)
+    use_candidate_v3 = topk_blocks == 2048 and candidate_topk.is_available(
+        "decode", logits.device
+    )
+    bounded_pool = (
+        nblocks > count
+        and count in (512, 1024, 2048)
+        and (topk_blocks != 2048 or use_candidate_v3)
+    )
     if bounded_pool:
         _candidate_pool_bounded_kernel[(rows,)](
             logits,
@@ -266,8 +274,16 @@ def select_candidates(
             score_stride,
             128,
         )
-    candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
-    if nblocks > count:
+    if use_candidate_v3:
+        # Full K2048 output already has the packed layout used by publication.
+        candidates = candidate_topk.select(scores, block_lengths)
+        if count != 2048:
+            candidates = candidates[:, :count].contiguous()
+    else:
+        candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
+    if topk_blocks == 2048 and not use_candidate_v3:
+        candidates.copy_(scores.topk(count, dim=-1, sorted=False).indices)
+    elif topk_blocks != 2048 and nblocks > count:
         if count in (512, 1024, 2048):
             rtp_llm_ops.topk_v3(
                 scores,

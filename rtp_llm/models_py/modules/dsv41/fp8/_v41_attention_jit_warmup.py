@@ -901,10 +901,17 @@ def _warm_norm_quant(device):
 
 
 def _warm_candidate_topk(device):
-    from . import _v41_candidate_topk
+    import torch
 
-    if _v41_candidate_topk._enabled() and not _v41_candidate_topk.warmup(device):
-        logging.info("[DSV41 Attention] candidate TopK retains existing fallback")
+    from . import _v41_candidate_topk_v3
+
+    if not any(
+        _v41_candidate_topk_v3.is_available(phase, device) for phase in ("prefill", "decode")
+    ):
+        return
+    scores = torch.zeros((1, 4096), dtype=torch.float32, device=device)
+    block_lengths = torch.full((1,), 4096, dtype=torch.int32, device=device)
+    _v41_candidate_topk_v3.select(scores, block_lengths)
 
 
 def _warm_grouped_bounds(attn, device):
