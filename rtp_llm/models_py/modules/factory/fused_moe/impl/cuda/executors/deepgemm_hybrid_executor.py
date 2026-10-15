@@ -552,7 +552,25 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     dtype=hidden_states_fp8.dtype,
                 ),
                 (
-                    torch.zeros(
+                    # ue8m0 packed scale workspace: ep_scatter_v2 writes only
+                    # the routed (valid) token rows; the padding rows stay
+                    # uninitialized.  That is sound: the DeepGEMM masked
+                    # scheduler derives each group's tile count from
+                    # masked_m on device (ceil_div(masked_m, BLOCK_M)), so
+                    # fully padded tiles are never loaded; the last partial
+                    # tile does load BLOCK_M-granular scale rows, but a GEMM
+                    # output row only depends on its own input row, so pad
+                    # garbage only lands in pad output rows, and ep_gather
+                    # only follows output_index >= 0.  The fp32 branch below
+                    # and the packed down_input_scale created by
+                    # create_packed_scale_tensor already rely on exactly
+                    # this contract, and this ue8m0 branch is only reachable
+                    # on SM10x/SM120 (is_deep_gemm_e8m0_used gates on
+                    # capability 10/12).  This removes one 28KB fill kernel
+                    # per MoE layer per decode-graph step; the
+                    # deepgemm_hybrid_executor_sm10x_test pins the
+                    # garbage-isolation property on hardware.
+                    torch.empty(
                         [
                             self.num_experts_per_partition,
                             ceil_div(self.K // self.BLOCK_SIZE, 4),

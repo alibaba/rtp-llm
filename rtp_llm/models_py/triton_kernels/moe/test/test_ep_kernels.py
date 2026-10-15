@@ -18,6 +18,7 @@ Run with bazel:
     bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_kernels --config=cuda13
 """
 
+import ctypes
 import unittest
 
 import torch
@@ -166,6 +167,196 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         self.assertTrue(
             torch.equal(count, ref_count),
             f"count mismatch:\n  got={count}\n  want={ref_count}",
+        )
+
+
+class TestRecomputeTopkIdsSelfZero(unittest.TestCase):
+    """Single-program self-zero path of recompute_topk_ids_sum_expert_count.
+
+    num_total <= BLOCK_SIZE launches a single program, so the kernel zeroes
+    the expert_count cells itself (torch.empty workspace) instead of a
+    separate torch.zeros fill kernel.  This is the decode CUDA-graph hot
+    path (one fill per MoE layer per step).  These tests pin:
+    - the self-zeroed counters match the reference for grid == 1 shapes,
+      including count values that are 0 and a workspace backed by poisoned
+      (0xFF) allocator memory;
+    - the grid == 1 / grid > 1 boundary follows num_total vs BLOCK_SIZE;
+    - the fill-kernel launch actually disappears (CUDA-graph capture node
+      census, the established CUPTI-free method in this tree) while the
+      multi-program path keeps exactly one fill.
+    """
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required for triton kernel test")
+        self.device = torch.device("cuda")
+
+    def _ref_count(
+        self, topk_ids: torch.Tensor, start: int, num_local: int
+    ) -> torch.Tensor:
+        adj = topk_ids - start
+        valid = (topk_ids != -1) & (adj >= 0) & (adj < num_local)
+        flat = adj[valid].to(torch.int32)
+        out = torch.zeros(num_local, dtype=torch.int32, device=topk_ids.device)
+        if flat.numel() > 0:
+            out.scatter_add_(
+                0, flat.to(torch.int64), torch.ones_like(flat, dtype=torch.int32)
+            )
+        return out
+
+    def _block_size(self, topk: int) -> int:
+        import triton
+
+        return triton.next_power_of_2(min(256, 1024 // max(topk, 1)))
+
+    def test_grid_one_matches_reference(self) -> None:
+        """grid == 1 shapes: self-zeroed counters equal the reference."""
+        torch.manual_seed(7)
+        cases = [
+            # (num_tokens, topk, num_local, start, num_total_experts)
+            (1, 4, 32, 32, 64),   # Xing4-style decode step: num_total 4
+            (3, 4, 32, 32, 64),   # MTP draft q_len 3
+            (64, 4, 32, 0, 32),   # num_total 256 == BLOCK: boundary
+            (16, 8, 8, 0, 64),    # topk 8 -> BLOCK 128
+            (1, 1, 5, 0, 5),
+            (10, 2, 257, 512, 1024),  # non-pow2 expert count
+        ]
+        for num_tokens, topk, num_local, start, num_total_experts in cases:
+            block = self._block_size(topk)
+            num_total = num_tokens * topk
+            self.assertLessEqual(
+                num_total, block, "case must launch a single program"
+            )
+            topk_ids = torch.randint(
+                -1, num_total_experts, (num_tokens, topk),
+                dtype=torch.int32, device=self.device,
+            )
+            topk_ids[torch.rand_like(topk_ids.float()) < 0.25] = -1
+            adjusted, count = recompute_topk_ids_sum_expert_count(
+                topk_ids, start, num_local
+            )
+            ref_count = self._ref_count(topk_ids, start, num_local)
+            self.assertTrue(
+                torch.equal(count, ref_count),
+                f"count mismatch for tokens={num_tokens} topk={topk} "
+                f"local={num_local}:\n  got={count}\n  want={ref_count}",
+            )
+            # counts stay dense: every cell is written (zero or accumulated)
+            self.assertEqual(count.numel(), num_local)
+
+    def test_grid_one_poisoned_workspace(self) -> None:
+        """0xFF-backed workspace memory must not leak into the counters."""
+        num_tokens, topk, num_local, start = 32, 4, 64, 64
+        topk_ids = torch.full(
+            (num_tokens, topk), -1, dtype=torch.int32, device=self.device
+        )
+        # Only expert (start + 0) is routed: every other cell must come back
+        # as an exact zero written by the in-kernel zeroing phase.
+        topk_ids[0, 0] = start
+        # Poison the caching allocator so the torch.empty workspace reuses
+        # all-ones memory.
+        poison = torch.full((num_local,), 0x7F7F7F7F, dtype=torch.int32,
+                            device=self.device)
+        del poison
+        adjusted, count = recompute_topk_ids_sum_expert_count(
+            topk_ids, start, num_local
+        )
+        expected = torch.zeros(num_local, dtype=torch.int32, device=self.device)
+        expected[0] = 1
+        self.assertTrue(torch.equal(count, expected))
+        # Only slot (0, 0) is routed: it remaps to local expert 0, every
+        # other slot keeps the -1 sentinel.
+        expected_adj = torch.full_like(topk_ids, -1)
+        expected_adj[0, 0] = 0
+        self.assertTrue(torch.equal(adjusted, expected_adj))
+
+    def test_grid_boundary_follows_block_size(self) -> None:
+        """num_total == BLOCK -> single program; BLOCK + 1 -> two programs."""
+        topk = 4
+        block = self._block_size(topk)
+        start, num_local = 0, 8
+
+        at_boundary = torch.randint(
+            0, num_local, (block // topk, topk), dtype=torch.int32,
+            device=self.device,
+        )
+        _, count = recompute_topk_ids_sum_expert_count(
+            at_boundary, start, num_local
+        )
+        self.assertTrue(torch.equal(count, self._ref_count(at_boundary, start, num_local)))
+
+        beyond = torch.randint(
+            0, num_local, (block // topk + 1, topk), dtype=torch.int32,
+            device=self.device,
+        )
+        _, count = recompute_topk_ids_sum_expert_count(
+            beyond, start, num_local
+        )
+        self.assertTrue(torch.equal(count, self._ref_count(beyond, start, num_local)))
+
+    def test_fill_kernel_launch_count(self) -> None:
+        """Launch census: grid == 1 drops the fill; grid > 1 keeps it.
+
+        CUPTI activity tracing is unavailable in the CUDA13 dev containers,
+        so launches are counted by CUDA-graph capture (the established
+        method in this tree): every launch becomes exactly one graph node,
+        enumerated with cuGraphGetNodes/cuGraphNodeGetType.  Node type 0 is
+        CUgraphNodeTypeKernel; torch.zeros lowers to one FillFunctor kernel.
+        """
+
+        def graph_kernel_nodes(fn) -> int:
+            graph = torch.cuda.CUDAGraph(keep_graph=True)
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                fn()
+            torch.cuda.current_stream().wait_stream(side)
+            with torch.cuda.graph(graph):
+                fn()
+            handle = graph.raw_cuda_graph()
+            cuda = ctypes.CDLL("libcuda.so.1")
+            count = ctypes.c_size_t(0)
+            assert cuda.cuGraphGetNodes(
+                ctypes.c_void_p(handle), None, ctypes.byref(count)
+            ) == 0
+            nodes = (ctypes.c_void_p * count.value)()
+            assert cuda.cuGraphGetNodes(
+                ctypes.c_void_p(handle), nodes, ctypes.byref(count)
+            ) == 0
+            kernels = 0
+            for i in range(count.value):
+                node_type = ctypes.c_int(0)
+                assert cuda.cuGraphNodeGetType(
+                    ctypes.c_void_p(nodes[i]), ctypes.byref(node_type)
+                ) == 0
+                self.assertEqual(node_type.value, 0, "expected only kernel nodes")
+                kernels += 1
+            return kernels
+
+        topk = 4
+        block = self._block_size(topk)
+        num_local, start = 32, 0
+        ids_single = torch.randint(
+            0, num_local, (block // topk, topk), dtype=torch.int32,
+            device=self.device,
+        )
+        ids_multi = torch.randint(
+            0, num_local, (block * 8 // topk, topk), dtype=torch.int32,
+            device=self.device,
+        )
+        # num_total == BLOCK -> exactly the recompute kernel, no fill.
+        self.assertEqual(
+            graph_kernel_nodes(lambda: recompute_topk_ids_sum_expert_count(
+                ids_single, start, num_local)),
+            1,
+            "single-program path must launch only the recompute kernel",
+        )
+        # num_total == 8 * BLOCK -> pre-fill kernel + recompute kernel.
+        self.assertEqual(
+            graph_kernel_nodes(lambda: recompute_topk_ids_sum_expert_count(
+                ids_multi, start, num_local)),
+            2,
+            "multi-program path must keep the torch.zeros pre-fill",
         )
 
 

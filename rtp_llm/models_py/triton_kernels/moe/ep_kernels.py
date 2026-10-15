@@ -651,7 +651,29 @@ def recompute_topk_ids_triton_kernel(
     num_local_experts,
     num_total,
     BLOCK_SIZE: tl.constexpr,
+    SELF_ZERO_EXPERT_COUNT: tl.constexpr = False,
+    EXPERT_COUNT_PAD: tl.constexpr = 1,
 ):
+    if SELF_ZERO_EXPERT_COUNT:
+        # Single-program launch (grid == (1,)): initialize the counters here
+        # so no separate torch.zeros fill kernel is needed.  Race analysis:
+        # the wrapper enables this flag only when exactly one program is
+        # launched, so no other program can atomic-add before, between or
+        # after these stores.  Within this CTA, tl.debug_barrier() is
+        # __syncthreads(): every zeroing store issued before the barrier is
+        # visible to all threads of the CTA after it (CUDA memory model),
+        # and the hardware serializes same-address atomic RMWs, so each
+        # counter cell observes exactly its zero followed by its adds.
+        # Multi-program self-zeroing is NOT sound (program N's atomic_add
+        # can land before program 0's zeroing store) and keeps the
+        # host-side torch.zeros pre-fill path below.
+        expert_offsets = tl.arange(0, EXPERT_COUNT_PAD)
+        tl.store(
+            expert_count_ptr + expert_offsets,
+            tl.zeros([EXPERT_COUNT_PAD], dtype=tl.int32),
+            mask=expert_offsets < num_local_experts,
+        )
+        tl.debug_barrier()
     token_indices = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(
         0, BLOCK_SIZE
     ).to(tl.int64)
@@ -698,7 +720,6 @@ def recompute_topk_ids_sum_expert_count(
 
     # Create output tensors
     adjusted_topk_ids = torch.empty_like(topk_ids)
-    expert_count = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
 
     # Configure triton kernel parameters
     # Use smaller block size for better vectorization when topk is large
@@ -708,6 +729,18 @@ def recompute_topk_ids_sum_expert_count(
 
     # Launch recompute kernel
     grid_recompute = (triton.cdiv(num_total, BLOCK_SIZE),)
+    # Single-program launches (num_total <= BLOCK_SIZE, e.g. every decode
+    # CUDA-graph step at small batch) let the kernel zero the counters itself
+    # (see the kernel's race analysis), removing one fill kernel from the hot
+    # path per MoE layer per step.  grid == 0 (num_total == 0) and grid > 1
+    # keep the pre-zeroed torch.zeros buffer: the kernel never runs for an
+    # empty grid, and cross-program zeroing would race with atomic adds.
+    self_zero_expert_count = grid_recompute[0] == 1
+    expert_count = (
+        torch.empty(num_local_experts, device=device, dtype=torch.int32)
+        if self_zero_expert_count
+        else torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+    )
     recompute_topk_ids_triton_kernel[grid_recompute](
         topk_ids,
         adjusted_topk_ids,
@@ -716,6 +749,8 @@ def recompute_topk_ids_sum_expert_count(
         num_local_experts,
         num_total,
         BLOCK_SIZE=BLOCK_SIZE,
+        SELF_ZERO_EXPERT_COUNT=self_zero_expert_count,
+        EXPERT_COUNT_PAD=triton.next_power_of_2(max(num_local_experts, 1)),
     )
 
     return adjusted_topk_ids, expert_count
