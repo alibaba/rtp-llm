@@ -62,35 +62,87 @@ void GroupSet::initialize(size_t                               group_set_id,
                             "GroupSet tag/pool count mismatch: tags=%zu pools=%zu",
                             group_tags.size(),
                             device_pools_.size());
-    std::unordered_set<std::string> seen_tags;
-    for (size_t member_index = 0; member_index < group_tags.size(); ++member_index) {
-        const auto& tag = group_tags[member_index];
-        RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "GroupSet has duplicate member tag=%s", tag.c_str());
-        (void)topology->group(tag);
-        if (!device_pools_.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(
-                device_pools_[member_index] != nullptr, "GroupSet has null device pool for tag=%s", tag.c_str());
+    std::vector<ModuleGroupKey> keys;
+    for (auto& tag : group_tags) {
+        keys.push_back({CacheModuleId::main(), std::move(tag)});
+    }
+    initializeMembers(
+        group_set_id, {{CacheModuleId::main(), std::move(topology)}}, std::move(keys), backing_layout);
+}
+
+void GroupSet::initialize(size_t                      group_set_id,
+                          const CacheDomainConfig&    domain,
+                          std::vector<ModuleGroupKey> group_keys,
+                          BackingLayout               backing_layout) {
+    std::unordered_map<CacheModuleId, std::shared_ptr<const CacheTopology>> topologies;
+    for (const auto& key : group_keys) {
+        (void)domain.group(key);
+        RTP_LLM_CHECK_WITH_INFO(domain.isActive(key.module_id),
+                                "inactive cache module=%zu cannot enter a reusable GroupSet",
+                                key.module_id.value());
+        topologies.emplace(key.module_id, domain.module(key.module_id).topologyPtr());
+    }
+    initializeMembers(group_set_id, std::move(topologies), std::move(group_keys), backing_layout);
+}
+
+void GroupSet::initializeMembers(size_t                                                                  group_set_id,
+                                 std::unordered_map<CacheModuleId, std::shared_ptr<const CacheTopology>> topologies,
+                                 std::vector<ModuleGroupKey>                                             group_keys,
+                                 BackingLayout                                                           backing_layout) {
+    RTP_LLM_CHECK_WITH_INFO(!group_keys.empty(), "GroupSet requires at least one member");
+    RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_keys.size(),
+                            "GroupSet member/pool count mismatch: members=%zu pools=%zu",
+                            group_keys.size(),
+                            device_pools_.size());
+    std::unordered_set<ModuleGroupKey> seen;
+    std::vector<std::string>           main_tags;
+    for (size_t index = 0; index < group_keys.size(); ++index) {
+        const auto& key = group_keys[index];
+        RTP_LLM_CHECK_WITH_INFO(seen.emplace(key).second, "GroupSet duplicate member %s", key.debugString().c_str());
+        const auto it = topologies.find(key.module_id);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != topologies.end() && it->second, "GroupSet missing topology for %s", key.debugString().c_str());
+        (void)it->second->group(key.tag);
+        RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_[index],
+                                "GroupSet null device pool for %s",
+                                key.debugString().c_str());
+        if (key.module_id.isMain()) {
+            main_tags.push_back(key.tag);
         }
     }
     size_t physical_payload_bytes   = backing_layout.payload_bytes;
-    uses_physical_payload_geometry_ = physical_payload_bytes > 0;
-    if (physical_payload_bytes == 0) {
-        for (const auto& tag : group_tags) {
-            const size_t group_bytes = topology->blockSizeBytesForGroup(tag);
-            RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - physical_payload_bytes,
-                                    "GroupSet payload size overflow at tag=%s",
-                                    tag.c_str());
-            physical_payload_bytes += group_bytes;
+    const bool uses_physical_payload = physical_payload_bytes > 0;
+    if (!uses_physical_payload) {
+        for (const auto& key : group_keys) {
+            const size_t bytes = topologies.at(key.module_id)->blockSizeBytesForGroup(key.tag);
+            RTP_LLM_CHECK_WITH_INFO(bytes <= std::numeric_limits<size_t>::max() - physical_payload_bytes,
+                                    "GroupSet payload size overflow at %s",
+                                    key.debugString().c_str());
+            physical_payload_bytes += bytes;
         }
     }
     RTP_LLM_CHECK_WITH_INFO(physical_payload_bytes > 0, "GroupSet physical payload must be positive");
-
-    group_set_id_  = group_set_id;
-    topology_      = std::move(topology);
-    group_tags_    = std::move(group_tags);
+    group_set_id_                   = group_set_id;
+    topologies_                     = std::move(topologies);
+    group_keys_                     = std::move(group_keys);
+    group_tags_                     = std::move(main_tags);
     payload_bytes_ = physical_payload_bytes;
-    enable_crc_    = backing_layout.crc_enabled;
-    storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+    enable_crc_                     = backing_layout.crc_enabled;
+    storage_bytes_                  = backing_layout.storage_bytes == 0 ? physical_payload_bytes :
+                                                                          backing_layout.storage_bytes;
+    uses_physical_payload_geometry_ = uses_physical_payload;
+}
+
+bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {
+    if (blocks.size() != device_pools_.size()) {
+        return false;
+    }
+    for (size_t pool_index = 0; pool_index < blocks.size(); ++pool_index) {
+        if (!device_pools_[pool_index]->isAllocated(blocks[pool_index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {

@@ -9,10 +9,12 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cache/ModuleGroupKey.h"
 
 namespace rtp_llm {
 
 class CacheTopology;
+class CacheDomainConfig;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -100,7 +102,22 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 class KVCacheResource {
 public:
     void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
+    void initGroups(const CacheDomainConfig& domain, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
+
+    size_t                          moduleCount() const;
+    size_t                          activeModuleCount() const;
+    int                             layerNum(CacheModuleId module_id) const;
+    std::vector<ModuleGroupKey>     groupKeys() const;
+    const GroupBlockIds&            groupBlockIds(CacheModuleId module_id) const;
+    std::shared_ptr<BlockIds>       groupBlockIds(const ModuleGroupKey& key) const;
+    const BlockIds&                 blockIds(const ModuleGroupKey& key) const;
+    BlockIds&                       mutableBlockIds(const ModuleGroupKey& key) const;
+    int                             blocksNum(const ModuleGroupKey& key) const;
+    const BlockIndicesType&         blocks(const ModuleGroupKey& key) const;
+    const BlockIndicesType&         kernelBlocks(const ModuleGroupKey& key) const;
+    const std::vector<std::string>& groupTagsForLayer(CacheModuleId module_id, int local_layer_id) const;
+    const BlockIds& blockIdsForLayer(CacheModuleId module_id, int local_layer_id, std::string_view tag) const;
 
     int                     blocksNum(std::string_view tag) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
@@ -170,9 +187,14 @@ private:
     bool hasOneGroupPerLayer() const;
 
     // Beam forks share immutable layer membership; default resources keep owning views.
-    std::shared_ptr<const CacheTopology>  topology_;
-    std::vector<std::vector<std::string>> layer_group_tags_;
-    GroupBlockIds         group_block_ids;
+    struct ModuleRows {
+        std::shared_ptr<const CacheTopology>  topology;
+        std::vector<std::vector<std::string>> layer_group_tags;
+        GroupBlockIds                         groups;
+    };
+    const ModuleRows&       moduleRows(CacheModuleId module_id) const;
+    std::vector<ModuleRows> modules_{1};
+    size_t                  active_module_count_{1};
     CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
     bool                  cache_keys_are_cp_canonical_{false};

@@ -260,7 +260,7 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
     return {group_num, batch_size, max_blocks};
 }
 
-void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
+static void tpSyncSelectedModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
     }
@@ -792,6 +792,103 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.kv_cache_kernel_block_id = reorderCacheRows(wire_kernel_blocks, local_rows, true);
             inputs.kv_cache_group_types     = reorderCacheRows(wire_group_types, local_rows, false);
             inputs.kv_cache_update_mapping  = reorderCacheCopyRows(wire_copy_mapping, sorted_rows);
+        }
+    }
+}
+
+// Synchronize the other active modules without rebroadcasting token/model inputs.
+// Each module independently uses the established canonical tag ordering.
+static void tpSyncCacheModule(CacheModuleInputs& cache, const ParallelismConfig& parallelism) {
+    const auto           sorted = sortedCacheGroupRows(cache.tags);
+    std::vector<int64_t> inverse(sorted.size());
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        inverse[sorted[i]] = i;
+    }
+    std::vector<torch::Tensor> wire(4);
+    const bool                 root = parallelism.tp_rank == 0;
+    if (root) {
+        wire = {reorderCacheRows(cache.physical_blocks, sorted, true),
+                reorderCacheRows(cache.kernel_blocks, sorted, true),
+                reorderCacheRows(cache.group_types, sorted, false),
+                reorderCacheCopyRows(cache.update_mapping, inverse)};
+    }
+    auto  header = torch::zeros({21}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+    auto* h      = header.data_ptr<int64_t>();
+    if (root) {
+        h[20] = cache.tags.size();
+        for (size_t t = 0; t < wire.size(); ++t) {
+            h[t * 5] = wire[t].defined() ? wire[t].dim() : -1;
+            if (!wire[t].defined()) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(wire[t].dim() <= 3 && wire[t].scalar_type() == torch::kInt32,
+                                    "module cache payload must be int32 with at most three dimensions");
+            h[t * 5 + 1] = wire[t].is_cuda();
+            for (int d = 0; d < wire[t].dim(); ++d) {
+                h[t * 5 + 2 + d] = wire[t].size(d);
+            }
+        }
+    }
+    execBroadcastCpu({{header}, 0});
+    for (size_t t = 0; t < wire.size(); ++t) {
+        const int64_t rank = h[t * 5];
+        RTP_LLM_CHECK_WITH_INFO(rank >= -1 && rank <= 3, "invalid TP module cache tensor rank=%ld", rank);
+        if (rank < 0) {
+            wire[t] = torch::Tensor();
+            continue;
+        }
+        if (!root) {
+            std::vector<int64_t> shape;
+            for (int64_t d = 0; d < rank; ++d) {
+                shape.push_back(h[t * 5 + 2 + d]);
+            }
+            auto options = torch::TensorOptions().dtype(torch::kInt32);
+            options      = h[t * 5 + 1] ? options.device(torch::kCUDA) : options.pinned_memory(true);
+            wire[t]      = torch::empty(shape, options);
+        }
+        if (wire[t].numel()) {
+            if (wire[t].is_cuda()) {
+                execBroadcast({{wire[t]}, 0});
+            } else {
+                execBroadcastCpu({{wire[t]}, 0});
+            }
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(h[20] == static_cast<int64_t>(cache.tags.size()),
+                            "TP module cache group count differs from configured tags");
+    if (!root) {
+        cache.physical_blocks = reorderCacheRows(wire[0], inverse, true);
+        cache.kernel_blocks   = reorderCacheRows(wire[1], inverse, true);
+        cache.group_types     = reorderCacheRows(wire[2], inverse, false);
+        cache.update_mapping  = reorderCacheCopyRows(wire[3], sorted);
+    }
+}
+
+void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism) {
+    if (parallelism.tp_size <= 1) {
+        return;
+    }
+    inputs.saveSelectedCacheInputs();
+    auto header = torch::tensor({static_cast<int64_t>(inputs.module_cache_inputs.size()),
+                                 static_cast<int64_t>(inputs.cache_module_id.value())},
+                                torch::kInt64)
+                      .pin_memory();
+    execBroadcastCpu({{header}, 0});
+    const auto* h = header.data_ptr<int64_t>();
+    RTP_LLM_CHECK_WITH_INFO(h[0] == static_cast<int64_t>(inputs.module_cache_inputs.size()),
+                            "TP active cache module count differs from local domain");
+    if (h[0]) {
+        RTP_LLM_CHECK_WITH_INFO(h[1] >= 0 && h[1] < h[0], "TP selected cache module out of range");
+        inputs.setSelectedCacheInputs(CacheModuleId(h[1]), inputs.module_cache_inputs[h[1]]);
+    }
+    tpSyncSelectedModelInputs(inputs, parallelism);
+    inputs.saveSelectedCacheInputs();
+    if (inputs.skip_run) {
+        return;
+    }
+    for (size_t m = 0; m < inputs.module_cache_inputs.size(); ++m) {
+        if (m != inputs.cache_module_id.value()) {
+            tpSyncCacheModule(inputs.module_cache_inputs[m], parallelism);
         }
     }
 }

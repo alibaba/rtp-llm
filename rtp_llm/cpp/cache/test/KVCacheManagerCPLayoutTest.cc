@@ -238,6 +238,41 @@ TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheK
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
+TEST_F(KVCacheManagerCPLayoutTest, DomainModulesShareCpKeyGridButOwnIndependentRowsAndBacking) {
+    auto              main  = makeTestConfig(20, 4);
+    auto              draft = makeSimpleMhaCacheConfig(1, 20, 4, DataType::TYPE_FP16, 1, 8);
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(main, parallelism);
+    resolveManagerCpLayout(draft, parallelism);
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft, draft}, 2);
+    auto              manager = std::make_shared<KVCacheManager>(domain, false, nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_TRUE(manager->init());
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(domain);
+    auto       tokens = makeTokenIds(1, 16, 4);
+    MallocInfo info{resource, tokens};
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *tokens);
+    ASSERT_TRUE(manager->malloc(info).success);
+    std::vector<void*> addresses;
+    for (size_t m = 0; m < domain.moduleCount(); ++m) {
+        const ModuleGroupKey key{CacheModuleId(m), "default"};
+        EXPECT_EQ(resource->blocksNum(0, key), 2);
+        const auto buffers = manager->convertIndexToBuffer(key.module_id, 0, key.tag, resource->blocks(0, key).front());
+        ASSERT_FALSE(buffers.empty());
+        addresses.push_back(buffers.front().addr);
+        // Each rank stores 4 tokens per block; the shared key stride spans both CP ranks.
+        EXPECT_EQ(domain.module(key.module_id).group("default").cacheKeyTokenStride(), 8u);
+    }
+    EXPECT_NE(addresses[0], addresses[1]);
+    EXPECT_NE(addresses[1], addresses[2]);
+    EXPECT_EQ(resource->cacheResource().activeModuleCount(), 2u);
+    EXPECT_EQ(resource->cacheKeys(0).size(), 4u);
+}
+
 // malloc() uses the immutable global request snapshot and cache-owned storage mapping.
 // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
 // A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).

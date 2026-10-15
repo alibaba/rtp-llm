@@ -44,6 +44,16 @@ public:
                    const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
                    bool                               use_device_malloc_block_pool = false);
+    KVCacheManager(const CacheDomainConfig&           config,
+                   bool                               warmup                       = false,
+                   const kmonitor::MetricsReporterPtr metrics_reporter             = nullptr,
+                   const KVCacheConfig&               kv_cache_config              = KVCacheConfig{},
+                   const ParallelismConfig&           parallelism_config           = ParallelismConfig{},
+                   const RuntimeConfig&               runtime_config               = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
+                   bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -58,6 +68,9 @@ public:
     }
 
     const CacheConfig& cacheConfig() const;
+    const CacheDomainConfig& cacheDomainConfig() const {
+        return domain_;
+    }
     const CacheConfig& getMTPModuleCacheConfig(CacheModuleId module_id) const;
 
     // 显存管理和缓存分配
@@ -99,6 +112,9 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopyForForward(CacheModuleId                   module_id,
+                                  const torch::Tensor&            copy_mapping,
+                                  const std::vector<std::string>& group_tags);
     void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
@@ -126,7 +142,17 @@ public:
 
     // Resolve an already selected logical page to this decoder's physical
     // destination. Missing blocks retain a region with null buffer.addr.
-    std::vector<CacheBlockRegion> queryDecodeCacheBlockRegions(int                     global_layer_id,
+    std::vector<CacheBlockRegion> queryDecodeCacheBlockRegions(CacheModuleId           module_id,
+                                                               int                     local_layer_id,
+                                                               const std::string&      tag,
+                                                               size_t                  key_count,
+                                                               size_t                  logical_page,
+                                                               int                     producer_cp_size,
+                                                               int                     decode_peer_count,
+                                                               int                     peer_index,
+                                                               bool                    opaque_wire,
+                                                               const BlockIndicesType& destination_blocks) const;
+    std::vector<CacheBlockRegion> queryDecodeCacheBlockRegions(int                     local_layer_id,
                                                                const std::string&      tag,
                                                                size_t                  key_count,
                                                                size_t                  logical_page,
@@ -137,6 +163,7 @@ public:
                                                                const BlockIndicesType& destination_blocks) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
+    GroupedCacheLayerLayout allLayerCacheBase(CacheModuleId module_id) const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
@@ -151,8 +178,6 @@ public:
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
-    void        refreshKVCacheInfoSnapshot();
-    KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     bool needsPrefillHitSnapshot() const {
         return prefill_cache_hit_metrics_reporter_ != nullptr;
     }
@@ -187,6 +212,7 @@ private:
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
+    CacheDomainConfig          domain_;
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
 

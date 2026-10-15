@@ -31,6 +31,8 @@
 
 namespace py = pybind11;
 
+// The production ComputeInit entry point declares this registration function
+// locally too; ExecOps.h exposes runtime operations without the pybind entry.
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
 }
@@ -508,6 +510,7 @@ struct Scenario {
     bool                             install_final_layernorm{false};
     bool                             install_lm_head{false};
     bool                             increment_request_ids_each_forward{false};
+    std::vector<CacheConfig>         draft_configs;
 };
 
 Scenario makeMultiTagScenario() {
@@ -546,9 +549,6 @@ Scenario makeMicroBatchScenario() {
 Scenario makeModuleEquivalenceScenario(bool with_mtp) {
     auto main_config  = makeCacheConfig({{"default", 2, 16}});
     auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"default", 2, 32}}));
-    if (with_mtp) {
-        main_config.mtp_sub_configs.push_back(draft_config);
-    }
     const auto& selected_config = with_mtp ? *draft_config : main_config;
     auto        layout          = makeLayout(selected_config);
     auto        inputs          = makeInputs(/*input_lengths=*/{4},
@@ -564,6 +564,7 @@ Scenario makeModuleEquivalenceScenario(bool with_mtp) {
         std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     if (with_mtp) {
         scenario.module_id = CacheModuleId(1);
+        scenario.draft_configs.push_back(*draft_config);
     }
     return scenario;
 }
@@ -658,7 +659,7 @@ Scenario makeMtpScenario() {
     auto main_config  = makeCacheConfig({{"main", 4, 16}});
     auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
     auto layout       = makeLayout(*draft_config);
-    main_config.mtp_sub_configs.push_back(draft_config);
+    main_config.seq_size_per_block = draft_config->seq_size_per_block;
     auto     inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{401},
                              /*cache_keys=*/{4101, 4102},
@@ -671,20 +672,16 @@ Scenario makeMtpScenario() {
     Scenario scenario{
         std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.module_id = CacheModuleId(1);
+    scenario.draft_configs.push_back(*draft_config);
     return scenario;
 }
 
 Scenario makeScenario(const std::string& name) {
-    if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
+    if (name == "mtp_local_tags" || name == "mtp_extra_payload" || name == "mtp_missing_tag"
         || name == "single_model_extra_payload") {
-        const bool single_group = name == "single_model_extra_payload";
         auto       main_config  = makeCacheConfig({{"unused", 2, 16}, {"draft", 2, 32}, {"other", 2, 24}});
         auto       draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
-        if (!single_group) {
-            draft_config->setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
-        }
         auto layout = makeLayout(*draft_config);
-        main_config.mtp_sub_configs.push_back(draft_config);
         auto inputs = makeInputs(/*input_lengths=*/{4},
                                  /*request_ids=*/{401},
                                  /*cache_keys=*/{4101, 4102},
@@ -694,18 +691,21 @@ Scenario makeScenario(const std::string& name) {
                                  /*block_table_width=*/2,
                                  /*global_tokens_per_block=*/2,
                                  /*global_stride_bytes=*/16);
-        if (name == "mtp_placeholders_extra_payload") {
+        if (name == "mtp_extra_payload") {
             inputs.kv_cache_group_tags.push_back("target_only");
             inputs.kv_cache_block_id =
                 torch::cat({inputs.kv_cache_block_id, pinnedTensor({7, 0}, {1, 1, 2})}, 0).pin_memory();
-        } else if (name == "mtp_missing_placeholder") {
-            inputs.kv_cache_group_tags = {"other", "draft"};
-            inputs.kv_cache_block_id   = inputs.kv_cache_block_id.narrow(0, 0, 2);
+        } else if (name == "mtp_missing_tag") {
+            inputs.kv_cache_group_tags = {"other", "unused"};
+            inputs.kv_cache_block_id =
+                torch::cat({inputs.kv_cache_block_id.narrow(0, 0, 1), inputs.kv_cache_block_id.narrow(0, 2, 1)}, 0)
+                    .pin_memory();
         }
         inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
         Scenario scenario{
             std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
         scenario.module_id = CacheModuleId(1);
+        scenario.draft_configs.push_back(*draft_config);
         return scenario;
     }
     if (name == "micro_batch_multi_tag") {
@@ -779,7 +779,7 @@ Scenario makeScenario(const std::string& name) {
     if (name == "mtp_equivalence") {
         return makeModuleEquivalenceScenario(/*with_mtp=*/true);
     }
-    if (name == "mtp_sub_config") {
+    if (name == "mtp_module_config") {
         return makeMtpScenario();
     }
     if (name == "prefill_only_pd") {
@@ -1128,7 +1128,9 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     auto                cache_store = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
     const auto&         metrics_reporter = fake_metrics_reporter.reporter();
-    auto                manager          = std::make_shared<KVCacheManager>(scenario.manager_config,
+    std::vector<CacheConfig> modules{scenario.manager_config};
+    modules.insert(modules.end(), scenario.draft_configs.begin(), scenario.draft_configs.end());
+    auto manager = std::make_shared<KVCacheManager>(CacheDomainConfig(std::move(modules)),
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -1574,12 +1576,81 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+#if USING_CUDA
+py::list runDomainTpRound(int rank) {
+    TORCH_CHECK(rank == 0 || rank == 1, "GPU TP fixture requires rank 0 or 1");
+    initRuntime(static_cast<size_t>(rank), false, false, MlaOpsType::AUTO);
+    GptModelInputs inputs;
+    inputs.module_cache_inputs.resize(2);
+    for (size_t module = 0; module < 2; ++module) {
+        auto& cache = inputs.module_cache_inputs[module];
+        cache.tags =
+            rank == 0 ? std::vector<std::string>{"shared", "other"} : std::vector<std::string>{"other", "shared"};
+        cache.seq_size_per_block        = 4;
+        cache.kernel_seq_size_per_block = module == 0 ? 4 : 2;
+    }
+    inputs.setSelectedCacheInputs(CacheModuleId::main(), inputs.module_cache_inputs[0]);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.tp_rank = rank;
+    py::list rounds;
+    for (int round = 0; round < 3; ++round) {
+        const CacheModuleId selected(round == 1 ? 1 : 0);
+        if (rank == 0) {
+            for (size_t module = 0; module < 2; ++module) {
+                auto&         cache   = inputs.module_cache_inputs[module];
+                const int64_t width   = module == 0 ? 2 : 3;
+                const int     offset  = round * 100 + static_cast<int>(module) * 20;
+                const auto    options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                cache.physical_blocks = (torch::arange(2 * width, options) + offset).reshape({2, 1, width});
+                cache.kernel_blocks   = (torch::arange(4 * width, options) + offset + 10).reshape({2, 1, 2 * width});
+                cache.group_types =
+                    pinnedTensor(module == 0 ? std::vector<int32_t>{1, 0} : std::vector<int32_t>{0, 1}, {2});
+                cache.update_mapping = pinnedTensor({0, 7 + offset, 9 + offset, 1, 11 + offset, 13 + offset}, {2, 3});
+            }
+            // Rebind after replacing the selected module's row: the synchronizer
+            // saves the selected execution view before publishing every module.
+            inputs.setSelectedCacheInputs(selected, inputs.module_cache_inputs[selected.value()]);
+            inputs.combo_tokens     = pinnedTensor({7 + round}, {1});
+            inputs.input_lengths    = pinnedTensor({1}, {1});
+            inputs.sequence_lengths = pinnedTensor({4 + round}, {1});
+        }
+        tpSyncModelInputs(inputs, parallelism);
+        py::dict result;
+        result["selected_module"]   = inputs.cache_module_id.value();
+        result["selected_physical"] = inputs.kv_cache_block_id.clone();
+        result["selected_kernel"]   = inputs.kv_cache_kernel_block_id.clone();
+        result["tokens"]            = inputs.combo_tokens.clone();
+        result["lengths"]           = inputs.sequence_lengths.clone();
+        py::list modules;
+        for (const auto& cache : inputs.module_cache_inputs) {
+            py::dict row;
+            row["tags"]          = cache.tags;
+            row["physical"]      = cache.physical_blocks.clone();
+            row["kernel"]        = cache.kernel_blocks.clone();
+            row["types"]         = cache.group_types.clone();
+            row["mapping"]       = cache.update_mapping.clone();
+            row["kernel_tokens"] = cache.kernel_seq_size_per_block;
+            modules.append(std::move(row));
+        }
+        result["modules"] = std::move(modules);
+        rounds.append(std::move(result));
+    }
+    return rounds;
+}
+#endif
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+    // Register communication on this SO so tpSyncModelInputs shares the callback
+    // and CPU broadcaster instances; importing production ops would duplicate types.
     rtp_llm::registerExecCtxOps(m);
+#if USING_CUDA
+    m.def("run_domain_tp_round", &rtp_llm::test::runDomainTpRound, py::arg("rank"));
+#endif
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);

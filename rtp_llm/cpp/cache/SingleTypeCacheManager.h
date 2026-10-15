@@ -92,6 +92,9 @@ public:
     using EvictCallback = std::function<size_t(size_t)>;
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
+    ModuleGroupKey          key() const {
+        return {module_id_, tag()};
+    }
     const GroupBase&        config() const;
     int                     group_id() const;
     const CacheGroupPolicy& policy() const;
@@ -136,6 +139,7 @@ protected:
 
 private:
     friend class CoordinatorCacheManager;
+    CacheModuleId module_id_ = CacheModuleId::main();
     void setEvictCallback(EvictCallback callback);
 };
 

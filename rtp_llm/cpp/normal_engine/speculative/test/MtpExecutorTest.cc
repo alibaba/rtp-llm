@@ -724,7 +724,7 @@ public:
     }
 
     MtpExecutorComponents createMtpExecutorComponents(const MtpExecutorTestConfig& test_config,
-                                                      const CacheConfig*           cache_config_override = nullptr) {
+                                                      const CacheDomainConfig*     cache_config_override = nullptr) {
         CustomConfig               config;
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
@@ -783,13 +783,13 @@ public:
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
-        auto           cache_config       = CacheConfigCreator::createConfig(score_cache_model_config,
-                                                             params.parallelism_config,
-                                                             test_kv_cache_config,
-                                                             cache_sp_config,
-                                                             &propose_cache_model_config,
-                                                             /*is_mtp=*/true,
-                                                             /*is_eagle=*/false);
+        auto           cache_config       = CacheConfigCreator::createDomainConfig(score_cache_model_config,
+                                                                   params.parallelism_config,
+                                                                   test_kv_cache_config,
+                                                                   cache_sp_config,
+                                                                   &propose_cache_model_config,
+                                                                   /*is_mtp=*/true,
+                                                                   /*is_eagle=*/false);
         const uint32_t local_block_num    = CacheConfigCreator::computeLocalBlockNum(cache_config,
                                                                                   score_cache_model_config,
                                                                                   params.runtime_config,
@@ -1143,28 +1143,31 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
-    target.finalizeBlockNums(8, RuntimeConfig{});
+    CacheDomainConfig domain(std::vector<CacheConfig>{target, draft});
+    domain.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
-        EXPECT_TRUE(target.mtp_sub_configs[0]->layerIdsForGroup("linear").empty());
-        EXPECT_EQ(target.mtp_sub_configs[0]->groupNums(), 2);  // groups, including placeholder
+        EXPECT_EQ(domain.module(CacheModuleId(1)).groupTags(), (std::vector<std::string>{"full"}));
     }
 
-    auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
+    auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &domain);
     auto*        executor           = components.executor.get();
     const size_t target_stride      = multiple_groups ? 0 : 48;
     const size_t target_scale       = multiple_groups ? 0 : 12;
-    const size_t draft_stride       = multiple_groups ? 0 : 16;
-    const size_t draft_scale        = multiple_groups ? 0 : 4;
+    const size_t draft_stride       = draft_has_linear ? 0 : 16;
+    const size_t draft_scale        = draft_has_linear ? 0 : 4;
     bool         saw_target_prepare = false;
     bool         saw_draft_prepare  = false;
     components.fake_target_model->setInputObserver([&](const GptModelInputs& inputs) {
         saw_target_prepare = true;
+        EXPECT_EQ(inputs.cache_module_id, CacheModuleId::main());
+        EXPECT_EQ(inputs.kv_cache_block_id.flatten()[0].item<int>(), 11);
         EXPECT_EQ(inputs.kv_block_stride_bytes, target_stride);
         EXPECT_EQ(inputs.kv_scale_stride_bytes, target_scale);
     });
     components.fake_draft_prefill_model->setInputObserver([&](const GptModelInputs& inputs) {
         saw_draft_prepare = true;
+        EXPECT_EQ(inputs.cache_module_id, CacheModuleId(1));
+        EXPECT_EQ(inputs.kv_cache_block_id.flatten()[0].item<int>(), 22);
         EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
         EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
     });
@@ -1177,6 +1180,19 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     input.input_lengths         = torch::ones({1}, cuda_i32);
     input.prefix_lengths        = torch::ones({1}, cuda_i32);
     input.sequence_lengths      = torch::full({1}, 2, cuda_i32);
+    for (size_t m = 0; m < domain.activeModuleCount(); ++m) {
+        const auto&       leaf = domain.module(CacheModuleId(m));
+        CacheModuleInputs cache;
+        cache.tags               = leaf.groupTags();
+        cache.physical_blocks    = torch::full({static_cast<int64_t>(cache.tags.size()), 1, 2}, 11 + 11 * m, cuda_i32);
+        cache.kernel_blocks      = cache.physical_blocks.clone();
+        cache.group_types        = torch::zeros({static_cast<int64_t>(cache.tags.size())}, torch::kInt32);
+        cache.block_stride_bytes = m == 0 ? target_stride : draft_stride;
+        cache.scale_stride_bytes = m == 0 ? target_scale : draft_scale;
+        cache.seq_size_per_block = leaf.seq_size_per_block;
+        input.module_cache_inputs.push_back(cache);
+    }
+    input.setSelectedCacheInputs(CacheModuleId::main(), input.module_cache_inputs[0]);
     input.kv_block_stride_bytes = 999;
     input.kv_scale_stride_bytes = 777;
     if (executor->useAsyncPrepare()) {
@@ -1197,6 +1213,8 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     bool saw_proposal = false;
     components.fake_draft_model->setInputObserver([&](const GptModelInputs& inputs) {
         saw_proposal = true;
+        EXPECT_EQ(inputs.cache_module_id, CacheModuleId(1));
+        EXPECT_EQ(inputs.kv_cache_block_id.flatten()[0].item<int>(), 22);
         EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
         EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
     });
@@ -2882,6 +2900,19 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     model_input.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     model_input.last_hidden_states = torch::tensor({0.1f, 0.2f, 1.1f, 1.2f}, torch::kFloat32).reshape({2, 2});
     model_input.combo_position_ids = torch::tensor({5, 5, 5, 7, 7, 7}, torch::kInt32);
+
+    // This direct executor fixture bypasses gather, so seed the same active-module metadata.
+    const auto& domain = components.executor->cache_manager_->cacheDomainConfig();
+    for (size_t m = 0; m < domain.activeModuleCount(); ++m) {
+        const auto&       leaf = domain.module(CacheModuleId(m));
+        CacheModuleInputs cache;
+        cache.tags               = leaf.groupTags();
+        cache.block_stride_bytes = leaf.groupNums() == 1 ? leaf.groups().front().kvBlockStrideBytes() : 0;
+        cache.scale_stride_bytes = leaf.groupNums() == 1 ? leaf.groups().front().kvScaleStrideBytes() : 0;
+        cache.seq_size_per_block = leaf.seq_size_per_block;
+        model_input.module_cache_inputs.push_back(cache);
+    }
+    model_input.setSelectedCacheInputs(CacheModuleId::main(), model_input.module_cache_inputs.front());
 
     auto makeDraftInput = [](std::vector<int> combo_tokens,
                              std::vector<int> sequence_lengths,

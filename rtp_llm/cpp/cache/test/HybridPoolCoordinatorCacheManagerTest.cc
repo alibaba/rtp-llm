@@ -211,8 +211,8 @@ protected:
                 for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate; ++key_index) {
                     const auto stored = state_->groups_by_key.find((*request.keys)[key_index]);
                     for (const auto& handle : request.handles[key_index]) {
-                        const auto& tag = handle.tag;
-                        if (isHandleRequired(key_index, candidate, handle.tag)
+                        const auto& tag = handle.key.tag;
+                        if (isHandleRequired(key_index, candidate, handle.key)
                             && (stored == state_->groups_by_key.end() || !stored->second.count(tag))) {
                             found = false;
                             break;
@@ -236,7 +236,7 @@ protected:
         for (const auto& handles : request.handles) {
             group_tags.emplace_back();
             for (const auto& handle : handles) {
-                group_tags.back().push_back(handle.tag);
+                group_tags.back().push_back(handle.key.tag);
             }
         }
         {
@@ -252,7 +252,7 @@ protected:
             for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
                 auto& stored = state_->groups_by_key[(*request.keys)[key_index]];
                 for (const auto& handle : request.handles[key_index]) {
-                    const auto& tag = handle.tag;
+                    const auto& tag = handle.key.tag;
                     stored.insert(tag);
                     group_tags[key_index].push_back(tag);
                 }
@@ -1086,8 +1086,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, PoolMetricsSnapshotsReportReserveB
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
-    EXPECT_EQ("linear", snapshots[0].pool_name);
-    EXPECT_EQ("full", snapshots[1].pool_name);
+    EXPECT_EQ("module=0 tag=linear", snapshots[0].pool_name);
+    EXPECT_EQ("module=0 tag=full", snapshots[1].pool_name);
     EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
     EXPECT_EQ(snapshots[1].used_blocks, snapshots[1].total_blocks - snapshots[1].free_blocks);
 

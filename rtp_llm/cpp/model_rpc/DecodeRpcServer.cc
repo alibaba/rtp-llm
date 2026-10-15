@@ -138,12 +138,16 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
 }
 
 std::string
-DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id) {
-    return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
+DecodeRpcServer::makeMTPModuleCacheKey(CacheModuleId module_id, const std::string& token_id_str, size_t layer_id) {
+    return makeCacheKey(module_id, token_id_str, layer_id);
 }
 
-std::string DecodeRpcServer::makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag) {
-    return std::to_string(request_id) + "-" + std::to_string(layer_id) + "-tag-" + tag;
+std::string DecodeRpcServer::makeTaggedRequestKey(int64_t            request_id,
+                                                  CacheModuleId      module_id,
+                                                  size_t             layer_id,
+                                                  const std::string& tag) {
+    return std::to_string(request_id) + "-module-" + std::to_string(module_id.value()) + "-" + std::to_string(layer_id)
+           + "-tag-" + tag;
 }
 
 std::vector<DecodeRpcServer::MTPModuleLoadPlan>
@@ -154,7 +158,7 @@ DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propo
     }
 
     const auto* active_module = propose_params->mtp_model_params_->front().get();
-    return {{/*module_index=*/0, active_module, active_module->model_id}};
+    return {{CacheModuleId(1), active_module}};
 }
 
 ErrorInfo DecodeRpcServer::validateRemoteLoadTopology(size_t worker_size, size_t peer_size) {
@@ -676,7 +680,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
-    load_context.groupBlockIds().validate();
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -696,9 +699,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    if (load_context.groupBlockIds().size() != 0) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        appendGroupBlockIds(load_context, topology, request);
+    if (load_context.moduleCount() != 0) {
+        const auto& domain = engine_->resourceContext().cache_manager->cacheDomainConfig();
+        appendGroupBlockIds(load_context, domain, request);
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
@@ -708,7 +711,6 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                                    int                             index,
                                                                    const std::vector<std::string>& peer_addrs) const {
-    load_context.groupBlockIds().validate();
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -731,9 +733,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         request.add_cache_keys(cache_key);
     }
     // Prefer per-group block ids if available (hybrid KV cache).
-    if (load_context.groupBlockIds().size() != 0) {
-        const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        appendGroupBlockIds(load_context, topology, request);
+    if (load_context.moduleCount() != 0) {
+        const auto& domain = engine_->resourceContext().cache_manager->cacheDomainConfig();
+        appendGroupBlockIds(load_context, domain, request);
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
@@ -745,7 +747,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
     auto*                              generate_stream = decode_context.getStream().get();
     auto&                              cache_keys      = generate_stream->cacheKeys(0);
     const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    std::vector<GroupBlockIds>         group_block_ids;
+    for (size_t module = 0; module < cache_resource.activeModuleCount(); ++module) {
+        group_block_ids.push_back(cache_resource.groupBlockIds(CacheModuleId(module)));
+    }
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -801,7 +806,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
                                                                       LoadKVCacheContext&    load_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    validateGroupTags(load_context, engine_->resourceContext().cache_manager->cacheConfig().topology());
+    validateGroupTags(load_context, engine_->resourceContext().cache_manager->cacheDomainConfig());
     int64_t load_cache_begin_time_us = currentTimeUs();
 
     struct WorkerRpcContext {
@@ -986,14 +991,24 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
     auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    auto        layer_num     = maga_init_params_.model_config_.num_layers;
-    validateGroupTags(load_context, cache_config.topology());
+    const auto& domain        = cache_manager->cacheDomainConfig();
+    validateGroupTags(load_context, domain);
+    if (domain.activeModuleCount() > 1) {
+        const auto plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
+        if (plan.size() + 1 != domain.activeModuleCount()) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active draft runtime does not match cache domain"), 0};
+        }
+        for (const auto& module : plan) {
+            RTP_LLM_CHECK_WITH_INFO(domain.module(module.module_id).layer_num
+                                        == module.engine_init_params->model_config_.num_layers,
+                                    "RPC cache module=%zu layer count does not match draft runtime",
+                                    module.module_id.value());
+        }
+    }
 
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool use_hybrid = cache_config.groupNums() > 1;
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -1007,23 +1022,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             debug_infos.push_back(buffer == nullptr ? "null" : buffer->debugInfo());
         }
         return debug_infos;
-    };
-    auto layerGroupTags = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
-        std::vector<std::string> layer_tags;
-        if (use_hybrid) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id < cfg.topology().layers().size(),
-                                    "hybrid cache layer %zu missing layer group membership, layers=%zu",
-                                    layer_id,
-                                    cfg.topology().layers().size());
-            for (const auto& group : cfg.topology().groupsForLayer(static_cast<int>(layer_id))) {
-                layer_tags.push_back(group.get().tag);
-            }
-            RTP_LLM_CHECK_WITH_INFO(
-                !layer_tags.empty(), "hybrid cache layer %zu has empty layer group membership", layer_id);
-        } else {
-            layer_tags.push_back(cfg.topology().groups().front().tag);
-        }
-        return layer_tags;
     };
     // Main and draft choose content with the same transfer policy. Cache maps
     // selected logical pages to local slots, key ranges, and physical parts.
@@ -1049,23 +1047,22 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             ++counts[key];
         }
     };
-    // Model selection and local/global layer mapping remain with the callers.
+    // Every address remains module-local through physical region lookup.
     // Every main and draft group uses the same peer, obligation and wire assembly.
     auto assembleGroupForPeer = [&](const CacheConfig& cfg,
                                     const std::string& tag,
                                     size_t             local_layer_id,
-                                    size_t             global_layer_id,
-                                    size_t             model_id,
+                                    CacheModuleId      module_id,
                                     int                peer_idx,
                                     const std::string& peer_addr) -> std::shared_ptr<RequestBlockBuffer> {
         const bool  cfg_use_hybrid = cfg.groupNums() > 1;
-        const auto& block_ids      = load_context.blockIdsForGroup(tag).blocks();
+        const auto& block_ids      = load_context.blockIdsForGroup(module_id, tag).blocks();
         const auto  load_plan      = groupLoadPlan(cfg, cfg_use_hybrid, tag, block_ids.size(), peer_idx);
         if (!load_plan.peer_participates) {
             return nullptr;
         }
 
-        auto request_key = makeTaggedRequestKey(load_context.request_id, local_layer_id, tag);
+        auto request_key = makeTaggedRequestKey(load_context.request_id, module_id, local_layer_id, tag);
         auto load_layer_cache =
             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
         const bool use_kv_key_prefix = cfg.use_mla || cfg.use_opaque_kv_cache_store || cfg_use_hybrid;
@@ -1078,7 +1075,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                           peer_idx)) {
                 continue;
             }
-            const auto regions = cache_manager->queryDecodeCacheBlockRegions(static_cast<int>(global_layer_id),
+            const auto regions = cache_manager->queryDecodeCacheBlockRegions(module_id,
+                                                                             static_cast<int>(local_layer_id),
                                                                              tag,
                                                                              load_context.cache_keys.size(),
                                                                              logical_page,
@@ -1096,7 +1094,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             const size_t cache_key_index = regions.front().key_index;
             const auto   block_id        = block_ids[block_pos];
             const auto   cache_key =
-                makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), local_layer_id, tag);
+                makeCacheKey(module_id, std::to_string(load_context.cache_keys[cache_key_index]), local_layer_id, tag);
             cacheTransferPartPrefix(use_kv_key_prefix, 0, regions.size());
             for (const auto& region : regions) {
                 const std::string wire_key =
@@ -1106,13 +1104,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 RTP_LLM_CHECK_WITH_INFO(part.addr != nullptr, "null block addr for key=%s", wire_key.c_str());
                 RTP_LLM_CHECK_WITH_INFO(part.size_bytes > 0, "zero block size for key=%s", wire_key.c_str());
                 RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_READ_BLOCK key=%s request_id=%ld tag=%s layer=%zu "
-                                  "model_id=%zu peer_idx=%d peer=%s cp_size=%d block_pos=%zu key_index=%zu "
+                                  "module_id=%zu peer_idx=%d peer=%s cp_size=%d block_pos=%zu key_index=%zu "
                                   "block_id=%d addr=%p len=%zu",
                                   wire_key.c_str(),
                                   static_cast<long>(load_context.request_id),
                                   tag.c_str(),
                                   local_layer_id,
-                                  model_id,
+                                  module_id.value(),
                                   peer_idx,
                                   peer_addr.c_str(),
                                   load_context.prefill_cp_size,
@@ -1133,77 +1131,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
-        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-            // Some typed-region cache layouts let one logical layer own
-            // multiple groups. Iterate every group the layer owns; other
-            // layouts reduce to the legacy single-group-per-layer behaviour.
-            std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
-
-            for (const auto& tag : layer_tags) {
-                auto load_layer_cache = assembleGroupForPeer(
-                    cache_config, tag, layer_id, layer_id, maga_init_params_.model_id, i, peer_addr);
-                if (load_layer_cache) {
-                    layer_caches.push_back(std::move(load_layer_cache));
-                }
-            }
-        }
-
-        if (engine_->isMTPEagle()) {
-            if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
-                && !propose_maga_init_params_->mtp_model_params_->empty()) {
-                const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
-                if (mtp_load_plan.empty()) {
-                    return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
-                }
-
-                for (const auto& module_plan : mtp_load_plan) {
-                    const size_t            mtp_model_id           = module_plan.module_index;
-                    const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
-
-                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(CacheModuleId(1 + mtp_model_id));
-                    const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
-
-                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
-                                            "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
-                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
-                                                + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-
-                    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                        const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
-
-                        // Same multi-group iteration as the main path.
-                        std::vector<std::string> mtp_layer_tags =
-                            layerGroupTags(mtp_cache_cfg, mtp_use_hybrid, layer_id);
-
-                        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-                            static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
-                            static_cast<int>(mtp_model_id),
-                            static_cast<uint32_t>(layer_num),
-                            static_cast<int>(layer_id));
-                        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                                "invalid decode MTP global layer: main=%ld module=%zu "
-                                                "module_layers=%zu local=%zu",
-                                                maga_init_params_.model_config_.num_layers,
-                                                mtp_model_id,
-                                                layer_num,
-                                                layer_id);
-
-                        for (const auto& tag : mtp_layer_tags) {
-                            auto load_layer_cache = assembleGroupForPeer(mtp_cache_cfg,
-                                                                         tag,
-                                                                         layer_id,
-                                                                         global_layer_id,
-                                                                         module_plan.cache_model_id,
-                                                                         i,
-                                                                         peer_addr);
-                            if (load_layer_cache) {
-                                layer_caches.push_back(std::move(load_layer_cache));
-                            }
-                        }
+        for (size_t module = 0; module < domain.activeModuleCount(); ++module) {
+            const CacheModuleId module_id(module);
+            const auto&         cfg = domain.module(module_id);
+            for (size_t layer = 0; layer < cfg.layer_num; ++layer) {
+                for (const auto& group : cfg.topology().groupsForLayer(static_cast<int>(layer))) {
+                    auto buffer = assembleGroupForPeer(cfg, group.get().tag, layer, module_id, i, peer_addr);
+                    if (buffer) {
+                        layer_caches.push_back(std::move(buffer));
                     }
                 }
-            } else {
-                return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
             }
         }
 
@@ -1274,9 +1211,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               domain          = engine_->resourceContext().cache_manager->cacheDomainConfig();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, domain);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1300,48 +1236,65 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-void DecodeRpcServer::validateGroupTags(const LoadKVCacheContext& context, const CacheTopology& topology) {
-    const auto& blocks = context.groupBlockIds();
-    blocks.validate();
-    RTP_LLM_CHECK_WITH_INFO(blocks.size() == topology.groupTags().size(),
-                            "RPC cache tag set does not match local topology");
-    for (const auto& entry : blocks.tag_to_index_) {
-        (void)topology.group(entry.first);
-    }
-}
-
-void DecodeRpcServer::appendGroupBlockIds(const LoadKVCacheContext& context,
-                                          const CacheTopology&      topology,
-                                          BroadcastLoadRequestPB&   request) {
-    validateGroupTags(context, topology);
-    const auto& blocks = context.groupBlockIds();
-    const auto  tags   = blocks.orderedTags();
-    for (size_t i = 0; i < tags.size(); ++i) {
-        auto* row = request.add_tagged_group_block_ids();
-        row->set_tag(tags[i]);
-        for (const auto block_id : blocks.rows_[i]->blocks()) {
-            row->add_block_ids(block_id);
+void DecodeRpcServer::validateGroupTags(const LoadKVCacheContext& context, const CacheDomainConfig& domain) {
+    RTP_LLM_CHECK_WITH_INFO(context.moduleCount() == domain.activeModuleCount(),
+                            "RPC cache module count=%zu does not match active modules=%zu",
+                            context.moduleCount(),
+                            domain.activeModuleCount());
+    for (size_t module = 0; module < context.moduleCount(); ++module) {
+        const CacheModuleId module_id(module);
+        const auto&         blocks = context.groupBlockIds(module_id);
+        blocks.validate();
+        RTP_LLM_CHECK_WITH_INFO(blocks.size() == domain.module(module_id).groupTags().size(),
+                                "RPC cache module=%zu tag set does not match local topology",
+                                module);
+        for (const auto& entry : blocks.tag_to_index_) {
+            (void)domain.group({module_id, entry.first});
         }
     }
 }
 
-GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                   const CacheTopology&          topology) {
-    GroupBlockIds blocks;
+void DecodeRpcServer::appendGroupBlockIds(const LoadKVCacheContext& context,
+                                          const CacheDomainConfig&  domain,
+                                          BroadcastLoadRequestPB&   request) {
+    validateGroupTags(context, domain);
+    for (size_t module = 0; module < context.moduleCount(); ++module) {
+        const auto& blocks = context.groupBlockIds(CacheModuleId(module));
+        const auto  tags   = blocks.orderedTags();
+        for (size_t i = 0; i < tags.size(); ++i) {
+            auto* row = request.add_tagged_group_block_ids();
+            row->set_module_id(module);
+            row->set_tag(tags[i]);
+            for (const auto block_id : blocks.rows_[i]->blocks()) {
+                row->add_block_ids(block_id);
+            }
+        }
+    }
+}
+
+std::vector<GroupBlockIds> DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                                                const CacheDomainConfig&      domain) {
+    std::vector<GroupBlockIds> modules(domain.activeModuleCount());
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        RTP_LLM_CHECK_WITH_INFO(!tagged_row.tag().empty(), "RPC cache tag must not be empty");
-        (void)topology.group(tagged_row.tag());
+        const CacheModuleId module_id(tagged_row.module_id());
+        RTP_LLM_CHECK_WITH_INFO(domain.isActive(module_id), "RPC cache module=%zu is inactive", module_id.value());
+        (void)domain.group({module_id, tagged_row.tag()});
+        auto& blocks = modules[module_id.value()];
         RTP_LLM_CHECK_WITH_INFO(blocks.tag_to_index_.emplace(tagged_row.tag(), blocks.rows_.size()).second,
-                                "duplicate RPC cache tag=%s",
+                                "duplicate RPC cache module=%zu tag=%s",
+                                module_id.value(),
                                 tagged_row.tag().c_str());
         auto holder = std::make_shared<BlockIds>();
         holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
         blocks.rows_.push_back(std::move(holder));
     }
-    blocks.validate();
-    RTP_LLM_CHECK_WITH_INFO(blocks.size() == topology.groupTags().size(),
-                            "RPC cache tag set does not match local topology");
-    return blocks;
+    for (size_t module = 0; module < modules.size(); ++module) {
+        modules[module].validate();
+        RTP_LLM_CHECK_WITH_INFO(modules[module].size() == domain.module(CacheModuleId(module)).groupTags().size(),
+                                "RPC cache module=%zu tag set does not match local topology",
+                                module);
+    }
+    return modules;
 }
 
 // Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its

@@ -596,7 +596,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
                                                   &propose_params_->getEngineInitParams().model_config_ :
                                                   nullptr;
-    auto               config               = CacheConfigCreator::createConfig(
+    auto               config               = CacheConfigCreator::createDomainConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);

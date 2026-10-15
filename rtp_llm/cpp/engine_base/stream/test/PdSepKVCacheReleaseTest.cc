@@ -407,8 +407,16 @@ TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnec
     // An uninitialized resource has no rows/tags. The request-only builders may
     // accept this, but the asynchronous dispatch entry must reject it locally.
     KVCacheResource                     resource;
-    DecodeRpcServer::LoadKVCacheContext load_context(
-        42, "missing-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+    DecodeRpcServer::LoadKVCacheContext load_context(42,
+                                                     "missing-identity",
+                                                     {"prefill-0"},
+                                                     {},
+                                                     std::vector<GroupBlockIds>{resource.groupBlockIds()},
+                                                     0,
+                                                     1000,
+                                                     1,
+                                                     0,
+                                                     &server_context);
     ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
     EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, load_context));
     EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
@@ -436,11 +444,19 @@ TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnect
                                                {{{tag, 0}, {"extra", 2}}, {holder, holder}},
                                                {{{tag, 0}}, {nullptr}}};
     for (const auto& blocks : malformed) {
-        DecodeRpcServer::LoadKVCacheContext context(
-            42, "malformed-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+        DecodeRpcServer::LoadKVCacheContext context(42,
+                                                    "malformed-identity",
+                                                    {"prefill-0"},
+                                                    {},
+                                                    std::vector<GroupBlockIds>{resource.groupBlockIds()},
+                                                    0,
+                                                    1000,
+                                                    1,
+                                                    0,
+                                                    &server_context);
         // Fault injection proves dispatch revalidates even after constructor validation.
         // Production only receives the const complete object.
-        const_cast<GroupBlockIds&>(context.groupBlockIds()) = blocks;
+        const_cast<GroupBlockIds&>(context.groupBlockIds(CacheModuleId::main())) = blocks;
         ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
         EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, context));
         EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
@@ -924,7 +940,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                    layer_cache,
                                    manager->cacheConfig(),
                                    cache_store,
-                                   model_id,
+                                   CacheModuleId::main(),
                                    cp_rank,
                                    cp_size,
                                    /*pre_created_event=*/nullptr);
@@ -940,7 +956,9 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                 }
                 const int key_index = std::min((physical_pos + 1) * group_scale, logical_blocks) - 1;
                 const auto key =
-                    "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[key_index]), /*layer_id=*/0, "default");
+                    "kv_"
+                    + makeCacheKey(
+                        CacheModuleId::main(), std::to_string(cache_keys[key_index]), /*layer_id=*/0, "default");
                 const auto block = stored_request->getBlock(key);
                 ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " physical_pos=" << physical_pos;
                 const auto transfer_bytes = manager->cacheConfig().topology().groups()[0].kvBlockStrideBytes();
@@ -985,17 +1003,18 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                  + std::to_string(12346 + 2 * cp_rank));
         }
         grpc::ServerContext                 server_context;
-        DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                         "cp-sharded-cache-store-pd",
-                                                         peer_addrs,
-                                                         cache_keys,
-                                                         decode_resource->cacheResource(0).groupBlockIds(),
-                                                         /*reuse_block_size=*/reused_blocks,
-                                                         /*timeout_ms=*/5000,
-                                                         /*partition_count=*/1,
-                                                         /*partition_id=*/0,
-                                                         &server_context,
-                                                         /*prefill_cp_size=*/cp_size);
+        DecodeRpcServer::LoadKVCacheContext load_context(
+            request_id,
+            "cp-sharded-cache-store-pd",
+            peer_addrs,
+            cache_keys,
+            std::vector<GroupBlockIds>{decode_resource->cacheResource(0).groupBlockIds()},
+            /*reuse_block_size=*/reused_blocks,
+            /*timeout_ms=*/5000,
+            /*partition_count=*/1,
+            /*partition_id=*/0,
+            &server_context,
+            /*prefill_cp_size=*/cp_size);
         const auto                          result = server.loadCache(load_context);
         ASSERT_TRUE(result.ok()) << result.error_info.ToString();
         ASSERT_EQ(cache_store->load_buffer_requests_.size(), static_cast<size_t>(cp_size));
@@ -1019,7 +1038,9 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                 }
                 const int key_index = std::min((physical_pos + 1) * group_scale, logical_blocks) - 1;
                 const auto key =
-                    "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[key_index]), /*layer_id=*/0, "default");
+                    "kv_"
+                    + makeCacheKey(
+                        CacheModuleId::main(), std::to_string(cache_keys[key_index]), /*layer_id=*/0, "default");
                 const auto block = loaded_request->getBlock(key);
                 ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " physical_pos=" << physical_pos;
                 const auto decode_block = decode_resource->blocks(0, "default")[static_cast<size_t>(physical_pos)];
@@ -1083,14 +1104,14 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     // contributes exactly one "kv_" key (no k_/v_ split, no scale).
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             ++expected_requests;
             expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0).size();
         }
     }
 
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
@@ -1111,7 +1132,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
@@ -1132,7 +1153,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                    layer_cache,
                                    cache_config,
                                    cache_store,
-                                   model_id,
+                                   CacheModuleId::main(),
                                    /*cp_rank=*/0,
                                    /*cp_size=*/1,
                                    /*pre_created_event=*/nullptr);
@@ -1143,7 +1164,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     EngineInitParams params;
     params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
+    params.model_config_.num_layers = cache_config.layer_num;
     params.parallelism_config       = ParallelismConfig();
 
     DecodeRpcServer server;
@@ -1154,22 +1175,23 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
     grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     /*reuse_block_size=*/0,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        request_id,
+        "dsv4-cache-store-pd",
+        peer_addrs,
+        cache_keys,
+        std::vector<GroupBlockIds>{decode_resource->cacheResource(0).groupBlockIds()},
+        /*reuse_block_size=*/0,
+        /*timeout_ms=*/5000,
+        /*partition_count=*/1,
+        /*partition_id=*/0,
+        &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
@@ -1230,7 +1252,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     }
 
     const auto& cache_config = prefill_manager->cacheConfig();
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
@@ -1251,7 +1273,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
@@ -1275,20 +1297,21 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                    layer_cache,
                                    cache_config,
                                    cache_store,
-                                   model_id,
+                                   CacheModuleId::main(),
                                    /*cp_rank=*/0,
                                    /*cp_size=*/1,
                                    /*pre_created_event=*/nullptr);
         }
     }
 
-    const auto first_csa_key = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
+    const auto first_csa_key =
+        "kv_" + makeCacheKey(CacheModuleId::main(), std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
     EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group("csa_kv").kvBlockStrideBytes());
 
     EngineInitParams params;
     params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
+    params.model_config_.num_layers = cache_config.layer_num;
     params.parallelism_config       = ParallelismConfig();
 
     DecodeRpcServer server;
@@ -1299,20 +1322,21 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
     grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-decoupled-cache-store-pd",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     /*reuse_block_size=*/0,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        request_id,
+        "dsv4-decoupled-cache-store-pd",
+        peer_addrs,
+        cache_keys,
+        std::vector<GroupBlockIds>{decode_resource->cacheResource(0).groupBlockIds()},
+        /*reuse_block_size=*/0,
+        /*timeout_ms=*/5000,
+        /*partition_count=*/1,
+        /*partition_id=*/0,
+        &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
 
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
@@ -1378,14 +1402,14 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     // the reuse count does not shrink the plan for a hybrid topology.
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             ++expected_requests;
             expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, reuse_num).size();
         }
     }
 
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
@@ -1406,7 +1430,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelGroupedCacheLayerLayout();
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
@@ -1427,7 +1451,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                    layer_cache,
                                    cache_config,
                                    cache_store,
-                                   model_id,
+                                   CacheModuleId::main(),
                                    /*cp_rank=*/0,
                                    /*cp_size=*/1,
                                    /*pre_created_event=*/nullptr);
@@ -1438,7 +1462,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
     EngineInitParams params;
     params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
+    params.model_config_.num_layers = cache_config.layer_num;
     params.parallelism_config       = ParallelismConfig();
 
     DecodeRpcServer server;
@@ -1449,22 +1473,23 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
     grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd-prefix-reuse",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     reuse_num,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        request_id,
+        "dsv4-cache-store-pd-prefix-reuse",
+        peer_addrs,
+        cache_keys,
+        std::vector<GroupBlockIds>{decode_resource->cacheResource(0).groupBlockIds()},
+        reuse_num,
+        /*timeout_ms=*/5000,
+        /*partition_count=*/1,
+        /*partition_id=*/0,
+        &server_context);
     const auto                          result = server.loadCache(load_context);
     ASSERT_TRUE(result.ok()) << result.error_info.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
-    for (int layer_id = 0; layer_id < 4; ++layer_id) {
+    for (int layer_id = 0; layer_id < static_cast<int>(cache_config.layer_num); ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
@@ -1578,7 +1603,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
                                layer_cache,
                                cache_config,
                                cache_store,
-                               /*cache_model_id=*/0,
+                               /*module_id=*/CacheModuleId::main(),
                                /*cp_rank=*/0,
                                /*cp_size=*/1,
                                event);
@@ -1592,7 +1617,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // Verify stored data matches the pattern we filled.
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
         for (int b = 0; b < block_num; ++b) {
-            auto k_key = "k_" + makeCacheKey(0, std::to_string(cache_keys[b]), layer_id);
+            auto k_key = "k_" + makeCacheKey(CacheModuleId(0), std::to_string(cache_keys[b]), layer_id);
             auto it    = cache_store->stored_blocks_.find(k_key);
             ASSERT_NE(it, cache_store->stored_blocks_.end()) << "missing key: " << k_key;
             uint8_t expected = static_cast<uint8_t>(layer_id * 10 + b);
@@ -1626,12 +1651,12 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
                            layer_cache,
                            config,
                            cache_store,
-                           /*cache_model_id=*/0,
+                           /*module_id=*/CacheModuleId::main(),
                            /*cp_rank=*/0,
                            /*cp_size=*/1,
                            /*pre_created_event=*/nullptr);
 
-    const auto key = "kv_" + makeCacheKey(0, std::to_string(cache_key), 0, "csa_state");
+    const auto key = "kv_" + makeCacheKey(CacheModuleId(0), std::to_string(cache_key), 0, "csa_state");
     auto       it  = cache_store->stored_blocks_.find(key);
     ASSERT_NE(it, cache_store->stored_blocks_.end());
     ASSERT_EQ(it->second.size(), static_cast<size_t>(kv_stride));
@@ -1700,12 +1725,12 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStorePreservesCpSwaOpaqueByteSlice
         const size_t data_end  = test_case.entries * 576;
         const size_t scale_end = test_case.entries * 584;
         ASSERT_LE(scale_end, full_bytes);
-        for (size_t model_id : {0u, 1u}) {  // Main model and MTP key namespaces.
-            SCOPED_TRACE(::testing::Message() << "model_id=" << model_id);
+        for (const auto model_id : {CacheModuleId::main(), CacheModuleId(1)}) {  // Main and MTP key namespaces.
+            SCOPED_TRACE(::testing::Message() << "model_id=" << model_id.value());
             std::vector<uint8_t> expected(full_bytes);
             for (size_t byte = 0; byte < full_bytes; ++byte) {
                 if (byte < data_end) {
-                    expected[byte] = static_cast<uint8_t>((byte + model_id * 31) % 127);
+                    expected[byte] = static_cast<uint8_t>((byte + model_id.value() * 31) % 127);
                 } else if (byte < scale_end) {
                     expected[byte] = static_cast<uint8_t>(128 + byte % 64);
                 } else {
@@ -1804,12 +1829,12 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
                            layer_cache,
                            config,
                            cache_store,
-                           /*cache_model_id=*/0,
+                           /*module_id=*/CacheModuleId::main(),
                            /*cp_rank=*/0,
                            /*cp_size=*/1,
                            /*pre_created_event=*/nullptr);
 
-    const auto cache_key_str = makeCacheKey(0, std::to_string(cache_key), 0, "default");
+    const auto cache_key_str = makeCacheKey(CacheModuleId(0), std::to_string(cache_key), 0, "default");
     const auto k_key         = "k_" + cache_key_str;
     const auto v_key         = "v_" + cache_key_str;
     auto       k_it          = cache_store->stored_blocks_.find(k_key);
@@ -1859,12 +1884,12 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
                            layer_cache,
                            config,
                            cache_store,
-                           /*cache_model_id=*/0,
+                           /*module_id=*/CacheModuleId::main(),
                            /*cp_rank=*/0,
                            /*cp_size=*/1,
                            /*pre_created_event=*/nullptr);
 
-    const auto scale_key = "kv_scale_" + makeCacheKey(0, std::to_string(cache_key), 0, "csa_state");
+    const auto scale_key = "kv_scale_" + makeCacheKey(CacheModuleId(0), std::to_string(cache_key), 0, "csa_state");
     auto       scale_it  = cache_store->stored_blocks_.find(scale_key);
     ASSERT_NE(scale_it, cache_store->stored_blocks_.end());
     ASSERT_EQ(scale_it->second.size(), static_cast<size_t>(scale_stride));

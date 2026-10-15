@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
@@ -59,13 +60,41 @@ public:
                             const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                             int64_t                            reserve_block_ratio = 0,
                             RoleType                           role_type           = RoleType::PDFUSION):
-        config_(config),
+        CoordinatorCacheManager(
+            CacheDomainConfig(config), allocation_type, metrics_reporter, reserve_block_ratio, role_type) {}
+
+    CoordinatorCacheManager(const CacheDomainConfig&           domain,
+                            AllocationType                     allocation_type     = AllocationType::DEVICE,
+                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                            int64_t                            reserve_block_ratio = 0,
+                            RoleType                           role_type           = RoleType::PDFUSION):
+        domain_(domain),
+        config_(domain.main()),
+        group_configs_(collectGroups(domain)),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio),
         role_type_(role_type) {}
 
     virtual ~CoordinatorCacheManager();
+
+    const CacheDomainConfig& cacheDomainConfig() const {
+        return domain_;
+    }
+    virtual std::vector<BlockInfo>
+    convertIndexToBuffer(CacheModuleId module_id, int local_layer_id, const std::string& tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(CacheModuleId      module_id,
+                                                        int                local_layer_id,
+                                                        const std::string& tag,
+                                                        int                block_id,
+                                                        int                partition_count,
+                                                        int                partition_id) const;
+    virtual BlockAddrInfo
+    convertIndexToAddr(CacheModuleId module_id, int local_layer_id, const std::string& tag, int block_id) const;
+    virtual GroupedCacheLayerLayout allLayerCacheBase(CacheModuleId module_id) const;
+    virtual void                    blockBatchCopyForForward(CacheModuleId                   module_id,
+                                                             const torch::Tensor&            copy_mapping,
+                                                             const std::vector<std::string>& group_tags);
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
@@ -149,8 +178,6 @@ public:
     virtual size_t               maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
-    uint32_t convertToGlobalLayerId(CacheModuleId module_id, int local_layer_id) const;
 
 protected:
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
@@ -182,10 +209,11 @@ protected:
         size_t additional_blocks{0};
     };
     // Count unique valid physical blocks held by this request in one independent pool.
-    static size_t heldRequestBlocks(const MallocInfo& malloc_info, std::string_view tag);
+    static size_t heldRequestBlocks(const MallocInfo& malloc_info, const ModuleGroupKey& tag);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag);
+    static InitBlockDemand
+    initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, const ModuleGroupKey& tag);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,
@@ -199,7 +227,7 @@ protected:
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
-    size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
+    size_t        logicalSeqSizePerBlockForCapacity(const ModuleGroupKey& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
@@ -209,7 +237,10 @@ protected:
     }
 
     // Own the immutable configuration binding for all dense manager/pool rows.
+    const CacheDomainConfig            domain_;
     const CacheConfig                  config_;
+    // Dense iteration metadata; tags may repeat and never select ownership.
+    const std::vector<GroupBase>       group_configs_;
     AllocationType                     allocation_type_;
     BlockTreeCachePtr                  block_tree_cache_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
@@ -259,7 +290,7 @@ protected:
                                           int               failed_group,
                                           bool              incremental,
                                           int               failed_need_blocks) const;
-    size_t               loadTargetPosition(size_t path_index, const std::string& tag) const;
+    size_t               loadTargetPosition(size_t path_index, const ModuleGroupKey& tag) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
@@ -285,7 +316,23 @@ protected:
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
+    static std::vector<GroupBase> collectGroups(const CacheDomainConfig& domain) {
+        std::vector<GroupBase> groups;
+        for (const auto& key : domain.groupKeys()) {
+            groups.push_back(domain.group(key));
+        }
+        return groups;
+    }
     size_t groupIdForTag(std::string_view tag) const;
+    size_t groupIdForKey(const ModuleGroupKey& key) const {
+        return domain_.groupIndex(key);
+    }
+    int groupCount() const {
+        return static_cast<int>(domain_.groupKeys().size());
+    }
+    const ModuleGroupKey& groupKey(size_t index) const {
+        return domain_.groupKeys().at(index);
+    }
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

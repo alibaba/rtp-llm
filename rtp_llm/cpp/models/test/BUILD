@@ -109,6 +109,23 @@ pywrapped_model_test_deps = [
 ]
 
 py_test(
+    name = "model_data_gpu_tp_test",
+    srcs = ["model_data_gpu_tp_test.py"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {
+        "GPU_COUNT": "2",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "2",
+    },
+    tags = ["L20_CU13"],
+    timeout = "moderate",
+)
+
+py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
     data = [":th_pywrapped_model_cache_store_integration_test"],

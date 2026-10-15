@@ -48,6 +48,9 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                
     cache_manager_(std::move(cache_manager)),
     module_id_(module_id) {
     if (cache_manager_) {
+        RTP_LLM_CHECK_WITH_INFO(cache_manager_->cacheDomainConfig().isActive(module_id_),
+                                "CacheStoreAsyncWriter requires an active cache module=%zu",
+                                module_id_.value());
         const CacheConfig* selected_config = &cache_manager_->cacheConfig();
         if (!module_id.isMain()) {
             selected_config = &cache_manager_->getMTPModuleCacheConfig(module_id);
@@ -412,16 +415,16 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
         auto completion_state     = active_store_completion_state_;
-        register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
+        register_store_completion = [completion_state, cache_manager = cache_manager_, module_id = module_id_](
                                         const std::vector<int64_t>& cache_keys,
                                         const std::vector<int32_t>& block_ids,
                                         const std::string&          tag) {
             std::shared_ptr<KVCacheResource> publication_lease;
             if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
                 KVCacheResource lease_resource;
-                lease_resource.initGroups(cache_config->topologyPtr());
+                lease_resource.initGroups(cache_manager->cacheDomainConfig());
                 lease_resource.setCacheKeys(cache_keys);
-                lease_resource.mutableBlockIds(tag).assign(block_ids);
+                lease_resource.mutableBlockIds({module_id, tag}).assign(block_ids);
                 publication_lease = cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
                 RTP_LLM_CHECK_WITH_INFO(
                     publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());
@@ -437,15 +440,15 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                 cache_config,
                 cache_store,
                 register_store_completion,
-                cache_model_id = module_id_.value(),
-                cp_rank        = cp_rank_,
-                cp_size        = cp_size_,
-                event          = std::move(event)]() mutable {
+                module_id = module_id_,
+                cp_rank   = cp_rank_,
+                cp_size   = cp_size_,
+                event     = std::move(event)]() mutable {
         runtimeWriteCacheStore(captured_cache_store_inputs,
                                captured_layer_kv,
                                *cache_config,
                                cache_store,
-                               cache_model_id,
+                               module_id,
                                cp_rank,
                                cp_size,
                                std::move(event),

@@ -92,7 +92,7 @@ class Qwen3NextMTPModel(GptModelBase):
         for layer in self.layers:
             if layer.layer_type == HybridAttentionType.LINEAR:
                 continue
-            binding = layer.cache_binding
+            binding = getattr(layer, "cache_binding", None)
             if binding is None:
                 continue
             for tag in binding.group_tags:
@@ -115,7 +115,7 @@ class Qwen3NextMTPModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers):
-            binding = decoder_layer.cache_binding
+            binding = getattr(decoder_layer, "cache_binding", None)
             layer_attention_inputs = (
                 binding.select_attention_inputs(inputs.attention_inputs)
                 if binding is not None

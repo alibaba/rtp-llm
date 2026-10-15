@@ -615,6 +615,7 @@ public:
         // kernel-granularity table.
         torch::Tensor next_kv_cache_block_id_gpu;
         torch::Tensor next_kv_cache_kernel_block_id_gpu;
+        std::vector<CacheModuleInputs> next_module_cache_inputs;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
@@ -703,6 +704,12 @@ public:
             return table.defined() && table.is_cuda() && table.scalar_type() == torch::kInt32 && table.dim() == 3
                    && table.size(1) == 1;
         };
+        for (const auto& module : state.next_module_cache_inputs) {
+            if (!valid(module.physical_blocks) || !valid(module.kernel_blocks)
+                || module.physical_blocks.size(0) != module.kernel_blocks.size(0)) {
+                return false;
+            }
+        }
         const auto& physical = state.next_kv_cache_block_id_gpu;
         const auto& kernel   = state.next_kv_cache_kernel_block_id_gpu;
         return valid(physical) && valid(kernel) && physical.size(0) == kernel.size(0);
@@ -712,6 +719,7 @@ public:
     }
     void clearMtpCacheSnapshot() {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+        mtp_async_state_.next_module_cache_inputs.clear();
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
     }

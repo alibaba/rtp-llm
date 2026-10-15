@@ -24,7 +24,7 @@ struct ReusableGroupLocation {
     size_t member_group_id{0};
 };
 
-using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
+using ReusableGroupLocations = std::unordered_map<ModuleGroupKey, ReusableGroupLocation>;
 
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
@@ -68,7 +68,10 @@ public:
     const std::vector<GroupSetPtr>& groupSets() const {
         return group_sets_;
     }
-    const ReusableGroupLocation* reusableGroupLocation(std::string_view group_tag) const;
+    const ReusableGroupLocation* reusableGroupLocation(const ModuleGroupKey& key) const;
+    const ReusableGroupLocation* reusableGroupLocation(std::string_view group_tag) const {
+        return reusableGroupLocation({CacheModuleId::main(), std::string(group_tag)});
+    }
     size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
     }
@@ -89,7 +92,7 @@ public:
 
     // All publication operations require the owning BlockTreeCache mutex.
     // Only complete, matchable DEVICE values in every required group are advertised.
-    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<ModuleGroupKey>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
 

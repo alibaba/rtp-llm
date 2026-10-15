@@ -71,10 +71,11 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheDomainConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
     resource_released_ = false;
 }
 
@@ -538,10 +539,11 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheDomainConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -608,9 +610,10 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
-        if (group.policy.group_type == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
+    const auto& domain = resource_context_.cache_manager->cacheDomainConfig();
+    for (const auto& key : domain.groupKeys()) {
+        if (domain.isActive(key.module_id) && domain.group(key).policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->mutableBlockIds(batch_id, key).swap(rhs, lhs);
         }
     }
 }

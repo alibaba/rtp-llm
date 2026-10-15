@@ -11,14 +11,7 @@ namespace rtp_llm {
 
 class DeviceBlockPoolConfigHelper {
 public:
-    /**
-     * Create the per-group block pool config from a merged CacheConfig.
-     * Memory layout is [layout0_kv][layout0_scale][layout1_kv][layout1_scale]...[layoutN_kv][layoutN_scale]
-     * Generally Memory layout is [main_kv][main_scale][mtp1_kv][mtp1_scale]...[mtpN_kv][mtpN_scale]
-     *
-     * @param cache_config The merged CacheConfig (topology owns every main and MTP layer)
-     * @param group The cache group this pool serves
-     */
+    // Each module group owns one contiguous backing in its local layer order.
     static DeviceBlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, const GroupBase& group) {
         const auto& spec = group.spec;
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec for group tag=%s is null", group.tag.c_str());
@@ -58,23 +51,7 @@ public:
         };
 
         const auto& group_layer_ids = cache_config.layerIdsForGroup(group.tag);
-        const auto  main_layer_num  = static_cast<uint32_t>(
-            std::count_if(group_layer_ids.begin(), group_layer_ids.end(), [&cache_config](int layer_id) {
-                return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.layer_num;
-            }));
-        if (main_layer_num > 0) {
-            append_layout(group, main_layer_num);
-        }
-
-        for (size_t module_index = 0; module_index < cache_config.mtp_sub_configs.size(); ++module_index) {
-            const auto& mtp_config = cache_config.mtp_sub_configs[module_index];
-            RTP_LLM_CHECK_WITH_INFO(mtp_config != nullptr, "mtp_sub_configs[%zu] is null", module_index);
-            const auto& mtp_group     = mtp_config->topology().group(group.tag);
-            const auto  mtp_layer_num = static_cast<uint32_t>(mtp_config->layerIdsForGroup(mtp_group.tag).size());
-            if (mtp_layer_num > 0) {
-                append_layout(mtp_group, mtp_layer_num);
-            }
-        }
+        append_layout(group, static_cast<uint32_t>(group_layer_ids.size()));
 
         RTP_LLM_CHECK_WITH_INFO(total_layout_layers == group_layer_ids.size(),
                                 "group tag=%s layout layer count=%zu does not match topology layers=%zu",

@@ -16,22 +16,23 @@ namespace {
 
 const GroupSet* resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
                                 const std::vector<GroupSetPtr>&           group_sets) {
-    if (item.group_tags_size() == 0) {
+    if (item.groups_size() == 0) {
         return nullptr;
     }
-    std::unordered_set<std::string> requested_tags;
-    for (const auto& tag : item.group_tags()) {
-        if (tag.empty() || !requested_tags.emplace(tag).second) {
+    std::unordered_set<ModuleGroupKey> requested_tags;
+    for (const auto& group : item.groups()) {
+        const ModuleGroupKey tag{CacheModuleId(group.module_id()), group.tag()};
+        if (tag.tag.empty() || !requested_tags.emplace(tag).second) {
             return nullptr;
         }
     }
     const GroupSet* match = nullptr;
     for (const auto& candidate : group_sets) {
-        if (!candidate || candidate->groupTags().size() != requested_tags.size()) {
+        if (!candidate || candidate->groupKeys().size() != requested_tags.size()) {
             continue;
         }
         const bool same_members = std::all_of(
-            candidate->groupTags().begin(), candidate->groupTags().end(), [&requested_tags](const std::string& tag) {
+            candidate->groupKeys().begin(), candidate->groupKeys().end(), [&requested_tags](const ModuleGroupKey& tag) {
                 return requested_tags.find(tag) != requested_tags.end();
             });
         if (!same_members) {
@@ -80,10 +81,14 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
                                                        const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
     const auto&                                   device_pools = group_set.devicePools();
-    const auto&                                   group_tags   = group_set.groupTags();
-    std::unordered_map<std::string, BlockIdxType> blocks_by_tag;
+    const auto&                                      group_tags   = group_set.groupKeys();
+    std::unordered_map<ModuleGroupKey, BlockIdxType> blocks_by_tag;
     for (const auto& group_block : item.group_blocks()) {
-        if (group_block.tag().empty() || !blocks_by_tag.emplace(group_block.tag(), group_block.block_id()).second) {
+        if (group_block.tag().empty()
+            || !blocks_by_tag
+                    .emplace(ModuleGroupKey{CacheModuleId(group_block.module_id()), group_block.tag()},
+                             group_block.block_id())
+                    .second) {
             return false;
         }
     }
@@ -128,8 +133,10 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
         CopyItem        item;
-        for (const auto& tag : group_set.groupTags()) {
-            item.add_group_tags(tag);
+        for (const auto& tag : group_set.groupKeys()) {
+            auto* member = item.add_groups();
+            member->set_module_id(tag.module_id.value());
+            member->set_tag(tag.tag);
         }
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
@@ -140,13 +147,14 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         }
         if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
             const auto& blocks     = descriptor.blocksAt(Tier::DEVICE);
-            const auto& group_tags = group_set.groupTags();
+            const auto& group_tags = group_set.groupKeys();
             if (blocks.size() != group_tags.size()) {
                 return false;
             }
             for (size_t i = 0; i < blocks.size(); ++i) {
                 auto* group_block = item.add_group_blocks();
-                group_block->set_tag(group_tags[i]);
+                group_block->set_tag(group_tags[i].tag);
+                group_block->set_module_id(group_tags[i].module_id.value());
                 group_block->set_block_id(blocks[i]);
             }
         }

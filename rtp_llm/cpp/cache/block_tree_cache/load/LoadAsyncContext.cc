@@ -166,7 +166,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                                      handles.end(),
                                      [&](const StorageBlockHandle& handle) {
                                          return !storage_backend_->isHandleRequired(
-                                             key_index, matched_blocks_num, handle.tag);
+                                             key_index, matched_blocks_num, handle.key);
                                      }),
                       handles.end());
     }

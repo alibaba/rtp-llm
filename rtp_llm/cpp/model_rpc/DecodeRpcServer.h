@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 
 #include <utility>
 
@@ -27,17 +28,17 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                  request_id,
-                           std::string              request_key,
-                           std::vector<std::string> peer_addrs,
-                           CacheKeysType            cache_keys,
-                           GroupBlockIds            group_block_ids,
-                           int64_t                  reuse_block_size,
-                           int64_t                  timeout_ms,
-                           int                      partition_count,
-                           int                      partition_id,
-                           grpc::ServerContext*     server_context,
-                           int32_t                  prefill_cp_size = 1):
+        LoadKVCacheContext(int64_t                    request_id,
+                           std::string                request_key,
+                           std::vector<std::string>   peer_addrs,
+                           CacheKeysType              cache_keys,
+                           std::vector<GroupBlockIds> group_block_ids,
+                           int64_t                    reuse_block_size,
+                           int64_t                    timeout_ms,
+                           int                        partition_count,
+                           int                        partition_id,
+                           grpc::ServerContext*       server_context,
+                           int32_t                    prefill_cp_size = 1):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -49,15 +50,25 @@ public:
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
             group_block_ids_(std::move(group_block_ids)) {
-            group_block_ids_.validate();
+            for (const auto& blocks : group_block_ids_) {
+                blocks.validate();
+            }
         }
 
-        const BlockIds& blockIdsForGroup(std::string_view tag) const {
-            return group_block_ids_.blockIds(tag);
+        const BlockIds& blockIdsForGroup(CacheModuleId module_id, std::string_view tag) const {
+            return groupBlockIds(module_id).blockIds(tag);
         }
 
-        const GroupBlockIds& groupBlockIds() const {
-            return group_block_ids_;
+        const GroupBlockIds& groupBlockIds(CacheModuleId module_id) const {
+            RTP_LLM_CHECK_WITH_INFO(module_id.value() < group_block_ids_.size(),
+                                    "RPC cache module=%zu out of range [0,%zu)",
+                                    module_id.value(),
+                                    group_block_ids_.size());
+            return group_block_ids_[module_id.value()];
+        }
+
+        size_t moduleCount() const {
+            return group_block_ids_.size();
         }
 
         int64_t                  request_id;
@@ -73,7 +84,7 @@ public:
         int32_t              prefill_cp_size;
 
     private:
-        GroupBlockIds group_block_ids_;
+        std::vector<GroupBlockIds> group_block_ids_;
     };
 
 private:
@@ -87,9 +98,8 @@ private:
     };
 
     struct MTPModuleLoadPlan {
-        size_t                  module_index;
+        CacheModuleId           module_id;
         const EngineInitParams* engine_init_params;
-        size_t                  cache_model_id;
     };
 
     void initThreadPool();
@@ -112,14 +122,15 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static void            validateGroupTags(const LoadKVCacheContext& context, const CacheTopology& topology);
-    static void            appendGroupBlockIds(const LoadKVCacheContext& context,
-                                               const CacheTopology&      topology,
-                                               BroadcastLoadRequestPB&   request);
-    static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static std::vector<GroupBlockIds> decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                                          const CacheDomainConfig&      domain);
+    static void validateGroupTags(const LoadKVCacheContext& context, const CacheDomainConfig& domain);
+    static void appendGroupBlockIds(const LoadKVCacheContext& context,
+                                    const CacheDomainConfig&  domain,
+                                    BroadcastLoadRequestPB&   request);
     static std::string
-    makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
+    makeTaggedRequestKey(int64_t request_id, CacheModuleId module_id, size_t layer_id, const std::string& tag);
+    static std::string makeMTPModuleCacheKey(CacheModuleId module_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
     static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                   const std::vector<size_t>& required_cache_key_counts,
@@ -148,7 +159,6 @@ private:
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
-    size_t                   model_id;
 };
 
 }  // namespace rtp_llm

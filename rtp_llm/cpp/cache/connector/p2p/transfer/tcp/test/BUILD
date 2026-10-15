@@ -57,6 +57,8 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20_CU13"},
     deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_cache_buffer",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/config:config_modules",
