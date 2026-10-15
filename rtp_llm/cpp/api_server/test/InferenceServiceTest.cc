@@ -584,7 +584,7 @@ TEST_F(InferenceServiceTest, InferResponseStreamingErrorAfterStart_WritesSseErro
     EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(texts));
     EXPECT_CALL(*mock_token_processor_, encode(StrEq("hello request")));
 
-    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _)).Times(1);
+    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _, 0)).Times(1);
 
     EXPECT_NO_THROW(inference_service_->inferResponse(10086, writer_ptr, request));
     ASSERT_EQ(writes.size(), 2u);
