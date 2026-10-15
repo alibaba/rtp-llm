@@ -162,6 +162,12 @@ def cuda13_suites():
             smoke_test(
                 name="minicpmv4_7_1b_sm103",
                 task_info="data/model/minicpmv47/q_r_1b_sm103.json",
+                # Opt the server tree into the flashinfer_cubin shadow: the
+                # SM103 pool's shared cache keeps getting fmha_gen ops with
+                # foreign runfiles anchors (concurrent branches), and the
+                # stable-workspace cubin dir sidesteps both the anchor and
+                # the missing generated header.
+                envs=["RTP_LLM_SHADOW_FLASHINFER_CUBIN=1"],
                 smoke_args="--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
                 gpu_type=[cuda13_x86_test_gpu()],
                 data=native.glob(["data/model/qwen_vl/*.jpeg"]),
