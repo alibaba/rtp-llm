@@ -1123,6 +1123,34 @@ class TestDynamicFp8FactoryGating(unittest.TestCase):
             )
         self.assertIsInstance(result, allowed)
 
+    def test_mode2_cuda_graph_allows_target_verify_prefill(self):
+        allowed = self._impl("PyFlashinferPagedPrefillImpl", supports_cuda_graph=True)
+        inputs = SimpleNamespace(is_prefill=True, is_target_verify=True)
+        with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [allowed]):
+            result = attn_factory.get_fmha_impl(
+                self._config(),
+                None,
+                inputs,
+                is_cuda_graph=True,
+                parallelism_config=None,
+            )
+        self.assertIsInstance(result, allowed)
+
+    def test_mode2_allows_spec_decode_gen_num_per_cycle(self):
+        config = self._config()
+        config.gen_num_per_cycle = 7
+        inputs = SimpleNamespace(is_prefill=True, is_target_verify=True)
+        allowed = self._impl("PyFlashinferPagedPrefillImpl", supports_cuda_graph=True)
+        with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [allowed]):
+            result = attn_factory.get_fmha_impl(
+                config,
+                None,
+                inputs,
+                is_cuda_graph=True,
+                parallelism_config=None,
+            )
+        self.assertIsInstance(result, allowed)
+
     def test_allowed_backend_constructor_failure_does_not_fallback(self):
         fallback_calls = []
 

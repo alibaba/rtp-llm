@@ -1657,7 +1657,10 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        return not self.dynamic_fp8
+        # Mode 2 keeps the graph-capable path for the fixed-capacity
+        # target-verify graph (spec decode); generation-prefill graphs are
+        # rejected earlier by the mode-2 validation, so they never reach here.
+        return True
 
 
 class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):

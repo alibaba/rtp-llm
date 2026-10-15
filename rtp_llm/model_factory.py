@@ -517,12 +517,38 @@ class ModelFactory:
             ModelFactory._setup_dspark_configs(
                 sp_config, model_config, propose_model_config
             )
+            if getattr(propose_model_cls, "draft_keep_base_kv_cache", False):
+                ModelFactory._reset_draft_fp8_kv_cache(
+                    propose_model_config, propose_model_cls.__name__
+                )
         elif sp_config.type == SpeculativeType.DFLASH:
             ModelFactory._setup_dflash_configs(
                 sp_config, model_config, propose_model_config
             )
 
         return propose_model_config
+
+    @staticmethod
+    def _reset_draft_fp8_kv_cache(
+        propose_model_config: ModelConfig, model_name: str
+    ) -> None:
+        """Draft KV-cache exemption: keep the draft cache at base dtype.
+
+        The draft has its own tiny cache, so FP8 KV savings are negligible
+        there while full-precision draft caches protect the dspark acceptance
+        rate. Never inherit the target's mode-1/2 request into the BF16 draft
+        kernels.
+        """
+        if propose_model_config.attn_config.fp8_kv_cache_mode == 0:
+            return
+        logging.info(
+            "resetting draft KV cache to base dtype: fp8_kv_cache_mode=%d -> 0 "
+            "(draft_keep_base_kv_cache on %s)",
+            propose_model_config.attn_config.fp8_kv_cache_mode,
+            model_name,
+        )
+        propose_model_config.attn_config.fp8_kv_cache_mode = 0
+        propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
 
     @staticmethod
     def _setup_dspark_configs(

@@ -96,23 +96,30 @@ def _validate_dynamic_fp8_config(
     if getattr(attn_configs, "fp8_kv_cache_mode", 0) != 2:
         return
     if is_cuda_graph and (
-        attn_inputs is None or getattr(attn_inputs, "is_prefill", True)
+        attn_inputs is None
+        or (
+            getattr(attn_inputs, "is_prefill", True)
+            and not getattr(attn_inputs, "is_target_verify", False)
+        )
     ):
+        # Target-verify graphs (spec decode) carry prefill-shaped attention but
+        # replay through the decode-style fixed-capacity graph runner; other
+        # prefill-shaped graphs stay eager in mode 2.
         raise ValueError("FP8 KV cache mode 2 supports CUDA graph for decode only")
     if attn_configs.use_mla:
         raise ValueError("FP8 KV cache mode 2 supports MHA only; MLA is not supported")
     if attn_configs.rope_config.style == RopeStyle.Mrope:
         rope_config = attn_configs.rope_config
         mrope_dims = (
-            rope_config.mrope_dim1,
-            rope_config.mrope_dim2,
-            rope_config.mrope_dim3,
+            getattr(rope_config, "mrope_dim1", 0),
+            getattr(rope_config, "mrope_dim2", 0),
+            getattr(rope_config, "mrope_dim3", 0),
         )
         if not (
-            rope_config.mrope_interleaved
-            and rope_config.index_factor == 3
+            getattr(rope_config, "mrope_interleaved", False)
+            and getattr(rope_config, "index_factor", 0) == 3
             and all(dim > 0 for dim in mrope_dims)
-            and 2 * sum(mrope_dims) == rope_config.dim
+            and 2 * sum(mrope_dims) == getattr(rope_config, "dim", -1)
         ):
             raise ValueError(
                 "FP8 KV cache mode 2 with MRoPE requires interleaved MRoPE with "
@@ -121,8 +128,13 @@ def _validate_dynamic_fp8_config(
     if attn_configs.use_logn_attn:
         raise ValueError("FP8 KV cache mode 2 does not support use_logn_attn")
     if getattr(attn_configs, "gen_num_per_cycle", 1) > 1:
-        raise ValueError(
-            "FP8 KV cache mode 2 does not support speculative or multi-token decode"
+        # Spec decode: the target-verify forward is prefill-shaped and runs
+        # through the mode-2 prefill impls; draft proposals stay single-token.
+        # Impl support gates reject combinations they cannot serve.
+        logging.debug(
+            "FP8 KV cache mode 2 running with gen_num_per_cycle=%s "
+            "(spec decode verify goes through the mode-2 prefill path)",
+            getattr(attn_configs, "gen_num_per_cycle", 1),
         )
 
 

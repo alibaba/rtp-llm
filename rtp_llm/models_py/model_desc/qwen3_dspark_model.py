@@ -166,6 +166,11 @@ class _TorchMhaRotaryEmbeddingOp:
 
 
 class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
+    # Keep the draft KV cache at base dtype even when the target runs FP8 KV
+    # cache mode 1/2: the draft cache is tiny and full precision protects the
+    # dspark acceptance rate. See ModelFactory.create_propose_model_config.
+    draft_keep_base_kv_cache = True
+
     def __init__(
         self,
         config: ModelConfig,
