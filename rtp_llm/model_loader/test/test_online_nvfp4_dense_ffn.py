@@ -119,8 +119,7 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
             self.skipTest("CUDA is not available")
         torch.manual_seed(13)
         # K must be a multiple of the 128-wide NVFP4 block.
-        weight = (torch.randn(32, 256, device="cuda") * 0.1).to(torch.bfloat16)
-        src = _ffn_weight(W.ffn_w2)
+        weight = (torch.randn(32, 256, device="cuda") * 0.1).to(torch.bfloat16)        src = _ffn_weight(W.ffn_w2)
         quant_weight = OnlineModelOptFp4DenseWeight(src, _quant_config(True))
 
         with mock.patch.object(
@@ -138,6 +137,61 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         self.assertEqual(tensors[W.ffn_w2_s2].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].flatten().tolist(), [1.0])
+
+    def test_online_shapes_through_fp4_gemm(self) -> None:
+        """B4: the loader's exact output tensors must run through mm_fp4.
+
+        Exercises the layered online path end to end on the GEMM level:
+        packed e2m1 + per-block fp8 scale + 0-dim fp32 scale_2 with
+        input_scale=1.0 (dynamic per-block activation quantization), routed
+        through CudaFp4GEMMLinear with the layered flag.
+        """
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
+            CudaFp4GEMMLinear,
+        )
+
+        torch.manual_seed(19)
+        output_size, hidden_size = 256, 512
+        weight_bf16 = (
+            torch.randn(output_size, hidden_size, device="cuda") * 0.05
+        ).to(torch.bfloat16)
+        packed, block_scale, scale_2 = quantize_expert_to_nvfp4(
+            weight_bf16, NVFP4_BLOCK_SIZE
+        )
+        self.assertEqual(scale_2.numel(), 1)
+
+        quant_config = _quant_config(True)
+        self.assertTrue(
+            CudaFp4GEMMLinear.can_handle(
+                quant_config,
+                packed,
+                block_scale,
+                weight_scale_2=scale_2,
+                input_scale=torch.tensor(1.0),
+            )
+        )
+        linear = CudaFp4GEMMLinear(
+            weight=packed,
+            weight_scales=block_scale,
+            input_scales=torch.tensor(1.0),
+            bias=None,
+            quant_config=quant_config,
+            weight_scale_2=scale_2,
+        )
+        self.assertEqual(linear.backend, "cutlass")
+
+        x = (torch.randn(32, hidden_size, device="cuda") * 0.05).to(torch.bfloat16)
+        out = linear(x)
+        reference = (x.float() @ weight_bf16.float().t()).to(torch.bfloat16)
+        # e2m1 weight quantization: each block snaps to a 16-level grid, so a
+        # coarse mean-error bound is the right acceptance criterion.
+        mean_abs_err = (out.float() - reference.float()).abs().mean()
+        mean_abs_ref = reference.float().abs().mean()
+        self.assertLess(float(mean_abs_err / mean_abs_ref), 0.12)
+        self.assertFalse(torch.isnan(out).any())
+        self.assertFalse(torch.isinf(out).any())
 
 
 class OnlineNvfp4LinearRoutingTest(unittest.TestCase):
