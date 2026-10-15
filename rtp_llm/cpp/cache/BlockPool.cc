@@ -9,7 +9,9 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -144,7 +146,11 @@ int currentGpuNumaNode() {
     if (error != cudaSuccess) {
         throw std::runtime_error(std::string("cudaDeviceGetPCIBusId failed: ") + cudaGetErrorString(error));
     }
-    const std::string path = std::string("/sys/bus/pci/devices/") + pci_bus_id + "/numa_node";
+    std::string pci_device(pci_bus_id);
+    std::transform(pci_device.begin(), pci_device.end(), pci_device.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    const std::string path = "/sys/bus/pci/devices/" + pci_device + "/numa_node";
     std::ifstream     node_file(path);
     int               node = -1;
     if (!(node_file >> node) || node < 0) {
