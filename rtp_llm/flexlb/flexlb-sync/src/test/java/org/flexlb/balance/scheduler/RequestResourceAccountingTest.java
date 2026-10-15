@@ -269,7 +269,7 @@ class RequestResourceAccountingTest {
             worker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
+                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)), null)).endpoint();
             } finally { worker.lock.unlock(); }
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
@@ -409,7 +409,7 @@ class RequestResourceAccountingTest {
         var worker = endpoint.getStatus();
         Runnable projection;
         worker.lock.lock();
-        try { projection = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response))); }
+        try { projection = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response), null)); }
         finally { worker.lock.unlock(); }
         projection.run();
     }
