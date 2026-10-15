@@ -11,6 +11,8 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -310,57 +312,46 @@ protected:
 };
 
 TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
-    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
-    EngineInitParams params;
-    DecodeRpcServer  server;
-    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
-    server.resource_.workers      = {"decode-0"};
-    server.resource_.grpc_workers = {"127.0.0.1:1"};
-    grpc::ServerContext          server_context;
-    DecodeRpcContext             rpc_context{nullptr};
-    kmonitor::MetricsReporterPtr reporter;
-    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
-    decode_context.peer_addrs = {"prefill-0"};
-    // An uninitialized resource has no rows/tags. The request-only builders may
-    // accept this, but the asynchronous dispatch entry must reject it locally.
-    KVCacheResource                     resource;
-    DecodeRpcServer::LoadKVCacheContext load_context(
-        42, "missing-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
-    ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
-    EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, load_context));
-    EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+    const auto config = makeConfig();
+    P2PConnectorSchedulerConfig scheduler_config;
+    scheduler_config.topology = config.topologyPtr();
+    scheduler_config.parallelism_config.tp_size = 1;
+    // No RPC client or worker pool: route validation must finish before either is needed.
+    P2PSchedulerDecodeRead scheduler(scheduler_config, nullptr, nullptr);
+    const auto plan = scheduler.planFor(1, 1, "missing-identity");
+    ASSERT_TRUE(plan->ok());
+    KVCacheResource resource;
+    resource.cacheKeys() = {42};
+    auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
 }
 
 TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnecting) {
-    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
-    EngineInitParams params;
-    DecodeRpcServer  server;
-    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
-    server.resource_.workers      = {"decode-0"};
-    server.resource_.grpc_workers = {"127.0.0.1:1"};
-    grpc::ServerContext          server_context;
-    DecodeRpcContext             rpc_context{nullptr};
-    kmonitor::MetricsReporterPtr reporter;
-    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
-    decode_context.peer_addrs = {"prefill-0"};
+    const auto config = makeConfig();
+    P2PConnectorSchedulerConfig scheduler_config;
+    scheduler_config.topology = config.topologyPtr();
+    scheduler_config.parallelism_config.tp_size = 1;
+    P2PSchedulerDecodeRead scheduler(scheduler_config, nullptr, nullptr);
+    const auto plan = scheduler.planFor(1, 1, "malformed-identity");
+    ASSERT_TRUE(plan->ok());
     KVCacheResource resource;
-    resource.initGroups(manager->cacheConfig().topologyPtr());
-    auto                             holder = std::make_shared<BlockIds>();
-    const auto                       tag    = manager->cacheConfig().groupTags().front();
+    resource.initGroups(config.topologyPtr());
+    resource.cacheKeys() = {42};
+    auto holder = std::make_shared<BlockIds>();
+    holder->assign({1});
+    const auto tag = config.groupTags().front();
     const std::vector<GroupBlockIds> malformed{{{}, {holder}},
                                                {{{tag, 0}, {"extra", 0}}, {holder, holder}},
                                                {{{tag, 1}}, {holder}},
                                                {{{tag, 0}, {"extra", 2}}, {holder, holder}},
                                                {{{tag, 0}}, {nullptr}}};
     for (const auto& blocks : malformed) {
-        DecodeRpcServer::LoadKVCacheContext context(
-            42, "malformed-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
-        // Fault injection proves dispatch revalidates even after constructor validation.
-        // Production only receives the const complete object.
-        const_cast<GroupBlockIds&>(context.groupBlockIds()) = blocks;
-        ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
-        EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, context));
-        EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+        // Fault injection: the dispatch projection must reject malformed identity before any RPC.
+        const_cast<GroupBlockIds&>(resource.groupBlockIds()) = blocks;
+        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
     }
 }
 
@@ -517,7 +508,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
 
     prepareDsv4Stream(tokens, RoleType::PREFILL);
     allocateAndFinish();
-    auto& prefill_resource = stream_->streamCacheResource();
     stream_->releaseResource();
 
     ResourceContext decode_resource_context;

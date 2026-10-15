@@ -121,6 +121,22 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                                    size_t                     worker_num) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
 
+    // Validate the complete identity/row pair before projecting a route or submitting any RPC.
+    try {
+        const auto& groups = resource.groupBlockIds();
+        groups.validate();
+        if (!config_.topology || groups.size() != config_.topology->groupTags().size()) {
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                             "decode route projection: resource group identity does not match topology");
+        }
+        for (const auto& tag : config_.topology->groupTags()) {
+            (void)groups.blockIds(tag);
+        }
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "decode route projection: invalid resource group identity: " + std::string(e.what()));
+    }
+
     // logical_count 必须是**全序列**的 cache_keys 数量，不是 block_range 窗口长度：
     // prefill 侧不知道 decode 的 block_range（prefix 部分命中的结果），两侧若用不同的
     // count，include_final_key 与 tail_count 会算出不同的键，破坏键集包含契约。
