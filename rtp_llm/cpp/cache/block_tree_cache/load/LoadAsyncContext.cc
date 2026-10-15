@@ -250,6 +250,9 @@ void LoadAsyncContext::markAborted() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
+        if (error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load context aborted");
+        }
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -296,6 +299,9 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
             return false;
         }
         has_failure_ = has_failure_ || !success;
+        if (!success && error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
+        }
         remaining_transfer_count_ -= count;
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
@@ -323,7 +329,11 @@ bool LoadAsyncContext::settle(bool success) {
         if (state_.load() != State::PENDING || !settlement_ready_) {
             return false;
         }
-        state_.store(success && !has_failure_ ? State::SUCCEEDED : State::FAILED);
+        const bool completed_successfully = success && !has_failure_;
+        if (!completed_successfully && error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
+        }
+        state_.store(completed_successfully ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
     return true;
@@ -338,6 +348,9 @@ bool LoadAsyncContext::onTaskFail() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
+        if (error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
+        }
         state_.store(State::FAILED);
     }
     notifyCompletion();
