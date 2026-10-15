@@ -186,6 +186,9 @@ def make_context(
 
 
 class QwenRenderer(CustomChatRenderer):
+    # Qwen2 architecture also hosts QwQ/R1-distill reasoning checkpoints.
+    supports_thinking: Optional[bool] = None
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,

@@ -365,11 +365,16 @@ EMITS_REASONING_STREAM_BY_MODEL_TYPE: Dict[str, bool] = {
 
 class CustomChatRenderer:
     # Whether this renderer's model spontaneously emits <think> blocks.
-    # Subclasses under ReasoningToolBaseRenderer set this True. It is the sole
-    # capability signal for think handling. See
+    # Subclasses under ReasoningToolBaseRenderer set this True. OpenAI uses this
+    # capability for reasoning-stream handling. See
     # EMITS_REASONING_STREAM_BY_MODEL_TYPE for per-deployment overrides, which
     # the instance attribute below resolves in __init__.
     emits_reasoning_stream: bool = False
+
+    # False is an explicit declaration that request-forced thinking is unsupported.
+    # Unknown/mixed checkpoint families must not inherit that declaration merely
+    # because they do not spontaneously emit reasoning streams.
+    supports_thinking: Optional[bool] = None
 
     def __init__(
         self,

@@ -13,20 +13,26 @@ Everything else in this package is internal and subject to change without notice
 External callers must import via this package boundary, not via submodules.
 """
 
-from rtp_llm.dash_sc.client import (
-    build_model_infer_request,
-    dash_sc_grpc_client_channel_options,
-    decode_finish_reason,
-)
-from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
-
 
 def __getattr__(name):
-    if name == "DashScApp":
-        from rtp_llm.dash_sc.app import DashScApp
+    # Keep pure thinking helpers usable without loading the server's native ops.
+    from importlib import import_module
 
-        return DashScApp
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if name == "DashScApp":
+        module = "rtp_llm.dash_sc.app"
+    elif name in {"SamplingParams", "DashScRequestControls"}:
+        module = "rtp_llm.dash_sc.codec"
+    elif name in {
+        "build_model_infer_request",
+        "dash_sc_grpc_client_channel_options",
+        "decode_finish_reason",
+    }:
+        module = "rtp_llm.dash_sc.client"
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module), name)
+    globals()[name] = value
+    return value
 
 
 __all__ = [

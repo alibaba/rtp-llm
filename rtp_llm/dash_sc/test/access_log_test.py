@@ -848,6 +848,21 @@ class GrpcMetricsTest(TestCase):
         self.assertNotIn("error_code", cancel[0][2])
         self.assertEqual(cancel[0][2]["priority"], "0")
 
+    def test_thinking_clamp_is_counted_per_request(self) -> None:
+        for clamped in (False, True, True):
+            rec = _make_record(thinking_clamped=clamped)
+            self.assertEqual(
+                rec.build_record(server_id=1, rank_id=0)["thinking_clamped"], clamped
+            )
+            grpc_metrics.report_frontend_rpc_done(
+                rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+            )
+        reports = self._for(AccMetrics.DASH_SC_THINKING_CLAMPED_QPS_METRIC)
+        self.assertEqual(
+            reports,
+            [(AccMetrics.DASH_SC_THINKING_CLAMPED_QPS_METRIC, 1, self.tags)] * 2,
+        )
+
     def test_done_error_tags_error_code(self) -> None:
         grpc_metrics.report_frontend_rpc_done(
             _make_record(),

@@ -32,6 +32,18 @@ def init_generate_group_args(parser, generate_env_config):
         help="深度思考模式: disabled/adaptive/enabled（兼容 0/1）",
     )
     generate_group.add_argument(
+        "--dash_sc_supports_thinking",
+        env_name="DASH_SC_SUPPORTS_THINKING",
+        bind_to=(generate_env_config, "dash_sc_supports_thinking"),
+        type=str2bool,
+        default=None,
+        help=(
+            "显式声明 DashSC 部署是否支持思考：0 禁止请求或提示锚点开启思考，"
+            "1 声明支持；默认按模型能力判断，Qwen2/Qwen3-VL 等混合检查点家族"
+            "保留未知，纯非思考检查点应显式设为 0"
+        ),
+    )
+    generate_group.add_argument(
         "--force_stop_words",
         env_name="FORCE_STOP_WORDS",
         bind_to=(generate_env_config, "force_stop_words"),

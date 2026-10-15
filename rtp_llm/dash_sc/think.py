@@ -7,8 +7,126 @@ backend ``GenerateInput`` is built.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional, Sequence
+
+MAX_THINK_ANCHOR_SCAN_TOKENS = 8192
+MAX_THINK_ANCHOR_DECODE_TOKENS = 4 * MAX_THINK_ANCHOR_SCAN_TOKENS
+
+
+def match_think_anchor(
+    input_ids: list[int],
+    *,
+    bos_tokens: Sequence[int],
+    bare_bos_tokens: Sequence[int],
+    anchor: str,
+    decode: Optional[Callable],
+    max_token_id: Optional[int] = None,
+) -> tuple[bool, list[int]]:
+    """Find a complete trailing tag, plus an independently removable token suffix.
+
+    A tag merged with preceding prompt text still opens the thinking gate, but
+    returns no suffix: echoing/removing that token would change the user prompt.
+    Only trailing LF is ignored; spaces, partial tags and closed blocks do not match.
+    Reject an indeterminate tail beyond the scan budget instead of silently
+    changing the request's thinking mode or scanning an entire client payload.
+    All decoder calls share a token-work budget, including suffix probes and
+    positional retries, so invisible tokens cannot amplify a bounded tail scan.
+    """
+    for tokens in (bos_tokens, bare_bos_tokens):
+        if tokens and input_ids[-len(tokens) :] == list(tokens):
+            return True, list(tokens)
+    anchor = anchor.rstrip("\n")
+    if decode is None or not anchor:
+        return False, []
+
+    decoded_tokens = 0
+
+    def bounded_decode(ids: list[int], **kwargs) -> str:
+        nonlocal decoded_tokens
+        decoded_tokens += len(ids)
+        if decoded_tokens > MAX_THINK_ANCHOR_DECODE_TOKENS:
+            raise ValueError(
+                "thinking boundary cannot be determined within "
+                f"{MAX_THINK_ANCHOR_DECODE_TOKENS} decoded input tokens"
+            )
+        return decode(ids, **kwargs)
+
+    def decode_tail(ids: list[int]) -> str:
+        if any(i < 0 or (max_token_id is not None and i > max_token_id) for i in ids):
+            raise ValueError(
+                "input_ids contain a token outside the tokenizer vocabulary"
+            )
+        try:
+            text = bounded_decode(ids, skip_special_tokens=False)
+        except TypeError as decode_error:
+            # Some custom tokenizers expose decode(ids) only. Do not mistake a
+            # TypeError raised inside a compatible decoder for a signature mismatch.
+            try:
+                signature = inspect.signature(decode)
+            except (ValueError, TypeError):
+                # Extension callables need not expose a Python signature.
+                try:
+                    text = bounded_decode(ids)
+                except Exception:
+                    raise decode_error
+            else:
+                try:
+                    signature.bind(ids, skip_special_tokens=False)
+                except TypeError:
+                    text = bounded_decode(ids)
+                else:
+                    raise decode_error
+        return text.rstrip("\n")
+
+    window = max(64, len(bos_tokens) + 16)
+    tail_end = len(input_ids)
+    scan_start = max(0, tail_end - MAX_THINK_ANCHOR_SCAN_TOKENS)
+    tail_start = tail_end
+    tail_text = ""
+    while tail_start > scan_start:
+        tail_start = max(scan_start, tail_start - window)
+        tail_text = decode_tail(input_ids[tail_start:tail_end])
+        if len(tail_text) >= len(anchor):
+            break
+        if not tail_text:
+            # Skip newline-only chunks without repeatedly decoding a growing tail.
+            tail_end = tail_start
+    if scan_start and tail_start == scan_start and len(tail_text) < len(anchor):
+        raise ValueError(
+            "thinking boundary cannot be determined within "
+            f"{MAX_THINK_ANCHOR_SCAN_TOKENS} trailing input tokens"
+        )
+    if not tail_text.endswith(anchor):
+        return False, []
+    for size in range(1, tail_end - tail_start + 1):
+        suffix_text = decode_tail(input_ids[tail_end - size : tail_end])
+        if suffix_text == anchor:
+            return True, input_ids[tail_end - size :]
+        if suffix_text.endswith(anchor) and "\ufffd" not in suffix_text:
+            # We already reached preceding prompt text. Longer suffixes cannot
+            # be safely echoed/removed; avoid scanning the remaining tail window.
+            break
+    return True, []
+
+
+def build_empty_think_phase2_input_ids(
+    input_ids: list[int],
+    matched_bos_ids: list[int],
+    empty_think_tokens: list[int],
+    *,
+    prompt_has_think_anchor: bool = False,
+    empty_think_suffix_tokens: Sequence[int] = (),
+) -> list[int]:
+    """Replace a removable anchor, or close a context-merged one in place."""
+    base = list(input_ids)
+    if matched_bos_ids and base[-len(matched_bos_ids) :] == matched_bos_ids:
+        return base[: -len(matched_bos_ids)] + list(empty_think_tokens)
+    if prompt_has_think_anchor:
+        return base + list(empty_think_suffix_tokens)
+    return base + list(empty_think_tokens)
+
 
 THINK_MODE_AUTO = "auto"
 THINK_MODE_FORCE = "force"
