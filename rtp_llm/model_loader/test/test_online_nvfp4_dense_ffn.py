@@ -161,7 +161,10 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         )
 
         torch.manual_seed(19)
-        output_size, hidden_size = 256, 512
+        # 512x1024 matches the shapes already validated on sm120 by
+        # fp4_gemm_linear_test; smaller tiles may lack cutlass kernel
+        # instantiations on this arch.
+        output_size, hidden_size = 512, 1024
         weight_bf16 = (
             torch.randn(output_size, hidden_size, device="cuda") * 0.05
         ).to(torch.bfloat16)
