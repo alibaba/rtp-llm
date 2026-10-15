@@ -1,6 +1,8 @@
 #pragma once
 
 #include "autil/Thread.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
+#include <tuple>
 #include <mutex>
 #include <thread>
 #include <map>
@@ -11,9 +13,12 @@
 
 namespace rtp_llm {
 
+using P2PLayerAddress  = std::pair<CacheModuleId, int>;
+using P2PLayerGroupKey = std::tuple<CacheModuleId, int, std::string>;
+
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id, std::string cache_tag);
+    LayerCacheBuffer(CacheModuleId module_id, int layer_id, std::string cache_tag);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -21,6 +26,15 @@ public:
     void addBlockId(int64_t cache_key, int block_id);
     /// @brief 查询 cache_key 对应的 block_id，未找到返回 -1
     int getBlockId(int64_t cache_key) const;
+    CacheModuleId moduleId() const {
+        return module_id_;
+    }
+    P2PLayerAddress address() const {
+        return {module_id_, layer_id_};
+    }
+    P2PLayerGroupKey groupKey() const {
+        return {module_id_, layer_id_, cache_tag_};
+    }
     int getLayerId() const {
         return layer_id_;
     }
@@ -32,6 +46,7 @@ public:
     }
 
 private:
+    CacheModuleId          module_id_;
     int                    layer_id_;
     std::string            cache_tag_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
@@ -48,17 +63,18 @@ public:
     void addLayerCacheBuffer(const std::string&                       unique_key,
                              const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer);
     /// @brief 获取 unique_key 对应指定层的缓冲区，不存在返回 nullptr
-    std::shared_ptr<LayerCacheBuffer>
-         getLayerCacheBuffer(const std::string& unique_key, int layer_id, const std::string& cache_tag) const;
+    std::shared_ptr<LayerCacheBuffer> getLayerCacheBuffer(const std::string& unique_key,
+                                                          CacheModuleId      module_id,
+                                                          int                layer_id,
+                                                          const std::string& cache_tag) const;
     void checkTimeout();
 
 private:
     uint64_t timeout_ms_;
 
     mutable std::mutex mutex_;
-    // [unique_key, [(layer_id, tag), LayerCacheBuffer]]
-    std::map<std::string, std::map<std::pair<int, std::string>, std::shared_ptr<LayerCacheBuffer>>>
-        layer_cache_buffer_map_;
+    // [unique_key, [(module_id, local_layer_id, tag), LayerCacheBuffer]]
+    std::map<std::string, std::map<P2PLayerGroupKey, std::shared_ptr<LayerCacheBuffer>>> layer_cache_buffer_map_;
     // [unique_key, expired_time]
     std::map<std::string, int64_t> expired_time_map_;
 };

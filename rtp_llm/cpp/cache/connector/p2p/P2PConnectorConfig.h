@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -42,7 +43,13 @@ struct P2PConnectorWorkerConfig {
 
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
-    uint32_t layer_all_num = 0;
+    // Indexed by active CacheModuleId only; inactive billing slots are never transferred.
+    std::vector<uint32_t> module_layer_counts;
+
+    bool hasLayer(CacheModuleId module_id, int layer_id) const {
+        return module_id.value() < module_layer_counts.size() && layer_id >= 0
+               && static_cast<uint32_t>(layer_id) < module_layer_counts[module_id.value()];
+    }
     // CP rank/size remain transport coordinates. FULL key ownership comes
     // from an external projection; first/stride index the global B-key array.
     // The worker owns this copied value for its lifetime. LayerCacheBuffer
@@ -66,11 +73,12 @@ struct P2PConnectorWorkerConfig {
         return *cache_key_coordinates;
     }
 
-    static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
-                                           const PDSepConfig&       pd_sep_config,
-                                           const ParallelismConfig& parallelism_config,
-                                           uint32_t                 layer_all_num,
-                                           std::optional<std::pair<size_t, size_t>> cache_key_coordinates = std::nullopt) {
+    static P2PConnectorWorkerConfig
+    create(const CacheStoreConfig&                  cache_store_config,
+           const PDSepConfig&                       pd_sep_config,
+           const ParallelismConfig&                 parallelism_config,
+           std::vector<uint32_t>                    module_layer_counts,
+           std::optional<std::pair<size_t, size_t>> cache_key_coordinates = std::nullopt) {
         P2PConnectorWorkerConfig config;
         config.transfer_backend_config.cache_store_rdma_mode         = cache_store_config.cache_store_rdma_mode;
         config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
@@ -88,7 +96,7 @@ struct P2PConnectorWorkerConfig {
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
-        config.layer_all_num                           = layer_all_num;
+        config.module_layer_counts                     = std::move(module_layer_counts);
         config.cache_key_coordinates                   = cache_key_coordinates;
         config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
         if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
@@ -107,20 +115,22 @@ struct P2PConnectorConfig {
     P2PConnectorSchedulerConfig scheduler_config;
     P2PConnectorWorkerConfig    worker_config;
 
-    static P2PConnectorConfig create(const RuntimeConfig&     runtime_config,
-                                     const CacheStoreConfig&  cache_store_config,
-                                     const ParallelismConfig& parallelism_config,
-                                     const PDSepConfig&       pd_sep_config,
-                                     uint32_t                 layer_all_num,
+    static P2PConnectorConfig create(const RuntimeConfig&                     runtime_config,
+                                     const CacheStoreConfig&                  cache_store_config,
+                                     const ParallelismConfig&                 parallelism_config,
+                                     const PDSepConfig&                       pd_sep_config,
+                                     std::vector<uint32_t>                    module_layer_counts,
                                      std::optional<std::pair<size_t, size_t>> cache_key_coordinates = std::nullopt) {
         P2PConnectorConfig config;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =
             P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
-        config.worker_config =
-            P2PConnectorWorkerConfig::create(cache_store_config, pd_sep_config, parallelism_config,
-                                             layer_all_num, cache_key_coordinates);
+        config.worker_config = P2PConnectorWorkerConfig::create(cache_store_config,
+                                                                pd_sep_config,
+                                                                parallelism_config,
+                                                                std::move(module_layer_counts),
+                                                                cache_key_coordinates);
         return config;
     }
 };

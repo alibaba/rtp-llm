@@ -648,11 +648,13 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
         ASSERT_FALSE(group_set->groupTags().empty());
         ASSERT_EQ(group_set->groupTags().size(), group_set->devicePools().size());
         ASSERT_NE(group_set->hostPool(), nullptr);
-        EXPECT_EQ(group_set->hostPool()->poolName(), "block_tree_host_" + expected_type_name);
+        EXPECT_EQ(group_set->hostPool()->poolName(),
+                  "block_tree_host_" + expected_type_name + "_" + std::to_string(group_set_id));
         EXPECT_GT(group_set->hostPool()->freeBlocksNum(), 0u);
         if (layout == TierLayout::HOST_DISK) {
             ASSERT_NE(group_set->diskPool(), nullptr);
-            EXPECT_EQ(group_set->diskPool()->poolName(), "block_tree_disk_" + expected_type_name);
+            EXPECT_EQ(group_set->diskPool()->poolName(),
+                  "block_tree_disk_" + expected_type_name + "_" + std::to_string(group_set_id));
             EXPECT_GT(group_set->diskPool()->freeBlocksNum(), 0u);
         } else {
             EXPECT_EQ(group_set->diskPool(), nullptr);

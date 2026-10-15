@@ -22,7 +22,7 @@ protected:
 
     // 创建测试用的 LayerCacheBuffer
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
-        return std::make_shared<LayerCacheBuffer>(layer_id, "default");
+        return std::make_shared<LayerCacheBuffer>(CacheModuleId::main(), layer_id, "default");
     }
 
     // 获取当前时间（毫秒）+ 偏移量
@@ -33,6 +33,25 @@ protected:
 protected:
     std::unique_ptr<ComputedLayerCacheBufferStore> store_;
 };
+
+TEST_F(ComputedLayerCacheBufferTest, SameLocalLayerAndTagRemainIndependentAcrossModules) {
+    auto main  = std::make_shared<LayerCacheBuffer>(CacheModuleId::main(), 0, "default");
+    auto draft = std::make_shared<LayerCacheBuffer>(CacheModuleId(1), 0, "default");
+    main->addBlockId(101, 7);
+    draft->addBlockId(101, 9);
+    ComputedLayerCacheBuffer computed(123, main, getDeadlineMs());
+    computed.addBuffer(draft, getDeadlineMs());
+    computed.addBuffer(main, getDeadlineMs());  // A duplicate must not increase completion count.
+    const auto [count, selected] = computed.getBuffers({{CacheModuleId(1), 0}});
+    EXPECT_EQ(count, 2);
+    ASSERT_EQ(selected.size(), 1u);
+    EXPECT_EQ(selected.front(), draft);
+    LayerCacheBufferStore store(10000);
+    store.addLayerCacheBuffer("request", main);
+    store.addLayerCacheBuffer("request", draft);
+    EXPECT_EQ(store.getLayerCacheBuffer("request", CacheModuleId::main(), 0, "default")->getBlockId(101), 7);
+    EXPECT_EQ(store.getLayerCacheBuffer("request", CacheModuleId(1), 0, "default")->getBlockId(101), 9);
+}
 
 // ==================== ComputedLayerCacheBuffer 类测试 ====================
 
@@ -49,7 +68,7 @@ TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
     computed_buffer.addBuffer(buffer, deadline_ms1);
     ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({{CacheModuleId::main(), 0}, {CacheModuleId::main(), 1}});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -68,7 +87,7 @@ TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
     computed_buffer.addBuffer(nullptr, deadline_ms1);
     ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({{CacheModuleId::main(), 0}, {CacheModuleId::main(), 1}});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -93,7 +112,7 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
 
     producer.join();
 
-    std::set<int> layer_ids     = {0, 1};
+    std::set<P2PLayerAddress> layer_ids = {{CacheModuleId::main(), 0}, {CacheModuleId::main(), 1}};
     auto [layer_count, buffers] = computed_buffer->getBuffers(layer_ids);
     EXPECT_EQ(layer_count, 2);
     EXPECT_EQ(buffers.size(), 2);
@@ -150,7 +169,7 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
     auto computed_buffer2 = store_->addBuffer(request_id, buffer1, deadline_ms);
     ASSERT_EQ(computed_buffer2, computed_buffer);
 
-    auto [layer_count, buffers] = retrieved->getBuffers({0, 2});
+    auto [layer_count, buffers] = retrieved->getBuffers({{CacheModuleId::main(), 0}, {CacheModuleId::main(), 2}});
     EXPECT_EQ(layer_count, 2);
     ASSERT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffers[0]->getLayerId(), 0);

@@ -117,7 +117,7 @@ TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure)
         context->setTargetBlocks(i, std::move(targets));
     }
     for (size_t handle = 0; handle < context->backendHandles()[1].size(); ++handle) {
-        const auto& pool   = pools.at(context->backendHandles()[1][handle].tag);
+        const auto& pool   = pools.at(context->backendHandles()[1][handle].key.tag);
         const auto  blocks = pool->malloc(1).value();
         pool->incRef(blocks);
         request_refs.emplace_back(pool, blocks.front());

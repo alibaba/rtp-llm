@@ -44,9 +44,14 @@ struct BlockIdPair {
 };
 
 struct TaggedBlockIdPair {
-    std::string  tag;
+    ModuleGroupKey key;
     BlockIdxType src;
     BlockIdxType dst;
+
+    TaggedBlockIdPair(ModuleGroupKey key, BlockIdxType src, BlockIdxType dst):
+        key(std::move(key)), src(src), dst(dst) {}
+    TaggedBlockIdPair(std::string tag, BlockIdxType src, BlockIdxType dst):
+        TaggedBlockIdPair(ModuleGroupKey{CacheModuleId::main(), std::move(tag)}, src, dst) {}
 };
 
 // Process-local tensor representation. group_id is resolved from a stable tag

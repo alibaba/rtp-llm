@@ -1479,9 +1479,11 @@ class HiddenStateCaptureTest(unittest.TestCase):
                     for tags in (("indexer_kv", "default"), ("default", "indexer_kv"))
                 ]
                 if with_cache:
-                    model.kv_cache = SimpleNamespace(
-                        get_layer_cache_groups=layer_caches.__getitem__
-                    )
+                    for layer_idx, caches in enumerate(layer_caches):
+                        caches_by_tag = {cache.tag: cache for cache in caches}
+                        model.layers[layer_idx].cache_binding = SimpleNamespace(
+                            cache_for_tag=caches_by_tag.__getitem__
+                        )
                 fmha_impl = {"indexer_kv": object(), "default": object()}
                 # Reuse the model across requests to check capture stays forward-local.
                 for capture_hidden_states in (True, False):

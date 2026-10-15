@@ -345,7 +345,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     init_resources.module_id              = params.module_id;
     init_resources.module_count           = params.cache_manager == nullptr ?
                                                 std::max<size_t>(1, params.module_id.value() + 1) :
-                                                1 + params.cache_manager->cacheConfig().mtp_sub_configs.size();
+                                                params.cache_manager->cacheDomainConfig().moduleCount();
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;

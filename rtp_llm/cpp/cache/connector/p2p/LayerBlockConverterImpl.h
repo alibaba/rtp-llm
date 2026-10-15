@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 
 namespace rtp_llm {
 
@@ -17,14 +18,17 @@ public:
     explicit LayerBlockConverterImpl(const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager):
         coordinator_manager_(coordinator_manager) {}
 
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
-        return filterValid(
-            coordinator_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
+    std::vector<BlockInfo> convertIndexToBuffer(CacheModuleId      module_id,
+                                                int                layer_id,
+                                                const std::string& tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id) const override {
+        return filterValid(coordinator_manager_->convertIndexToBuffer(
+            module_id, layer_id, tag, block_id, partition_count, partition_id));
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
-        const auto                                layout = coordinator_manager_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;
         using BufferKey = std::tuple<uintptr_t, size_t, bool, int32_t, int32_t>;
         std::set<BufferKey> seen;
@@ -49,14 +53,17 @@ public:
             }
             result.push_back({info, aligned});
         };
-        for (const auto& [tag, group_layout] : layout.groups()) {
-            (void)tag;
-            if (group_layout.empty()) {
-                continue;
-            }
-            for (const auto& layer : group_layout.layers()) {
-                append_tensor(layer.kv_addr);
-                append_tensor(layer.kv_scale_addr);
+        for (size_t m = 0; m < coordinator_manager_->cacheDomainConfig().activeModuleCount(); ++m) {
+            const auto layout = coordinator_manager_->allLayerCacheBase(CacheModuleId(m));
+            for (const auto& [tag, group_layout] : layout.groups()) {
+                (void)tag;
+                if (group_layout.empty()) {
+                    continue;
+                }
+                for (const auto& layer : group_layout.layers()) {
+                    append_tensor(layer.kv_addr);
+                    append_tensor(layer.kv_scale_addr);
+                }
             }
         }
         return result;

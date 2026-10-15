@@ -28,9 +28,11 @@ class CausalAttention(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.cache_binding = None
+        self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num

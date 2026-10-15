@@ -7,6 +7,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -27,6 +28,16 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
+    static CacheDomainConfig
+    createDomainConfig(const ModelConfig&                               model_config,
+                       const ParallelismConfig&                         parallelism_config,
+                       const KVCacheConfig&                             kv_cache_config,
+                       const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
+                       const ModelConfig*                               draft_model_config = nullptr,
+                       bool                                             is_mtp             = false,
+                       bool                                             is_eagle           = false);
+
+    static KVCacheBlockBudget blockBudget(const CacheDomainConfig& domain);
     static CacheConfig createWarmupConfig(const ModelConfig&       model_config,
                                           const ParallelismConfig& parallelism_config,
                                           int                      gen_num_per_cycle = 0);
@@ -35,17 +46,20 @@ public:
                                           const KVCacheConfig&     kv_cache_config,
                                           int                      gen_num_per_cycle = 0);
     // Builds main and draft layouts. Capacity is computed and finalized separately.
-    static CacheConfig createConfig(const ModelConfig&                               model_config,
-                                    const ParallelismConfig&                         parallelism_config,
-                                    const KVCacheConfig&                             kv_cache_config,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
-                                    const ModelConfig*                               draft_model_config = nullptr,
-                                    bool                                             is_mtp             = false,
-                                    bool                                             is_eagle           = false);
+    static CacheConfig createConfig(const ModelConfig&       model_config,
+                                    const ParallelismConfig& parallelism_config,
+                                    const KVCacheConfig&     kv_cache_config);
 
     static uint32_t resolvedBaseBlockTokens(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config);
     static uint32_t resolvedKernelBlockTokens(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config);
 
+    static uint32_t computeLocalBlockNum(const CacheDomainConfig&                         config,
+                                         const ModelConfig&                               model_config,
+                                         const RuntimeConfig&                             runtime_config,
+                                         const KVCacheConfig&                             kv_cache_config,
+                                         const ParallelismConfig&                         parallelism_config,
+                                         const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
+                                         const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
                                          const RuntimeConfig&                             runtime_config,

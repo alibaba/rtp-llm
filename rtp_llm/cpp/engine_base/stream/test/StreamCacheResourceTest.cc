@@ -427,6 +427,29 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, SwapLinearBlocksAdvancesEveryActiveModuleOnly) {
+    auto              leaf = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    CacheDomainConfig domain({leaf, leaf, leaf}, 2);
+    ResourceContext   context;
+    context.cache_manager = std::make_shared<KVCacheManager>(domain);
+    StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+    resource.init(1);
+    auto& batch = resource.kvCacheMutable();
+    ASSERT_EQ(batch.cacheResource().moduleCount(), 3u);
+    for (const auto& key : domain.groupKeys()) {
+        const auto offset = static_cast<int>(key.module_id.value() * 10);
+        batch.mutableBlockIds(0, key).assign({2 + offset, 5 + offset});
+    }
+    resource.swapLinearBlocks(0, 0, 1);
+    for (const auto& key : domain.groupKeys()) {
+        const auto offset = static_cast<int>(key.module_id.value() * 10);
+        const bool swap =
+            domain.isActive(key.module_id) && domain.group(key).policy.group_type == CacheGroupType::LINEAR;
+        EXPECT_EQ(batch.blocks(0, key),
+                  swap ? (BlockIndicesType{5 + offset, 2 + offset}) : (BlockIndicesType{2 + offset, 5 + offset}));
+    }
+}
+
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
         auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);

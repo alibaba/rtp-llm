@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -327,9 +328,9 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 
 TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
-    main_config.mtp_sub_configs.push_back(
-        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
-    auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
+    auto draft_config = makeWriterTestCacheConfig("draft", /*kv_stride=*/32);
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(CacheDomainConfig({main_config, draft_config}), /*warmup=*/true);
 
     CacheStoreAsyncWriter writer(
         /*device_id=*/-1, cache_manager, CacheModuleId(1));
@@ -337,8 +338,33 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     EXPECT_EQ(writer.cache_manager_, cache_manager);
     EXPECT_EQ(writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
     EXPECT_EQ(writer.module_id_, CacheModuleId(1));
+    EXPECT_EQ(writer.cache_config_.get(), &cache_manager->cacheDomainConfig().module(CacheModuleId(1)));
     EXPECT_EQ(writer.cp_rank_, 0);
     EXPECT_EQ(writer.cp_size_, 1);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SameTagSelectsIndependentModuleGeometry) {
+    const CacheDomainConfig domain(
+        {makeWriterTestCacheConfig("shared", /*kv_stride=*/16), makeWriterTestCacheConfig("shared", /*kv_stride=*/32)});
+    auto                  cache_manager = std::make_shared<KVCacheManager>(domain, /*warmup=*/true);
+    CacheStoreAsyncWriter main_writer(/*device_id=*/-1, cache_manager, CacheModuleId::main());
+    CacheStoreAsyncWriter draft_writer(/*device_id=*/-1, cache_manager, CacheModuleId(1));
+    EXPECT_EQ(main_writer.module_id_, CacheModuleId::main());
+    EXPECT_EQ(draft_writer.module_id_, CacheModuleId(1));
+    EXPECT_EQ(main_writer.cache_config_->groupTags(), draft_writer.cache_config_->groupTags());
+    EXPECT_NE(main_writer.cache_config_.get(), draft_writer.cache_config_.get());
+    EXPECT_EQ(main_writer.cache_config_->group("shared").spec->block_size_bytes(), 16u);
+    EXPECT_EQ(draft_writer.cache_config_->group("shared").spec->block_size_bytes(), 32u);
+    EXPECT_THROW((void)CacheStoreAsyncWriter(/*device_id=*/-1, cache_manager, CacheModuleId(2)), std::exception);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, RejectsInactiveBillingModuleBeforeCreatingWriter) {
+    const auto              main_config  = makeWriterTestCacheConfig("shared", /*kv_stride=*/16);
+    const auto              draft_config = makeWriterTestCacheConfig("shared", /*kv_stride=*/32);
+    const CacheDomainConfig domain({main_config, draft_config, draft_config}, /*active_module_count=*/2);
+    auto                    cache_manager = std::make_shared<KVCacheManager>(domain, /*warmup=*/true);
+    EXPECT_NO_THROW((void)CacheStoreAsyncWriter(/*device_id=*/-1, cache_manager, CacheModuleId(1)));
+    EXPECT_THROW((void)CacheStoreAsyncWriter(/*device_id=*/-1, cache_manager, CacheModuleId(2)), std::exception);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, RequiresExplicitPhysicalCpTopology) {
@@ -379,15 +405,18 @@ TEST_F(CacheStoreAsyncWriterTest, ExplicitProducerTopologyUsesProvidedValues) {
 
 TEST_F(CacheStoreAsyncWriterTest, DraftConfigKeepsExplicitProducerTopology) {
     auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
-    main_config.mtp_sub_configs.push_back(
-        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
+    auto              draft_config = makeWriterTestCacheConfig("draft", /*kv_stride=*/32);
     ParallelismConfig parallelism;
     parallelism.tp_rank                            = 1;
     parallelism.tp_size                            = 2;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
     main_config.finalizeStorageLayout(parallelism);
-    auto cache_manager = std::make_shared<KVCacheManager>(
-        main_config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
+    draft_config.finalizeStorageLayout(parallelism);
+    auto cache_manager = std::make_shared<KVCacheManager>(CacheDomainConfig({main_config, draft_config}),
+                                                          /*warmup=*/true,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          parallelism);
     CacheStoreAsyncWriter draft_writer(
         /*device_id=*/-1,
         cache_manager,
@@ -396,6 +425,9 @@ TEST_F(CacheStoreAsyncWriterTest, DraftConfigKeepsExplicitProducerTopology) {
         std::make_pair(1, 2));
 
     EXPECT_EQ(draft_writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
+    EXPECT_EQ(draft_writer.module_id_, CacheModuleId(1));
+    EXPECT_EQ(draft_writer.cache_config_->storage_cp_rank, 1);
+    EXPECT_EQ(draft_writer.cache_config_->storage_cp_size, 2);
     EXPECT_EQ(draft_writer.cp_rank_, 1);
     EXPECT_EQ(draft_writer.cp_size_, 2);
 }

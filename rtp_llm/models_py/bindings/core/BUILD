@@ -88,6 +88,7 @@ cc_library(
         "OpData.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_identity",
         ":type_convert",
         ":common_defines",
         ":tensor_holder",

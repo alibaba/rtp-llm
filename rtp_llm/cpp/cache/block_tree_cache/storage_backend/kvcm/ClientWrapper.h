@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include "rtp_llm/cpp/cache/ModuleGroupKey.h"
 #include <unordered_map>
 #include <map>
 #include <memory>
@@ -33,7 +34,7 @@ public:
     virtual bool initForPools(const ConfigMap&                     config_map,
                               kv_cache_manager::RoleType           role,
                               const std::vector<PoolRegistration>& registrations,
-                              const std::vector<std::string>&      tags);
+                              const std::vector<ModuleGroupKey>&   tags);
     virtual void shutdown() noexcept;
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
@@ -57,22 +58,22 @@ public:
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
 
-    // Business identity is a tag; vector slots never leave this wrapper.
-    virtual bool loadKvCachesForTag(const std::string&                                          tag,
-                                    const kv_cache_manager::UriStrVec&                          uris,
-                                    kv_cache_manager::BlockBuffers&                             buffers,
-                                    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    // Business identity is a module group; vector slots never leave this wrapper.
+    virtual bool loadKvCachesForGroup(const ModuleGroupKey&                                       tag,
+                                      const kv_cache_manager::UriStrVec&                          uris,
+                                      kv_cache_manager::BlockBuffers&                             buffers,
+                                      const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
-    saveKvCachesForTag(const std::string&                                          tag,
-                       const kv_cache_manager::UriStrVec&                          uris,
-                       const kv_cache_manager::BlockBuffers&                       buffers,
-                       const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    saveKvCachesForGroup(const ModuleGroupKey&                                       tag,
+                         const kv_cache_manager::UriStrVec&                          uris,
+                         const kv_cache_manager::BlockBuffers&                       buffers,
+                         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,
                   const kv_cache_manager::InitParams&  init_params,
                   const std::vector<PoolRegistration>& registrations,
-                  const std::vector<std::string>&      tags);
+                  const std::vector<ModuleGroupKey>&   tags);
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
     bool initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
     // reinit if address_snapshot_ change
@@ -90,7 +91,7 @@ private:
     // InitParams carries a pointer, so retain the descriptor for every later
     // meta-client re-registration performed by this wrapper.
     std::vector<PoolRegistration>           pool_registrations_;
-    std::unordered_map<std::string, size_t> tag_to_index_;
+    std::unordered_map<ModuleGroupKey, size_t> tag_to_index_;
     // keys of config_map_/meta_client_map_ will not change after init
     ConfigMap                config_map_;
     MetaClientMap            meta_client_map_;

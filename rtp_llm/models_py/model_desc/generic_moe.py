@@ -523,7 +523,7 @@ class GenericMoeModel(GptModelBase):
                 for group_tag in ("default", "indexer_kv")
             }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            binding = decoder_layer.cache_binding
+            binding = getattr(decoder_layer, "cache_binding", None)
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
                 layer_kv_cache = (

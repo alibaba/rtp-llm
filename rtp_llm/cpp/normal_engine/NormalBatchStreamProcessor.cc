@@ -52,6 +52,36 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     output_dispatcher_ = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids, async_worker_count);
 }
 
+void NormalBatchStreamProcessor::setCacheDomain(const CacheDomainConfig& domain, CacheModuleId selected_module) {
+    RTP_LLM_CHECK_WITH_INFO(
+        domain.isActive(selected_module), "gather requires an active cache module=%zu", selected_module.value());
+    model_input_gatherer_config_.cache_module_id     = selected_module;
+    const auto& leaf                                 = domain.module(selected_module);
+    model_input_gatherer_config_.seq_size_per_block  = leaf.seq_size_per_block;
+    model_input_gatherer_config_.kv_cache_group_nums = leaf.groupNums();
+    model_input_gatherer_config_.kv_cache_group_tags = leaf.groupTags();
+    model_input_gatherer_config_.kv_cache_group_types.clear();
+    for (const auto& group : leaf.groups()) {
+        model_input_gatherer_config_.kv_cache_group_types.push_back(group.policy.group_type);
+    }
+    model_input_gatherer_config_.use_opaque_kv_cache_store  = leaf.use_opaque_kv_cache_store;
+    model_input_gatherer_config_.block_stride_bytes         = 0;
+    model_input_gatherer_config_.scale_stride_bytes         = 0;
+    model_input_gatherer_config_.kernel_seq_size_per_block  = 0;
+    model_input_gatherer_config_.kernel_blocks_per_kv_block = leaf.topology().maxKernelBlocksPerKvBlock();
+    if (leaf.groupNums() == 1) {
+        const auto& group                                      = leaf.groups().front();
+        model_input_gatherer_config_.block_stride_bytes        = group.kvBlockStrideBytes();
+        model_input_gatherer_config_.scale_stride_bytes        = group.kvScaleStrideBytes();
+        model_input_gatherer_config_.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
+    }
+    model_input_gatherer_config_.active_cache_modules.clear();
+    for (size_t m = 0; m < domain.activeModuleCount(); ++m) {
+        model_input_gatherer_config_.active_cache_modules.push_back(domain.module(CacheModuleId(m)));
+    }
+    model_input_gatherer_ = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
+}
+
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,
                                                   const MergedOutput& merge_outputs) const {
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);

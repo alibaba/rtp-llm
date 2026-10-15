@@ -41,7 +41,7 @@ using IKVCacheRecvTaskPtr = std::shared_ptr<IKVCacheRecvTask>;
 
 /// @brief 注册一层 KV cache 接收任务的请求参数
 struct RecvRequest {
-    /// unique_key = base_key + "_" + layer_id + "_" + remote_partition_id
+    /// unique_key includes request, module, local layer, cache tag and partition (P2PKeyUtil)
     std::string     unique_key;
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;

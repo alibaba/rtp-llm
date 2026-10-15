@@ -156,7 +156,7 @@ protected:
             read_handle_counts_.push_back(key_handles.size());
             std::vector<std::string> group_tags;
             for (const auto& handle : key_handles) {
-                group_tags.push_back(handle.tag);
+                group_tags.push_back(handle.key.tag);
             }
             read_group_tags_.push_back(std::move(group_tags));
         }
@@ -663,7 +663,7 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
         EXPECT_EQ(handles[3].size(), 3u);
         for (size_t key_index = 0; key_index < handles.size(); ++key_index) {
             for (size_t handle_index = 0; handle_index < handles[key_index].size(); ++handle_index) {
-                const auto group_id = static_cast<size_t>(handles[key_index][handle_index].tag.back() - '0');
+                const auto group_id = static_cast<size_t>(handles[key_index][handle_index].key.tag.back() - '0');
                 current.setBackendTargetBlock(key_index, handle_index, blocks[group_id]);
             }
         }

@@ -31,36 +31,36 @@ TEST(P2PConnectorConfigTest, ShardedKeyCoordinatesMustBeExplicit) {
     const CacheStoreConfig cache_store;
     const PDSepConfig pd_sep;
 
-    EXPECT_THROW((void)P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1),
+    EXPECT_THROW((void)P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, {1}),
                  std::invalid_argument);
     const std::pair<size_t, size_t> coordinates{3, 4};
     EXPECT_EQ(coordinates, (std::pair<size_t, size_t>{3, 4}));
-    const auto config = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1, coordinates);
+    const auto config = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, {1}, coordinates);
     EXPECT_EQ(config.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{3, 4}));
     EXPECT_EQ(config.worker_config.cp_rank, 3);
     EXPECT_EQ(config.worker_config.cp_size, 4);
 
     EXPECT_THROW((void)P2PConnectorConfig::create(
-                     runtime, cache_store, parallelism, pd_sep, 1, std::pair<size_t, size_t>{2, 2}),
+                     runtime, cache_store, parallelism, pd_sep, {1}, std::pair<size_t, size_t>{2, 2}),
                  std::invalid_argument);
     EXPECT_THROW((void)P2PConnectorConfig::create(
-                     runtime, cache_store, parallelism, pd_sep, 1, std::pair<size_t, size_t>{0, 0}),
+                     runtime, cache_store, parallelism, pd_sep, {1}, std::pair<size_t, size_t>{0, 0}),
                  std::invalid_argument);
 
     parallelism.tp_size = 1;
     parallelism.tp_rank = 0;
-    const auto p1 = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    const auto p1       = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, {1});
     EXPECT_EQ(p1.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{0, 1}));
     parallelism.tp_size = 4;
     parallelism.prefill_cp_config.kv_cache_sharded = false;
-    const auto unsharded = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    const auto unsharded = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, {1});
     EXPECT_EQ(unsharded.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{0, 1}));
 }
 
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(CacheModuleId, int, const std::string&, int, int, int) const override {
         return {};
     }
 
@@ -97,7 +97,7 @@ protected:
         pd_sep_config.decode_polling_call_prefill_ms = 30;
 
         config_ = P2PConnectorConfig::create(
-            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*module_layer_counts=*/{2});
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -189,6 +189,20 @@ protected:
 // ==================== handleRead 测试 ====================
 
 // 测试: stream_store_ 为 nullptr，返回 INTERNAL 错误
+TEST_F(P2PConnectorTest, RejectsInactiveModuleAndNonlocalLayerBeforeRead) {
+    for (const auto& coordinate : std::vector<std::pair<uint64_t, uint32_t>>{{1, 0}, {0, 2}}) {
+        P2PConnectorBroadcastTpRequestPB request;
+        auto                             block = request.add_layer_blocks();
+        block->set_module_id(coordinate.first);
+        block->set_layer_id(coordinate.second);
+        block->set_cache_tag("default");
+        block->add_cache_keys(101);
+        block->add_block_ids(7);
+        FunctionResponsePB response;
+        EXPECT_ANY_THROW(connector_->executeRead(123, "invalid", currentTimeMs() + 1000, request, response));
+    }
+}
+
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenStreamStoreIsNull) {
     auto connector = std::make_unique<P2PConnector>(config_, mock_layer_block_converter_, nullptr);
 

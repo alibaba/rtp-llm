@@ -176,12 +176,12 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);
-    ASSERT_FALSE(item1.group_block_ids.at("full").empty());
+    ASSERT_FALSE(item1.group_block_ids.at({CacheModuleId::main(), "full"}).empty());
     ASSERT_EQ(item1.prompt_tokens, prompt_1);
 
     const auto& item2 = result["2"];
     ASSERT_EQ(item2.prompt_tokens.size(), 4);
-    ASSERT_FALSE(item2.group_block_ids.at("full").empty());
+    ASSERT_FALSE(item2.group_block_ids.at({CacheModuleId::main(), "full"}).empty());
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
 }
 
@@ -200,7 +200,7 @@ TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow)
     EXPECT_EQ(prompt.prompt_tokens, (std::vector<int>{1, 2, 3}));
     ASSERT_EQ(prompt.group_block_ids.size(), 2u);
     for (const auto& group : manager->cacheConfig().topology().groups()) {
-        const auto& blocks = prompt.group_block_ids.at(group.tag);
+        const auto& blocks = prompt.group_block_ids.at({CacheModuleId::main(), group.tag});
         ASSERT_FALSE(blocks.empty()) << group.tag;
         const auto& pools = manager->coordinator_manager_->cacheGroups();
         auto        owner = std::find_if(
@@ -253,7 +253,7 @@ TEST_F(SystemPromptConstructorTest, testCp2ResidentInsertUsesCacheCanonicalKeys)
     auto result = constructor.construct(config, engine.get(), manager.get(), true);
     ASSERT_TRUE(result.ok()) << result.status();
     EXPECT_EQ(result->at("cp2").prompt_tokens.size(), 8u);
-    ASSERT_EQ(result->at("cp2").group_block_ids.at("full").size(), 2u);
+    ASSERT_EQ(result->at("cp2").group_block_ids.at({CacheModuleId::main(), "full"}).size(), 2u);
 
     const auto& full_keys = engine->fullKeys();
     ASSERT_EQ(full_keys.size(), 4u);

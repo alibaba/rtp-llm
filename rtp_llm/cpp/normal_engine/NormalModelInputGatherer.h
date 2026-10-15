@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -17,6 +18,8 @@ namespace rtp_llm {
 struct TensorHolder;
 
 struct NormalModelInputGathererConfig {
+    CacheModuleId               cache_module_id = CacheModuleId::main();
+    std::vector<CacheConfig>    active_cache_modules;
     size_t                      num_layers{};
     size_t                      vocab_size{};
     size_t                      input_vocab_size{};
@@ -55,7 +58,7 @@ public:
                                                              TensorHolder&                   host_holder) const;
 
 private:
-    GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
+    GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
     absl::Status   processContextStreams(GptModelInputs&     model_input,

@@ -71,21 +71,22 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheDomainConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
     resource_released_ = false;
 }
 
-bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const {
+bool StreamCacheResource::copyChunkKernelBlocks(int batch, const ModuleGroupKey& key, int32_t* dst) const {
     if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
         return false;
     }
     const auto& context = resource_context_;
-    const auto& group   = context.cache_manager->cacheConfig().group(tag);
+    const auto& group   = context.cache_manager->cacheDomainConfig().group(key);
     const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
-    const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
+    const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(key);
     if (group.policy.shared_chunk_state) {
         // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
         RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
@@ -579,10 +580,11 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheDomainConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -649,9 +651,10 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
-        if (group.policy.group_type == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
+    const auto& domain = resource_context_.cache_manager->cacheDomainConfig();
+    for (const auto& key : domain.groupKeys()) {
+        if (domain.isActive(key.module_id) && domain.group(key).policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->mutableBlockIds(batch_id, key).swap(rhs, lhs);
         }
     }
 }

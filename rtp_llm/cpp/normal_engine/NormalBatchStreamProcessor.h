@@ -7,6 +7,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -24,6 +25,8 @@ public:
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
                                int                                async_worker_count = 0);
+
+    void setCacheDomain(const CacheDomainConfig& domain, CacheModuleId selected_module = CacheModuleId::main());
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,

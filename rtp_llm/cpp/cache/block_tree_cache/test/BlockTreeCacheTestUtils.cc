@@ -431,7 +431,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
     }
     std::shared_ptr<const CacheTopology> storage_topology;
     StorageBackend::PoolsByTag           storage_pools;
-    StorageBackend::BufferResolver       storage_buffer_resolver;
+    StorageBackend::LeafBufferResolver   storage_buffer_resolver;
     if (storage_backend != nullptr) {
         storage_topology = group_sets.front()->topologyPtr();
         for (const auto& group_set : group_sets) {

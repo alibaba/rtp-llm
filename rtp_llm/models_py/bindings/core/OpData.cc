@@ -10,6 +10,57 @@
 
 namespace rtp_llm {
 
+CacheModuleInputs GptModelInputs::selectedCacheInputs() const {
+    return {kv_cache_block_id,
+            kv_cache_kernel_block_id,
+            kv_cache_group_tags,
+            kv_cache_group_types,
+            kv_cache_update_mapping,
+            kv_block_stride_bytes,
+            kv_scale_stride_bytes,
+            seq_size_per_block,
+            kernel_seq_size_per_block,
+            use_opaque_kv_cache_store};
+}
+
+void GptModelInputs::setSelectedCacheInputs(CacheModuleId module_id, const CacheModuleInputs& cache) {
+    cache_module_id           = module_id;
+    kv_cache_block_id         = cache.physical_blocks;
+    kv_cache_kernel_block_id  = cache.kernel_blocks;
+    kv_cache_group_tags       = cache.tags;
+    kv_cache_group_types      = cache.group_types;
+    kv_cache_update_mapping   = cache.update_mapping;
+    kv_block_stride_bytes     = cache.block_stride_bytes;
+    kv_scale_stride_bytes     = cache.scale_stride_bytes;
+    seq_size_per_block        = cache.seq_size_per_block;
+    kernel_seq_size_per_block = cache.kernel_seq_size_per_block;
+    use_opaque_kv_cache_store = cache.use_opaque_kv_cache_store;
+}
+
+void GptModelInputs::saveSelectedCacheInputs() {
+    if (!module_cache_inputs.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(cache_module_id.value() < module_cache_inputs.size(),
+                                "selected cache module=%zu exceeds module count=%zu",
+                                cache_module_id.value(),
+                                module_cache_inputs.size());
+        auto& cache           = module_cache_inputs[cache_module_id.value()];
+        cache.physical_blocks = kv_cache_block_id;
+        cache.kernel_blocks   = kv_cache_kernel_block_id;
+        cache.tags            = kv_cache_group_tags;
+        cache.group_types     = kv_cache_group_types;
+        cache.update_mapping  = kv_cache_update_mapping;
+    }
+}
+
+void GptModelInputs::selectCacheModule(CacheModuleId module_id) {
+    RTP_LLM_CHECK_WITH_INFO(module_id.value() < module_cache_inputs.size(),
+                            "cache input module=%zu exceeds active module count=%zu",
+                            module_id.value(),
+                            module_cache_inputs.size());
+    saveSelectedCacheInputs();
+    setSelectedCacheInputs(module_id, module_cache_inputs[module_id.value()]);
+}
+
 std::string combineStrings(const std::vector<std::string>& vec) {
     std::string result = "\" ";
     for (const auto& s : vec) {

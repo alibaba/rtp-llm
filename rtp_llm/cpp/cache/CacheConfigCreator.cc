@@ -56,32 +56,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
-        size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheConfig& source, const GroupBase& segment, bool main) {
-            const auto   layer_ids = source.layerIdsForGroup(segment.tag);
-            const size_t layer_count =
-                main ? std::count_if(
-                           layer_ids.begin(),
-                           layer_ids.end(),
-                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
-                        layer_ids.size();
-            addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
-            addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
-        };
-        // Exactly the physical segments assembled by BlockPoolConfigHelper:
-        // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config, group, true);
-        for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
-                                    "MTP cache configuration is missing group index=%zu for tag=%s",
-                                    gid,
-                                    group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(sub->topology().groups()[gid].tag == group.tag,
-                                    "MTP group order is inconsistent for tag=%s",
-                                    group.tag.c_str());
-            append_segment(*sub, sub->topology().groups()[gid], false);
-        }
+        const size_t group_bytes    = config.blockSizeBytesForGroup(group.tag);
         const auto& policy = group.policy;
         if (policy.explicit_block_num > 0) {
             if (policy.charge_to_paged_budget) {
@@ -514,37 +489,70 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
     return config;
 }
 
-CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
-                                             const ParallelismConfig&                         parallelism_config,
-                                             const KVCacheConfig&                             kv_cache_config,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                             const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+CacheDomainConfig CacheConfigCreator::createDomainConfig(const ModelConfig&       model_config,
+                                                         const ParallelismConfig& parallelism_config,
+                                                         const KVCacheConfig&     kv_cache_config,
+                                                         const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                         const ModelConfig* draft_model_config,
+                                                         bool               is_mtp,
+                                                         bool               is_eagle) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     RTP_LLM_CHECK_WITH_INFO(
         draft_model_config == nullptr
-            || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
-        "draft proposal token count must fit a non-negative int");
-    const int gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
-    auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-    config.finalizeStorageLayout(parallelism_config);
+            || (sp_config->gen_num_per_cycle > 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
+        "draft proposal token count must fit a positive int");
+    const int                gen_num_per_cycle = draft_model_config == nullptr ? 0 : sp_config->gen_num_per_cycle;
+    std::vector<CacheConfig> modules;
+    modules.push_back(createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle));
+    modules.front().finalizeStorageLayout(parallelism_config);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
         draft.finalizeStorageLayout(parallelism_config);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
-        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
-        config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        // Proposal count controls billed slots. Execution still binds only
+        // the first draft module, including DSPARK's feature-cache commits.
+        const int draft_count = !is_eagle && (is_mtp || sp_config->type == SP_TYPE_DSPARK) ? gen_num_per_cycle : 1;
+        for (int slot = 0; slot < draft_count; ++slot) {
+            modules.push_back(draft);
         }
     }
+    return CacheDomainConfig(std::move(modules), draft_model_config == nullptr ? 1 : 2);
+}
 
-    return config;
+KVCacheBlockBudget CacheConfigCreator::blockBudget(const CacheDomainConfig& domain) {
+    KVCacheBlockBudget total;
+    for (size_t index = 0; index < domain.moduleCount(); ++index) {
+        const auto leaf = blockBudgetForConfig(domain.module(CacheModuleId(index)));
+        addBudgetBytes(total.explicit_pool_reserve_bytes, leaf.explicit_pool_reserve_bytes);
+        addBudgetBytes(total.paged_block_bytes, leaf.paged_block_bytes);
+        addBudgetBytes(total.swa_block_bytes, leaf.swa_block_bytes);
+    }
+    return total;
+}
+
+CacheConfig CacheConfigCreator::createConfig(const ModelConfig&       model_config,
+                                             const ParallelismConfig& parallelism_config,
+                                             const KVCacheConfig&     kv_cache_config) {
+    return createDomainConfig(model_config, parallelism_config, kv_cache_config).main();
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,
+                                                  const ModelConfig&                               model_config,
+                                                  const RuntimeConfig&                             runtime_config,
+                                                  const KVCacheConfig&                             kv_cache_config,
+                                                  const ParallelismConfig&                         parallelism_config,
+                                                  const std::optional<WarmUpResult>&               warm_up_result,
+                                                  const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    return computeLocalBlockNum(CacheDomainConfig(config),
+                                model_config,
+                                runtime_config,
+                                kv_cache_config,
+                                parallelism_config,
+                                warm_up_result,
+                                sp_config);
+}
+
+uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheDomainConfig&                         config,
                                                   const ModelConfig&                               model_config,
                                                   const RuntimeConfig&                             runtime_config,
                                                   const KVCacheConfig&                             kv_cache_config,
@@ -558,7 +566,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        const auto block_budget = blockBudgetForConfig(config);
+        const auto block_budget = blockBudget(config);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
@@ -569,14 +577,14 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                              kv_cache_mem_size / 1024 / 1024,
                              block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
         }
-        block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.linear_step);
+        block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.main().linear_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least one baseline block, got %u", block_num);
-    const auto kv_cache_seq_len = static_cast<uint64_t>(block_num) * config.seq_size_per_block;
+    const auto kv_cache_seq_len = static_cast<uint64_t>(block_num) * config.main().seq_size_per_block;
     RTP_LLM_LOG_INFO("cache layout created: candidate_blocks=%u, candidate_tokens=%lu, draft_modules=%zu",
                      block_num,
                      kv_cache_seq_len,
-                     config.mtp_sub_configs.size());
+                     config.moduleCount() - 1);
     if (kv_cache_seq_len < static_cast<uint64_t>(model_config.max_seq_len)) {
         RTP_LLM_LOG_WARNING("candidate cache capacity %lu tokens is below max_seq_len %ld tokens",
                             kv_cache_seq_len,

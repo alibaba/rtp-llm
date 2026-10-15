@@ -115,6 +115,28 @@ TEST_F(KVCacheManagerCPLayoutTest, CPShardingConsumesFinalizedLayout) {
     EXPECT_EQ(*mgr->cacheConfig().cache_info_block_tokens, static_cast<size_t>(seq_size_per_block * 2));
 }
 
+TEST_F(KVCacheManagerCPLayoutTest, DecodeKeepsFullLocalPagesWithShardedPrefillSource) {
+    auto config = makeTestConfig();
+    ParallelismConfig par;
+    par.role_type                          = RoleType::DECODE;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.tp_rank                            = 1;
+    par.tp_size                            = 2;
+    resolveManagerCpLayout(config, par);
+
+    EXPECT_EQ(config.storage_cp_size, 1);
+    EXPECT_EQ(config.storage_cp_rank, 0);
+    EXPECT_FALSE(config.request_projection_required);
+    EXPECT_EQ(config.cache_info_block_tokens.value(), 4u);
+    EXPECT_EQ(config.capacity_tokens_per_block.at("default"), 4u);
+
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+    EXPECT_FALSE(mgr->cacheConfig().request_projection_required);
+    EXPECT_EQ(mgr->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false).block_size, 4u);
+}
+
 TEST_F(KVCacheManagerCPLayoutTest, CPShardingRequiresFinalizedStorageConfig) {
     auto config = makeTestConfig();
     ParallelismConfig par;
@@ -236,6 +258,41 @@ TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheK
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+}
+
+TEST_F(KVCacheManagerCPLayoutTest, DomainModulesShareCpKeyGridButOwnIndependentRowsAndBacking) {
+    auto              main  = makeTestConfig(20, 4);
+    auto              draft = makeSimpleMhaCacheConfig(1, 20, 4, DataType::TYPE_FP16, 1, 8);
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(main, parallelism);
+    resolveManagerCpLayout(draft, parallelism);
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft, draft}, 2);
+    auto              manager = std::make_shared<KVCacheManager>(domain, false, nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_TRUE(manager->init());
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(domain);
+    auto       tokens = makeTokenIds(1, 16, 4);
+    MallocInfo info{resource, tokens};
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *tokens);
+    ASSERT_TRUE(manager->malloc(info).success);
+    std::vector<void*> addresses;
+    for (size_t m = 0; m < domain.moduleCount(); ++m) {
+        const ModuleGroupKey key{CacheModuleId(m), "default"};
+        EXPECT_EQ(resource->blocksNum(0, key), 2);
+        const auto buffers = manager->convertIndexToBuffer(key.module_id, 0, key.tag, resource->blocks(0, key).front());
+        ASSERT_FALSE(buffers.empty());
+        addresses.push_back(buffers.front().addr);
+        // Each rank stores 4 tokens per block; the shared key stride spans both CP ranks.
+        EXPECT_EQ(domain.module(key.module_id).group("default").cacheKeyTokenStride(), 8u);
+    }
+    EXPECT_NE(addresses[0], addresses[1]);
+    EXPECT_NE(addresses[1], addresses[2]);
+    EXPECT_EQ(resource->cacheResource().activeModuleCount(), 2u);
+    EXPECT_EQ(resource->cacheKeys(0).size(), 4u);
 }
 
 // malloc() uses the immutable global request snapshot and cache-owned storage mapping.

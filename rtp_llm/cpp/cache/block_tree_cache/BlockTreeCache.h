@@ -133,18 +133,25 @@ public:
                   bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
-    int evictForGroup(std::string_view group_tag, size_t num_blocks);
+    int evictForGroup(const ModuleGroupKey& key, size_t num_blocks);
+    int evictForGroup(std::string_view group_tag, size_t num_blocks) {
+        return evictForGroup({CacheModuleId::main(), std::string(group_tag)}, num_blocks);
+    }
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
-    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<ModuleGroupKey>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
-    BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
+    BlockIndicesType matchedBlocksForGroup(const ModuleGroupKey&                 group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
+    BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
+                                           const std::vector<MultiNodeResource>& matched_resources) const {
+        return matchedBlocksForGroup({CacheModuleId::main(), std::string(group_tag)}, matched_resources);
+    }
 
     TransferResult executeTransfer(TransferTask task);
 

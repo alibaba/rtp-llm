@@ -557,7 +557,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     mirco_batch_input.attention_inputs,
                     self.fmha_config,
                 )
-                binding = layer.cache_binding
+                binding = getattr(layer, "cache_binding", None)
                 out = layer(
                     hidden_states=inputs,
                     fmha_impl=fmha_impl,

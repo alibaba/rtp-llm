@@ -147,7 +147,7 @@ class BertModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            binding = decoder_layer.cache_binding
+            binding = getattr(decoder_layer, "cache_binding", None)
             hidden_states = decoder_layer(
                 hidden_states,
                 binding.select_fmha_impl(fmha_impl) if binding else fmha_impl,

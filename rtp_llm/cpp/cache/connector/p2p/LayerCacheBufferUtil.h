@@ -28,13 +28,15 @@ public:
 
     /// @brief 将 KVCacheResource 的指定层转换为单个 LayerCacheBuffer
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource& resource,
+                                                          CacheModuleId    module_id,
                                                           int              batch_id,
                                                           int              layer_id,
                                                           int              start_block_idx,
                                                           int              block_count,
-                                                          size_t           key_first = 0,
+                                                          size_t           key_first  = 0,
                                                           size_t           key_stride = 1);
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource&   resource,
+                                                          CacheModuleId      module_id,
                                                           int                batch_id,
                                                           int                layer_id,
                                                           const std::string& cache_tag,
@@ -46,6 +48,7 @@ public:
     /// @brief Return whether the selected layer/tag window contains a transferable block.
     /// Uses the same argument validation, CP key bounds, and start/count semantics as convertLayer().
     static bool hasTransferableBlocks(const KVCacheResource& resource,
+                                      CacheModuleId          module_id,
                                       int                    layer_id,
                                       const std::string&     cache_tag,
                                       int                    start_block_idx,

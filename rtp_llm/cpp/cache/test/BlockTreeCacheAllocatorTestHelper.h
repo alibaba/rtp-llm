@@ -20,6 +20,10 @@ public:
     explicit BlockTreeCacheTestAllocator(const CacheConfig& config, Args&&... args):
         Allocator(config, std::forward<Args>(args)...), config_(config) {}
 
+    template<typename... Args>
+    explicit BlockTreeCacheTestAllocator(const CacheDomainConfig& config, Args&&... args):
+        Allocator(config, std::forward<Args>(args)...), config_(config) {}
+
     bool init() {
         if (!Allocator::init()) {
             return false;
@@ -55,7 +59,7 @@ public:
     }
 
 private:
-    CacheConfig                     config_;
+    CacheDomainConfig               config_;
     KVCacheConfig                   kv_cache_config_;
     std::shared_ptr<StorageBackend> storage_backend_;
 };

@@ -57,7 +57,9 @@ public:
                                                                      const std::shared_ptr<Meta>& meta) override;
 
     std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
-    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
+    asyncWriteByLayer(CacheModuleId                                        module_id,
+                      int                                                  layer_id,
+                      const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
 public:
     void handleRead(const P2PConnectorStartLoadRequestPB& request,

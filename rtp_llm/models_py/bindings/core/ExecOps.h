@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_util.h"
 
@@ -142,7 +143,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             const torch_ext::LayerKVCache&       layer_kv,
                             const CacheConfig&                   cache_config,
                             std::shared_ptr<CacheStore>          cache_store,
-                            size_t                               cache_model_id,
+                            CacheModuleId                        module_id,
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,

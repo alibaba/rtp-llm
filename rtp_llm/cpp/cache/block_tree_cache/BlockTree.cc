@@ -11,12 +11,12 @@ namespace rtp_llm {
 
 BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
-        const auto& group_tags = group_sets_[group_set_id]->groupTags();
+        const auto& group_tags = group_sets_[group_set_id]->groupKeys();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
             const auto& tag = group_tags[member_group_id];
             const bool  inserted =
                 reusable_group_locations_.emplace(tag, ReusableGroupLocation{group_set_id, member_group_id}).second;
-            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate BlockTree reusable tag=%s", tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate BlockTree reusable tag=%s", tag.debugString().c_str());
         }
     }
 
@@ -26,8 +26,8 @@ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move
     root_->group_set_resources.resize(group_sets_.size());
 }
 
-const ReusableGroupLocation* BlockTree::reusableGroupLocation(std::string_view group_tag) const {
-    const auto location_it = reusable_group_locations_.find(std::string(group_tag));
+const ReusableGroupLocation* BlockTree::reusableGroupLocation(const ModuleGroupKey& group_tag) const {
+    const auto location_it = reusable_group_locations_.find(group_tag);
     return location_it == reusable_group_locations_.end() ? nullptr : &location_it->second;
 }
 
@@ -364,8 +364,8 @@ TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
     return current;
 }
 
-void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
-                                  const std::vector<std::string>& required_group_tags) {
+void BlockTree::setEventPublisher(KVCacheEventPublisherPtr           publisher,
+                                  const std::vector<ModuleGroupKey>& required_group_tags) {
     std::vector<ReusableGroupLocation> locations;
     if (publisher) {
         if (required_group_tags.empty()) {
@@ -411,7 +411,7 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
     for (const auto& location : publication_groups_) {
         const auto& resource = node->group_set_resources.at(location.group_set_id);
         if (resource.transfer_detached || resource.transfer_state != GroupSetTransferState::IDLE
-            || resource.device_blocks.size() != group_sets_[location.group_set_id]->groupTags().size()
+            || resource.device_blocks.size() != group_sets_[location.group_set_id]->groupKeys().size()
             || !resource.hasCompleteDeviceValue()) {
             removePublishedKey(node->cache_key);
             return;

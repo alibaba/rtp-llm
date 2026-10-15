@@ -141,7 +141,7 @@ class Qwen3Model(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            binding = decoder_layer.cache_binding
+            binding = getattr(decoder_layer, "cache_binding", None)
             layer_fmha_impl = (
                 binding.select_fmha_impl(fmha_impl) if binding else fmha_impl
             )

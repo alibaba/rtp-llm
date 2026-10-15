@@ -105,6 +105,7 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
         model = Qwen3DSparkModel.__new__(Qwen3DSparkModel)
         torch.nn.Module.__init__(model)
         model.kv_cache = None
+        model.layers = [SimpleNamespace(cache_binding=None)]
 
         query_positions = torch.arange(6196, 6204, dtype=torch.long).view(1, 8)
         target_mrope = query_positions.repeat_interleave(3).to(torch.int32)
@@ -321,9 +322,16 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
         linear = SimpleNamespace()
         layer_cache = SimpleNamespace(tag="full")
         model = SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    cache_binding=SimpleNamespace(
+                        select_attention_inputs=lambda attention_inputs: attention_inputs["full"]
+                    )
+                )
+            ],
             kv_cache=SimpleNamespace(
                 get_layer_cache_groups=lambda layer_idx: [layer_cache]
-            )
+            ),
         )
         inputs = SimpleNamespace(attention_inputs={"linear0": linear, "full": full})
 

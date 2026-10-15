@@ -34,6 +34,32 @@ public:
         return batch_resource[0].groupNums();
     }
 
+    void initGroups(const CacheDomainConfig& domain) {
+        for (auto& batch : batch_resource) {
+            batch.initGroups(domain);
+        }
+    }
+
+    int blocksNum(int batch_id, const ModuleGroupKey& key) const {
+        return cacheResource(batch_id).blocksNum(key);
+    }
+
+    const BlockIndicesType& blocks(int batch_id, const ModuleGroupKey& key) const {
+        return cacheResource(batch_id).blocks(key);
+    }
+
+    const BlockIndicesType& kernelBlocks(int batch_id, const ModuleGroupKey& key) const {
+        return cacheResource(batch_id).kernelBlocks(key);
+    }
+
+    BlockIds& mutableBlockIds(int batch_id, const ModuleGroupKey& key) {
+        return cacheResource(batch_id).mutableBlockIds(key);
+    }
+
+    std::shared_ptr<BlockIds> groupBlockIds(int batch_id, const ModuleGroupKey& key) const {
+        return cacheResource(batch_id).groupBlockIds(key);
+    }
+
     void resizeBlocks(int reserver_blocks, int value = 0) {
         for (auto& resource : batch_resource) {
             resource.resizeBlocks(reserver_blocks, value);
@@ -142,9 +168,11 @@ public:
     void check() const {
         RTP_LLM_CHECK(!batch_resource.empty());
         const auto& first = batch_resource[0];
-        const auto  tags  = first.groupTags();
+        const auto  tags  = first.groupKeys();
         for (const auto& resource : batch_resource) {
-            RTP_LLM_CHECK(resource.groupNums() == first.groupNums());
+            RTP_LLM_CHECK(resource.moduleCount() == first.moduleCount());
+            RTP_LLM_CHECK(resource.activeModuleCount() == first.activeModuleCount());
+            RTP_LLM_CHECK(resource.groupKeys().size() == tags.size());
             for (const auto& tag : tags) {
                 RTP_LLM_CHECK(resource.blocksNum(tag) == first.blocksNum(tag));
             }

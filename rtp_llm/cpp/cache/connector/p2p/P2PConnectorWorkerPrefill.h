@@ -35,8 +35,11 @@ public:
 public:
     bool init(int64_t store_wait_timeout_ms);
 
-    bool
-    writeByLayer(int layer_id, const KVCacheResourcePtr& resource, int64_t request_id, std::optional<c10::Event> event);
+    bool writeByLayer(CacheModuleId             module_id,
+                      int                       layer_id,
+                      const KVCacheResourcePtr& resource,
+                      int64_t                   request_id,
+                      std::optional<c10::Event> event);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
@@ -72,7 +75,7 @@ private:
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      std::set<std::pair<int, std::string>>&           sent_layer_groups,
+                                      std::set<P2PLayerGroupKey>&                      sent_layer_groups,
                                       int&                                             total_transfers);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,

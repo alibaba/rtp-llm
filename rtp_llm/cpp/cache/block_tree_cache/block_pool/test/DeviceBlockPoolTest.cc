@@ -12,6 +12,7 @@
 // which drags in the heavy //rtp_llm/cpp/cache monolith (and its CUDA-13 prebuilt
 // remote_kv_cache_manager dependency that does not link in the CUDA-12 toolchain).
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -71,16 +72,14 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     return config;
 }
 
-CacheConfig makeMtpCacheConfig() {
-    CacheConfig main = rtp_llm::test::makeSimpleMhaCacheConfig(
-        /*layer_num=*/2, /*block_num=*/3, /*seq_size_per_block=*/1, TYPE_FP16, /*local_head_num_kv=*/1, 64);
-    for (int module = 0; module < 2; ++module) {
-        const auto draft = std::make_shared<CacheConfig>(rtp_llm::test::makeSimpleMhaCacheConfig(
-            /*layer_num=*/1, /*block_num=*/4 + module, /*seq_size_per_block=*/1, TYPE_FP16, 1, 64));
-        main.mtp_sub_configs.push_back(main.mergeMTPModule(*draft, module, main.layer_num));
-    }
-    main.finalizeBlockNums(/*baseline_block_num=*/3, rtp_llm::RuntimeConfig{});
-    return main;
+CacheDomainConfig makeMtpCacheConfig() {
+    std::vector<CacheConfig> leaves;
+    leaves.push_back(rtp_llm::test::makeSimpleMhaCacheConfig(2, 3, 1, TYPE_FP16, 1, 64));
+    leaves.push_back(rtp_llm::test::makeSimpleMhaCacheConfig(1, 4, 1, TYPE_FP16, 1, 64));
+    leaves.push_back(rtp_llm::test::makeSimpleMhaCacheConfig(1, 5, 1, TYPE_FP16, 1, 64));
+    CacheDomainConfig domain(std::move(leaves), 2);
+    domain.finalizeBlockNums(3, RuntimeConfig{});
+    return domain;
 }
 
 }  // namespace
@@ -145,38 +144,31 @@ TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {
     }
 }
 
-TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMapping) {
-    CacheConfig cache_config = makeMtpCacheConfig();
-    ASSERT_EQ(cache_config.group("default").block_num, 3u);
-    ASSERT_EQ(cache_config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[0]->group("default").block_num, 3u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[1]->group("default").block_num, 3u);
-
-    auto config = std::make_shared<DeviceBlockPoolConfig>(
-        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));
-    config->use_device_malloc_backing = true;
-    ASSERT_EQ(config->physical_block_count, 3u);
-    ASSERT_EQ(config->memory_layouts.size(), 3u);
-    EXPECT_EQ(config->memory_layouts[0].layer_num, 2u);
-    EXPECT_EQ(config->memory_layouts[1].layer_num, 1u);
-    EXPECT_EQ(config->memory_layouts[2].layer_num, 1u);
-    for (const auto& layout : config->memory_layouts) {
-        EXPECT_EQ(layout.block_num, 3u);
+TEST(DeviceBlockPoolTest, ModulePoolsUseJointBlockCountAndIndependentBacking) {
+    const auto                                    domain = makeMtpCacheConfig();
+    std::vector<std::unique_ptr<DeviceBlockPool>> pools;
+    std::vector<void*>                            addresses;
+    for (size_t module = 0; module < domain.moduleCount(); ++module) {
+        const auto& leaf = domain.module(CacheModuleId(module));
+        ASSERT_EQ(leaf.group("default").block_num, 3u);
+        auto config = std::make_shared<DeviceBlockPoolConfig>(
+            DeviceBlockPoolConfigHelper::createConfigForGroup(leaf, leaf.group("default")));
+        config->use_device_malloc_backing = true;
+        ASSERT_EQ(config->memory_layouts.size(), 1u);
+        EXPECT_EQ(config->memory_layouts.front().layer_num, module == 0 ? 2u : 1u);
+        EXPECT_EQ(config->memory_layouts.front().block_num, 3u);
+        auto pool = std::make_unique<DeviceBlockPool>(config);
+        ASSERT_TRUE(pool->init());
+        const auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        auto* addr = pool->convertIndexToAddr(0, *block).kv_addr;
+        ASSERT_NE(addr, nullptr);
+        for (auto* previous : addresses) {
+            EXPECT_NE(addr, previous);
+        }
+        addresses.push_back(addr);
+        pools.push_back(std::move(pool));
     }
-
-    DeviceBlockPool pool(config);
-    ASSERT_TRUE(pool.init());
-    auto block = pool.malloc();
-    ASSERT_TRUE(block.has_value());
-
-    const auto main_addr = pool.convertIndexToAddr(/*global_layer_id=*/0, *block);
-    const auto mtp1_addr = pool.convertIndexToAddr(/*global_layer_id=*/2, *block);
-    const auto mtp2_addr = pool.convertIndexToAddr(/*global_layer_id=*/3, *block);
-    ASSERT_NE(main_addr.kv_addr, nullptr);
-    ASSERT_NE(mtp1_addr.kv_addr, nullptr);
-    ASSERT_NE(mtp2_addr.kv_addr, nullptr);
-    EXPECT_NE(main_addr.kv_addr, mtp1_addr.kv_addr);
-    EXPECT_NE(mtp1_addr.kv_addr, mtp2_addr.kv_addr);
 }
 
 TEST(DeviceBlockPoolTest, ConvertIndexToBufferReturnsBlockInfo) {

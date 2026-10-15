@@ -748,7 +748,9 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 
     RTP_LLM_CHECK(model_input.ok());
 
-    overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder);
+    if (model_input->module_cache_inputs.empty()) {
+        overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder);
+    }
     // Empty decode rounds are valid after prefill and on non-leader TP ranks.
     // Their allocated [0, 4] history is defined, but torch::cat rejects an
     // empty tensor list; leave that empty history intact until TP sync/skip.

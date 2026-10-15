@@ -337,6 +337,9 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
+    // Drive completion after StartLoad reaches the peer. Otherwise the background
+    // checker may cancel the in-flight RPC before its server handler runs.
+    scheduler_->stopChecker();
     tp_broadcast_servers_[0]->service()->setP2PResponseSuccess(false);
 
     auto resource = createValidKVCacheResource(2, 2);
@@ -347,7 +350,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
 
-    waitAsyncContextDone(async_context);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (prefill_server_->service()->getStartLoadCallCount() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+    waitAsyncContextDone(async_context, 5000, true);
 
     EXPECT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());

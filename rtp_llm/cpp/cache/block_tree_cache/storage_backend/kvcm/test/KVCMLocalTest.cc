@@ -53,12 +53,12 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     kvcm::ClientWrapper          wrapper(std::move(factory));
     std::array<char, 64>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeLocalConfig()}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeLocalConfig()}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Fm0:full"}, "default"));
 
     const std::vector<int64_t> keys{1, 2};
     kv_cache_manager::Location location;
-    location.emplace_back(kv_cache_manager::LocationSpecUnit{"tp0_Ffull", "uri"});
+    location.emplace_back(kv_cache_manager::LocationSpecUnit{"tp0_Fm0:full", "uri"});
     kv_cache_manager::Locations expected_locations{std::move(location)};
     EXPECT_CALL(*meta_ptr, MatchLocation("match", kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, expected_locations)));
@@ -70,21 +70,22 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     kv_cache_manager::UriStrVec    uris{"uri"};
     kv_cache_manager::BlockBuffers buffers;
     EXPECT_CALL(*transfer_ptr, LoadKvCaches(uris, _, _)).WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    EXPECT_TRUE(wrapper.loadKvCachesForTag("default", uris, buffers));
+    EXPECT_TRUE(wrapper.loadKvCachesForGroup(ModuleGroupKey{CacheModuleId::main(), "default"}, uris, buffers));
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "session";
-    EXPECT_CALL(*meta_ptr, StartWrite("start", keys, std::vector<int64_t>{}, std::vector<std::string>{"Ffull"}, 9))
+    EXPECT_CALL(*meta_ptr, StartWrite("start", keys, std::vector<int64_t>{}, std::vector<std::string>{"Fm0:full"}, 9))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, write_location)));
     const auto [start_ok, actual_write_location] =
-        wrapper.getWriteLocation("", "start", keys, {}, {"Ffull"}, /*write_timeout_seconds=*/9);
+        wrapper.getWriteLocation("", "start", keys, {}, {"Fm0:full"}, /*write_timeout_seconds=*/9);
     EXPECT_TRUE(start_ok);
     EXPECT_EQ(actual_write_location.write_session_id, "session");
 
     EXPECT_CALL(*transfer_ptr, SaveKvCaches(uris, _, _))
         .WillOnce(Return(
             std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::UriStrVec{"actual_uri"})));
-    const auto [save_ok, actual_uris] = wrapper.saveKvCachesForTag("default", uris, buffers);
+    const auto [save_ok, actual_uris] =
+        wrapper.saveKvCachesForGroup(ModuleGroupKey{CacheModuleId::main(), "default"}, uris, buffers);
     EXPECT_TRUE(save_ok);
     EXPECT_EQ(actual_uris, (kv_cache_manager::UriStrVec{"actual_uri"}));
 
@@ -124,7 +125,7 @@ TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     kv_cache_manager::Locations locations{
-        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "read_uri"}}};
     EXPECT_CALL(*client_wrapper,
                 match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>{101}, _, _))
         .WillOnce(Return(std::make_pair(true, locations)));
@@ -133,8 +134,10 @@ TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
     ASSERT_EQ(observation.matched_blocks_num, 1u);
     ASSERT_NE(observation.match_meta, nullptr);
 
-    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
-        .WillOnce(Invoke([](const std::string&,
+    EXPECT_CALL(*client_wrapper,
+                loadKvCachesForGroup(
+                    ModuleGroupKey{CacheModuleId::main(), "default"}, kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+        .WillOnce(Invoke([](const ModuleGroupKey&,
                             const kv_cache_manager::UriStrVec&,
                             kv_cache_manager::BlockBuffers& buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
@@ -160,8 +163,8 @@ TEST(KVCMLocalTest, SuccessfulMatchPreservesLocalPrefixAndReadsOnlyRemoteSuffix)
     ASSERT_EQ(third_block_info.size(), 1u);
 
     kv_cache_manager::Locations locations{
-        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri_102"}},
-        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri_103"}},
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "read_uri_102"}},
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "read_uri_103"}},
     };
     EXPECT_CALL(*client_wrapper,
                 match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>({101, 102, 103}), _, _))
@@ -186,9 +189,12 @@ TEST(KVCMLocalTest, SuccessfulMatchPreservesLocalPrefixAndReadsOnlyRemoteSuffix)
     ASSERT_NE(observation.match_meta, nullptr);
 
     EXPECT_CALL(*client_wrapper,
-                loadKvCachesForTag("default", kv_cache_manager::UriStrVec({"read_uri_102", "read_uri_103"}), _, _))
+                loadKvCachesForGroup(ModuleGroupKey{CacheModuleId::main(), "default"},
+                                     kv_cache_manager::UriStrVec({"read_uri_102", "read_uri_103"}),
+                                     _,
+                                     _))
         .WillOnce(Invoke([second_base = second_block_info.front().addr, third_base = third_block_info.front().addr](
-                             const std::string&,
+                             const ModuleGroupKey&,
                              const kv_cache_manager::UriStrVec&,
                              kv_cache_manager::BlockBuffers& buffers,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&) {
@@ -235,7 +241,8 @@ TEST(KVCMLocalTest, InvalidMatchLocationReportsNoHitAndDoesNotDispatchPayload) {
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"unknown_spec", "read_uri"}}};
     EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
     auto observation = match(*backend.backend, makeStorageRequest(environment));
-    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForGroup(ModuleGroupKey{CacheModuleId::main(), "default"}, _, _, _))
+        .Times(0);
     EXPECT_FALSE(observation.success);
     EXPECT_EQ(observation.matched_blocks_num, 0u);
     EXPECT_EQ(observation.match_meta, nullptr);
@@ -252,7 +259,8 @@ TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) 
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForGroup(ModuleGroupKey{CacheModuleId::main(), "default"}, _, _, _))
+        .Times(0);
     auto broadcast_manager =
         std::make_shared<BroadcastManager>(std::vector<std::string>{"unused-rank-0", "unused-rank-1"});
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, std::move(broadcast_manager));
@@ -263,8 +271,8 @@ TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) 
                               }));
 
     kv_cache_manager::Locations locations{kv_cache_manager::Location{
-        kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "rank0_uri"},
-        kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "duplicate_rank0_uri"},
+        kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "rank0_uri"},
+        kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "duplicate_rank0_uri"},
     }};
     EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
     const auto observation = match(*backend.backend, makeStorageRequest(environment));
@@ -283,13 +291,15 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     kv_cache_manager::Locations locations{
-        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fm0:default", "read_uri"}}};
     EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
     auto observation = match(*backend.backend, makeStorageRequest(environment));
     ASSERT_TRUE(observation.success);
     ASSERT_NE(observation.match_meta, nullptr);
 
-    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+    EXPECT_CALL(*client_wrapper,
+                loadKvCachesForGroup(
+                    ModuleGroupKey{CacheModuleId::main(), "default"}, kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
 }

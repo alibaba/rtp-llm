@@ -113,10 +113,10 @@ std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> P2PConnector::asyncWrite(c
     return nullptr;
 }
 
-std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext>
-P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
+std::shared_ptr<::rtp_llm::legacy::p2p::AsyncContext> P2PConnector::asyncWriteByLayer(
+    CacheModuleId module_id, int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    worker_->writeByLayer(module_id, layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
@@ -273,10 +273,15 @@ bool P2PConnector::executeRead(int64_t                                 request_i
                                FunctionResponsePB&                     response) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
+        const CacheModuleId module_id(layer_block_pb.module_id());
         const auto  layer_id  = static_cast<int>(layer_block_pb.layer_id());
+        RTP_LLM_CHECK_WITH_INFO(config_.worker_config.hasLayer(module_id, layer_id),
+                                "P2P RPC requires an active module/local layer: module=%zu layer=%d",
+                                module_id.value(),
+                                layer_id);
         const auto& cache_tag = layer_block_pb.cache_tag();
         RTP_LLM_CHECK_WITH_INFO(!cache_tag.empty(), "P2P layer block requires cache_tag for layer=%d", layer_id);
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(module_id, layer_id, cache_tag);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
         RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_ids.size(),

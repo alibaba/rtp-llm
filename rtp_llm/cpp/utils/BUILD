@@ -12,6 +12,7 @@ cc_library(
         "KVCacheUtils.h",
     ],
     copts = copts(),
+    deps = ["//rtp_llm/cpp/cache:cache_identity"],
     visibility = ["//visibility:public"],
 )
 

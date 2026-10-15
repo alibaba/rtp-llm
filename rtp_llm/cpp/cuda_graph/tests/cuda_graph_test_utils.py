@@ -166,6 +166,7 @@ class CudaGraphTestModelBuilder:
         if init_kv_cache:
             self._init_kv_cache(result, py_model_config)
             model.kv_cache = result.kv_cache
+            model.bind_layer_caches()
 
         return result
 

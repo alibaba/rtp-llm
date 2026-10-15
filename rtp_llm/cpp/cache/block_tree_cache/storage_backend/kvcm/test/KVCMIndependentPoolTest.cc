@@ -150,7 +150,7 @@ protected:
                     const auto& topology_group = config_.group(config_.groupTags().at(group));
                     const auto  prefix         = group < 2 ? "F" : "L";
                     for (int tp = 0; tp < (rank == 0 ? 1 : 2); ++tp) {
-                        EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + topology_group.tag),
+                        EXPECT_EQ(sizes.at("tp" + std::to_string(tp) + "_" + prefix + "m0:" + topology_group.tag),
                                   config_.blockSizeBytesForGroup(topology_group.tag));
                     }
                 }
@@ -193,8 +193,13 @@ protected:
             parallel.tp_size = 2;
             parallel.tp_rank = rank;
         }
-        backend_ = std::make_shared<KVCMStorageBackend>(
-            config_, options, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, nullptr, wrapper_);
+        backend_ = std::make_shared<KVCMStorageBackend>(CacheDomainConfig(config_),
+                                                        options,
+                                                        RuntimeConfig{},
+                                                        parallel,
+                                                        SpeculativeExecutionConfig{},
+                                                        nullptr,
+                                                        wrapper_);
         if (fail_second || rank != 0) {
             auto topology = config_.topologyPtr();
             auto tags     = config_.groupTags();
@@ -263,7 +268,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "session";
     proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
-    proposal.locations        = {{{"tp0_Llinear0", "linear"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
+    proposal.locations = {{{"tp0_Lm0:linear0", "linear"}, {"tp0_Fm0:full1", "full1"}, {"tp0_Fm0:full0", "full0"}}};
     EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
     EXPECT_CALL(*meta_, FinishWrite(_, "session", _, _))
@@ -307,7 +312,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins)
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "failed_session";
     proposal.block_mask       = kv_cache_manager::BlockMaskOffset{0};
-    proposal.locations        = {{{"tp0_Llinear0", "linear"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
+    proposal.locations = {{{"tp0_Lm0:linear0", "linear"}, {"tp0_Fm0:full1", "full1"}, {"tp0_Fm0:full0", "full0"}}};
     EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
     EXPECT_CALL(*meta_,
@@ -337,12 +342,12 @@ TEST_F(KVCMIndependentPoolTest, FailedSecondRegistrationReleasesAcceptedClients)
 
 TEST_F(KVCMIndependentPoolTest, WorkerRoutesRepeatedTagsAcrossIndependentOrdersAndPropagatesFailure) {
     ASSERT_TRUE(initialize(false, 1, /*reorder_binding=*/true));
-    EXPECT_EQ(state_->spec_names, (std::vector<std::string>{"tp1_Ffull0", "tp1_Ffull1", "tp1_Llinear0"}));
+    EXPECT_EQ(state_->spec_names, (std::vector<std::string>{"tp1_Fm0:full0", "tp1_Fm0:full1", "tp1_Lm0:linear0"}));
     fill(31);
     RemoteOperationRequestPB operation;
     operation.set_op(REMOTE_OPERATION_WRITE);
     for (size_t group : {2u, 0u, 1u, 0u}) {
-        operation.add_group_tags(config_.groupTags().at(group));
+        operation.add_groups()->set_tag(config_.groupTags().at(group));
         operation.add_block_ids(blocks_[group]);
         operation.add_uris("group_" + std::to_string(group) + "_" + std::to_string(operation.uris_size()));
     }

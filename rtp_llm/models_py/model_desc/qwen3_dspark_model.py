@@ -123,9 +123,9 @@ def _write_rocm_paged_kv_cache(
             value_rows
         )
     else:
-        value_physical = cache.view(
-            cache.shape[0], 2, kv_heads, head_dim, page_size
-        )[:, 1]
+        value_physical = cache.view(cache.shape[0], 2, kv_heads, head_dim, page_size)[
+            :, 1
+        ]
         value_physical[pages, :, :, slots] = value_rows
 
 
@@ -247,7 +247,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         return self.fc(features)
 
     def dspark_attention_inputs(self, inputs: PyModelInputs):
-        binding = self.layers[0].cache_binding
+        binding = getattr(self.layers[0], "cache_binding", None)
         attention = (
             binding.select_attention_inputs(inputs.attention_inputs)
             if binding is not None
@@ -302,7 +302,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             self.context_rope._apply_rope(
                 dummy_q, key, _RopePositions(context_positions)
             )
-            binding = self.layers[layer_idx].cache_binding
+            binding = getattr(self.layers[layer_idx], "cache_binding", None)
             if binding is None:
                 raise RuntimeError(
                     f"DSpark commit layer {layer_idx} has no bound KV cache"

@@ -51,13 +51,13 @@ ClientWrapper::~ClientWrapper() {
 bool ClientWrapper::init(const ConfigMap&                    config_map,
                          const kv_cache_manager::InitParams& init_params,
                          const std::string&                  tag) {
-    return initImpl(config_map, init_params, {}, {tag});
+    return initImpl(config_map, init_params, {}, {{CacheModuleId::main(), tag}});
 }
 
 bool ClientWrapper::initForPools(const ConfigMap&                     config_map,
                                  kv_cache_manager::RoleType           role,
                                  const std::vector<PoolRegistration>& registrations,
-                                 const std::vector<std::string>&      tags) {
+                                 const std::vector<ModuleGroupKey>&   tags) {
     if (registrations.empty()) {
         RTP_LLM_LOG_ERROR("KVCM requires at least one pool registration");
         return false;
@@ -76,14 +76,14 @@ bool ClientWrapper::initForPools(const ConfigMap&                     config_map
 bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                              const kv_cache_manager::InitParams&  init_params,
                              const std::vector<PoolRegistration>& registrations,
-                             const std::vector<std::string>&      tags) {
+                             const std::vector<ModuleGroupKey>&   tags) {
     std::lock_guard<std::mutex>             shutdown_lock(shutdown_mutex_);
-    std::unordered_map<std::string, size_t> pending_tags;
+    std::unordered_map<ModuleGroupKey, size_t> pending_tags;
     if (tags.size() != (registrations.empty() ? 1 : registrations.size())) {
         return false;
     }
     for (size_t i = 0; i < tags.size(); ++i) {
-        if (tags[i].empty() || !pending_tags.emplace(tags[i], i).second) {
+        if (tags[i].tag.empty() || !pending_tags.emplace(tags[i], i).second) {
             return false;
         }
     }
@@ -484,10 +484,10 @@ bool ClientWrapper::waitForRetry(int sleep_time_ms) {
         lock, std::chrono::milliseconds(sleep_time_ms), [this] { return stop_requested_; });
 }
 
-bool ClientWrapper::loadKvCachesForTag(const std::string&                                          tag,
-                                       const kv_cache_manager::UriStrVec&                          uri_str_vec,
-                                       kv_cache_manager::BlockBuffers&                             block_buffers,
-                                       const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+bool ClientWrapper::loadKvCachesForGroup(const ModuleGroupKey&                                       tag,
+                                         const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                         kv_cache_manager::BlockBuffers&                             block_buffers,
+                                         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
@@ -503,10 +503,10 @@ bool ClientWrapper::loadKvCachesForTag(const std::string&                       
 }
 
 std::pair<bool, kv_cache_manager::UriStrVec>
-ClientWrapper::saveKvCachesForTag(const std::string&                                          tag,
-                                  const kv_cache_manager::UriStrVec&                          uri_str_vec,
-                                  const kv_cache_manager::BlockBuffers&                       block_buffers,
-                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+ClientWrapper::saveKvCachesForGroup(const ModuleGroupKey&                                       tag,
+                                    const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                    const kv_cache_manager::BlockBuffers&                       block_buffers,
+                                    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {

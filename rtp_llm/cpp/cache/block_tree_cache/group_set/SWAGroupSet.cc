@@ -16,7 +16,7 @@ std::unique_ptr<MatchValidator> SWAGroupSet::createMatchValidator() {
 }
 
 size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return group(groupTags().front()).reuseBlockCount(matched_block_count);
+    return group(groupKeys().front()).reuseBlockCount(matched_block_count);
 }
 
 // SWAMatchValidator

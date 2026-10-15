@@ -26,19 +26,20 @@ struct DeviceHostCopyTileGeometry {
 // physical payload keep their logical strides and exclude extra pool padding.
 inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const GroupSet&                  group,
                                                                       const std::vector<BlockIdxType>& blocks) {
-    const auto& tags  = group.groupTags();
+    const auto& keys  = group.groupKeys();
     const auto& pools = group.devicePools();
-    if (tags.empty() || pools.size() != tags.size() || blocks.size() != pools.size()) {
-        throw std::invalid_argument("device-host backing tag/pool/block count mismatch");
+    if (keys.empty() || pools.size() != keys.size() || blocks.size() != pools.size()) {
+        throw std::invalid_argument("device-host backing member/pool/block count mismatch");
     }
     size_t                                  offset = 0;
     std::vector<DeviceHostCopyTileGeometry> tiles;
-    for (size_t member = 0; member < tags.size(); ++member) {
+    for (size_t member = 0; member < keys.size(); ++member) {
         if (!pools[member]) {
             throw std::invalid_argument("device-host backing has a null pool");
         }
-        const auto& base      = group.group(tags[member]);
-        const auto  layer_ids = group.topologyPtr()->layerIdsForGroup(tags[member]);
+        const auto& key       = keys[member];
+        const auto& base      = group.group(key);
+        const auto  layer_ids = group.topologyPtr(key.module_id)->layerIdsForGroup(key.tag);
         if (layer_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
             throw std::overflow_error("device-host backing layer count overflow");
         }

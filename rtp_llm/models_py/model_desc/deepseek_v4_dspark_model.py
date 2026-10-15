@@ -34,7 +34,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -650,7 +653,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 # the committed rows, so proposal rows never enter the store's
                 # block plan.
                 if write_cache_store_impl is not None:
-                    binding = self.v4.layers[layer_idx].cache_binding
+                    binding = getattr(self.v4.layers[layer_idx], "cache_binding", None)
                     if binding is None:
                         raise RuntimeError(
                             f"DSpark commit layer {layer_idx} has no bound KV cache"

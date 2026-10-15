@@ -447,6 +447,51 @@ StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
     return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
 }
 
+TEST(StorageBackendTest, SameLocalTagAndBlockPinIndependentModulesUntilLeaseRelease) {
+    CacheConfig leaf;
+    leaf.layer_num          = 1;
+    leaf.seq_size_per_block = 1;
+    const auto topology     = makeTopology();
+    leaf.setTopology(topology->groups(), topology->layers());
+    CacheDomainConfig domain({leaf, leaf});
+    auto              main_pool   = std::make_shared<TestBlockPool>();
+    auto              draft_pool  = std::make_shared<TestBlockPool>();
+    const auto        main_block  = main_pool->malloc().value();
+    const auto        draft_block = draft_pool->malloc().value();
+    ASSERT_EQ(main_block, draft_block);
+    main_pool->incRef(main_block);
+    draft_pool->incRef(draft_block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(
+        backend.init(domain,
+                     {{{CacheModuleId(1), "default"}, draft_pool}, {{CacheModuleId::main(), "default"}, main_pool}},
+                     [](CacheModuleId module, int layer, const std::string&, int block) {
+                         return std::vector<BlockInfo>{
+                             {false, layer, 0, reinterpret_cast<void*>(1000 * (module.value() + 1) + block), 16}};
+                     }));
+    StorageRequest request{
+        std::make_shared<CacheKeysType>(CacheKeysType{123}),
+        {{{{CacheModuleId::main(), "default"}, main_block}, {{CacheModuleId(1), "default"}, draft_block}}}};
+    {
+        auto lease = backend.prepareWrite(request);
+        EXPECT_TRUE(static_cast<bool>(lease));
+        EXPECT_EQ(main_pool->refCount(main_block), 2u);
+        EXPECT_EQ(draft_pool->refCount(draft_block), 2u);
+        main_pool->decRef(main_block);
+        draft_pool->decRef(draft_block);
+        EXPECT_TRUE(main_pool->isAllocated(main_block));
+        EXPECT_TRUE(draft_pool->isAllocated(draft_block));
+    }
+    EXPECT_FALSE(main_pool->isAllocated(main_block));
+    EXPECT_FALSE(draft_pool->isAllocated(draft_block));
+    auto invalid                                  = request;
+    invalid.handles.front().front().key.module_id = CacheModuleId(2);
+    EXPECT_ANY_THROW(backend.prepareWrite(invalid));
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    backend.shutdown();
+}
+
 TEST(StorageBackendTest, InvalidHandlesFailBeforePinOrIoSubmission) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
@@ -456,14 +501,14 @@ TEST(StorageBackendTest, InvalidHandlesFailBeforePinOrIoSubmission) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     auto unknown                        = makeRequest(block);
-    unknown.handles.front().front().tag = "missing";
+    unknown.handles.front().front().key.tag = "missing";
     EXPECT_ANY_THROW(backend.prepareWrite(unknown));
     EXPECT_ANY_THROW(backend.read(unknown, nullptr, {}));
     unknown.handles.front().front().block = NULL_BLOCK_IDX;
     EXPECT_ANY_THROW(backend.match(unknown, {}));
 
     auto late_unknown                       = makeRequest(block, 2);
-    late_unknown.handles.back().front().tag = "missing";
+    late_unknown.handles.back().front().key.tag = "missing";
     EXPECT_ANY_THROW(backend.prepareWrite(late_unknown));
 
     auto duplicate = makeRequest(block);

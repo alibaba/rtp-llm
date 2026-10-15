@@ -296,7 +296,19 @@ class LayerProfilerRangeTest(unittest.TestCase):
         self.assertEqual(proposal_events, expected)
 
         commit_events = []
-        model.v4 = SimpleNamespace(layers=[object(), object()])
+        model.v4 = SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    cache_binding=SimpleNamespace(
+                        cache_for_tag=lambda tag, idx=idx: commit_events.append(
+                            ("cache", idx)
+                        )
+                        or idx
+                    )
+                )
+                for idx in range(2)
+            ]
+        )
         model.kv_cache = SimpleNamespace(
             group_tags=[SWA_KV],
             get_layer_cache=lambda idx, tag: commit_events.append(("cache", idx))

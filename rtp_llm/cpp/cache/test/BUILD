@@ -39,6 +39,15 @@ test_deps = [
     ],
 }) + torch_deps() + cuda13_torch_link_deps
 
+cc_test(
+    name = "cache_domain_config_creator_test",
+    srcs = ["CacheDomainConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 cc_library(
     name = "mock_async_context",
     hdrs = ["MockAsyncContext.h"],
@@ -110,7 +119,6 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",

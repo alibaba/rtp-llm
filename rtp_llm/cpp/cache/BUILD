@@ -74,6 +74,16 @@ alias(
 )
 
 cc_library(
+    name = "cache_identity",
+    hdrs = [
+        "CacheModuleId.h",
+        "ModuleGroupKey.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
@@ -82,13 +92,14 @@ cc_library(
     ],
     hdrs = [
         "CacheConfig.h",
-        "CacheModuleId.h",
+        "CacheDomainConfig.h",
         "CachePhysicalRegion.h",
         "CacheTopology.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_identity",
         ":cache_group_type",
         ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",

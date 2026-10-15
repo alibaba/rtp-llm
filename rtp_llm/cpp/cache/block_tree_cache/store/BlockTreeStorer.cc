@@ -86,8 +86,8 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
                 continue;
             }
             const auto& group = *tree_->groupSets()[group_set];
-            for (size_t member = 0; member < group.groupTags().size(); ++member) {
-                key_handles.push_back({group.groupTags()[member], resource.device_blocks[member]});
+            for (size_t member = 0; member < group.groupKeys().size(); ++member) {
+                key_handles.push_back({group.groupKeys()[member], resource.device_blocks[member]});
             }
         }
     }

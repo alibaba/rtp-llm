@@ -36,9 +36,9 @@ struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
 };
 
-const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, std::string_view tag) {
+const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, const ModuleGroupKey& tag) {
     const auto it = std::find_if(handles.begin(), handles.end(), [tag](const StorageBlockHandle& handle) {
-        return handle.tag == tag && !isNullBlockIdx(handle.block);
+        return handle.key == tag && !isNullBlockIdx(handle.block);
     });
     return it == handles.end() ? nullptr : &*it;
 }
@@ -49,7 +49,7 @@ class KVCMStorageBackend::Impl {
 public:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
 
-    Impl(const CacheConfig&                   cache_config,
+    Impl(const CacheDomainConfig&             cache_config,
          const KVCacheConfig&                 kv_cache_config,
          const RuntimeConfig&                 runtime_config,
          const ParallelismConfig&             parallelism_config,
@@ -65,40 +65,36 @@ public:
         client_wrapper_(std::move(client_wrapper)),
         sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
 
-    bool init(const CacheTopology&                                                topology,
-              StorageBackend::BufferResolver                                      buffer_resolver,
-              const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
+    bool init(StorageBackend::BufferResolver                                         buffer_resolver,
+              const std::function<const DeviceBlockPoolPtr&(const ModuleGroupKey&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
         if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
                               parallelism_config_.tp_size);
             return false;
         }
-        std::vector<std::string> full_group_tags;
-        std::vector<std::string> other_group_tags;
-        // CacheConfig::blockSizeBytesForGroup resolves MTP child-owned physical
-        // strides; do not replace this with topology-derived geometry.
-        std::unordered_map<std::string, size_t> group_block_size_bytes;
-        const std::vector<GroupBase>&           groups = topology.groups();
-        group_block_size_bytes.reserve(groups.size());
-        for (const auto& group : groups) {
-            if (group.policy.group_type == CacheGroupType::FULL) {
-                full_group_tags.push_back(group.tag);
-            } else {
-                other_group_tags.push_back(group.tag);
+        std::vector<ModuleGroupKey>                full_group_tags;
+        std::vector<ModuleGroupKey>                other_group_tags;
+        std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes;
+        for (const auto& key : cache_config_.groupKeys()) {
+            if (!cache_config_.isActive(key.module_id)) {
+                continue;
             }
-            group_block_size_bytes.emplace(group.tag, cache_config_.blockSizeBytesForGroup(group.tag));
+            const auto& group = cache_config_.group(key);
+            (group.policy.group_type == CacheGroupType::FULL ? full_group_tags : other_group_tags).push_back(key);
+            group_block_size_bytes.emplace(key, cache_config_.module(key.module_id).blockSizeBytesForGroup(key.tag));
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                cache_config_, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         } else {
-            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
-                                                                               buffer_resolver,
-                                                                               full_group_tags,
-                                                                               other_group_tags,
-                                                                               std::max(1, cache_config_.linear_step),
-                                                                               std::move(group_block_size_bytes));
+            group_policy_ =
+                std::make_unique<kvcm::FullLinearLayerGroupPolicy>(cache_config_,
+                                                                   buffer_resolver,
+                                                                   full_group_tags,
+                                                                   other_group_tags,
+                                                                   std::max(1, cache_config_.main().linear_step),
+                                                                   std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
@@ -202,13 +198,15 @@ public:
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
                 RTP_LLM_CHECK_WITH_INFO(info != spec_info.end(), "KVCM read has unknown spec [%s]", spec_name.c_str());
-                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
+                const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.key);
                 RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
                                         "KVCM read has no destination handle for key=%zu tag=%s",
                                         key_idx,
-                                        info->second.tag.c_str());
+                                        info->second.key.debugString().c_str());
                 auto* remote = requests.at(static_cast<size_t>(info->second.tp_rank)).mutable_remote_request();
-                remote->add_group_tags(info->second.tag);
+                auto* member = remote->add_groups();
+                member->set_module_id(info->second.key.module_id.value());
+                member->set_tag(info->second.key.tag);
                 remote->add_block_ids(handle->block);
                 remote->add_uris(std::string(location_spec.uri));
             }
@@ -255,14 +253,16 @@ public:
                     const auto info = spec_info.find(location_spec.spec_name);
                     RTP_LLM_CHECK_WITH_INFO(
                         info != spec_info.end(), "KVCM write has unknown spec [%s]", location_spec.spec_name.c_str());
-                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.tag);
+                    const StorageBlockHandle* handle = findHandle(request.handles[key_idx], info->second.key);
                     RTP_LLM_CHECK_WITH_INFO(handle != nullptr,
                                             "KVCM write has no source handle for key=%zu tag=%s",
                                             key_idx,
-                                            info->second.tag.c_str());
+                                            info->second.key.debugString().c_str());
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
-                    remote->add_group_tags(info->second.tag);
+                    auto*        member = remote->add_groups();
+                    member->set_module_id(info->second.key.module_id.value());
+                    member->set_tag(info->second.key.tag);
                     remote->add_block_ids(handle->block);
                     remote->add_uris(location_spec.uri);
                     actual_uri_gather[rank].push_back(&location_spec);
@@ -313,7 +313,10 @@ public:
     }
 
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
-        const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
+        std::vector<ModuleGroupKey> tags;
+        for (const auto& group : request.groups()) {
+            tags.push_back({CacheModuleId(group.module_id()), group.tag()});
+        }
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
         const kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
         if (tags.size() != blocks.size() || blocks.size() != uris.size()) {
@@ -346,7 +349,8 @@ private:
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                 const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
+                infos->emplace(spec_name,
+                               cache_config_.module(group.key.module_id).blockSizeBytesForGroup(group.key.tag));
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -368,18 +372,18 @@ private:
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
-        const std::string dtype      = getDataTypeStr(cache_config_.dtype);
+        const std::string dtype      = getDataTypeStr(cache_config_.main().dtype);
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
         std::string draft_info;
-        if (!cache_config_.mtp_sub_configs.empty()) {
+        if (cache_config_.moduleCount() > 1) {
             draft_info = '{' + sp_config_.to_string() + '}';
         }
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
-                 << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
-                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
+                 << ";block_size:" << cache_config_.main().seq_size_per_block << ";model_name:" << model_name
+                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.main().use_mla
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
@@ -393,7 +397,7 @@ private:
         auto config =
             std::make_shared<kvcm::KVCMConfig>(kv_cache_config_.kvcm_enable_vipserver,
                                                kv_cache_config_.kvcm_vipserver_domain,
-                                               static_cast<int32_t>(cache_config_.seq_size_per_block),
+                                               static_cast<int32_t>(cache_config_.main().seq_size_per_block),
                                                kv_cache_config_.kvcm_instance_group,
                                                instance_id,
                                                addresses,
@@ -403,7 +407,7 @@ private:
                                                location_groups,
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
-                                                                     cache_config_.use_mla,
+                                                                     cache_config_.main().use_mla,
                                                                      static_cast<int32_t>(parallelism_config_.tp_size),
                                                                      static_cast<int32_t>(parallelism_config_.dp_size),
                                                                      1,
@@ -413,7 +417,7 @@ private:
     }
 
     std::vector<kvcm::ClientWrapper::PoolRegistration>
-    makePoolRegistrations(const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
+    makePoolRegistrations(const std::function<const DeviceBlockPoolPtr&(const ModuleGroupKey&)>& pool_resolver) {
         const auto&          groups = group_policy_->groups();
         std::vector<int32_t> ordered_groups;
         for (const auto& [id, group] : groups) {
@@ -428,7 +432,7 @@ private:
         registration_tags_.clear();
         std::vector<kvcm::ClientWrapper::PoolRegistration> registrations;
         for (int32_t group_id : ordered_groups) {
-            const auto& tag  = groups.at(group_id).tag;
+            const auto& tag  = groups.at(group_id).key;
             const auto& pool = pool_resolver(tag);
             if (!pool->getBaseAddress() || pool->getTotalSizeBytes() == 0) {
                 RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
@@ -443,7 +447,7 @@ private:
     }
 
     bool executeTagTransfers(RemoteOpType                       operation,
-                             const std::vector<std::string>&    tags,
+                             const std::vector<ModuleGroupKey>& tags,
                              const std::vector<int32_t>&        blocks,
                              const kv_cache_manager::UriStrVec& uris,
                              kv_cache_manager::BlockBuffers&    buffers,
@@ -452,7 +456,7 @@ private:
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return false;
         }
-        std::unordered_map<std::string, std::vector<size_t>> indices_by_tag;
+        std::unordered_map<ModuleGroupKey, std::vector<size_t>> indices_by_tag;
         for (size_t index = 0; index < tags.size(); ++index) {
             indices_by_tag[tags[index]].push_back(index);
         }
@@ -473,12 +477,12 @@ private:
             }
             const auto trace_info = makeTransferTraceInfo(batch_blocks);
             if (operation == REMOTE_OPERATION_READ) {
-                if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
+                if (!client_wrapper_->loadKvCachesForGroup(tag, batch_uris, batch_buffers, trace_info)) {
                     return false;
                 }
             } else {
                 auto [success, result] =
-                    client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
+                    client_wrapper_->saveKvCachesForGroup(tag, batch_uris, batch_buffers, trace_info);
                 if (!success || (!result.empty() && result.size() != batch_uris.size())) {
                     return false;
                 }
@@ -574,7 +578,7 @@ private:
     }
 
 private:
-    CacheConfig                          cache_config_;
+    CacheDomainConfig                    cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
     ParallelismConfig                    parallelism_config_;
@@ -582,7 +586,7 @@ private:
     std::shared_ptr<BroadcastManager>    broadcast_manager_;
     std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
     std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
-    std::vector<std::string>             registration_tags_;
+    std::vector<ModuleGroupKey>          registration_tags_;
     // Preserve KVCM's operation-local, one-based request
     // order. Abort and finish share a sequence because both call FinishWrite.
     std::atomic<uint64_t> match_trace_sequence_{1};
@@ -592,7 +596,7 @@ private:
     const bool            sdk_check_enabled_;
 };
 
-KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cache_config,
+KVCMStorageBackend::KVCMStorageBackend(const CacheDomainConfig&             cache_config,
                                        const KVCacheConfig&                 kv_cache_config,
                                        const RuntimeConfig&                 runtime_config,
                                        const ParallelismConfig&             parallelism_config,
@@ -613,11 +617,10 @@ KVCMStorageBackend::~KVCMStorageBackend() = default;
 
 bool KVCMStorageBackend::initImpl() {
     return impl_->init(
-        topology(),
-        [this](int layer_id, const std::string& tag, int block_id) {
-            return convertIndexToBuffer(layer_id, tag, block_id);
+        [this](CacheModuleId module_id, int layer_id, const std::string& tag, int block_id) {
+            return convertIndexToBuffer(module_id, layer_id, tag, block_id);
         },
-        [this](const std::string& tag) -> const DeviceBlockPoolPtr& { return devicePool(tag); });
+        [this](const ModuleGroupKey& key) -> const DeviceBlockPoolPtr& { return devicePool(key); });
 }
 
 StorageMatchResult KVCMStorageBackend::matchImpl(const StorageRequest& request) {

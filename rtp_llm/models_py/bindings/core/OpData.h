@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -27,12 +28,33 @@ enum class ParallelMode {
     EPLB      = 5,
 };
 
+// Immutable tables/metadata for one active cache module. The selected fields in
+// GptModelInputs are an execution view; ownership remains indexed by CacheModuleId.
+struct CacheModuleInputs {
+    torch::Tensor            physical_blocks;
+    torch::Tensor            kernel_blocks;
+    std::vector<std::string> tags;
+    torch::Tensor            group_types;
+    torch::Tensor            update_mapping;
+    size_t                   block_stride_bytes        = 0;
+    size_t                   scale_stride_bytes        = 0;
+    size_t                   seq_size_per_block        = 0;
+    size_t                   kernel_seq_size_per_block = 0;
+    bool                     use_opaque_kv_cache_store = false;
+};
+
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
 struct GptModelInputs {
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    CacheModuleId                  cache_module_id = CacheModuleId::main();
+    std::vector<CacheModuleInputs> module_cache_inputs;
+    CacheModuleInputs              selectedCacheInputs() const;
+    void                           setSelectedCacheInputs(CacheModuleId module_id, const CacheModuleInputs& cache);
+    void                           saveSelectedCacheInputs();
+    void                           selectCacheModule(CacheModuleId module_id);
+    torch::Tensor                   engram_token_windows;
+    torch::Tensor                   mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
