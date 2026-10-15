@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 
 from .input_packer_triton import fused_pack_mega_moe_inputs
-from .shared_fp8_scale import stage_shared_fp8_input_scales
 
 
 def fused_pack_mega_moe_se_inputs(
@@ -19,12 +18,7 @@ def fused_pack_mega_moe_se_inputs(
     out_weights: torch.Tensor,
     block_m: int,
 ) -> None:
-    """Pack routed inputs, then stage the shared-L1 UTCCP scale layout.
-
-    Both launches are enqueued on the current stream.  Keeping this entry
-    point separate prevents the ordinary MegaMoE packer from touching shared
-    buffer views.
-    """
+    """Pack routed inputs and shared-L1 UTCCP scales in one launch."""
     fused_pack_mega_moe_inputs(
         x,
         weights,
@@ -33,12 +27,8 @@ def fused_pack_mega_moe_se_inputs(
         out_sf,
         out_indices,
         out_weights,
-    )
-    stage_shared_fp8_input_scales(
-        out_sf,
-        out_shared_l1_sf,
-        int(x.size(0)),
-        block_m,
+        out_shared_sf=out_shared_l1_sf,
+        shared_block_m=block_m,
     )
 
 
