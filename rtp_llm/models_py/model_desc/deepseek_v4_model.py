@@ -427,10 +427,9 @@ class DeepSeekV4Model(GptModelBase):
         moe_prefill_cap = getattr(
             model_config, "moe_prefill_max_tokens_per_rank", None
         )
+        max_seq_len = int(getattr(model_config, "max_seq_len", 0) or 0)
         self._prefill_scheduler_token_capacity = int(
-            moe_prefill_cap
-            if moe_prefill_cap is not None
-            else (int(model_config.max_seq_len) or 4096)
+            moe_prefill_cap if moe_prefill_cap is not None else (max_seq_len or 4096)
         )
         # Python-only DSpARK config, populated on the target model by the
         # speculative-engine setup. ``getattr`` keeps older ModelConfig

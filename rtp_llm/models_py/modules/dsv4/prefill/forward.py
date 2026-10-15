@@ -519,7 +519,10 @@ def forward_layers(
             )
 
     if prepare_hidden_fn is None:
-        h = v4._embed(input_ids)  # [T_total, dim]
+        # Production models expose the TP-aware `_embed`; mainline test stubs
+        # still carry the pre-TP public `embed`.
+        embed_fn = getattr(v4, "_embed", None) or v4.embed
+        h = embed_fn(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -800,7 +803,10 @@ def forward_layers(
         h = v4._hc_head_reduce(h)  # [T, dim]
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
-        h = v4._norm(h)  # [T, dim]
+        # Production models expose the TP-aware `_norm`; mainline test stubs
+        # still carry the plain `norm`.
+        norm_fn = getattr(v4, "_norm", None) or v4.norm
+        h = norm_fn(h)  # [T, dim]
 
     if _rt_on:
         _rt.record("prefill_final_norm", h)

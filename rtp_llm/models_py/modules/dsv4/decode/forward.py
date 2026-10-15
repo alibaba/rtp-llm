@@ -330,7 +330,10 @@ def forward_layers(
             _rt_on = False
 
     if prepare_hidden_fn is None:
-        h = v4._embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        # Production models expose the TP-aware `_embed`; mainline test stubs
+        # still carry the pre-TP public `embed`.
+        embed_fn = getattr(v4, "_embed", None) or v4.embed
+        h = embed_fn(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
@@ -367,7 +370,10 @@ def forward_layers(
         _rt.record("decode_hc_reduced", h)
     # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
     bsz, q_len, dim_ = h.shape
-    h = v4._norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, -1)
+    # Production models expose the TP-aware `_norm`; mainline test stubs
+    # still carry the plain `norm`.
+    norm_fn = getattr(v4, "_norm", None) or v4.norm
+    h = norm_fn(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, -1)
     if _rt_on:
         _rt.record("decode_final_norm", h)
         step = getattr(v4, "_dbg_step", 0)
