@@ -178,19 +178,22 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         )
 
         quant_config = _quant_config(True)
+        # The loader emits a CUDA input_scale tensor (ones([1], device=...));
+        # a CPU scale tensor breaks the fp4_quantize/mm_fp4 device contract.
+        input_scale = torch.ones([1], dtype=torch.float32, device="cuda")
         self.assertTrue(
             CudaFp4GEMMLinear.can_handle(
                 quant_config,
                 gemm_weight,
                 gemm_scale,
                 weight_scale_2=scale_2,
-                input_scale=torch.tensor(1.0),
+                input_scale=input_scale,
             )
         )
         linear = CudaFp4GEMMLinear(
             weight=gemm_weight,
             weight_scales=gemm_scale,
-            input_scales=torch.tensor(1.0),
+            input_scales=input_scale,
             bias=None,
             quant_config=quant_config,
             weight_scale_2=scale_2,
