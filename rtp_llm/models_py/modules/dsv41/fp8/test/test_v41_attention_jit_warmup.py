@@ -35,6 +35,18 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_ragged_swa_refresh_must_be_ready_before_requests(self):
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        refresh = SimpleNamespace(warmup=Mock(return_value=True))
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(_v41_swa_refresh_triton=refresh)}
+        ):
+            warmup._warm_swa_refresh("private-device")
+            refresh.warmup.assert_called_once_with("private-device")
+            refresh.warmup.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "ragged SWA refresh"):
+                warmup._warm_swa_refresh("private-device")
+
     def test_joint_pool_layout_fallback_and_required_compilation(self):
         package = "rtp_llm.models_py.modules.dsv41.fp8"
         joint = SimpleNamespace(
@@ -702,6 +714,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 "_prepare_sparse_prefill_plan_kernel": {"KEY_COUNT"}
             },
             "_v41_prefill_metadata.py": {
+                "_chunk_metadata_kernel": {"ROWS", "BATCH", "PS", "LS", "RS"},
                 "_prefill_slots_kernel": {"ROWS", "REQUESTS", "COLS", "TABLE_STRIDE"},
                 "_prefill_bounds_kernel": {"ROWS", "WIDTH"},
             },

@@ -64,6 +64,20 @@ def make_inputs(rows, k=512, *, device="cpu", strided=False, dtype=torch.int32):
 
 
 class IndexPlanCPU(unittest.TestCase):
+    def test_blackwell_family_gate_is_cached_per_device(self):
+        fused._device_supported.cache_clear()
+        self.addCleanup(fused._device_supported.cache_clear)
+        for index, capability in enumerate(
+            ((9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
+        ):
+            with self.subTest(capability=capability), patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as query:
+                device = torch.device("cuda", index)
+                self.assertEqual(fused._device_supported(device), capability[0] == 10)
+                self.assertEqual(fused._device_supported(device), capability[0] == 10)
+                query.assert_called_once_with(device)
+
     def test_oracle_canonicalizes_order_preserving_duplicates_and_padding(self):
         selected = torch.tensor([[7, -3, 2, 7, -1], [-1, -1, -1, -1, -1]])
         actual, lengths = reference_plan(selected, torch.tensor([4, -1]), 10, 20, 3, 4)
@@ -161,11 +175,8 @@ class IndexPlanCPU(unittest.TestCase):
 )
 class IndexPlanCUDA(unittest.TestCase):
     def setUp(self):
-        if fused.triton is None or torch.cuda.get_device_capability() not in (
-            (10, 0),
-            (10, 3),
-        ):
-            self.skipTest("SM100/SM103 and Triton required")
+        if fused.triton is None or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("Blackwell SM10x and Triton required")
 
     def check(self, selected, positions, offset=0, size=4096, start=0, window=128):
         before = selected.clone(), positions.clone()

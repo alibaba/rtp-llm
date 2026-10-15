@@ -36,6 +36,7 @@ def _chunk_metadata_kernel(
     RATIO: tl.constexpr,
     WINDOW: tl.constexpr,
     REPLAY: tl.constexpr,
+    COMPACT_REPLAY: tl.constexpr,
 ):
     index = tl.arange(0, 128)
     prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
@@ -44,7 +45,9 @@ def _chunk_metadata_kernel(
     size = prefix + length
     if RATIO == 2:
         size = size >> 1
-    chunk = size + length + tail
+    swa_length = tl.minimum(length, WINDOW) if COMPACT_REPLAY else length
+    chunk = size + swa_length + tail
+    start = prefix + length - swa_length if COMPACT_REPLAY else prefix - tail
     offset = tl.cumsum(chunk) - chunk
     row = tl.program_id(0) * 128 + index
     request = tl.load(requests + row * RS, row < ROWS, other=0).to(tl.int64)
@@ -57,10 +60,12 @@ def _chunk_metadata_kernel(
     request = tl.minimum(tl.maximum(request, 0), 127).to(tl.int32)
     tl.store(output + row, tl.gather(offset, request, 0), row < ROWS)
     tl.store(output + ROWS + row, tl.gather(size, request, 0), row < ROWS)
-    tl.store(output + 2 * ROWS + row, tl.gather(prefix - tail, request, 0), row < ROWS)
+    tl.store(output + 2 * ROWS + row, tl.gather(start, request, 0), row < ROWS)
 
 
-def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
+def try_chunk_metadata(
+    prefixes, lengths, requests, ratio, window, replay, *, compact_replay=False
+):
     """Original long-arithmetic chunk offsets, counts and SWA starts in one launch."""
     if not (
         isinstance(prefixes, torch.Tensor)
@@ -78,6 +83,7 @@ def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
         and type(window) is int
         and window > 0
         and type(replay) is bool
+        and type(compact_replay) is bool
     ):
         return None
     rows = requests.numel()
@@ -96,6 +102,7 @@ def try_chunk_metadata(prefixes, lengths, requests, ratio, window, replay):
             ratio,
             window,
             replay,
+            compact_replay,
             num_warps=4,
         )
     return output.unbind(0)

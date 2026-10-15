@@ -1,5 +1,5 @@
 // Candidate-only FP32 K2048 selector over default-disabled native policy hooks.
-#include "topk_v3.cuh"
+#include "_v41_candidate_topk_impl.cuh"
 #include "_v41_candidate_topk_sb.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -32,16 +32,16 @@ __global__ __launch_bounds__(1024, 2) void select_ids(const float* scores,
                                                       int          out_width,
                                                       int64_t      row_stride,
                                                       int64_t      out_stride) {
-    using Impl = device::topk::TopKRegister<Vecs>;
+    using Impl = device::v41_candidate_topk::TopKRegister<Vecs>;
     struct SbScratch {
         int values[32];
     };
-    __shared__ device::topk::MaxSmem<typename Impl::Smem, SbScratch> scratch;
-    __shared__ device::topk::CandidateContext candidate;
-    const int                                 tx  = threadIdx.x;
-    const int                                 r   = blockIdx.x;
-    const float*                              row = scores + static_cast<int64_t>(r) * row_stride;
-    int32_t*                                  dst = output + static_cast<int64_t>(r) * out_stride;
+    __shared__ device::v41_candidate_topk::MaxSmem<typename Impl::Smem, SbScratch> scratch;
+    __shared__ device::v41_candidate_topk::CandidateContext candidate;
+    const int                                               tx  = threadIdx.x;
+    const int                                               r   = blockIdx.x;
+    const float*                                            row = scores + static_cast<int64_t>(r) * row_stride;
+    int32_t*                                                dst = output + static_cast<int64_t>(r) * out_stride;
     if (tx == 0) {
         candidate.status = 0;
         row_status[r]    = 0;
@@ -49,7 +49,8 @@ __global__ __launch_bounds__(1024, 2) void select_ids(const float* scores,
     for (int col = tx; col < out_width; col += blockDim.x)
         dst[col] = -1;
     __syncthreads();
-    device::topk::TopKProblem problem{row, dst, nullptr, nullptr, 2048u, static_cast<uint32_t>(width), 0u};
+    device::v41_candidate_topk::TopKProblem problem{
+        row, dst, nullptr, nullptr, 2048u, static_cast<uint32_t>(width), 0u};
     Impl::template forward<false, Aligned, true>(problem, &scratch, &candidate);
     // Small-tie paths have partially active warps; join before reusing scratch.
     __syncthreads();
