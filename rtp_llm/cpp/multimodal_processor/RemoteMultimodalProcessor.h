@@ -75,6 +75,7 @@ public:
             }
             output->set_content_sha256(image.content_sha256);
             output->set_processor_identity(image.processor_identity);
+            output->set_source_bytes(image.source_bytes);
         }
         return output_transport_->fetch(ip_port, request, server_context);
     }

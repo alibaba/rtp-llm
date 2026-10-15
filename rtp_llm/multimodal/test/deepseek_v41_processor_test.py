@@ -6,9 +6,9 @@ import io
 import json
 import os
 import sys
+import unittest
 from dataclasses import replace
 from pathlib import Path
-import unittest
 from unittest import TestCase, main
 from unittest.mock import Mock, patch
 
@@ -17,6 +17,7 @@ import torch
 from PIL import Image
 from tokenizers import Tokenizer
 
+from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     IMAGE,
     IMAGE_END,
@@ -280,7 +281,7 @@ class V41ProcessorTest(TestCase):
             with self.subTest(text=text, count=len(records)):
                 with self.assertRaisesRegex(ValueError, "placeholder count"):
                     prepare_vl_inputs(text, records, self.tokenizer, self.config)
-        with self.assertRaisesRegex(ValueError, "invalid or damaged"):
+        with self.assertRaisesRegex(ValueError, MMErr.IMG_OPEN):
             prepare_vl_inputs(
                 prompt, [{"data": b"not an image"}], self.tokenizer, self.config
             )
@@ -304,6 +305,17 @@ class V41ProcessorTest(TestCase):
 
 
 class V41TokenIdsProcessorTest(TestCase):
+    def test_unreadable_image_preserves_public_error_message(self):
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        for data in (b"not an image", image_data(3, 5)[:24]):
+            with self.subTest(data_length=len(data)):
+                with self.assertRaises(ValueError) as raised:
+                    prepare_vl_inputs_from_token_ids(
+                        [config.image_token_id], [{"data": data}], config
+                    )
+                self.assertEqual(str(raised.exception), MMErr.IMG_OPEN)
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+
     def test_image_byte_limit_checks_each_source_before_decode(self):
         data = image_data(3, 5)
         encoded = base64.b64encode(data).decode()
@@ -414,6 +426,24 @@ class V41TokenIdsProcessorTest(TestCase):
         prepared = prepare_vl_inputs_from_token_ids([], [], config, prompt="ignored")
         self.assertEqual(prepared.token_ids, ())
         self.assertEqual(prepared.images, ())
+
+    def test_inspection_retains_source_without_changing_canonical_patches(self):
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        data = image_data(3, 5)
+        ids = [7, config.image_token_id, 8]
+        records = [{"data": data}]
+        original = prepare_vl_inputs_from_token_ids(ids, records, config)
+        inspected = prepare_vl_inputs_from_token_ids(
+            ids, records, config, retain_source_bytes=True
+        )
+        self.assertEqual(original.images[0].source_bytes, b"")
+        self.assertEqual(inspected.images[0].source_bytes, data)
+        self.assertEqual(inspected.token_ids, original.token_ids)
+        self.assertEqual(inspected.token_types, original.token_types)
+        self.assertEqual(inspected.image_content_hashes, original.image_content_hashes)
+        torch.testing.assert_close(
+            inspected.images[0].patches, original.images[0].patches, rtol=0, atol=0
+        )
 
     def test_count_mismatch_fails_before_download(self):
         config = V41ImageProcessorConfig()

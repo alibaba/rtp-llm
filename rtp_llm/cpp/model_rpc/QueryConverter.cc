@@ -132,11 +132,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
     TRANS_OPTIONAL(aux_info);
-    generate_config->timeout_ms               = config_proto->timeout_ms();
-    generate_config->sp_edit                  = config_proto->sp_edit();
-    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept          = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->timeout_ms           = config_proto->timeout_ms();
+    generate_config->sp_edit              = config_proto->sp_edit();
+    generate_config->force_disable_sp_run = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept      = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -302,6 +302,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                     .clone();
             image.content_sha256     = source.content_sha256();
             image.processor_identity = source.processor_identity();
+            image.source_bytes       = source.source_bytes();
             prepared->images.push_back(std::move(image));
         }
         generate_input->v41_inputs        = std::move(prepared);

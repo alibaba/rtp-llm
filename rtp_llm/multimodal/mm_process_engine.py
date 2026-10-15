@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import concurrent.futures
 import gc
 import logging
@@ -1374,10 +1375,14 @@ class MMProcessEngine:
                         types=torch.tensor(list(image.types), dtype=torch.int32),
                         content_sha256=image.content_sha256,
                         processor_identity=image.processor_identity,
+                        source_bytes=image.source_bytes,
                     )
                     for image in typed.images
                 ],
                 timeout_ms=mm_inputs.timeout_ms,
+                request_id=mm_inputs.request_id,
+                user_id=user_id,
+                service_name=service_name,
             )
         try:
             converted_inputs = trans_mm_input(mm_inputs)
@@ -1391,7 +1396,9 @@ class MMProcessEngine:
             service_name=service_name,
         )
 
-    def submit_v41(self, images, timeout_ms=0) -> MMEmbeddingRes:
+    def submit_v41(
+        self, images, timeout_ms=0, request_id=0, user_id="", service_name=""
+    ) -> MMEmbeddingRes:
         """Schedule typed images through the same bounded GPU queue as other models."""
         validate = getattr(self.mm_part, "validate_prepared_images", None)
         if validate is None:
@@ -1420,13 +1427,69 @@ class MMProcessEngine:
             )
             item.preprocess_result = [image]
             work_items.append(item)
+        handle = None
+        verdict_future = None
+        inspection_enabled = self._greennet_enabled()
+        deadline = (
+            time.monotonic()
+            + (
+                min(timeout_ms, self.vit_config.mm_timeout_ms)
+                if timeout_ms > 0
+                else self.vit_config.mm_timeout_ms
+            )
+            / 1000.0
+        )
         self.inc_query_num()
         try:
             if not work_items:
                 return MMEmbeddingRes([])
-            embeddings, positions, extra = self._compute_embeddings(work_items)
+            if inspection_enabled:
+                inspection_inputs = []
+                for image in images:
+                    data = image.get("source_bytes", b"")
+                    if not data:
+                        raise FtRuntimeException(
+                            ExceptionType.MM_PROCESS_ERROR,
+                            "V4.1 content inspection requires original image bytes",
+                        )
+                    inspection_inputs.append(
+                        MultimodalInput(
+                            "data:image/jpeg;base64," + base64.b64encode(data).decode(),
+                            MMUrlType.IMAGE,
+                            torch.empty(0),
+                            MMPreprocessConfig(),
+                        )
+                    )
+                # Inspect the original media without changing the canonical patches.
+                # Every typed request is checked, including vision embedding cache hits.
+                _, verdict_future, handle = self._begin_greennet(
+                    inspection_inputs,
+                    request_id=request_id,
+                    user_id=user_id,
+                    service_name=service_name,
+                    deadline=deadline,
+                )
+            embeddings, positions, extra = self._compute_embeddings(
+                work_items, deadline=deadline if inspection_enabled else None
+            )
+            if verdict_future is not None:
+                verdict = verdict_future.result(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+                if verdict is None:
+                    raise RuntimeError("V4.1 content inspection returned no verdict")
+                if not verdict.passed:
+                    raise FtRuntimeException(
+                        (
+                            ExceptionType.UNSAFE_INPUT_CONTENT
+                            if verdict.code == 2
+                            else ExceptionType.MM_PROCESS_ERROR
+                        ),
+                        verdict.message or "data inspection failed",
+                    )
             return MMEmbeddingRes(embeddings, positions, extra)
         finally:
+            self._cancel_greennet(handle)
             self.dec_query_num()
 
     def mm_embedding_cpp(
