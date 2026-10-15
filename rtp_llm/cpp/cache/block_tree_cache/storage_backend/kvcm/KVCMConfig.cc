@@ -162,6 +162,13 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     }
 }
 
+void SdkWrapperConfig::parseBackendConfigs(const std::string& config) {
+    // Use the same polymorphic parser as KVCM_CLIENT_CONFIG. Parsing directly
+    // into base-class pointers would discard backend-specific fields.
+    const auto wrapper_json = "{\"sdk_backend_configs\":" + config + "}";
+    FromJsonString(*this, wrapper_json);
+}
+
 void ModelDeployment::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("model_name", model_name_);
     json.Jsonize("dtype", dtype_);
@@ -185,6 +192,7 @@ void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("instance_group", instance_group_);
     json.Jsonize("instance_id", instance_id_);
     json.Jsonize("block_size", block_size_);
+    json.Jsonize("default_query_type", default_query_type_, default_query_type_);
     json.Jsonize("location_spec_infos", location_spec_info_map_);
     json.Jsonize("address", addresses_);
     json.Jsonize("meta_channel_config", meta_channel_config_, meta_channel_config_);
