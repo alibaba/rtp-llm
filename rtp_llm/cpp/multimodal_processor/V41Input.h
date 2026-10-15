@@ -18,6 +18,7 @@ struct V41ImageInput {
     torch::Tensor types;
     std::string   content_sha256;
     std::string   processor_identity;
+    std::string   source_bytes;
 };
 
 struct V41RequestInputs {

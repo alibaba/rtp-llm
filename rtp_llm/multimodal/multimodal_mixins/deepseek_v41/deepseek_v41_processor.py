@@ -9,13 +9,15 @@ import hashlib
 import io
 import json
 import math
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import torch
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
+
+from rtp_llm.multimodal.mm_error_messages import MMErr
 
 register_heif_opener()
 
@@ -65,6 +67,7 @@ class V41ImageInput:
     types: torch.Tensor
     content_sha256: str
     processor_identity: str
+    source_bytes: bytes = field(default=b"", repr=False)
 
     @property
     def length(self) -> int:
@@ -215,10 +218,16 @@ def prepare_vl_inputs(
     *,
     url_loader=None,
     output_budget: int = 0,
+    retain_source_bytes: bool = False,
 ) -> V41PreparedInputs:
     # output_budget is retained for callers; the generation layer applies limits.
     return prepare_vl_inputs_from_token_ids(
-        tokenizer.encode(prompt), images, config, prompt=prompt, url_loader=url_loader
+        tokenizer.encode(prompt),
+        images,
+        config,
+        prompt=prompt,
+        url_loader=url_loader,
+        retain_source_bytes=retain_source_bytes,
     )
 
 
@@ -230,6 +239,7 @@ def prepare_vl_inputs_from_token_ids(
     prompt: str = "",
     url_loader=None,
     max_image_bytes: int | None = None,
+    retain_source_bytes: bool = False,
 ) -> V41PreparedInputs:
     """Expand upstream image markers without re-tokenizing any text or special IDs."""
     if sum(token == config.image_token_id for token in prompt_tokens) != len(images):
@@ -250,7 +260,7 @@ def prepare_vl_inputs_from_token_ids(
             with Image.open(io.BytesIO(data)) as image:
                 patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)
         except (OSError, Image.DecompressionBombError) as error:
-            raise ValueError("invalid or damaged V4.1 image payload") from error
+            raise ValueError(MMErr.IMG_OPEN) from error
         types = image_token_types(llm_h, llm_w)
         image_inputs.append(
             V41ImageInput(
@@ -261,6 +271,7 @@ def prepare_vl_inputs_from_token_ids(
                 types,
                 hashlib.sha256(data).hexdigest(),
                 config.identity,
+                source_bytes=data if retain_source_bytes else b"",
             )
         )
         tokens.extend([config.image_token_id] * types.numel())
