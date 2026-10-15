@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shlex
@@ -100,7 +101,8 @@ class FlexEnv:
     """A live environment: one mock cluster + one master (+ optional victims)."""
 
     def __init__(self, spec: EnvSpec, run_dir: Path, base_grpc_port: int):
-        self.spec = spec
+        self.spec = copy.deepcopy(spec)
+        self.startup_fingerprint = spec.fingerprint()
         self.run_dir = run_dir
         self.base_grpc_port = base_grpc_port
         self.mock_http_port = base_grpc_port - 1
@@ -180,7 +182,7 @@ class EnvManager:
         """Return a live env for *spec*; rebuild only when the spec changed."""
         if (
             self.current is not None
-            and self.current.spec.fingerprint() == spec.fingerprint()
+            and self.current.startup_fingerprint == spec.fingerprint()
         ):
             return self.current
         if self.current is not None:

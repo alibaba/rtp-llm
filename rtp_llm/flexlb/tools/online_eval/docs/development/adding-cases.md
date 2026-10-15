@@ -159,6 +159,10 @@ program 用 `InputContract.from_fields(...)` 声明输入分组和字段，再�
 
 观测输入统一使用 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`；输入组只绑定指标，不声明固定的存储后端。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。读取能力由 Python program 提供，实时观测可通过 monitoring session 读取 Prometheus，离线分析消费冻结证据；运行时来源实例由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
 
+共享 Java 发流输入通过 `case_api.traffic_inputs.java_flow_inputs()` 组合，字段与基本数值规则来自 `adapters.java_flow_spec.JavaFlowSpec`。case 只补充自己的来源约束；action 通过同一规格解码，避免在 program、action 中分别维护允许字段名单。
+
+内部 criteria 使用 `case_api.criteria.CriteriaContract` 声明投影分组。直接传递的字段复用输入声明，检查字段取 `CheckSet.criteria_fields`；`project()` 负责按合同选取已解释的数据，`read()` 复核冻结参数及离线证据。窗口换算、profile 阈值选择和跨字段业务约束仍由 case 显式实现。新增普通字段或检查不再同步修改 program 的字段筛选、action 的白名单和通用数值检查循环；新增业务算法仍需实现并验证其消费逻辑。
+
 字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。分组由 case 的输入合同声明，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
 固定测量能力在 Python 声明指标、单位、窗口和方向，YAML 提供阈值；通用指标检查可由 YAML 选择指标与窗口，但仍验证定义与允许选择。前者保障持续性、cohort 等算法的前提，后者用于无专属测量流程的标量比较。两者复用比较与依赖绑定，不把测量算法复制成 YAML 规则。消费方单位是算法要求，query plan 单位是生产声明；必须相等，不能直接抄生产单位代替消费断言。

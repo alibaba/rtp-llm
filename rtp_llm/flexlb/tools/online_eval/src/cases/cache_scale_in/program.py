@@ -9,7 +9,7 @@ from case_api.builder import output
 from cases.cache_scale_in.inputs import INPUTS
 from adapters.client_configuration import ClientConfiguration
 from cases.cache_scale_in.inputs import (
-    engine_counters, ENGINE_FIELDS, OBSERVATION_FIELDS, compile_checks, observation_contract,
+    engine_counters, ENGINE_FIELDS, CRITERIA, compile_checks, observation_contract,
 )
 from traffic.contracts import driver, uniform_gate_flow
 from case_api.metric_inputs import bind_mock_engine_metrics
@@ -19,16 +19,15 @@ def default(case):
     data = case.bind(INPUTS)
     flow = driver(data.traffic, "java_flow")
     inputs = data.observation["inputs"]
-    gate = dict({k: v for k, v in data.procedure.items() if k not in {"analysis_timeout_s", "startup_timeout_s"}},
-                **{k: data.observation[k] for k in OBSERVATION_FIELDS},
-                **observation_contract(data.observation),
-                **compile_checks(case, data.checks, data.analysis["collapse"]))
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
     bind_mock_engine_metrics(case, inputs["engine_counters"], ENGINE_FIELDS)
     client = ClientConfiguration.read(flow["client"])
-    gate["qps"] = client.playback.qps
+    gate = CRITERIA.project(procedure=data.procedure, observation=data.observation,
+                            windows=observation_contract(data.observation),
+                            checks=compile_checks(case, data.checks, data.analysis["collapse"]),
+                            runtime={"qps": client.playback.qps})
     budget = (
         gate["warmup_timeout_s"] + gate["topology_timeout_s"] + gate["observe_s"] + 10
     )

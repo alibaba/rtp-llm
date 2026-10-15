@@ -146,7 +146,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 `ScenarioRunner.run()` 接收编译实例并返回 `RunResult`。`StageExecutor` 返回 `StageExecutionSummary`，阶段、清理和交付状态具有独立的结果类型。`RunOutcome.evaluate()` 使用 `OutcomeEvidence` 统一判定执行、gate、有效性和交付；报告失败不重写阶段检查。`RunFinalizer` 在证据和报告各自的 deadline 内调用适配器，并在阶段开始、完成或失败时保存检查点。
 
-环境声明、Master patch 和解析结果分别由 `EnvironmentDeclaration`、`MasterPatch` 与 `ResolvedEnvironment` 表达。`EnvironmentResolver` 读取一次 preset，校验所有具名 profile patch，再为选定 profile 渲染。性能与缓存 patch 在编译时合入最终快照；backend 仅绑定租约和进程启动参数，不重新读取 preset 或解释性能 patch。简单字段的类型、默认值和范围声明在领域字段 metadata，环境词汇从字段定义生成。
+环境声明、Master patch 和解析结果分别由 `EnvironmentDeclaration`、`MasterPatch` 与 `ResolvedEnvironment` 表达。`EnvironmentResolver` 读取一次 preset，校验所有具名 profile patch，再为选定 profile 渲染。性能与缓存 patch 在编译时合入最终快照；backend 仅绑定租约和进程启动参数，不重新读取 preset 或解释性能 patch。简单字段的类型、默认值和范围声明在领域字段 metadata，环境词汇从字段定义生成。 `startup` 标记允许转入底层启动规格的字段，`reconfigure` 标记允许同 lane 重建的字段；两者与解码规则位于同一声明，后台不接收任意字段转抄。声明已准入但没有解码器的字段直接报错。复杂布局、选主和配置渲染保留显式转换。`EnvSpec` 的复用标识默认覆盖全部字段及嵌套规格；`FlexEnv` 保存启动时的规格副本和标识，调用方随后修改对象不会改变已启动环境的身份。
 
 case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
 

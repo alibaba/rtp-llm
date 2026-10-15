@@ -47,20 +47,10 @@ def mutate_config(config, mutation):
 
 def _validate(params, plan, probe=False):
     from scenario.environment_config import environment
+    from scenario.environment_declaration import reconfigurable_fields
 
     required = {"config_overrides", "mutation"} if probe else {"config_overrides"}
-    allowed = (
-        required
-        if probe
-        else required
-        | {
-            "n_prefill",
-            "n_decode",
-            "metric_whitelist",
-            "mock_auto_fetch",
-            "mock_fetch_attach_timeout_ms",
-        }
-    )
+    allowed = required if probe else required | reconfigurable_fields()
     if (
         not isinstance(params, dict)
         or set(params) - allowed
@@ -74,15 +64,8 @@ def _validate(params, plan, probe=False):
         original = environment(plan.environment, plan.path, profile)
         replacement = copy.deepcopy(plan.environment)
         replacement["config_overrides"] = copy.deepcopy(params["config_overrides"])
-        for role in (
-            "n_prefill",
-            "n_decode",
-            "metric_whitelist",
-            "mock_auto_fetch",
-            "mock_fetch_attach_timeout_ms",
-        ):
-            if role in params:
-                replacement[role] = params[role]
+        replacement.update({name: copy.deepcopy(params[name]) for name in reconfigurable_fields()
+                            if name in params})
         target = environment(replacement, plan.path, profile)
         for axis in ("decision", "dispatcher"):
             if original["effective_axes"][axis] != target["effective_axes"][axis]:

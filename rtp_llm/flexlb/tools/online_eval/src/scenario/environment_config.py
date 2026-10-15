@@ -3,7 +3,7 @@ import re
 from adapters.perf_presets import preset_names
 from adapters.zookeeper_config import ZooKeeperConfig
 from scenario.validation import fail, mapping, number
-from scenario.environment_declaration import EnvironmentDeclaration, environment_fields, optional_scalars
+from scenario.environment_declaration import EnvironmentDeclaration, environment_fields, optional_scalars, captured_fields
 from scenario.environment_resolver import EnvironmentResolver
 
 def read_environment(value, path):
@@ -36,11 +36,7 @@ def read_environment(value, path):
         fail(path + '.zookeeper', 'requires dual_zookeeper layout')
     resolver = EnvironmentResolver.read(value, path, result["perf_preset"])
     captured = resolver.captured
-    for field, capture_field in (
-        ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-        ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-        ("decode_cache_blocks", "decode_kv_pool_blocks"),
-    ):
+    for field, capture_field in captured_fields().items():
         if field not in value and capture_field in captured:
             result[field] = captured[capture_field]
     if "model_override" in value:
@@ -88,12 +84,12 @@ def read_environment(value, path):
             key: number(val, field + "." + key, integer=key.startswith("max_batch_"))
             for key, val in perf.items()
         }
-    for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
+    for key in ("n_prefill", "n_decode"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
-    for name in ("master_jvm_heap", "mock_heap"):
-        if name in value:
-            result[name] = value[name]
+    unhandled = set(value) - set(result) - {"config_overrides", "profile_overrides"}
+    if unhandled:
+        fail(path, "declared environment fields have no decoder: " + str(sorted(unhandled)))
     return EnvironmentDeclaration.read_normalized(result), resolver
 
 

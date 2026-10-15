@@ -158,11 +158,11 @@ def test_zk_runtime_only_reads_verified_prepared_artifacts(tmp_path):
 
 def test_missing_zk_preparation_fails_before_starting_mock(tmp_path):
     from adapters.environment import EnvManager
-    from adapters.environment_config import EnvSpec
+    from adapters.environment_config import EnvSpec, MasterSpec
     from adapters.zk_helper import ZkHelperOps
     from adapters.zookeeper_config import ZooKeeperConfig
     spec = EnvSpec(label='fixture', n_prefill=1, n_decode=1, perf={},
-                   masters=[NS(name='A')], zk_consistency=ZooKeeperConfig())
+                   masters=[MasterSpec('A', 18080)], zk_consistency=ZooKeeperConfig())
     manager = EnvManager(tmp_path, verbose=False)
     with patch.object(manager, '_start_mock') as start, patch('adapters.environment.resolve_java21', return_value='java'), patch.object(
             ZkHelperOps, 'default_launch_argv', side_effect=RuntimeError('not prepared')):

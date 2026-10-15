@@ -10,8 +10,7 @@ from analysis.time_buckets import TimeBuckets
 from monitoring.contracts import MetricUnavailable
 from monitoring.metric_store import series_row
 
-STATE_FIELDS = ("http_up", "scheduler_inflight", "prefill_inflight_requests",
-                "decode_master_queued", "decode_confirmed_running")
+from cases.master_ha_failover.state_contract import STATE_FIELDS
 
 
 def _artifacts(payload, *, require_states=True):
