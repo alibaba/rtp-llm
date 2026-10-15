@@ -767,6 +767,8 @@ class KVCacheConfig:
     kvcm_asyncwrapper_queue_size: int
     kvcm_asyncwrapper_thread_num: int
     kvcm_client_config: str
+    kvcm_read_backend_type: int
+    kvcm_min_replica_count: int
     kvcm_enable_vipserver: bool
     kvcm_get_broadcast_timeout: int
     kvcm_get_timeout_ms: int
