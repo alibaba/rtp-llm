@@ -186,7 +186,8 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self,
     ):
         model, layers, operation, stream, _, _ = self.mega_fixture()
-        warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
         self.assertEqual(
             operation.call_args_list,
             [

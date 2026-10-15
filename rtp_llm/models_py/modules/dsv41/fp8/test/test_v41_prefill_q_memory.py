@@ -20,6 +20,10 @@ class PrefillQMemoryTest(unittest.TestCase):
     def test_short_metadata_fails_before_any_projection_or_mla(self):
         owner = SimpleNamespace(
             dim=5,
+            _mega_attention=SimpleNamespace(
+                supports_query=lambda _: True,
+                supports_prefill=lambda *args: True,
+            ),
             _project_prefill_q=Mock(),
             _prefill_output_all_reduce=Mock(),
         )
@@ -102,6 +106,8 @@ class PrefillQMemoryTest(unittest.TestCase):
             out.copy_(F.linear(o.flatten(1), wo))
 
         owner._prefill_output_proj_into = output_project
+        owner._shared_attention = {}
+        owner.wo_b = object()
         angles = torch.randn(rows * 2, owner.rope_head_dim // 2)
         freqs = torch.polar(torch.ones_like(angles), angles)[::2]
         indices = (torch.arange(rows) % 7).view(rows, 1, 1).int()
@@ -126,8 +132,24 @@ class PrefillQMemoryTest(unittest.TestCase):
         output_project(reference_o, freqs, out=reference)
         events.clear()
 
+        def mega_prefill(q, pool, idx, positions, lens):
+            selected_freqs = freqs[positions.long()]
+            attention.rope_only(q, selected_freqs, 4)
+            o = mla(q=q, kv=pool, indices=idx, topk_length=lens)[0]
+            return o, selected_freqs
+
+        owner._mega_attention = SimpleNamespace(
+            supports_query=lambda _: True,
+            supports_prefill=lambda *args: True,
+            project_q=lambda linear, value, out: linear(value, out=out).view(-1, 2, 8),
+            prefill=mega_prefill,
+            project_output=lambda pair, linear, out: output_project(*pair, out=out),
+        )
+
         common = SimpleNamespace(
             freqs_cis=freqs,
+            cp_on=False,
+            position_ids=torch.arange(rows),
             workspace=PrefillWorkspace(
                 torch.device("cpu"),
                 q_rows=min(rows, 4),

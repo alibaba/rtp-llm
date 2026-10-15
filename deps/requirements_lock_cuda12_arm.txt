@@ -547,8 +547,8 @@ filelock==3.25.2 \
     #   huggingface-hub
     #   torch
     #   transformers
-flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:ea9225f2c5ebf6fa37ee41d967796d1d3d6d925c3bef187e12ace67c67baf36f
+flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B49e2000.cu129-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:a589029d301711501cf3a277268b56d5f22bea74a8d9364b38cc064a77e6f6a2
     # via -r deps/requirements_cuda12_arm.txt
 flashinfer-python==0.2.5 \
     --hash=sha256:990aa090ef781783e76b836696ece4efd23956f72b5696d622fc619a61162aef

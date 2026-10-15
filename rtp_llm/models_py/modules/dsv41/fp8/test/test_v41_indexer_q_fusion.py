@@ -52,6 +52,7 @@ def assert_identical(actual, expected):
 
 def _metadata():
     def tensor(shape, dtype):
+        strides = torch.empty(shape, device="meta").stride()
         return SimpleNamespace(
             device=torch.device("cuda"),
             shape=shape,
@@ -59,6 +60,7 @@ def _metadata():
             dtype=dtype,
             requires_grad=False,
             is_contiguous=lambda: True,
+            stride=lambda dim: strides[dim],
         )
 
     return dict(
@@ -284,7 +286,10 @@ class V41IndexerQFusionCPU(unittest.TestCase):
                     self.assertFalse(fused.is_supported(**case))
             for key in _metadata():
                 case = _metadata()
-                case[key].is_contiguous = lambda: False
+                if key == "q":
+                    case[key].stride = lambda dim: 2
+                else:
+                    case[key].is_contiguous = lambda: False
                 self.assertFalse(fused.is_supported(**case))
             self.assertFalse(fused.is_supported(**_metadata(), rope_head_dim=32))
             case = _metadata()
