@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <optional>
 #include <thread>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
@@ -29,6 +30,7 @@ public:
     struct PoolRegistration {
         kv_cache_manager::RegistSpan span;
         std::string                  location_spec_name;
+        std::optional<kv_cache_manager::ClientMemoryRegistrations> memory_registrations;
     };
     virtual bool initForPools(const ConfigMap&                     config_map,
                               kv_cache_manager::RoleType           role,

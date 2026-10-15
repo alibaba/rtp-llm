@@ -411,6 +411,7 @@ TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallb
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
     EXPECT_EQ(callbacks, 0u);
     EXPECT_EQ(commits, 0u);
@@ -451,6 +452,7 @@ TEST(LoadAsyncContextTest, CoordinatorCommitFailurePublishesInternalStatusBefore
     EXPECT_FALSE(context->commit());
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->errorInfo().ok());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
     EXPECT_EQ(aborts, 0u);
     coordinator->shutdown();

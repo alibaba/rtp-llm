@@ -80,7 +80,6 @@ public:
     bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
     void         cancelUnsubmittedTransfers();
-    ErrorInfo    errorInfo() const override;
     bool         aggregateSuccess() const;
     bool         settle(bool success);
     bool         onTaskFail();
@@ -88,6 +87,7 @@ public:
     void         onDone(DoneCallback callback) override;
     bool         done() const override;
     bool         success() const override;
+    ErrorInfo    errorInfo() const override;
     MallocStatus mallocStatus() const;
 
 private:
@@ -99,6 +99,7 @@ private:
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
     void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
+    ErrorInfo completionErrorLocked() const;
     void notifyCompletion();
 
     ErrorInfo completionErrorLocked() const;
