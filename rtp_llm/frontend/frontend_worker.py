@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.output_vocab_config import load_output_vocab_config
 from rtp_llm.distribute.distributed_server import (
     WorldInfo,
     get_dp_addrs_from_world_info,
@@ -74,6 +75,23 @@ class FrontendWorker:
         self.tokenizer = TokenizerFactory.create(
             model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
         )
+        self.codebook_mode = False
+        if model_config.enable_output_vocab_pruning:
+            # Frontend configs do not load weights/finalize the output vocabulary.
+            # Resolve the same manifest once so text stopping agrees with the engine.
+            eos_token_id = self.tokenizer.eos_token_id
+            if isinstance(eos_token_id, (list, tuple)):
+                eos_token_id = eos_token_id[0] if eos_token_id else None
+            if eos_token_id is None:
+                eos_token_id = model_config.special_tokens.eos_token_id
+            _, groups = load_output_vocab_config(
+                model_config.ckpt_path,
+                model_config.vocab_size,
+                model_config.input_vocab_size,
+                tokenizer=self.tokenizer.get_real_tokenizer(),
+                extra_token_ids=(eos_token_id,),
+            )
+            self.codebook_mode = bool(groups)
 
         # Create engine_config from config (ports from server_config/distribute_config)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
@@ -108,6 +126,7 @@ class FrontendWorker:
             vit_separation=vit_separation,
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
+            codebook_mode=self.codebook_mode,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

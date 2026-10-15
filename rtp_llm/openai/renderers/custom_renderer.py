@@ -399,6 +399,13 @@ class CustomChatRenderer:
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)
 
+    def disable_stop_words(self) -> None:
+        """Keep fixed-level codebook IDs intact during token/text rendering."""
+        self.stop_words_id_list = []
+        self.stop_words_str_list = []
+        self.extra_stop_word_ids_list = []
+        self.extra_stop_words = []
+
     def add_extra_stop_word_ids(self, extra_stop_word_ids: List[List[int]]):
         self.extra_stop_word_ids_list.extend(extra_stop_word_ids)
 

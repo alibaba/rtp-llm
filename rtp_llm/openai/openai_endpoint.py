@@ -65,6 +65,8 @@ def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
 
 
 class OpenaiEndpoint(object):
+    codebook_mode: bool = False
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -72,7 +74,9 @@ class OpenaiEndpoint(object):
         vit_config: VitConfig,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
+        codebook_mode: bool = False,
     ):
+        self.codebook_mode = codebook_mode
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
@@ -168,6 +172,12 @@ class OpenaiEndpoint(object):
         self.stop_words_str_list = list(set(self.stop_words_str_list))
         self.stop_words_id_list = self._dedup_stop_words_list(self.stop_words_id_list)
 
+        if self.codebook_mode:
+            self.stop_words_id_list = []
+            self.stop_words_str_list = []
+            for renderer in (self.chat_renderer, self.template_renderer):
+                # Renderers also keep model/template stop words independently.
+                renderer.disable_stop_words()
         logging.info(
             f"use stop_words_str_list [{self.stop_words_str_list}], "
             f"stop_words_id_list [{self.stop_words_id_list}]"
@@ -224,7 +234,14 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
-        config = request.extra_configs or GenerateConfig()
+        config = (
+            request.extra_configs.model_copy(deep=True)
+            if request.extra_configs is not None
+            else GenerateConfig()
+        )
+        if self.codebook_mode:
+            config.stop_words_list = []
+            config.stop_words_str = []
         if request.extra_configs is not None and (
             config.response_format is not None
             or GrammarConstraint.collect_from_config(config)
@@ -249,7 +266,9 @@ class OpenaiEndpoint(object):
             config.top_k = request.top_k
         if request.n != None:
             config.num_return_sequences = request.n
-        request_stop_words_list = request.stop if request.stop != None else []
+        request_stop_words_list = (
+            request.stop if request.stop is not None and not self.codebook_mode else []
+        )
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
         config.stop_words_str = list(
@@ -259,11 +278,12 @@ class OpenaiEndpoint(object):
                 + config.stop_words_str
             )
         )
-        config.stop_words_list = self._dedup_stop_words_list(
-            self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(config.stop_words_str)
-            + config.stop_words_list
-        )
+        if not self.codebook_mode:
+            config.stop_words_list = self._dedup_stop_words_list(
+                self.stop_words_id_list
+                + self.chat_renderer.tokenize_words(config.stop_words_str)
+                + config.stop_words_list
+            )
         if request.chat_id != None:
             config.chat_id = request.chat_id
         if request.seed != None:
@@ -614,10 +634,20 @@ class OpenaiEndpoint(object):
     def chat_completion(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
+        rendered_input = self.render_chat(chat_request)
+        return self._chat_completion_from_inputs(
+            request_id, chat_request, raw_request, rendered_input
+        )
+
+    def _chat_completion_from_inputs(
+        self, request_id, chat_request, raw_request, rendered_input
+    ):
+        if self.codebook_mode:
+            # Recipe renderers may apply request.stop after decoding as well.
+            chat_request = chat_request.model_copy(update={"stop": None})
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
@@ -699,6 +729,8 @@ class OpenaiEndpoint(object):
     async def _render_single_output(self, outputs, chat_request, generate_config):
         """Render a single GenerateOutputs into a ChatCompletionResponse.
         Only non-streaming mode is supported for batch inference."""
+        if self.codebook_mode:
+            chat_request = chat_request.model_copy(update={"stop": None})
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )

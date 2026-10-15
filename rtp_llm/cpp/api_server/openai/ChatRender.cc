@@ -167,6 +167,11 @@ std::vector<std::vector<int>> ChatRender::get_all_extra_stop_word_ids_list() {
     return py::cast<std::vector<std::vector<int>>>(render_.attr("get_all_extra_stop_word_ids_list")());
 }
 
+void ChatRender::disable_stop_words() {
+    py::gil_scoped_acquire acquire;
+    render_.attr("disable_stop_words")();
+}
+
 RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
     py::gil_scoped_acquire acquire;
 

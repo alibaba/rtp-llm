@@ -780,6 +780,7 @@ protected:
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
     size_t                                output_vocab_size_;
+    bool                                  is_codebook_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_                = 0;
