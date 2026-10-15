@@ -119,8 +119,8 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
 
     auto init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {
-        const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-        init_result.block_aligned_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
+        const CacheKeysType& cache_keys = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+        init_result.device_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
     }
     if (!init_result.success) {
         return finalize_init_failure(init_result);
@@ -137,10 +137,10 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             }
             pending_async_context.reset();
             load_context.reset();
-            incr_result.match_cost_time_us         = init_result.match_cost_time_us;
-            incr_result.match_end_time_us          = init_result.match_end_time_us;
-            incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
-            incr_result.load_attempted             = init_result.load_attempted;
+            incr_result.match_cost_time_us  = init_result.match_cost_time_us;
+            incr_result.match_end_time_us   = init_result.match_end_time_us;
+            incr_result.device_input_length = init_result.device_input_length;
+            incr_result.load_attempted      = init_result.load_attempted;
             return finalize_init_failure(std::move(incr_result));
         }
         if (pending_async_context != nullptr) {
@@ -271,7 +271,7 @@ bool CoordinatorCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContex
 }
 
 bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
-                                                      int                            device_ready_reuse_length) {
+                                                             int                            device_ready_reuse_length) {
     std::lock_guard<std::mutex> lock(malloc_mutex_);
     RTP_LLM_CHECK(resource != nullptr && device_ready_reuse_length >= 0);
 
@@ -285,12 +285,13 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
         }
     });
     for (size_t i = 0; i < groups.size(); ++i) {
-        const auto&  group              = groups[i];
-        const auto&  pool               = group->blockPool();
-        auto&        locations          = block_locations[i];
-        const auto&  tag                = group->tag();
-        const int    local_reuse_length = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
-        const size_t recompute_begin    = local_reuse_length / group->seqSizePerBlock();
+        const auto& group     = groups[i];
+        const auto& pool      = group->blockPool();
+        auto&       locations = block_locations[i];
+        const auto& tag       = group->tag();
+        const int   local_reuse_length =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+        const size_t recompute_begin = local_reuse_length / group->seqSizePerBlock();
         for (int batch = 0; batch < resource->batchSize(); ++batch) {
             auto&       ids    = resource->mutableBlockIds(batch, tag);
             const auto& blocks = ids.blocks();
@@ -439,10 +440,10 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
         snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        snapshot.used_ratio =
-            snapshot.total_blocks == 0 ?
-                0.0f :
-                static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+        snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
+                                                  0.0f :
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                     / static_cast<double>(snapshot.total_blocks));
         snapshots.push_back(std::move(snapshot));
     }
     return snapshots;

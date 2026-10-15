@@ -111,7 +111,7 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
     for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
         const auto& plan    = plans[plan_index];
         const auto& context = contexts[plan_index];
-        bool handled = false;
+        bool        handled = false;
         for (auto& strategy : strategies_) {
             auto result = strategy->tryExecute(plan, options_, context);
             if (result.status == StrategyStatus::DONE) {
@@ -152,17 +152,17 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
 
         const std::vector<BlockIdxType>& device_blocks = descriptor.blocksAt(Tier::DEVICE);
         for (const auto& tile : getDeviceHostCopyTiles(group_set, device_blocks)) {
-            const auto& pool = *group_set.devicePools()[tile.member_group_id];
-            const auto addr = reinterpret_cast<uintptr_t>(tile.buffer.addr);
-            const auto base = reinterpret_cast<uintptr_t>(pool.getBaseAddress());
-            const auto capacity = pool.getTotalSizeBytes();
+            const auto& pool     = *group_set.devicePools()[tile.member_group_id];
+            const auto  addr     = reinterpret_cast<uintptr_t>(tile.buffer.addr);
+            const auto  base     = reinterpret_cast<uintptr_t>(pool.getBaseAddress());
+            const auto  capacity = pool.getTotalSizeBytes();
             RTP_LLM_CHECK_WITH_INFO(tile.host_offset <= host.payload_bytes
                                         && tile.buffer.size_bytes <= host.payload_bytes - tile.host_offset,
                                     "device-host tile exceeds host payload");
             RTP_LLM_CHECK_WITH_INFO(tile.buffer.is_cuda == (pool.deviceIndex() >= 0)
                                         && (!tile.buffer.is_cuda || tile.buffer.device_index == pool.deviceIndex())
-                                        && base <= UINTPTR_MAX - capacity && addr >= base
-                                        && addr - base <= capacity && tile.buffer.size_bytes <= capacity - (addr - base),
+                                        && base <= UINTPTR_MAX - capacity && addr >= base && addr - base <= capacity
+                                        && tile.buffer.size_bytes <= capacity - (addr - base),
                                     "invalid device-host buffer");
             const int device = pool.deviceIndex();
             auto&     plan   = plans_by_device[device];

@@ -21,7 +21,7 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
             continue;
         }
         CachePoolMetricsSnapshot report_snapshot;
-        report_snapshot.tier                   = tierName(Tier::DEVICE);
+        report_snapshot.tier                       = tierName(Tier::DEVICE);
         report_snapshot.pool_name                  = snapshot.pool_name;
         report_snapshot.block_size_bytes           = snapshot.block_size_bytes;
         report_snapshot.total_blocks               = snapshot.total_blocks;
@@ -44,22 +44,26 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
             continue;
         }
         CachePoolMetricsSnapshot report_snapshot;
-        report_snapshot.tier                       = tierName(snapshot.tier);
-        report_snapshot.pool_name                  = snapshot.pool_name;
-        report_snapshot.block_size_bytes           = snapshot.block_size_bytes;
-        report_snapshot.total_blocks               = snapshot.total_blocks;
-        report_snapshot.free_blocks                = snapshot.free_blocks;
-        report_snapshot.used_blocks                = snapshot.used_blocks;
-        report_snapshot.available_blocks           = snapshot.available_blocks;
-        report_snapshot.request_ref_blocks         = snapshot.request_ref_blocks;
-        report_snapshot.block_cache_ref_blocks     = snapshot.block_cache_ref_blocks;
-        report_snapshot.load_ref_blocks            = snapshot.load_ref_blocks;
-        report_snapshot.eviction_target_ref_blocks = snapshot.eviction_target_ref_blocks;
-        report_snapshot.store_ref_blocks           = snapshot.store_ref_blocks;
-        report_snapshot.active_blocks              = snapshot.active_blocks;
-        report_snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
-                                                         0.0f :
-                                                         static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
+        report_snapshot.tier                          = tierName(snapshot.tier);
+        report_snapshot.pool_name                     = snapshot.pool_name;
+        report_snapshot.block_size_bytes              = snapshot.block_size_bytes;
+        report_snapshot.total_blocks                  = snapshot.total_blocks;
+        report_snapshot.free_blocks                   = snapshot.free_blocks;
+        report_snapshot.used_blocks                   = snapshot.used_blocks;
+        report_snapshot.available_blocks              = snapshot.available_blocks;
+        report_snapshot.request_ref_blocks            = snapshot.request_ref_blocks;
+        report_snapshot.block_cache_ref_blocks        = snapshot.block_cache_ref_blocks;
+        report_snapshot.load_ref_blocks               = snapshot.load_ref_blocks;
+        report_snapshot.eviction_target_ref_blocks    = snapshot.eviction_target_ref_blocks;
+        report_snapshot.store_ref_blocks              = snapshot.store_ref_blocks;
+        report_snapshot.active_blocks                 = snapshot.active_blocks;
+        report_snapshot.read_bytes                    = snapshot.read_bytes;
+        report_snapshot.write_bytes                   = snapshot.write_bytes;
+        report_snapshot.read_bandwidth_bytes_per_sec  = snapshot.read_bandwidth_bytes_per_sec;
+        report_snapshot.write_bandwidth_bytes_per_sec = snapshot.write_bandwidth_bytes_per_sec;
+        report_snapshot.used_ratio                    = snapshot.total_blocks == 0 ?
+                                                            0.0f :
+                                                            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                                             / static_cast<double>(snapshot.total_blocks));
         report_snapshots.push_back(std::move(report_snapshot));
     }
