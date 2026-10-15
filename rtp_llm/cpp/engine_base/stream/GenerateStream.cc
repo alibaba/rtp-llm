@@ -26,6 +26,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr size_t kSmallBeamSearchV1MaxBeamWidth = 8;  // Keep in sync with trt_beam_search kMaxBeamWidthForV1.
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -40,8 +42,28 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
-    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
-        return "output vocabulary size must be greater than twice the maximum beam width";
+    if (config.hasNumBeams()) {
+        const size_t max_num_beams = static_cast<size_t>(config.maxNumBeams());
+        if (output_vocab_size < max_num_beams) {
+            return "output vocabulary size must be at least the maximum beam width";
+        }
+        // Match the per-step V1/V2 dispatch, including repeated final variable beam widths.
+        // After the first repeated tail step, every remaining transition is identical.
+        const size_t steps_to_check = std::min(static_cast<size_t>(std::max(config.max_new_tokens, 0)),
+                                               std::max(config.variable_num_beams.size(), size_t{1}) + 1);
+        int          input_beams    = 1;
+        for (size_t step = 0; step < steps_to_check; ++step) {
+            const int output_beams =
+                config.variable_num_beams.empty() ?
+                    config.num_beams :
+                    config.variable_num_beams[std::min(step, config.variable_num_beams.size() - 1)];
+            if (output_beams > 1 && input_beams == output_beams
+                && static_cast<size_t>(input_beams) <= kSmallBeamSearchV1MaxBeamWidth
+                && output_vocab_size <= 2 * static_cast<size_t>(input_beams)) {
+                return "output vocabulary size must be greater than twice the beam width for V1 beam search";
+            }
+            input_beams = output_beams;
+        }
     }
     return std::nullopt;
 }
@@ -108,7 +130,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);

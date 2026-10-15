@@ -27,6 +27,8 @@ namespace kernels
 // force_path: 0 = auto route, 1 = force multi-block radix, 2 = force one-block radix.
 // Any nonzero force_path clamps back to one-block when grid_dim < 2: multi-block is
 // not valid below 2 blocks (the auto route has never selected it there).
+// Radix full selection (k == inputLength) always uses one-block, even when forcing
+// multi-block, and retains the requested sorted/unsorted output layout.
 // Primarily a testing/benchmarking knob; beam search also wires it to the
 // RTP_LLM_BEAM_TOPK_FORCE_PATH env var as a runtime rollback switch (see
 // beamSearchKernels.h). Workspace size depends on the path, so queries must pass the
