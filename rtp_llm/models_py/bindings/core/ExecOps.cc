@@ -575,7 +575,7 @@ void cudaCurrentStreamSyncAndCheck() {
     check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
     check_cuda_error();
 #elif USING_ROCM
-    ROCM_CHECK(hipStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+    ROCM_CHECK(hipStreamSynchronize(at::hip::getCurrentHIPStream(at::hip::current_device())));
     ROCM_CHECK_ERROR();
 #endif
 }
