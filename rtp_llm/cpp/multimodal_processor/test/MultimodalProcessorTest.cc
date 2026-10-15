@@ -78,6 +78,45 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
     EXPECT_EQ(input->multimodal_features.value().size(), 2);
 }
 
+TEST_F(MultimodalProcessorTest, kimiK3TwoImagesUseOnePadEachAndKeepFeatureIdentity) {
+    // The checkpoint tokenizer encodes <|media_pad|> as 163605. MoonViT's
+    // projected feature width is 7168; the fake only replaces its numeric rows.
+    constexpr int32_t media_pad_id = 163605;
+    FakeMultimodalProcessor processor =
+        FakeMultimodalProcessor::createFakeMultimodalProcessor({{media_pad_id}}, false, 64, 7168);
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor({17, media_pad_id, 18, media_pad_id, 19}, torch::kInt32);
+    input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("3"), MultimodalInput("2")};
+
+    auto status = processor.updateMultimodalFeatures(input);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_EQ(input->input_ids.numel(), 8);
+    ASSERT_TRUE(input->text_tokens_mask);
+    ASSERT_TRUE(input->mm_locs);
+    ASSERT_TRUE(input->multimodal_features);
+    const auto ids = input->input_ids.data_ptr<int32_t>();
+    const auto mask = input->text_tokens_mask.value().data_ptr<int32_t>();
+    const auto locs = input->mm_locs.value().data_ptr<int32_t>();
+    EXPECT_EQ(ids[0], 17);
+    EXPECT_EQ(ids[4], 18);
+    EXPECT_EQ(ids[7], 19);
+    EXPECT_EQ(locs[0], 1);
+    EXPECT_EQ(locs[1], 5);
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(mask[i], i == 0 || i == 4 || i == 7);
+    }
+    const auto& features = input->multimodal_features.value();
+    ASSERT_EQ(features.size(), 2);
+    EXPECT_EQ(features[0].size(0), 3);
+    EXPECT_EQ(features[0].size(1), 7168);
+    EXPECT_EQ(features[1].size(0), 2);
+    EXPECT_EQ(features[1].size(1), 7168);
+    EXPECT_EQ(ids[1], ids[2]);
+    EXPECT_EQ(ids[2], ids[3]);
+    EXPECT_EQ(ids[5], ids[6]);
+    EXPECT_NE(ids[1], ids[5]);
+}
+
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {
     FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{2, 3, 4}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();

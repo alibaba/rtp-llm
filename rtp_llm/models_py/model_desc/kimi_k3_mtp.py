@@ -8,7 +8,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.kimi_k3.attention import linear
-from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -71,6 +71,26 @@ class KimiK3MtpModel(KimiK3Model):
             return collectives.all_gather_modeling_boundary(local_input)
         return all_gather(local_input, Group.TP)
 
+    def _embed_shifted_tokens(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Restore media placeholders in the already shifted draft token layout."""
+        ids = inputs.input_ids
+        if inputs.multimodal_inputs.multimodal_features:
+            text_mask = inputs.embedding_inputs.text_tokens_mask
+            if text_mask is None or text_mask.shape != ids.shape:
+                raise ValueError(
+                    "K3 MTP image features require one text mask entry per input token"
+                )
+            media_token_id = self.config.mm_related_params.special_token_ids.get(
+                "image_token_index"
+            )
+            if media_token_id is None:
+                raise ValueError(
+                    "K3 MTP media tokens require media_placeholder_token_id"
+                )
+            # C++ has shifted the mask per request; preserve the original hash IDs.
+            ids = ids.masked_fill(text_mask == 0, media_token_id)
+        return self.embed_tokens(ids, tp_gather=self._gather_modeling_boundary)
+
     def _project_local_mtp_input(self, inputs):
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
@@ -88,9 +108,7 @@ class KimiK3MtpModel(KimiK3Model):
             )
         # The embedding gathers hidden shards across TP. Project only this
         # rank's token rows after that gather, before entering the SP layer.
-        embedded = self.embed_tokens(
-            inputs.input_ids, tp_gather=self._gather_modeling_boundary
-        )
+        embedded = self._embed_shifted_tokens(inputs)
         embedded = embedded.narrow(0, local_start, local_rows).contiguous()
         local_positions = positions.narrow(0, local_start, local_rows)
         previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
