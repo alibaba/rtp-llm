@@ -68,6 +68,12 @@ protected:
                                                  const torch::Tensor& prefill_cp_padding_lengths,
                                                  int                  cp_size) = 0;
 
+    /// @brief Map valid prefill tokens directly to their rows in the CP all-gather output.
+    static torch::Tensor generateOutputIndices(const torch::Tensor& restore_indices,
+                                               const torch::Tensor& chunk_lengths,
+                                               const torch::Tensor& padding_lengths,
+                                               int                  cp_size);
+
     ParallelismConfig parallelism_config_;
 };
 

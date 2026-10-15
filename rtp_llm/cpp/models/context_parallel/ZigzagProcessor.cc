@@ -137,12 +137,9 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
     execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
-    auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
-    torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
-    int64_t       num_valid_tokens           = valid_indices.size(0);
-    torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
-    hidden_states                            = all_hidden_t.index_select(0, combined_indices);
+    const auto& output_indices = cp_params.prefill_cp_output_indices;
+    int64_t     num_valid_tokens = output_indices.size(0);
+    hidden_states                = all_hidden_t.index_select(0, output_indices);
     return num_valid_tokens;
 #endif
 }
@@ -158,9 +155,8 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
 
     // Map each requested output row (in restored valid-seq order) to its
     // chunk-concat flat index, without ever materializing the full sequence.
-    torch::Tensor valid_indices = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
-    torch::Tensor combined      = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
-    torch::Tensor sel           = combined.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
+    torch::Tensor sel = cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong))
+                            .to(torch::kLong);
 
     const int64_t num_lm = sel.size(0);
 

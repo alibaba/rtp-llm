@@ -19,6 +19,7 @@ public:
     using ZigZagProcessor::plan;
     using ZigZagProcessor::generateQKVRestoreIndices;
     using ZigZagProcessor::generateQKVPaddingMask;
+    using ZigZagProcessor::generateOutputIndices;
     using ZigZagProcessor::computeLocalLastHidden;
 };
 
@@ -55,7 +56,14 @@ torch::Tensor zigzagGenerateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk
     return processor.generateQKVPaddingMask(prefill_cp_chunk_lengths, prefill_cp_padding_lengths, cp_size);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+torch::Tensor zigzagGenerateOutputIndices(const torch::Tensor& restore_indices,
+                                          const torch::Tensor& chunk_lengths,
+                                          const torch::Tensor& padding_lengths,
+                                          int                  cp_size) {
+    return ZigZagProcessorTestWrapper::generateOutputIndices(restore_indices, chunk_lengths, padding_lengths, cp_size);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                              const torch::Tensor& input_lengths,
                              const torch::Tensor& sequence_lengths,
@@ -79,15 +87,15 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
     return std::make_tuple(model_input.combo_tokens.cpu().clone(),
                            model_input.input_lengths.cpu().clone(),
                            model_input.last_hidden_states.cpu().clone(),
-                           cp_params.prefill_shuffle_indices.cpu().clone());
+                           cp_params.prefill_shuffle_indices.cpu().clone(),
+                           cp_params.prefill_cp_output_indices.cpu().clone());
 }
 
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
 // to the gathered last-token hidden (no comm). The Python test sums these across
 // ranks to simulate the all-reduce in handleOutputsLastHidden.
 torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
-                                           const torch::Tensor& restore_indice,
-                                           const torch::Tensor& padding_mask,
+                                           const torch::Tensor& output_indices,
                                            const torch::Tensor& lm_output_indexes,
                                            int                  cp_rank,
                                            int                  cp_size) {
@@ -100,8 +108,7 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     inputs.lm_output_indexes = lm_output_indexes.contiguous().clone();
 
     torch_ext::PyContextParallelParams cp_params;
-    cp_params.prefill_qkv_restore_indice = restore_indice.contiguous().clone();
-    cp_params.prefill_qkv_padding_mask   = padding_mask.contiguous().clone();
+    cp_params.prefill_cp_output_indices = output_indices.contiguous().clone();
 
     return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
 }
@@ -131,6 +138,13 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_size"),
           "Generate padding mask for QKV tensors in context parallel scenarios (legacy wrapper)");
 
+    m.def("generate_output_indices",
+          &zigzagGenerateOutputIndices,
+          py::arg("restore_indices"),
+          py::arg("chunk_lengths"),
+          py::arg("padding_lengths"),
+          py::arg("cp_size"));
+
     m.def("handle_inputs_with_hidden",
           &zigzagHandleInputsWithHidden,
           py::arg("total_input_tokens"),
@@ -144,8 +158,7 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,
           py::arg("hidden_chunk"),
-          py::arg("restore_indice"),
-          py::arg("padding_mask"),
+          py::arg("output_indices"),
           py::arg("lm_output_indexes"),
           py::arg("cp_rank"),
           py::arg("cp_size"),

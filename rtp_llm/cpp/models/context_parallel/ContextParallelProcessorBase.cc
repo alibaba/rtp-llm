@@ -171,14 +171,64 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     auto qkv_restore_indice = generateQKVRestoreIndices(cp_chunk_lengths, prefill_cp_size);
     auto qkv_padding_mask   = generateQKVPaddingMask(cp_chunk_lengths, cp_padding_lengths, prefill_cp_size);
+    auto output_indices =
+        generateOutputIndices(qkv_restore_indice, cp_chunk_lengths, cp_padding_lengths, prefill_cp_size);
 
     cp_params.prefill_cp_padding_lengths       = cp_padding_lengths.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_cp_chunk_lengths         = cp_chunk_lengths.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_shuffle_indices          = shuffle_indices.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_cp_output_indices        = output_indices.to(torch::kCUDA, true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
 #endif
+}
+
+torch::Tensor IContextParallelProcessor::generateOutputIndices(const torch::Tensor& restore_indices,
+                                                               const torch::Tensor& chunk_lengths,
+                                                               const torch::Tensor& padding_lengths,
+                                                               int                  cp_size) {
+    RTP_LLM_CHECK_WITH_INFO(restore_indices.device().is_cpu() && chunk_lengths.device().is_cpu()
+                                && padding_lengths.device().is_cpu() && restore_indices.scalar_type() == torch::kInt32
+                                && chunk_lengths.scalar_type() == torch::kInt32
+                                && padding_lengths.scalar_type() == torch::kInt32 && restore_indices.dim() == 1
+                                && chunk_lengths.dim() == 1 && padding_lengths.dim() == 1
+                                && chunk_lengths.numel() == padding_lengths.numel() && cp_size > 0,
+                            "CP output indices require 1-D CPU int32 restore/chunk/padding tensors and positive cp_size");
+
+    const auto* restore = restore_indices.data_ptr<int32_t>();
+    const auto* chunks  = chunk_lengths.data_ptr<int32_t>();
+    const auto* padding = padding_lengths.data_ptr<int32_t>();
+    int64_t     padded_total = 0;
+    int64_t     valid_total  = 0;
+    for (int64_t stream = 0; stream < chunk_lengths.numel(); ++stream) {
+        const int64_t padded = static_cast<int64_t>(chunks[stream]) * cp_size;
+        RTP_LLM_CHECK_WITH_INFO(padding[stream] >= 0 && padding[stream] <= padded,
+                                "Invalid CP padding length %d for padded stream length %ld",
+                                padding[stream],
+                                padded);
+        padded_total += padded;
+        valid_total += padded - padding[stream];
+    }
+    RTP_LLM_CHECK_WITH_INFO(restore_indices.numel() == padded_total,
+                            "CP restore index count %ld differs from padded token count %ld",
+                            restore_indices.numel(),
+                            padded_total);
+
+    auto     output_indices = torch::empty({valid_total}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    int32_t* output         = output_indices.data_ptr<int32_t>();
+    int64_t  src_offset     = 0;
+    int64_t  dst_offset     = 0;
+    for (int64_t stream = 0; stream < chunk_lengths.numel(); ++stream) {
+        const int64_t padded = static_cast<int64_t>(chunks[stream]) * cp_size;
+        const int64_t valid  = padded - padding[stream];
+        if (valid > 0) {
+            std::memcpy(output + dst_offset, restore + src_offset, valid * sizeof(int32_t));
+        }
+        src_offset += padded;
+        dst_offset += valid;
+    }
+    return output_indices;
 }
 
 size_t IContextParallelProcessor::handleOutputs(torch::Tensor&                            hidden_states,

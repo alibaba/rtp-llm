@@ -141,6 +141,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices)
         .def_readwrite("prefill_qkv_restore_indice", &PyContextParallelParams::prefill_qkv_restore_indice)
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
+        .def_readwrite("prefill_cp_output_indices", &PyContextParallelParams::prefill_cp_output_indices)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
