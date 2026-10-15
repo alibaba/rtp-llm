@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -119,7 +118,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // through num_return_sequences or variable beams. Preallocate the common case and grow safely.
     const auto initial_sampler_batch_size =
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
-    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
+    sampler_.reset(new Sampler(
+        SamplerInitParams{initial_sampler_batch_size, false, !params.model_config_.output_vocab_groups.empty()}));
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -142,13 +142,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =

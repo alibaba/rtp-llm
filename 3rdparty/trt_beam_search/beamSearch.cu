@@ -68,7 +68,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
                                      runtime::SizeType32 beamWidthIn,
                                      runtime::SizeType32 beamWidthOut,
                                      runtime::SizeType32 vocabSize,
-                                     int                 topkForcePath) {
+                                     int                 topkForcePath, bool forceV2) {
 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
@@ -90,7 +90,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
     int const nByteReservedSharedMemoryPerBlock = nByteMaxSharedMemoryPerSM - nByteMaxSharedMemoryPerBlock;
     config.mByteMaxSharedMemoryPerBlock = nByteMaxSharedMemoryPerBlock;
 
-    if (beamWidthIn == beamWidthOut && beamWidthIn <= kMaxBeamWidthForV1 && vocabSize > 2 * beamWidthOut)
+    if (!forceV2 && beamWidthIn == beamWidthOut && beamWidthIn <= kMaxBeamWidthForV1 && vocabSize > 2 * beamWidthOut)
     {
         // V1 workflow for small beam width and non-VBWS
         // Stage 1
@@ -260,10 +260,10 @@ template BeamSearchConfig configureBeamSearch<float>(runtime::SizeType32 batchSi
                                                      runtime::SizeType32 beamWidthIn,
                                                      runtime::SizeType32 beamWidthOut,
                                                      runtime::SizeType32 vocabSize,
-                                                     int                 topkForcePath);
+                                                     int                 topkForcePath, bool forceV2);
 template BeamSearchConfig configureBeamSearch<half>(runtime::SizeType32 batchSize,
                                                     runtime::SizeType32 beamWidthIn,
                                                     runtime::SizeType32 beamWidthOut,
                                                     runtime::SizeType32 vocabSize,
-                                                    int                 topkForcePath);
+                                                    int                 topkForcePath, bool forceV2);
 }

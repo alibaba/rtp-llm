@@ -40,7 +40,7 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
                                 && beam_width_out <= tensorrt_llm::kernels::kMaxSupportedBeamWidth,
                             "beam widths must be within the compiled kernel support range");
     // TODO(zhangjianning.zjn): check the shape of params
-    const bool use_v2 = beam_width_in != beam_width_out
+    const bool use_v2 = params.force_v2 || beam_width_in != beam_width_out
                         || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1)
                         || vocab_size <= 2 * beam_width_out;
     if (use_v2) {
@@ -102,7 +102,8 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     auto                           logits_dtype = torchDTypeToDataType(params.logits.dtype());
     tensorrt_llm::BeamSearchConfig config;
     DISPATCH_TYPE(T, logits_dtype, [&]() {
-        config = tensorrt_llm::configureBeamSearch<T>(batch_size, beam_width_in, beam_width_out, vocab_size);
+        config = tensorrt_llm::configureBeamSearch<T>(
+            batch_size, beam_width_in, beam_width_out, vocab_size, -1, params.force_v2);
     });
 
     // set beam search kernel workspace

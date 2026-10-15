@@ -16,3 +16,7 @@ TEST_F(RocmBeamSearchOpTest, variableBeamWidthTest) {
 TEST_F(RocmBeamSearchOpTest, prunedVocabV2Test) {
     runPrunedVocabV2Tests();
 }
+
+TEST_F(RocmBeamSearchOpTest, forcedV2HandlesMaskedEqualSmallBeams) {
+    runMaskedEqualSmallBeamV2Tests();
+}
