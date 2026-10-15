@@ -177,6 +177,12 @@ torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inp
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
+// Reorders the first (group) dimension of a cache payload to `rows` order. The
+// row-index upload for CUDA tables goes through pinned staging memory and an
+// async H2D copy so it never drains the in-flight model graph on the execution
+// stream. Exposed for focused device tests.
+torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table);
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
 struct MicroBatchInfo {

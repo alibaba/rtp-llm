@@ -50,6 +50,8 @@ std::vector<int64_t> sortedCacheGroupRows(const std::vector<std::string>& tags) 
     return rows;
 }
 
+}  // namespace
+
 torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table) {
     if (!tensor.defined()) {
         return tensor;
@@ -64,9 +66,26 @@ torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<in
     if (rows.size() <= 1) {
         return tensor;
     }
-    auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
+    // The row index is a handful of int64 values. Upload it through pinned
+    // staging memory with a non-blocking copy: a blocking .to(device) here
+    // drains the draft/verify graph queued on the execution stream and stalls
+    // the dspark decode loop. The caching host allocator keeps the pinned
+    // staging block alive until its recorded copy event completes, so the
+    // temporary is safe to drop at the end of this scope.
+    torch::Tensor row_index;
+    if (tensor.is_cuda()) {
+        auto row_index_host = torch::empty({static_cast<int64_t>(rows.size())},
+                                           torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+        std::copy(rows.begin(), rows.end(), row_index_host.data_ptr<int64_t>());
+        row_index = row_index_host.to(tensor.device(), /*non_blocking=*/true);
+    } else {
+        row_index = torch::tensor(rows, torch::kInt64);
+    }
+    auto result = tensor.index_select(0, row_index);
     return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
 }
+
+namespace {
 
 torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vector<int64_t>& rows) {
     if (!mapping.defined()) {
