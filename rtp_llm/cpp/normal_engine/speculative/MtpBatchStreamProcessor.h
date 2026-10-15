@@ -134,6 +134,10 @@ public:
                                          torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 
+    torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
+                                             const std::vector<int>& accept_lens,
+                                             size_t                  total_accept_len) const;
+
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
                                          torch::Tensor&      draft_token_probs_d_t,
