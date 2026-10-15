@@ -31,6 +31,27 @@ class GlobalCacheIndexTest {
 
     private GlobalCacheIndex globalCacheIndex;
 
+    @Test
+    void retirementPreservesSharedOwnership() {
+        EngineLocalView local = new EngineLocalView();
+        for (long key = 0; key < 1025; key++) {
+            local.addOrUpdateCacheBlock("retired", key);
+            globalCacheIndex.addCacheBlock(key, "retired", null);
+            if (key % 2 == 0) globalCacheIndex.addCacheBlock(key, "survivor", null);
+        }
+        globalCacheIndex.addCacheBlock(2000L, "survivor", null);
+        Set<Long> detached = local.removeAllCacheBlockOfEngine("retired");
+        assertEquals(1025, detached.size());
+        assertEquals(0, local.size("retired"));
+        globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached, null);
+        assertEquals(514L, globalCacheIndex.totalBlocks());
+        assertEquals(514L, globalCacheIndex.totalMappings());
+        assertEquals(Map.of("survivor", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
+                List.of("retired", "survivor"), List.of(0L, 1L)));
+        globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached, null);
+        assertEquals(514L, globalCacheIndex.totalMappings());
+    }
+
     @BeforeEach
     void setUp() {
         globalCacheIndex = new GlobalCacheIndex();
@@ -54,7 +75,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(1L, "survivor", null);
         globalCacheIndex.addCacheBlock(2L, "retiring", null);
         var history = new EndpointTrace();
-        globalCacheIndex.removeAllCacheBlockOfEngine("retiring", history);
+        globalCacheIndex.removeAllCacheBlockOfEngine("retiring", Set.of(1L, 2L), history);
         var snapshot = history.snapshot();
         assertEquals("CACHE_INDEX_LOCK_RELEASED", snapshot.phase());
         assertEquals(2L, snapshot.scannedKeys());
@@ -97,7 +118,7 @@ class GlobalCacheIndexTest {
         var failure = new AtomicReference<Throwable>();
         Thread cleaning = new Thread(() -> {
             try {
-                globalCacheIndex.removeAllCacheBlockOfEngine(retiring, cleanupHistory);
+                globalCacheIndex.removeAllCacheBlockOfEngine(retiring, Set.of(1L), cleanupHistory);
             } catch (Throwable thrown) {
                 failure.set(thrown);
             }
@@ -155,7 +176,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.removeCacheBlock("engine1", 1L, null);
         assertEquals(2L, globalCacheIndex.totalBlocks());
         assertEquals(2L, globalCacheIndex.totalMappings());
-        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", null);
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", Set.of(1L), null);
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
         globalCacheIndex.removeCacheBlock("missing", 2L, null);
