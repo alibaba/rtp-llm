@@ -21,7 +21,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
@@ -42,7 +42,7 @@ public final class MasterEngineSynchronizer {
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
     private final long syncRequestTimeoutMs;
-    private final LongAdder syncCount = new LongAdder();
+    private final AtomicLong syncCount = new AtomicLong();
     private final Long syncEngineStatusInterval;
     private final long statusStaleAfterUs;
     private final ScheduledThreadPoolExecutor scheduler;
@@ -111,16 +111,17 @@ public final class MasterEngineSynchronizer {
     }
 
     public void syncEngineStatus() {
-        syncCount.increment();
+        long syncCycleId = syncCount.incrementAndGet();
         logger.debug("sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(), modelName);
+                syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(new EngineSyncRunner(
                         modelName, workerDirectory,
                         workerAddressService, statusCheckExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
-                        syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+
+                        syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
                                 .isFullSnapshotDebugMode(),
                         statusStaleAfterUs

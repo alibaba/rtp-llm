@@ -435,9 +435,8 @@ class FlexlbGrpcForwarderTest {
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB big =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(21L)
-                        // any non-trivial payload larger than the 8-byte budget
-                        .setVitOnly(false)
+                        // A maximal positive int64 requires nine payload bytes plus its tag.
+                        .setRequestId(Long.MAX_VALUE)
                         .build();
         assertTrue(big.getSerializedSize() > 8,
                 "request must exceed the shrunken budget; got " + big.getSerializedSize());
@@ -459,7 +458,8 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder.MasterForwardResult failed =
                 await(forwarder.forwardScheduleToMaster(request(23L)));
         assertTrue(failed.masterFound());
-        assertEquals("GRPC_FAILED", failed.failure());
+        assertEquals("UNAVAILABLE", failed.failure());
+        verify(reporter).reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");
 
         java.lang.reflect.Field inflight =
                 FlexlbGrpcForwarder.class.getDeclaredField("forwardInflightBytes");

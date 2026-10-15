@@ -1,6 +1,7 @@
 package org.flexlb.cache.service;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
@@ -34,7 +35,8 @@ public interface CacheAwareService {
      * @param workerStatus Worker status information
      * @return Update result
      */
-    WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+    WorkerCacheUpdateResult updateEngineBlockCache(
+            WorkerStatus workerStatus, EndpointTrace.Poll pollTrace);
 
     /**
      * Remove every cached block associated with one engine address.
@@ -43,5 +45,5 @@ public interface CacheAwareService {
      * invoking this method. The cache index is address based and therefore
      * cannot distinguish two worker generations by itself.
      */
-    void removeEngineBlockCache(String engineIpPort);
+    void removeEngineBlockCache(String engineIpPort, EndpointTrace trace);
 }

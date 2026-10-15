@@ -184,7 +184,7 @@ class DecodeStateTest {
         response.setLatestFinishedVersion(status.appliedStatusCursor().latestFinishedTaskVersion() + 1);
         status.lock.lock();
         try {
-            return state.calibrate(status.prepareNewStatus(status.freezeStatusResponse(response)));
+            return state.calibrate(status.prepareNewStatus(status.freezeStatusResponse(response), null));
         } finally {
             status.lock.unlock();
         }

@@ -1,6 +1,9 @@
 package org.flexlb.httpserver;
 
 import io.grpc.Context;
+import io.opentelemetry.api.trace.Span;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
+import org.flexlb.telemetry.FlexlbTrace;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -562,6 +565,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                   FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                   StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer,
                                   ScheduleOrigin origin) {
+        recordScheduleTrace(ctx, response, origin);
         // Report ACK-to-response time for BATCH path (only when engine ACK was received)
         if (ctx != null && ctx.getAckAtMs() > 0) {
             long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
@@ -750,6 +754,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         var config = configService.loadBalanceConfig();
         BalanceContext ctx = new BalanceContext(config);
+        ctx.setTraceContext(entryTraceContext());
+        Span span = Span.fromContext(ctx.getTraceContext());
+        FlexlbTrace.setRequestAttributes(span, pb.getRequestId());
+        FlexlbTrace.setAttribute(span, FlexlbTrace.SCHEDULE_PRIORITY, (long) pb.getPriority());
 
         Request request = new Request();
         request.setRequestId(pb.getRequestId());
@@ -860,6 +868,55 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             case UNSPECIFIED -> FlexlbScheduleProtocol.ScheduleFailureReasonPB
                     .SCHEDULE_FAILURE_REASON_UNSPECIFIED;
         };
+    }
+
+    private static io.opentelemetry.context.Context entryTraceContext() {
+        io.opentelemetry.context.Context context = GrpcTraceInterceptor.getOtelContext();
+        return context != null ? context : io.opentelemetry.context.Context.current();
+    }
+
+    private static void recordScheduleTrace(BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, ScheduleOrigin origin) {
+        try {
+            // Forwarded responses need not populate ctx.response. The wire
+            // response is the result actually delivered to this caller.
+            io.opentelemetry.context.Context traceContext = ctx == null
+                    ? entryTraceContext() : ctx.getTraceContext();
+            FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.SCHEDULE_CODE,
+                    (long) response.getCode());
+            FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.ENQUEUED_BY_MASTER,
+                    response.getEnqueuedByMaster());
+            if (response.getSuccess()) {
+                for (var server : response.getServerStatusList()) {
+                    String address = server.getServerIp() + ":" + server.getHttpPort();
+                    if (RoleType.PREFILL.getCode().equals(server.getRole())
+                            || RoleType.PDFUSION.getCode().equals(server.getRole())) {
+                        FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.PREFILL_ADDRESS, address);
+                    } else if (RoleType.DECODE.getCode().equals(server.getRole())) {
+                        FlexlbTrace.setScheduleAttribute(traceContext, FlexlbTrace.DECODE_ADDRESS, address);
+                    }
+                }
+            } else {
+                String errorType = switch (origin) {
+                    case ENTRY_ERROR -> "FLEXLB_INTERNAL_ERROR";
+                    case FORWARD_FAILED -> "FLEXLB_FORWARD_FAILED";
+                    default -> FlexlbTrace.scheduleFailureType(response.getCode());
+                };
+                FlexlbTrace.markBusinessError(traceContext, response.getCode(), errorType);
+                FlexlbTrace.recordScheduleFailure(traceContext, response.getCode(), errorType,
+                        ctx == null ? null : ctx.getSchedulingDiagnostics());
+            }
+            if (ctx != null && ownsLocalRoute(origin)) {
+                FlexlbTrace.setScheduleDuration(traceContext, FlexlbTrace.ROUTE_SUBMIT_MS,
+                        ctx.getServiceStartNanos(), ctx.getRouteSubmittedNanos());
+                FlexlbTrace.setScheduleDuration(traceContext, FlexlbTrace.BATCH_WAIT_MS,
+                        ctx.getRouteSubmittedNanos(), ctx.getBatchDispatchedNanos());
+                FlexlbTrace.setScheduleDuration(traceContext, FlexlbTrace.ACK_TO_RESPONSE_MS,
+                        ctx.getAckAtNanos(), System.nanoTime());
+            }
+        } catch (Throwable ignored) {
+            // Telemetry must not suppress response publication or cancellation reconciliation.
+        }
     }
 
     private boolean shouldForwardToMaster() {
