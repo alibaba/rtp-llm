@@ -1024,7 +1024,13 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
         blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
+        BlockIndicesType valid_blocks;
+        for (auto block : *blocks_by_group[group_id]) {
+            if (!isNullBlockIdx(block) && block > 0) {
+                valid_blocks.push_back(block);
+            }
+        }
+        kv_cache_groups_[group_id]->unreference(valid_blocks);
     }
 }
 

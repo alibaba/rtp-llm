@@ -2,7 +2,6 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
