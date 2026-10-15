@@ -136,6 +136,7 @@ class EnvironmentDeclaration:
     master_jvm_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
     mock_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
     event_loop_threads: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
+    completion_threads: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
     rpc_threads: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
     rpc_max_calls: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
     metric_whitelist: str | None = field(default=None, metadata={"reconfigure": True})

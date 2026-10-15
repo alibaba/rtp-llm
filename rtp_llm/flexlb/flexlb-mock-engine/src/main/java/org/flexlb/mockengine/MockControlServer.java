@@ -641,6 +641,8 @@ final class MockControlServer {
                 case "seed" -> java.util.Set.of("engine", "port", "operation", "worker", "workers", "unique", "shared");
                 case "churn" -> java.util.Set.of("engine", "port", "operation", "delta", "every");
                 case "inspect" -> java.util.Set.of("engine", "port", "operation");
+                case "grow" -> java.util.Set.of("engine", "port", "operation", "unique", "shared");
+                case "clock" -> java.util.Set.of("engine", "port", "operation", "interval_ms");
                 default -> throw new ApiException(400, "unknown fixture operation");
             };
             var names = body.fieldNames();
@@ -656,7 +658,7 @@ final class MockControlServer {
                 result.put("fixture", service.cacheFixture(operation,
                         body.path("worker").asInt(), body.path("workers").asInt(),
                         body.path("unique").asInt(), body.path("shared").asInt(),
-                        body.path("delta").asInt(), body.path("every").asInt()));
+                        body.path("delta").asInt(), body.path("every").asInt(), body.path("interval_ms").asInt()));
                 return result;
             } catch (IllegalArgumentException e) {
                 throw new ApiException(400, e.getMessage());

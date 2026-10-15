@@ -14,21 +14,16 @@ from analysis.checks import CheckResult, evaluate
 from scenario.contracts import StageHandler, StageOutput
 
 CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged",
-                       "stable_actual_sync_rate", "churn_actual_sync_rate", "small_diff_observed"})
-
-
-class HealthIsolationFailure(Exception):
-    """A recorded healthy-survivor violation is already a definitive failed gate."""
+    "cache_consistency", "actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"})
 
 
 def validate(params, plan):
-    if set(params) != {"procedure", "observation", "checks"}:
-        raise ValueError("cache recovery requires procedure, observation and checks")
-    for section in params.values():
-        if not isinstance(section, dict) or any(
-                type(value) not in (int, float) or not math.isfinite(value) or value < 0
-                for value in section.values()):
-            raise ValueError("invalid recovery parameters")
+    if set(params) != {"procedure", "observation", "checks", "traffic", "intervention"}:
+        raise ValueError("pressure cycle requires shared background and explicit intervention")
+    if type(params["intervention"]) is not bool:
+        raise ValueError("intervention must be boolean")
+    from adapters.java_flow_spec import JavaFlowSpec
+    JavaFlowSpec.read(params["traffic"])
     return copy.deepcopy(params)
 
 
@@ -99,201 +94,281 @@ def withdraw(original, victims):
 
 
 def execute(ctx, params, deadline):
-    p, observation, limits = (params[name] for name in ("procedure", "observation", "checks"))
+    from adapters.java_flow import JavaFlowGroup
+    from adapters.resource_evidence import flow_evidence
+    from traffic.traffic_source import materialize
+    from cases.cache_sync_recovery.telemetry import (
+        fetch, metric_values, metric_sum, resource, fingerprint_matches, interval_rates,
+    )
+    p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
+    intervention = params["intervention"]
+    directory = ctx.artifact_dir / "cache-stability"
+    directory.mkdir()
+    evidence = dict(intervention=intervention, parameters=copy.deepcopy(params),
+        environment=ctx.instance["environment"], events=[], intensity={}, frames=[], errors=[],
+        healthy_violations=[], convergence_samples=0, consistency=None,
+        expiry_scope="discovery withdrawal while RPC remains alive; not a health-timeout injection")
     engines = control_json(ctx.ops, "snapshot?view=topology", deadline)["engines"]
-    prefill = sorted((entry for entry in engines if entry["role"] == "prefill"),
-                     key=lambda entry: int(entry["name"].rsplit("-", 1)[1]))
+    prefill = sorted((e for e in engines if e["role"] == "prefill"), key=lambda e: int(e["name"].rsplit("-", 1)[1]))
     if len(prefill) != ctx.env.spec.n_prefill or len(engines) != ctx.env.spec.n_prefill + ctx.env.spec.n_decode:
-        raise ValueError("Mock topology differs from configured population")
-    # Evenly spaced victims; never stop their real RPC service.
-    selected = [prefill[i * len(prefill) // p["expired_workers"]] for i in range(p["expired_workers"])]
-    victim_addresses = {entry["http_addr"] for entry in selected}
-    expected_names = {entry["http_addr"] for entry in engines}
-    keys = p["unique_keys"] + 2 * p["shared_keys"]
+        raise ValueError("Mock topology differs from frozen case")
+    chosen = [prefill[i*len(prefill)//p["expired_workers"]] for i in range(p["expired_workers"])]
+    victims = {e["http_addr"] for e in chosen} if intervention else set()
+    names = {e["http_addr"] for e in engines}
     path = Path(ctx.env.discovery_file)
     original = path.read_text()
-    hidden = withdraw(original, {entry["http_addr"] for entry in selected})
-    # LIFO cleanup restores discovery even when cancellation interrupts this action.
-    ctx.add_cleanup("restore_cache_recovery_discovery", lambda cleanup_deadline: atomic_write(path, original))
-    evidence_path = ctx.artifact_dir / "cache-recovery.jsonl"
-    summary_path = ctx.artifact_dir / "cache-recovery-summary.json"
-    evidence = dict(keys_per_worker=keys, expected_unique_keys=len(prefill) * (p["unique_keys"] + p["shared_keys"]),
-                    victims=sorted(victim_addresses), fixture="synthetic ring; separate from inference KV",
-                    identity_scope="Master discovery ip:httpPort; alive probes use grpc_addr",
-                    byte_scope="fixture protobuf map and version; excludes other RPC fields and framing",
-                    expiry_scope="controlled discovery withdrawal while RPC remains alive",
-                    errors=[], events=[], intensity={})
+    ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(path, original))
+    evidence["victims"] = sorted(victims)
+    keys = p["unique_keys"] + 2*p["shared_keys"]
+    baseline, flow, last_sample = None, None, None
+    affected, absent, rebuilt = set(), set(), set()
+    maximum_gap = 0
+    url = master_url("127.0.0.1", ctx.ops.master_http_port, "inflight")
+    metrics_url = f"http://127.0.0.1:{ctx.env.master_management_port}/prometheus"
 
-    def fixture(entry, operation, **options):
-        response = control_json(ctx.ops, "cache_fixture", deadline,
-                                {"engine": entry["name"], "operation": operation, **options})
-        if response.get("status") != "ok" or response.get("engine") != entry["name"]:
-            raise ValueError("fixture lacks acknowledged engine identity")
-        return response["fixture"]
-
-    def event(name):
-        evidence["events"].append(ctx.record_event(name))
+    def fixture(e, operation, **options):
+        result = control_json(ctx.ops, "cache_fixture", deadline,
+                              dict(engine=e["name"], operation=operation, **options))
+        if result.get("engine") != e["name"] or result.get("status") != "ok":
+            raise ValueError("fixture identity mismatch")
+        return result["fixture"]
 
     def stats():
-        return {entry["http_addr"]: fixture(entry, "inspect") for entry in prefill}
+        return {e["http_addr"]: fixture(e, "inspect") for e in prefill}
+
+    def event(name):
+        e = ctx.record_event(name)
+        evidence["events"].append(dict(e, name=name))
+        (directory/"events.json").write_text(json.dumps(evidence["events"]))
+        print("CACHE_EVENT", name, flush=True)
 
     def alive(entries):
-        for entry in entries:
-            with grpc.insecure_channel(entry["grpc_addr"]) as channel:
-                result = ctx.ops.pb2_grpc.RpcServiceStub(channel).GetWorkerStatus(
+        results = []
+        for e in entries:
+            with grpc.insecure_channel(e["grpc_addr"]) as channel:
+                response = ctx.ops.pb2_grpc.RpcServiceStub(channel).GetWorkerStatus(
                     ctx.ops.pb2.StatusVersionPB(), timeout=min(2, deadline.remaining()))
-            if not result.alive:
-                raise ValueError("fixture Worker did not independently report alive: " + entry["name"])
+            results.append(dict(worker=e["http_addr"], alive=response.alive, epoch_s=ctx.wall_clock()))
+            if not response.alive:
+                raise ValueError("selected Worker is not independently alive")
+        return results
 
-    last_sample = None
-    max_gap = 0.0
-    peak_age = 0.0
-    affected = set()
-    baseline = None
-    expired = set()
-
-    with evidence_path.open("w") as output_file:
-        def sample(phase):
-            nonlocal last_sample, max_gap, peak_age
-            rows = master_rows(ctx, deadline)
-            now = ctx.clock()
-            if last_sample is not None:
-                max_gap = max(max_gap, now - last_sample)
-                if now - last_sample > observation["max_gap_s"]:
-                    raise ValueError("health sampling gap exceeds evidence budget")
-            last_sample = now
-            if baseline is not None:
-                excluded = victim_addresses if phase in {"withdrawn", "recovery"} else set()
-                affected.update(collateral(rows, baseline, excluded, limits["max_status_age_ms"]))
-                for address in set(baseline) - victim_addresses:
-                    if address in rows:
-                        peak_age = max(peak_age, rows[address]["status_age_ms"])
-            if phase == "withdrawn":
-                expired.update(victim_addresses - rows.keys())
-            output_file.write(json.dumps(dict(epoch_s=ctx.wall_clock(), phase=phase, workers=rows)) + "\n")
-            output_file.flush()
-            if affected:
-                # Stop on positive evidence before a later stall hides it behind an I/O error.
-                address = sorted(affected)[0]
-                entry = next(entry for entry in engines if entry["http_addr"] == address)
-                proof = dict(address=address, grpc_addr=entry["grpc_addr"], phase=phase,
-                             epoch_s=ctx.wall_clock(), master=rows.get(address))
+    def sample(phase):
+        nonlocal last_sample, maximum_gap
+        before = ctx.clock()
+        raw = json.loads(fetch(url, min(5, deadline.remaining())))
+        now = ctx.clock()
+        if last_sample is not None:
+            maximum_gap = max(maximum_gap, now-last_sample)
+        last_sample = now
+        rows = {w["ip_port"]: dict(w, role=role) for role in ("prefill", "decode")
+                for w in raw[role+"_endpoints"]}
+        if len(rows) != len(raw["prefill_endpoints"]) + len(raw["decode_endpoints"]):
+            raise ValueError("duplicate Worker identity")
+        for row in rows.values():
+            if not {"generation", "status_age_ms", "reported_alive"} <= row.keys():
+                raise ValueError("Master lacks observational health adapter")
+        if baseline is not None:
+            excluded = victims if phase in {"intervention", "post"} else set()
+            newly = set(collateral(rows, baseline, excluded, limits["max_status_age_ms"])) - affected
+            affected.update(newly)
+            if newly:
+                proof = dict(phase=phase, epoch_s=ctx.wall_clock(), workers=sorted(newly))
                 try:
-                    with grpc.insecure_channel(entry["grpc_addr"]) as channel:
-                        response = ctx.ops.pb2_grpc.RpcServiceStub(channel).GetWorkerStatus(
-                            ctx.ops.pb2.StatusVersionPB(), timeout=min(1, deadline.remaining()))
-                    proof["rpc_alive"] = response.alive
+                    proof["direct_alive"] = alive([e for e in engines if e["http_addr"] == sorted(newly)[0]])
                 except Exception as error:
                     proof["probe_error"] = str(error)
-                proof["probe_end_epoch_s"] = ctx.wall_clock()
-                evidence["healthy_violation_probe"] = proof
-                raise HealthIsolationFailure()
-            return rows
+                evidence["healthy_violations"].append(proof)
+            if phase == "intervention":
+                absent.update(victims - rows.keys())
+            if phase == "post":
+                rebuilt.update(a for a in victims if a in rows and rows[a]["generation"] != baseline[a]["generation"])
+        if phase == "post":
+            ready = set(rows) == names and all(healthy(w, limits["max_status_age_ms"])
+                and (w["role"] != "prefill" or w.get("cache_key_size") == keys)
+                for w in rows.values()) and rebuilt == victims
+            evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if ready else 0
+        meters = metric_values(fetch(metrics_url, min(5, deadline.remaining())))
+        frame = dict(epoch_s=ctx.wall_clock(), phase=phase, snapshot_read_s=ctx.clock()-before,
+            workers=rows, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
+            max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
+            missing_workers=len((baseline or {}).keys()-rows.keys()-victims),
+            healthy_max_status_age_ms=max((w["status_age_ms"] for a, w in rows.items() if a not in victims), default=None),
+            stale_workers=sum(not healthy(w, limits["max_status_age_ms"]) for w in rows.values()),
+            replaced_workers=sum(a in baseline and w["generation"] != baseline[a]["generation"] for a, w in rows.items()) if baseline else 0,
+            global_keys=metric_sum(meters, "cache_global_total_count"),
+            affected_workers=len(affected), reported_dead=sum(not w["reported_alive"] for w in rows.values()),
+            process_allocated_bytes=raw.get("process_allocated_bytes"), scheduler_inflight=raw["scheduler_inflight"],
+            heap_bytes=metric_sum(meters, "jvm_memory_used_bytes", {"area": "heap"}),
+            direct_bytes=metric_sum(meters, "jvm_buffer_memory_used_bytes", {"id": "direct"}),
+            diff_scanned_keys=raw.get("diagnostic_diff_scanned_keys", metric_sum(meters, "cache_diff_scanned_keys_total", {"role": "PREFILL"})),
+            worker_status_commits=metric_sum(meters, "engine_health_check_visitor_success_qps_total"),
+            cache_sync_commits=metric_sum(meters, "cache_status_check_visitor_success_qps_total", {"role": "PREFILL"}),
+            master=resource(ctx.env.master), mock=resource(ctx.env.mock))
+        evidence["frames"].append(frame)
+        with (directory/"observations.jsonl").open("a") as f:
+            f.write(json.dumps(frame)+"\n")
+        return rows
 
-        def hold(phase, seconds):
-            end = ctx.clock() + seconds
-            while ctx.clock() < end:
-                sample(phase)
-                deadline.sleep(min(observation["sample_s"], end - ctx.clock()) if ctx.clock() < end else 0)
+    def hold(phase, seconds):
+        start = ctx.clock()
+        before = stats()
+        event(phase+"_started")
+        until = start+seconds
+        while ctx.clock() < until:
+            deadline.check()
+            sample(phase)
+            deadline.sleep(min(o["sample_s"], max(0, until-ctx.clock())))
+        after = stats()
+        evidence["intensity"][phase] = interval_rates(before, after, ctx.clock()-start)
+        return after
 
-        try:
-            event("cache_seed_started")
-            for i, entry in enumerate(prefill):
-                fixture(entry, "seed", worker=i, workers=len(prefill), unique=p["unique_keys"], shared=p["shared_keys"])
-                if p["seed_interval_s"] and i + 1 < len(prefill):
-                    deadline.sleep(p["seed_interval_s"])
-            initial = stats()
-            versions = {address: value["version"] for address, value in initial.items()}
-            end = ctx.clock() + p["warmup_timeout_s"]
-            consecutive = 0
-            while ctx.clock() < end:
-                rows = sample("warmup")
-                consecutive = consecutive + 1 if converged(rows, expected_names, keys, versions, limits["max_status_age_ms"]) else 0
-                if consecutive >= observation["converged_samples"]:
-                    baseline = rows
-                    break
-                deadline.sleep(observation["sample_s"])
-            if baseline is None:
-                raise ValueError("cache baseline did not converge")
-            alive(engines)
-            # Baseline establishment is excluded from the intervention sampling budget.
-            last_sample = None
-            event("cache_baseline_ready")
-            for phase, duration in (("stable", p["stable_s"]), ("churn", p["churn_s"])):
-                if phase == "churn":
-                    for entry in prefill:
-                        fixture(entry, "churn", delta=p["delta_keys"], every=p["change_every_responses"])
-                before = stats()
-                started = ctx.clock()
-                event("cache_" + phase + "_started")
-                hold(phase, duration)
-                after = stats()
-                elapsed = ctx.clock() - started
-                totals = {field: sum(after[address][field] - before[address][field] for address in after)
-                          for field in ("responses", "entries", "key_payload_bytes", "changed_responses", "added_keys", "removed_keys")}
-                evidence["intensity"][phase] = dict(totals, observed_s=elapsed,
-                    responses_per_s=totals["responses"] / elapsed, entries_per_s=totals["entries"] / elapsed,
-                    key_payload_bytes_per_s=totals["key_payload_bytes"] / elapsed)
-            alive(selected)
-            atomic_write(path, hidden)
+    try:
+        t = params["traffic"]
+        trace = materialize(directory/"traffic.jsonl", t["source"], "cache-sync-shared-background",
+                            Path(ctx.instance["source_path"]).parent,
+                            max_requests=int(t["client"]["playback"]["duration_s"]*t["client"]["playback"]["qps"]*1.02))
+        initial_until = ctx.clock()+60
+        while ctx.clock() < initial_until:
+            rows = sample("initial_health")
+            if set(rows) == names and all(healthy(w, limits["max_status_age_ms"]) for w in rows.values()):
+                baseline = rows
+                break
+            deadline.sleep(o["sample_s"])
+        if baseline is None:
+            raise ValueError("initial healthy Worker population unavailable")
+        event("cache_seed_started")
+        for i, e in enumerate(prefill):
+            fixture(e, "seed", worker=i, workers=len(prefill), unique=1, shared=0)
+            sample("cache_construction")
+            if i+1 < len(prefill):
+                deadline.sleep(p["seed_interval_s"])
+        event("cache_growth_started")
+        for step in range(1, p["baseline_steps"]+1):
+            for e in prefill:
+                fixture(e, "grow", unique=max(1, p["unique_keys"]*step//p["baseline_steps"]),
+                        shared=p["shared_keys"]*step//p["baseline_steps"])
+            sample("cache_construction")
+            deadline.sleep(p["baseline_interval_s"])
+        event("cache_growth_finished")
+        frozen = stats()
+        baseline = None
+        ready = 0
+        until = ctx.clock()+p["warmup_timeout_s"]
+        while ctx.clock() < until:
+            rows = sample("warmup")
+            good = set(rows) == names and all(healthy(w, limits["max_status_age_ms"]) and (
+                w["role"] != "prefill" or w.get("cache_key_size") == keys
+                and w.get("cache_version") == frozen[a]["version"]) for a, w in rows.items())
+            ready = ready+1 if good else 0
+            if ready >= o["converged_samples"]:
+                baseline = rows
+                break
+            deadline.sleep(o["sample_s"])
+        if baseline is None:
+            raise ValueError("shared cache baseline failed to converge")
+        last_sample = None
+        maximum_gap = 0
+        event("cache_baseline_ready")
+        for e in prefill:
+            fixture(e, "clock", interval_ms=p["churn_interval_ms"])
+            fixture(e, "churn", delta=p["delta_keys"], every=1)
+        hold("cache_only", p["cache_only_s"])
+        client = ctx.services.environment.client_operations(t["jvm_xms"], t["jvm_xmx"])
+        flow = JavaFlowGroup(client, directory/"flow", run_id=str(ctx.artifact_dir), group_id=t["group_id"],
+                             phase_id=t["phase_id"], poll_s=t["poll_s"], collection_profile="aggregate")
+
+        def close_flow(d):
+            if flow.proc is not None:
+                flow.stop_sending(d)
+                flow.drain(d)
+
+        ctx.register_resource("java_flow", flow, cleanup=close_flow, evidence=flow_evidence, request_stop=flow.request_stop)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as startup:
+            pending = startup.submit(flow.start, trace, t["client"], deadline,
+                                     target=f"127.0.0.1:{ctx.env.master_http_port+2}")
+            while not pending.done():
+                sample("traffic_startup")
+                deadline.sleep(o["sample_s"])
+            pending.result()
+        hold("traffic_warmup", p["traffic_warmup_s"])
+        hold("measurement", p["measurement_s"])
+        event("measurement_finished")
+        if intervention:
+            evidence["victim_alive_before"] = alive(chosen)
+            atomic_write(path, withdraw(original, victims))
             event("partial_workers_withdrawn")
-            hold("withdrawn", p["withdraw_s"])
-            alive(selected)
+        hold("intervention", p["withdraw_s"])
+        if intervention:
+            evidence["victim_alive_withdrawn"] = alive(chosen)
             atomic_write(path, original)
-            restored_at = ctx.clock()
             event("partial_workers_restored")
-            for entry in prefill:
-                fixture(entry, "churn", delta=0, every=0)
-            frozen = stats()
-            versions = {address: value["version"] for address, value in frozen.items()}
-            end = ctx.clock() + p["recovery_timeout_s"]
-            consecutive = 0
-            recovered = False
-            rebuilt = set()
-            while ctx.clock() < end:
-                rows = sample("recovery")
-                rebuilt.update(address for address in victim_addresses if address in rows
-                               and rows[address]["generation"] != baseline[address]["generation"])
-                good = converged(rows, expected_names, keys, versions, limits["max_status_age_ms"])
-                consecutive = consecutive + 1 if good and rebuilt == victim_addresses else 0
-                if consecutive >= observation["converged_samples"]:
-                    recovered = True
-                    break
-                deadline.sleep(observation["sample_s"])
-            event("cache_recovery_finished")
-            evidence.update(affected_workers=sorted(affected), max_healthy_status_age_ms=peak_age,
-                max_sample_gap_s=max_gap, expired_workers=sorted(expired), rebuilt_workers=sorted(rebuilt),
-                recovered=recovered, recovery_s=ctx.clock() - restored_at)
-            check_evidence = dict(artifact=str(evidence_path), summary=str(summary_path),
-                                  expiry_is_observed_absence=True, generation_is_observed_replacement=True)
-            checks = [
-                evaluate("healthy_survivors", len(affected), "eq", 0, evidence=check_evidence),
-                evaluate("victims_withdrawn", len(expired), "eq", len(selected), evidence=check_evidence),
-                evaluate("victims_rebuilt", len(rebuilt), "eq", len(selected), evidence=check_evidence),
-                evaluate("cache_converged", recovered, "eq", True, evidence=check_evidence),
-            ]
-            for phase, intensity in evidence["intensity"].items():
-                checks.append(evaluate(phase + "_actual_sync_rate", intensity["responses_per_s"], "ge",
-                                       limits["min_cache_responses_per_s"], evidence=check_evidence))
-            checks.append(evaluate("small_diff_observed", evidence["intensity"]["churn"]["changed_responses"],
-                                   "ge", 1, evidence=check_evidence))
-            return StageOutput({}, checks, [str(evidence_path), str(summary_path)])
-        except HealthIsolationFailure:
-            evidence["aborted_after_health_violation"] = True
-            checks = [evaluate("healthy_survivors", len(affected), "eq", 0,
-                evidence=dict(artifact=str(evidence_path), summary=str(summary_path)))]
-            checks.extend(CheckResult(name, "SKIP", detail="stopped after recorded health isolation failure")
-                          for name in sorted(CHECK_IDS - {"healthy_survivors"}))
-            return StageOutput({}, checks, [str(evidence_path), str(summary_path)])
-        except Exception as error:
-            evidence["errors"].append(str(error))
-            raise
-        finally:
-            evidence.update(affected_workers=sorted(affected), max_healthy_status_age_ms=peak_age,
-                            max_sample_gap_s=max_gap)
-            # Do not leave a withdrawal in place on a failed gate, evidence error or timeout.
-            atomic_write(path, original)
-            summary_path.write_text(json.dumps(evidence, indent=2))
+        # Identical post duration and unchanged background; do not stop at first convergence.
+        hold("post", p["post_s"])
+        event("post_finished")
+        flow.stop_sending(deadline)
+        event("sending_stopped")
+        flow.drain(deadline)
+        event("drain_finished")
+        evidence["client"] = flow.evidence_snapshot()
+        event("performance_observation_finished")
+        for e in prefill:
+            fixture(e, "churn", delta=0, every=0)
+        expected = stats()
+        until = ctx.clock()+120
+        verified = None
+        while ctx.clock() < until:
+            verified = json.loads(fetch(url.rsplit("/", 1)[0]+"/cache_fingerprint", min(90, deadline.remaining())))
+            if fingerprint_matches(expected, verified):
+                break
+            deadline.sleep(o["sample_s"])
+        consistent = bool(verified and fingerprint_matches(expected, verified))
+        consistent = consistent and verified.get("global_unique_keys") == len(prefill)*(p["unique_keys"]+p["shared_keys"])
+        consistent = consistent and verified.get("global_mappings") == len(prefill)*keys
+        evidence["consistency"] = dict(consistent=consistent, expected=expected, observed=verified,
+            scope="frozen fingerprints and exhaustive status/global membership; counts guard extra mappings")
+        event("consistency_finished")
+        last = evidence["frames"][-1]["workers"]
+        healthy_end = (set(last) == names and all(healthy(w, limits["max_status_age_ms"]) for w in last.values())
+                       and evidence["convergence_samples"] >= o["converged_samples"])
+        evidence.update(affected_workers=sorted(affected), expired_workers=sorted(absent), rebuilt_workers=sorted(rebuilt),
+                        max_sample_gap_s=maximum_gap)
+        measured = evidence["intensity"]["measurement"]
+        checks = [evaluate("healthy_survivors", len(affected), "eq", 0),
+            evaluate("cache_converged", healthy_end, "eq", True),
+            evaluate("cache_consistency", consistent, "eq", True),
+            evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
+            evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["responses"]*keys
+                     and measured["totals"]["full_responses"] == measured["totals"]["responses"], "eq", True),
+            evaluate("clock_input_intensity", limits["min_added_keys_per_s"] <= measured["added_keys"] <= limits["max_added_keys_per_s"], "eq", True),
+            evaluate("sampling_complete", maximum_gap, "le", o["max_gap_s"]),
+            evaluate("client_complete", evidence["client"]["complete"], "eq", True)]
+        if intervention:
+            checks.extend([evaluate("victims_withdrawn", len(absent), "eq", len(victims)),
+                           evaluate("victims_rebuilt", len(rebuilt), "eq", len(victims))])
+        else:
+            checks.extend(CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
+                          for k in ("victims_withdrawn", "victims_rebuilt"))
+        evidence["checks"] = [dict(id=c.id, status=c.status, actual=c.actual) for c in checks]
+        event("observation_finished")
+        return StageOutput({}, checks, [str(directory/"evidence.json")])
+    except Exception as error:
+        evidence["errors"].append(repr(error))
+        # A later collection error cannot erase an already observed collateral failure.
+        # Remaining checks stay unevaluated; reports retain the incomplete runtime boundary.
+        if affected:
+            evidence["affected_workers"] = sorted(affected)
+            evidence["runtime_incomplete"] = True
+            checks = [evaluate("healthy_survivors", len(affected), "eq", 0)]
+            checks.extend(CheckResult(id=k, status="SKIP", actual=None, expected=None,
+                detail="observation interrupted") for k in sorted(CHECK_IDS-{"healthy_survivors"}))
+            evidence["checks"] = [dict(id=c.id, status=c.status, actual=c.actual) for c in checks]
+            return StageOutput({}, checks, [str(directory/"evidence.json")])
+        raise
+    finally:
+        atomic_write(path, original)
+        (directory/"evidence.json").write_text(json.dumps(evidence))
 
 
 HANDLERS = [StageHandler("cache_recovery_cycle", validate, execute, {}, checks=CHECK_IDS)]

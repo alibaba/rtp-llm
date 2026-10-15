@@ -97,10 +97,11 @@ class WorkloadRuntimeTests(unittest.TestCase):
             },
             {
                 "request_completion::default",
-                "cache_sync_recovery::default",
+                "cache_sync_recovery::steady",
+                "cache_sync_recovery::recovery",
             },
         )
-        self.assertEqual(len(plans), 16)
+        self.assertEqual(len(plans), 18)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_quick_suite_is_request_completion_for_every_master_profile(self):

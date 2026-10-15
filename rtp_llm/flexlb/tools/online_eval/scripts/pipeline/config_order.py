@@ -7,7 +7,7 @@ from yaml.nodes import MappingNode, SequenceNode
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
-    'case_schema_version', 'case', 'program', 'metadata', 'profiles',
+    'case_schema_version', 'case', 'program', 'default_variant', 'metadata', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
     'variants', 'profile_overrides', 'reporting', 'reports',
 )

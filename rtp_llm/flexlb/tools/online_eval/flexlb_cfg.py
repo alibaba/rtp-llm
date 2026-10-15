@@ -152,6 +152,7 @@ class ConfigOverride:
     request_timeout_ms: Optional[int] = None
     decision_lifetime: Optional[float] = None
     status_rpc_ms: Optional[int] = None
+    status_poll_interval_ms: Optional[int] = None
     cache_min_refresh_ms: Optional[int] = None
     cache_max_refresh_ms: Optional[int] = None
     status_stale_after_ms: Optional[int] = None
@@ -174,6 +175,8 @@ class ConfigOverride:
             raise ValueError("decision_lifetime must be finite and >= 1")
         if self.cache_min_refresh_ms is not None or self.cache_max_refresh_ms is not None:
             _cache_refresh_bounds(self.cache_min_refresh_ms, self.cache_max_refresh_ms)
+        if self.status_poll_interval_ms is not None and (type(self.status_poll_interval_ms) is not int or self.status_poll_interval_ms <= 0):
+            raise ValueError("status_poll_interval_ms must be a positive integer")
         _validate_affinity(self.cache_affinity_max_extra_ttft_ms,
                            self.cache_affinity_min_prefix_hit_percent)
 
@@ -359,6 +362,7 @@ def build_flexlb_config(
     decision_lifetime: float = GENERATOR_DEFAULTS["decision_lifetime"],
     cache_min_refresh_ms: Optional[int] = None,
     cache_max_refresh_ms: Optional[int] = None,
+    status_poll_interval_ms: int = 20,
     status_rpc_ms: int = GENERATOR_DEFAULTS["status_rpc_ms"],
     status_stale_after_ms: Optional[int] = GENERATOR_DEFAULTS["status_stale_after_ms"],
     cleanup_interval_ms: int = GENERATOR_DEFAULTS["cleanup_interval_ms"],
@@ -367,6 +371,8 @@ def build_flexlb_config(
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
+    if type(status_poll_interval_ms) is not int or status_poll_interval_ms <= 0:
+        raise ValueError("status_poll_interval_ms must be a positive integer")
     _validate_health(status_rpc_ms, max(10_000, status_rpc_ms * 2)
                      if status_stale_after_ms is None else status_stale_after_ms,
                      cleanup_interval_ms)
@@ -437,7 +443,7 @@ def build_flexlb_config(
             },
             "workerRegistry": {
                 "health": {
-                    "statusPollIntervalMs": 20,
+                    "statusPollIntervalMs": status_poll_interval_ms,
                     "statusRpcTimeoutMs": status_rpc_ms,
                     "statusStaleAfterMs": (
                         max(10_000, status_rpc_ms * 2)
@@ -468,6 +474,7 @@ _STRESS_DOC_PATHS = {
     "prefill_expression": ("router", "roles", "prefill", "executionTimeEstimator", "expression"),
     "queue_timeout_ms": ("scheduler", "queueTimeoutMs"),
     "status_rpc_ms": ("workerRegistry", "health", "statusRpcTimeoutMs"),
+    "status_poll_interval_ms": ("workerRegistry", "health", "statusPollIntervalMs"),
     "decode_max_engine_requests": (
         "router",
         "roles",

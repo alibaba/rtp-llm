@@ -1,51 +1,95 @@
 case_schema_version: 2
 case: cache_sync_recovery
 program: default
+default_variant: steady
 metadata:
   kind: functional
-  description: 大缓存全量同步、小幅 diff 和部分存活 Worker 撤出恢复，验证健康 Worker 不受连带影响。
+  description: 同一大缓存与业务背景下，验证稳态同步及部分 Worker 撤出恢复的健康隔离。
   category: status
-  tags: [cache, lifecycle]
-profiles:
-- single-nonbatch
-- batch-window
+  tags: [cache, lifecycle, allocation]
+profiles: [single-nonbatch, batch-window]
 environment:
   backend: java_mock
+  perf_preset: deepseek_v4_flash_l20c
+  model_override:
+    baseline: deepseek_v4_flash_l20c
+    reason: 隔离缓存事故同步负载，统一 120P/320D 拓扑；性能模型保持不变。
   discovery: discovery_file
-  n_prefill: 96
-  n_decode: 32
+  n_prefill: 120
+  n_decode: 320
   config_overrides:
+    ordering: fifo
+    max_inflight_per_prefill_worker: 64
+    status_poll_interval_ms: 125
     status_rpc_ms: 5000
-    cache_min_refresh_ms: 4800
-    cache_max_refresh_ms: 4800
+    status_stale_after_ms: 10000
+    cache_min_refresh_ms: 1625
+    cache_max_refresh_ms: 1625
+  metric_whitelist: flexlb_app_cache_,flexlb_app_engine_health_check_,flexlb_app_grpc_,flexlb_app_engine_balancing_,flexlb_grpc_
   master_jvm_heap: 64g
-  mock_heap: 32g
+  mock_heap: 64g
+  event_loop_threads: 64
+  completion_threads: 32
+  rpc_threads: 64
+  rpc_max_calls: 32768
   master_sync_log: true
 execution:
-  timeout_s: 1500
+  timeout_s: 3000
   stage_timeout_s: 60
-  cleanup_timeout_s: 120
-  collection: diagnostic
+  cleanup_timeout_s: 180
+  collection: aggregate
 parameters:
+  traffic:
+    group_id: cache_background
+    phase_id: continuous
+    source:
+      kind: trace
+      model: prefix_lineage
+      parameters:
+        path: ../../data/traffic_trace/deepseek_v4_flash_20260923_0920_16m.xz
+        count: 844864
+        output_tokens: 8192
+        output_distribution: {kind: geometric, mean_tokens: 1000, seed: 20260922}
+        priority: 50
+        max_input_tokens: 32768
+    client:
+      playback:
+        duration_s: 660
+        mode: uniform
+        qps: 600
+        ramp_up_seconds: 30
+        max_laps: 1
+        identity: structural-relabel
+      limits: {max_concurrency: 32768, request_timeout_s: 120, drain_timeout_s: 130}
+      transport: {channels: 8, event_loop_threads: 8}
+    poll_s: 0.2
+    jvm_xms: 2g
+    jvm_xmx: 8g
   procedure:
     setup_timeout_s: 300
     warmup_timeout_s: 300
-    stable_s: 15
-    churn_s: 60
+    cache_only_s: 120
+    traffic_warmup_s: 180
+    measurement_s: 300
     withdraw_s: 20
-    recovery_timeout_s: 180
-    seed_interval_s: 1
-    # Ring: two adjacent shared segments, plus private keys; cardinality remains fixed.
-    unique_keys: 296000
-    shared_keys: 5000
+    post_s: 120
+    seed_interval_s: 0
+    baseline_steps: 60
+    baseline_interval_s: 5
+    unique_keys: 176000
+    shared_keys: 65000
     delta_keys: 117
-    # Sensitivity setting, not measured production changed-version frequency.
-    change_every_responses: 10
+    churn_interval_ms: 6000
     expired_workers: 12
   observation:
-    sample_s: 1
-    max_gap_s: 5
+    sample_s: 2
+    max_gap_s: 10
     converged_samples: 5
   checks:
     max_status_age_ms: 10000
-    min_cache_responses_per_s: 15
+    min_cache_responses_per_s: 35
+    min_added_keys_per_s: 2000
+    max_added_keys_per_s: 2700
+variants:
+- id: recovery
+  program: recovery

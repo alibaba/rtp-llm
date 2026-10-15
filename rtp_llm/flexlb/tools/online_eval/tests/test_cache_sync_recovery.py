@@ -1,15 +1,12 @@
 """Reject invalid workloads and distinguish healthy survivors from planned victims."""
 
 import copy
-import contextlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from cases.cache_sync_recovery.actions import atomic_write, collateral, converged, withdraw
-from cases.cache_sync_recovery import actions
 from document_io import load_document
 from flexlb_cfg import ConfigOverride, render_env
 from scenario.program_compiler import configure_program
@@ -28,16 +25,22 @@ def row(generation=1, age=20):
 
 def test_registered_functional_case_compiles_with_owned_fixture_and_request_gates():
     plan = configure_program(config(), "cache_sync_recovery.yaml")
-    actions = [stage["action"] for stage in plan["variants"][0]["stages"]]
-    assert actions == ["setup", "cache_recovery_cycle", "request", "wait", "check", "check", "teardown"]
+    assert [v["id"] for v in plan["variants"]] == ["steady", "recovery"]
+    a, b = plan["variants"]
+    assert [s["action"] for s in a["stages"]] == ["setup", "cache_recovery_cycle", "teardown"]
+    assert a["environment"] == b["environment"] if "environment" in a else True
+    left, right = copy.deepcopy(a["stages"][1]), copy.deepcopy(b["stages"][1])
+    assert left["params"].pop("intervention") is False
+    assert right["params"].pop("intervention") is True
+    assert left == right
 
 
 @pytest.mark.parametrize("section,key,value", [
     ("procedure", "delta_keys", 400000),
-    ("procedure", "expired_workers", 96),
-    ("procedure", "stable_s", 0),
-    ("observation", "max_gap_s", 10),
-    ("checks", "max_status_age_ms", 20000),
+    ("procedure", "expired_workers", 120),
+    ("procedure", "measurement_s", 0),
+    ("observation", "max_gap_s", 11),
+    ("checks", "min_added_keys_per_s", 2500),
 ])
 def test_invalid_parameters_fail_before_launch(section, key, value):
     data = config()
@@ -76,62 +79,6 @@ def test_withdrawal_preserves_other_roles_and_atomic_restore(tmp_path):
     assert list(tmp_path.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("violation", ["stale", "missing", "generation"])
-def test_recorded_health_failure_stops_before_later_observation_errors(tmp_path, monkeypatch, violation):
-    engines = [dict(name=f"prefill-{i}", role="prefill", grpc_addr=f"p{i}", http_addr=f"h{i}")
-               for i in range(3)] + [dict(name="decode-0", role="decode", grpc_addr="d0", http_addr="hd0")]
-    discovery = tmp_path / "discovery.json"
-    original = json.dumps({"P": ["h0", "h1", "h2"], "D": ["hd0"]})
-    discovery.write_text(original)
-    params = config()["parameters"]
-    params["procedure"].update(seed_interval_s=0, expired_workers=1)
-    params["observation"]["converged_samples"] = 1
-    calls = []
-    stub = SimpleNamespace(GetWorkerStatus=lambda request, timeout: SimpleNamespace(alive=True))
-    ops = SimpleNamespace(pb2=SimpleNamespace(StatusVersionPB=lambda: object()),
-                          pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub))
-    ctx = SimpleNamespace(env=SimpleNamespace(discovery_file=discovery, spec=SimpleNamespace(n_prefill=3, n_decode=1)),
-        ops=ops, artifact_dir=tmp_path, clock=lambda: 0, wall_clock=lambda: 10,
-        add_cleanup=lambda name, callback: None, record_event=lambda name: {"id": name})
-
-    def control(ops, endpoint, deadline, body=None):
-        if endpoint.startswith("snapshot"):
-            return {"engines": engines}
-        return {"status": "ok", "engine": body["engine"], "fixture": {"version": 2}}
-
-    def snapshot(ctx, deadline):
-        calls.append(True)
-        if len(calls) > 2:
-            raise TimeoutError("later observation must not hide a recorded failure")
-        rows = {entry["http_addr"]: row() for entry in engines}
-        rows["hd0"]["role"] = "decode"
-        if len(calls) == 2:
-            if violation == "missing":
-                rows.pop("h1")
-            elif violation == "generation":
-                rows["h1"]["generation"] = 2
-            else:
-                rows["h1"]["status_age_ms"] = 10001
-        return rows
-
-    monkeypatch.setattr(actions, "control_json", control)
-    monkeypatch.setattr(actions, "master_rows", snapshot)
-    monkeypatch.setattr(actions.grpc, "insecure_channel", lambda target: contextlib.nullcontext(target))
-    result = actions.execute(ctx, params, SimpleNamespace(remaining=lambda: 100))
-    from scenario.stage_execution import _validate_output
-    from analysis.checks import check_verdict
-    _validate_output(ctx, result, {}, actions.HANDLERS[0].checks)
-    assert check_verdict(c.status for c in result.checks) == "FAIL"
-    assert next(c for c in result.checks if c.id == "healthy_survivors").status == "FAIL"
-    assert all(c.status == "SKIP" for c in result.checks if c.id != "healthy_survivors")
-    summary = json.loads((tmp_path / "cache-recovery-summary.json").read_text())
-    assert summary["affected_workers"] == ["h1"]
-    assert summary["healthy_violation_probe"]["rpc_alive"] is True
-    assert summary["aborted_after_health_violation"] is True
-    assert summary["errors"] == []
-    assert discovery.read_text() == original
-
-
 def test_refresh_override_is_explicit_and_heap_parameters_are_frozen():
     default = json.loads(render_env("single-nonbatch"))
     assert "cacheStatus" not in default["workerRegistry"]
@@ -147,34 +94,169 @@ def test_refresh_override_is_explicit_and_heap_parameters_are_frozen():
         configure_program(data, "case.yaml")
 
 
-def test_missing_health_evidence_cannot_pass_and_discovery_is_restored(tmp_path, monkeypatch):
-    engines = [dict(name=f"prefill-{i}", role="prefill", grpc_addr=f"p{i}", http_addr=f"h{i}")
-               for i in range(3)] + [dict(name="decode-0", role="decode", grpc_addr="d0", http_addr="hd0")]
-    path = tmp_path / "discovery.json"
-    original = json.dumps({"P": ["h0", "h1", "h2"], "D": ["hd0"]})
-    path.write_text(original)
-    cleanup = []
-    ctx = SimpleNamespace(env=SimpleNamespace(discovery_file=path, spec=SimpleNamespace(n_prefill=3, n_decode=1)),
-        ops=object(), artifact_dir=tmp_path, clock=lambda: 0, wall_clock=lambda: 10,
-        add_cleanup=lambda name, callback: cleanup.append(callback), record_event=lambda name: {"id": name})
+
+
+def test_status_poll_override_is_distinct_from_rpc_timeout_and_validated():
+    rendered = json.loads(render_env("single-nonbatch", ConfigOverride(
+        status_poll_interval_ms=125, status_rpc_ms=5000)))
+    health = rendered["workerRegistry"]["health"]
+    assert health["statusPollIntervalMs"] == 125
+    assert health["statusRpcTimeoutMs"] == 5000
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ValueError):
+            ConfigOverride(status_poll_interval_ms=invalid)
+
+
+def test_actual_intensity_uses_response_counters_and_elapsed_time():
+    from cases.cache_sync_recovery.telemetry import interval_rates
+    fields = ("responses", "full_responses", "unchanged_responses", "entries", "key_payload_bytes",
+              "changed_responses", "added_keys", "removed_keys")
+    before = {"a": dict.fromkeys(fields, 10), "b": dict.fromkeys(fields, 20)}
+    after = {"a": dict.fromkeys(fields, 110), "b": dict.fromkeys(fields, 320)}
+    rates = interval_rates(before, after, 20)
+    assert rates["responses"] == 20
+    assert rates["entries"] == 20
+    assert rates["totals"]["added_keys"] == 400
+    with pytest.raises(ValueError):
+        interval_rates(after, before, 20)
+
+
+def test_fingerprints_require_actual_membership_and_exact_population():
+    from cases.cache_sync_recovery.telemetry import fingerprint_matches
+    expected = {"a": dict(keys=5, sum=123, xor=42, version=9)}
+    worker = dict(ip_port="a", cache_version=9, fingerprint=dict(indexed_keys=5,
+        status_keys=5, sum=123, xor=42, missing_status=0, missing_global=0))
+    assert fingerprint_matches(expected, {"prefill_endpoints": [worker]})
+    for field in ("missing_global", "missing_status", "sum", "xor", "indexed_keys"):
+        bad = copy.deepcopy(worker)
+        bad["fingerprint"][field] += 1
+        assert not fingerprint_matches(expected, {"prefill_endpoints": [bad]})
+    assert not fingerprint_matches(expected, {"prefill_endpoints": []})
+
+
+def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
+    from cases.cache_sync_recovery.report import report
+    instance = tmp_path/'instance'
+    cache = instance/'cache-stability'
+    cache.mkdir(parents=True)
+    logs = instance/'environment/env1'
+    logs.mkdir(parents=True)
+    stamp = '2026-10-15T10:00:00.000+0000'
+    import datetime
+    epoch = datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
+    (logs/'master_gc.log').write_text(
+        f'[{stamp}][2.0s][info][gc] GC(9) Pause Full (G1 Compaction Pause) 63G->20G(64G) 180.000ms\n')
+    raw = dict(parameters=config()['parameters'], environment={}, errors=[], checks=[dict(
+        id='healthy_survivors',status='PASS',actual=0)], intensity={'measurement': dict(
+            responses=1,entries=306000,key_payload_bytes=100)}, expiry_scope='discovery',
+        events=[dict(id='cache_only_started',epoch_s=epoch-120),
+                dict(id='performance_observation_finished',epoch_s=epoch+2),
+                dict(id='observation_finished',epoch_s=epoch+5)],
+        frames=[dict(epoch_s=e,phase='measurement', master={},mock={},healthy_max_status_age_ms=age)
+                for e,age in ((epoch-120,7),(epoch+1,None))])
+    (cache/'evidence.json').write_text(json.dumps(raw))
+    output = tmp_path/'report'
+    report(instance,output,'example')
+    specs = list(output.rglob('report-spec.json'))
+    assert len(specs) == 1
+    spec = json.loads(specs[0].read_text())
+    assert spec['timeOriginEpochS'] == epoch-120
+    assert spec['timeAxis']['max'] == 123
+    assert len(spec['panels']) == 2
+    assert all(p['title'].startswith('steady · ') for p in spec['panels'])
+    full = next(p for p in spec['panels'] if p['id']=='steady-gc')['series'][0]
+    assert full['points'] == [dict(x=120,y=180)]
+    assert all(len(p['series'])==1 for p in spec['panels'])
+    from reporting.comparison import compare
+    left = specs[0].parent
+    right = report(instance,tmp_path/'second','second')
+    compare([left,right],tmp_path/'comparison',alignment_event='cache_only_started')
+    compared = json.loads((tmp_path/'comparison/reports/comparison/runs/report-spec.json').read_text())
+    gc_overlay = [p for p in compared['panels'] if p['id'].startswith('overlay:')
+                  and any(s['metric_id']=='steady.gc' for s in p['series'])]
+    assert len(gc_overlay) == 1
+    assert len(gc_overlay[0]['series']) == 2
+
+
+def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, monkeypatch):
+    import contextlib
+    from types import SimpleNamespace
+    from cases.cache_sync_recovery import actions, telemetry
+    import traffic.traffic_source as traffic
+    engines = [dict(name=f'prefill-{i}',role='prefill',http_addr=f'h{i}',grpc_addr=f'p{i}') for i in range(3)]
+    engines.append(dict(name='decode-0',role='decode',http_addr='hd',grpc_addr='pd'))
+    discovery = tmp_path/'discovery.json'
+    discovery.write_text(json.dumps(dict(P=['h0','h1','h2'],D=['hd'])))
+    params = copy.deepcopy(config()['parameters'])
+    params['procedure'].update(seed_interval_s=0,expired_workers=1)
+    params['observation']['converged_samples'] = 1
+    params['intervention'] = False
+    time = [0]
+    snapshots = []
 
     def control(ops, endpoint, deadline, body=None):
-        if endpoint.startswith("snapshot"):
-            return {"engines": engines}
-        return {"status": "ok", "engine": body["engine"], "fixture": {"version": 2}}
+        if endpoint.startswith('snapshot'):
+            return dict(engines=engines)
+        return dict(engine=body['engine'],status='ok',fixture=dict(version=2))
 
-    monkeypatch.setattr(actions, "control_json", control)
+    def fetch(url, timeout):
+        if url.endswith('prometheus'):
+            return b''
+        snapshots.append(True)
+        if len(snapshots)>2:
+            raise TimeoutError('later snapshot unavailable')
+        rows = [dict(ip_port=f'h{i}',**row(age=10001 if i==1 and len(snapshots)==2 else 20)) for i in range(3)]
+        return json.dumps(dict(prefill_endpoints=rows,decode_endpoints=[dict(ip_port='hd',**row())],scheduler_inflight=0)).encode()
 
-    def missing_evidence(ctx, deadline):
-        raise ValueError("Master lacks Worker poll-health evidence")
+    stub = SimpleNamespace(GetWorkerStatus=lambda request,timeout: SimpleNamespace(alive=True))
+    ops = SimpleNamespace(master_http_port=1,pb2=SimpleNamespace(StatusVersionPB=lambda: None),
+        pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub))
+    ctx = SimpleNamespace(ops=ops,artifact_dir=tmp_path,instance=dict(environment={},source_path=str(tmp_path/'case.yaml')),
+        env=SimpleNamespace(spec=SimpleNamespace(n_prefill=3,n_decode=1),discovery_file=discovery,
+                            master_management_port=2,master=None,mock=None),
+        clock=lambda:time[0],wall_clock=lambda:100+time[0],add_cleanup=lambda *a:None,
+        record_event=lambda identity:dict(id=identity,epoch_s=100+time[0]))
+    deadline = SimpleNamespace(remaining=lambda:100,check=lambda:None,sleep=lambda value:time.__setitem__(0,time[0]+value))
+    monkeypatch.setattr(actions,'control_json',control)
+    monkeypatch.setattr(telemetry,'fetch',fetch)
+    monkeypatch.setattr(telemetry,'resource',lambda proc:{})
+    monkeypatch.setattr(traffic,'materialize',lambda *a,**kw:tmp_path/'traffic.jsonl')
+    monkeypatch.setattr(actions.grpc,'insecure_channel',lambda address:contextlib.nullcontext(address))
+    result = actions.execute(ctx,params,deadline)
+    from scenario.stage_execution import _validate_output
+    _validate_output(ctx,result,{},actions.CHECK_IDS)
+    assert next(c.status for c in result.checks if c.id=='healthy_survivors') == 'FAIL'
+    assert all(c.status=='SKIP' for c in result.checks if c.id!='healthy_survivors')
+    evidence = json.loads((tmp_path/'cache-stability/evidence.json').read_text())
+    assert evidence['affected_workers'] == ['h1']
+    assert evidence['healthy_violations'][0]['direct_alive'][0]['alive'] is True
+    assert evidence['runtime_incomplete'] is True
+    assert 'later snapshot unavailable' in evidence['errors'][0]
 
-    monkeypatch.setattr(actions, "master_rows", missing_evidence)
-    params = config()["parameters"]
-    params["procedure"].update(seed_interval_s=0, expired_workers=1)
-    with pytest.raises(ValueError, match="poll-health evidence"):
-        actions.execute(ctx, params, object())
-    assert path.read_text() == original
-    assert "poll-health evidence" in json.loads((tmp_path / "cache-recovery-summary.json").read_text())["errors"][0]
-    atomic_write(path, json.dumps({"P": [], "D": []}))
-    cleanup[0](object())
-    assert path.read_text() == original
+
+def test_recovery_report_keeps_two_focused_panels_and_only_distinct_events():
+    from cases.cache_sync_recovery.report import compact_report_spec
+    data = dict(intervention=True, parameters={'procedure': {'expired_workers': 12}},
+        environment=dict(n_prefill=120,n_decode=320), victims=list(range(12)), phase_summary={},
+        frames=[dict(epoch_s=430,phase='post',healthy_max_status_age_ms=11000,missing_workers=1)],
+        events=[dict(id=k,epoch_s=t) for k,t in (
+            ('cache_only_started',0),('measurement_started',100),('measurement_finished',400),
+            ('partial_workers_withdrawn',400.01),('intervention_started',400.02),
+            ('partial_workers_restored',420),('post_started',420.01),('post_finished',540))])
+    spec=compact_report_spec(data,dict(timeOriginEpochS=0,timeAxis={'max':600},run_id='sample'))
+    assert len(spec['panels'])==2
+    assert all(p['title'].startswith('recovery · ') and len(p['series'])==1 for p in spec['panels'])
+    assert spec['panels'][0]['series'][0]['points']==[dict(x=430,y=11)]
+    assert spec['panels'][1]['series'][0]['points']==[dict(x=430,y=427)]
+    for panel in spec['panels']:
+        assert [e['id'] for e in panel['events']]==[
+            'measurement_started','partial_workers_withdrawn','partial_workers_restored']
+    assert spec['events'][0]['id']=='cache_only_started'
+
+
+def test_ring_fixture_requires_at_least_three_prefill_workers_before_launch():
+    data = config()
+    data['environment']['n_prefill'] = 2
+    data['parameters']['procedure']['expired_workers'] = 1
+    with pytest.raises(ValueError):
+        configure_program(data,'case.yaml')

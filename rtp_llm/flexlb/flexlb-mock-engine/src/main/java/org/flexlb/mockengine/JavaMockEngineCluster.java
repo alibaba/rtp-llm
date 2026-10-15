@@ -5299,7 +5299,7 @@ public final class JavaMockEngineCluster {
             CacheSyncFixture fixture = cacheSyncFixture;
             if (fixture != null) status.setVersion(fixture.version());
             if (request.getNeedCacheKeys() && fixture != null) {
-                status.mergeFrom(fixture.response());
+                status.mergeFrom(fixture.response(request.getLatestCacheVersion()));
             } else if (request.getNeedCacheKeys()) {
                 for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
                 if (memoryCache != null)
@@ -5624,7 +5624,7 @@ public final class JavaMockEngineCluster {
         }
 
         synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
-                int unique, int shared, int delta, int every) {
+                int unique, int shared, int delta, int every, int intervalMs) {
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
             if ("seed".equals(operation)) {
@@ -5633,6 +5633,12 @@ public final class JavaMockEngineCluster {
             } else if ("churn".equals(operation)) {
                 if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
                 cacheSyncFixture.churn(delta, every);
+            } else if ("grow".equals(operation)) {
+                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
+                cacheSyncFixture.grow(unique, shared);
+            } else if ("clock".equals(operation)) {
+                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
+                cacheSyncFixture.clockInterval(intervalMs);
             } else if (!"inspect".equals(operation)) {
                 throw new IllegalArgumentException("unknown cache fixture operation");
             }

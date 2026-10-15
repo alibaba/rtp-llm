@@ -3,6 +3,9 @@ default_suite: quick
 default_profile: batch-window
 suites:
   core: []
+  cache_sync:
+  - cache_sync_recovery::steady
+  - cache_sync_recovery::recovery
   quick:
   - request_completion::default
   workload:

@@ -106,6 +106,7 @@ class CaseDeclaration:
     metadata: dict
     execution: ExecutionPolicy
     variants: tuple[VariantDeclaration, ...]
+    default_variant: str
     reports: Optional[tuple[str, ...]]
     reporting: Optional[dict]
     declaration: dict = field(repr=False)
@@ -115,7 +116,7 @@ class CaseDeclaration:
         data_only(value, source)
         mapping(value, {'case_schema_version', 'case', 'program', 'id', 'profiles',
                         'environment', 'execution', 'parameters', 'variants', 'metadata',
-                        'parameter_schema', 'reports', 'reporting'}, source)
+                        'parameter_schema', 'reports', 'reporting', 'default_variant'}, source)
         if type(value.get('case_schema_version')) is not int or value['case_schema_version'] != 2:
             raise ScenarioError(f'{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python')
         metadata = normalize_metadata(value.get('metadata'))
@@ -139,5 +140,6 @@ class CaseDeclaration:
         return cls(value.get('case'), value.get('id', value.get('case')), value.get('program'),
                    tuple(profiles), **groups, metadata=metadata, execution=execution,
                    variants=tuple(VariantDeclaration.read(row, source + '.variants') for row in variants),
+                   default_variant=value.get("default_variant", "default"),
                    reports=tuple(reports) if reports is not None else None, reporting=copy.deepcopy(value.get('reporting')),
                    declaration=copy.deepcopy(value))

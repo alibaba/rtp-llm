@@ -35,7 +35,7 @@ def configure_program(config, source):
     document = _program_document(config, name, source)
     seen = set()
     numeric_contracts = {}
-    default = VariantDeclaration.read({"id": "default"}, source)
+    default = VariantDeclaration.read({"id": config.default_variant}, source)
     for row in (default, *config.variants):
         identity = row.identity
         if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
