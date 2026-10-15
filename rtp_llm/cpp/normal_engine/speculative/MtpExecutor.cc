@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <c10/core/InferenceMode.h>
 #include <sstream>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -3452,6 +3453,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         auto draft_token_ids          = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
+            c10::InferenceMode inference_mode(true);
             draft_token_ids.zero_();
             draft_decode_model_output.all_hidden_states.zero_();
         }

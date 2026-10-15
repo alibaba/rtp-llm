@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <c10/core/InferenceMode.h>
 
 using namespace std;
 
@@ -14,6 +15,7 @@ namespace rtp_llm {
 Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
+    c10::InferenceMode inference_mode(true);
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
     // Helper: narrow a tensor if defined, else return undefined tensor

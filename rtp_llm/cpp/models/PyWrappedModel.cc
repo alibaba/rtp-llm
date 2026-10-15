@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/DeviceGuard.h>
+#include <c10/core/InferenceMode.h>
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
@@ -731,6 +732,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
+    c10::InferenceMode inference_mode(true);
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
     d2d_copies_.clear();
@@ -787,6 +789,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 }
 
 void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
+    c10::InferenceMode inference_mode(true);
     RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockId");
     c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
     if (!inputs.kv_cache_kernel_block_id.defined()) {
@@ -860,6 +863,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    c10::InferenceMode inference_mode(true);
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("py_model.forward(cuda_graph=%d,prefill_cg=%d,model_id=%zu)",
                                   static_cast<int>(enable_cuda_graph_),
                                   static_cast<int>(is_prefill_cuda_graph_mode_),
