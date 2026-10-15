@@ -1823,6 +1823,9 @@ class AiterPrefillAttnOpVerify:
     def __init__(self, attn_configs: AttentionConfigs):
         self.enable_cuda_graph = False
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.head_num = attn_configs.head_num
+        self.head_num_kv = attn_configs.kv_head_num
+        self.head_dim = attn_configs.size_per_head
         self.workspace = None
 
     def prepare(self, attn_inputs: PyAttentionInputs):
@@ -1836,7 +1839,15 @@ class AiterPrefillAttnOpVerify:
                 "verify attention requires a CUDA/HIP block table at prepare"
             )
         _, _, workspace_cls = _get_verify_attention_api()
-        self.workspace = workspace_cls(batch_size, query_length, block_table.device)
+        self.workspace = workspace_cls(
+            batch_size,
+            query_length,
+            self.head_num,
+            self.head_num_kv,
+            self.head_dim,
+            self.tokens_per_block,
+            block_table.device,
+        )
         # These are graph capacities, not the 4K kernel tuning point.  Replay
         # metadata refresh uses them to reject a length that cannot be addressed
         # by this capture's original page table.

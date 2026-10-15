@@ -127,6 +127,9 @@ def _partition_attention(
     block_tables_ptr,
     context_lengths_ptr,
     stride_block_table_seq: gl.constexpr,
+    HEAD_NUM: gl.constexpr,
+    HEADS_PER_KV: gl.constexpr,
+    KV_HEADS: gl.constexpr,
     QUERY_SEQ_LEN: gl.constexpr,
     CONTEXT_PARTITION_SIZE: gl.constexpr,
     KV_COMPUTE_BLOCK_SIZE: gl.constexpr,
@@ -139,10 +142,12 @@ def _partition_attention(
     OUTPUT_DTYPE: gl.constexpr = gl.bfloat16
     LOG2_E: gl.constexpr = 1.4426950408889634
     QUERY_SEQ_LEN_POW2: gl.constexpr = triton.next_power_of_2(QUERY_SEQ_LEN)
-    if 6 <= 16 // QUERY_SEQ_LEN_POW2:
+    if HEADS_PER_KV <= 16 // QUERY_SEQ_LEN_POW2:
         ONE_QUERY_GROUP_SIZE_POW2: gl.constexpr = 16 // QUERY_SEQ_LEN_POW2
     else:
-        ONE_QUERY_GROUP_SIZE_POW2: gl.constexpr = triton.next_power_of_2(6)
+        ONE_QUERY_GROUP_SIZE_POW2: gl.constexpr = triton.next_power_of_2(
+            HEADS_PER_KV
+        )
     QUERY_GROUP_SIZE_POW2: gl.constexpr = QUERY_SEQ_LEN_POW2 * ONE_QUERY_GROUP_SIZE_POW2
     K_HEAD_SIZE_SPLITS: gl.constexpr = 256 // KV_16B_ELEMENT_COUNT
     MAX_NUM_KV_BLOCKS_PER_COMPUTE: gl.constexpr = KV_COMPUTE_BLOCK_SIZE // 16
@@ -289,7 +294,7 @@ def _partition_attention(
         0, QUERY_GROUP_SIZE_POW2, layout=gl.SliceLayout(1, qk_linear_layout)
     )
     query_row_mask_3d = (mtp_query_len_offsets[:, None, None] < QUERY_SEQ_LEN) & (
-        mtp_query_group_size_offsets[None, :, None] < 6
+        mtp_query_group_size_offsets[None, :, None] < HEADS_PER_KV
     )
     query_row_mask_1d = gl.reshape(query_row_mask_3d, [QUERY_GROUP_SIZE_POW2])
     qk_row_mask = gl.convert_layout(
@@ -314,15 +319,17 @@ def _partition_attention(
     sequence_start_idx = 0
     sequence_partition_idx = output_partition_idx
     mtp_query_offsets = (
-        (batch_idx * Q_LEN + query_tile_idx * QUERY_SEQ_LEN) * 3072
-        + mtp_query_len_offsets[:, None, None] * 3072
-        + kv_head_idx * 1536
+        (batch_idx * Q_LEN + query_tile_idx * QUERY_SEQ_LEN)
+        * HEAD_NUM
+        * 256
+        + mtp_query_len_offsets[:, None, None] * HEAD_NUM * 256
+        + kv_head_idx * HEADS_PER_KV * 256
         + mtp_query_group_size_offsets[None, :, None] * 256
         + mtp_head_size_offsets[None, None, :]
     )
     mtp_query_mask = (
         (mtp_query_len_offsets[:, None, None] < QUERY_SEQ_LEN)
-        & (mtp_query_group_size_offsets[None, :, None] < 6)
+        & (mtp_query_group_size_offsets[None, :, None] < HEADS_PER_KV)
         & (mtp_head_size_offsets[None, None, :] < 256)
     )
     if Q_LEN % QUERY_SEQ_LEN != 0:
@@ -345,11 +352,11 @@ def _partition_attention(
     max_logits_group_idx_in_len = (
         max_logits_base_offsets_mtp % ONE_QUERY_GROUP_SIZE_POW2
     )
-    max_logits_base_offsets = max_logits_query_len_idx * 6 + max_logits_group_idx_in_len
+    max_logits_base_offsets = max_logits_query_len_idx * HEADS_PER_KV + max_logits_group_idx_in_len
     max_logits_offsets = (
-        sequence_idx * (2 * PARTS * QUERY_SEQ_LEN * 6)
-        + kv_head_idx * (PARTS * QUERY_SEQ_LEN * 6)
-        + output_partition_idx * (QUERY_SEQ_LEN * 6)
+        sequence_idx * (KV_HEADS * PARTS * QUERY_SEQ_LEN * HEADS_PER_KV)
+        + kv_head_idx * (PARTS * QUERY_SEQ_LEN * HEADS_PER_KV)
+        + output_partition_idx * (QUERY_SEQ_LEN * HEADS_PER_KV)
         + max_logits_base_offsets
     )
     output_group_offsets_mtp = gl.arange(
@@ -357,15 +364,17 @@ def _partition_attention(
     )
     output_query_len_idx = output_group_offsets_mtp // ONE_QUERY_GROUP_SIZE_POW2
     output_group_idx_in_len = output_group_offsets_mtp % ONE_QUERY_GROUP_SIZE_POW2
-    output_group_offsets = output_query_len_idx * 6 + output_group_idx_in_len
+    output_group_offsets = output_query_len_idx * HEADS_PER_KV + output_group_idx_in_len
     output_head_size_offsets = gl.arange(
         0, 256, layout=gl.SliceLayout(0, pv_mfma_layout)
     )
     output_mask = pv_row_mask[:, None] & (output_head_size_offsets[None, :] < 256)
-    output_offsets = sequence_idx * (2 * PARTS * QUERY_SEQ_LEN * 6 * 256)
-    output_offsets += kv_head_idx * (PARTS * QUERY_SEQ_LEN * 6 * 256)
+    output_offsets = (
+        sequence_idx * (KV_HEADS * PARTS * QUERY_SEQ_LEN * HEADS_PER_KV * 256)
+    )
+    output_offsets += kv_head_idx * (PARTS * QUERY_SEQ_LEN * HEADS_PER_KV * 256)
     output_offsets += (
-        output_partition_idx * (QUERY_SEQ_LEN * 6 * 256)
+        output_partition_idx * (QUERY_SEQ_LEN * HEADS_PER_KV * 256)
         + output_group_offsets[:, None] * 256
         + output_head_size_offsets[None, :]
     )
@@ -422,7 +431,7 @@ def _partition_attention(
                 )
                 kv_block_numbers = kv_block_numbers.to(gl.int64)
                 key_block_offsets = (
-                    kv_block_numbers[:, None, None, None] * 16384
+                    kv_block_numbers[:, None, None, None] * (KV_HEADS * 8192)
                     + kv_head_idx * 4096
                     + head_size_split_offsets[None, :, None, None] * 128
                     + block_element_offsets[None, None, :, None] * KV_16B_ELEMENT_COUNT
@@ -455,7 +464,7 @@ def _partition_attention(
                     ),
                 )
                 value_block_offsets = (
-                    kv_block_numbers_reshaped[:, None, None, None] * 16384
+                    kv_block_numbers_reshaped[:, None, None, None] * (KV_HEADS * 8192)
                     + kv_head_idx * 4096
                     + value_dim1_offsets[None, :, None, None] * 2048
                     + value_dim2_offsets[None, None, :, None] * KV_16B_ELEMENT_COUNT
@@ -539,6 +548,9 @@ def _gluon_reduce(
     out_ptr,
     gid,
     kh,
+    HEAD_NUM: gl.constexpr,
+    HEADS_PER_KV: gl.constexpr,
+    KV_HEADS: gl.constexpr,
     PARTS: gl.constexpr,
     ROWS: gl.constexpr,
     ROWS_PAD: gl.constexpr,
@@ -561,7 +573,7 @@ def _gluon_reduce(
     part = gl.arange(0, PARTS, layout=gl.SliceLayout(1, stats_layout))
     stat_row = gl.arange(0, ROWS_PAD, layout=gl.SliceLayout(0, stats_layout))
     stat_mask = stat_row[None, :] < ROWS
-    stat_base = (gid * 2 + kh) * PARTS * ROWS
+    stat_base = (gid * KV_HEADS + kh) * PARTS * ROWS
     part_offsets = stat_base + part[:, None] * ROWS + stat_row[None, :]
     pmax = gl.load(max_ptr + part_offsets, mask=stat_mask, other=-3.4e38)
     psum = gl.load(exp_ptr + part_offsets, mask=stat_mask, other=0.0)
@@ -583,21 +595,23 @@ def _gluon_reduce(
         pe = gl.convert_layout(pe, gl.SliceLayout(1, vec_layout))
         weight = gl.exp(pm - gmax) * pe / gl.maximum(gsum, 1e-20)
         poff = (
-            ((gid * 2 + kh) * PARTS + p) * ROWS * D + out_row[:, None] * D + d[None, :]
+            ((gid * KV_HEADS + kh) * PARTS + p) * ROWS * D
+            + out_row[:, None] * D
+            + d[None, :]
         )
         value = gl.load(partial_ptr + poff, mask=row_mask[:, None], other=0.0)
         acc += value.to(gl.float32) * weight[:, None]
-    qpos = out_row // 6
-    gqa = out_row % 6
+    qpos = out_row // HEADS_PER_KV
+    gqa = out_row % HEADS_PER_KV
     out_off = (
         (
             gid // triton.cdiv(Q_LEN, QTILE) * Q_LEN
             + gid % triton.cdiv(Q_LEN, QTILE) * QTILE
         )
-        * 12
+        * HEAD_NUM
         * D
-        + qpos[:, None] * 12 * D
-        + (kh * 6 + gqa[:, None]) * D
+        + qpos[:, None] * HEAD_NUM * D
+        + (kh * HEADS_PER_KV + gqa[:, None]) * D
         + d[None, :]
     )
     if Q_LEN % QTILE != 0:
@@ -617,6 +631,9 @@ def _verify_attention(
     counters,
     output,
     BT_STRIDE: gl.constexpr,
+    HEAD_NUM: gl.constexpr,
+    HEADS_PER_KV: gl.constexpr,
+    KV_HEADS: gl.constexpr,
     Q_LEN: gl.constexpr,
     QTILE: gl.constexpr,
     PARTITION: gl.constexpr,
@@ -633,10 +650,13 @@ def _verify_attention(
         partial,
         query,
         kv,
-        kv + 8192,
+        kv + KV_HEADS * 4096,
         block_table,
         lengths,
         BT_STRIDE,
+        HEAD_NUM,
+        HEADS_PER_KV,
+        KV_HEADS,
         QTILE,
         PARTITION,
         COMPUTE,
@@ -646,7 +666,9 @@ def _verify_attention(
     # Publish all lanes' scratch stores before the agent-scope RMW. The last
     # producer acquires preceding publications; no CTA waits for another CTA.
     tl.debug_barrier()
-    old = tl.atomic_add(counters + gid * 2 + head, 1, sem="acq_rel", scope="gpu")
+    old = tl.atomic_add(
+        counters + gid * KV_HEADS + head, 1, sem="acq_rel", scope="gpu"
+    )
     if old == PARTS - 1:
         _gluon_reduce(
             exp_sums,
@@ -655,6 +677,9 @@ def _verify_attention(
             output,
             gid,
             head,
+            HEAD_NUM,
+            HEADS_PER_KV,
+            KV_HEADS,
             PARTS,
             ROWS,
             ROWS_PAD,
@@ -662,17 +687,44 @@ def _verify_attention(
             Q_LEN,
         )
         tl.debug_barrier()
-        tl.atomic_xchg(counters + gid * 2 + head, 0, sem="release", scope="gpu")
+        tl.atomic_xchg(
+            counters + gid * KV_HEADS + head, 0, sem="release", scope="gpu"
+        )
 
 
 # (maximum batch, query tile, KV partition, compute tile). Q5-7 reuse Q8 values.
+# Duplicate rows with a smaller query tile exist for geometries whose query
+# group (pow2(q_tile) * pow2(heads_per_kv)) would exceed the 64-row QK layout.
 _CONFIGS = (
     (1, 2, 512, 128),
     (2, 4, 512, 256),
     (4, 4, 1024, 256),
     (16, 8, 1024, 128),
+    (16, 4, 1024, 128),
     (32, 8, 512, 256),
+    (32, 4, 512, 256),
 )
+
+
+def _one_query_group_pow2(q_tile: int, heads_per_kv: int) -> int:
+    """Mirror the kernel's ONE_QUERY_GROUP_SIZE_POW2 heuristic for gating."""
+    q_tile_pow2 = triton.next_power_of_2(q_tile)
+    if heads_per_kv <= 16 // q_tile_pow2:
+        return 16 // q_tile_pow2
+    return triton.next_power_of_2(heads_per_kv)
+
+
+def _pick_config(batch_size: int, heads_per_kv: int):
+    """First config that covers the batch and keeps the query group <= 64 rows."""
+    for max_batch, q_tile, partition, compute in _CONFIGS:
+        if batch_size <= max_batch:
+            query_group = (
+                triton.next_power_of_2(q_tile)
+                * _one_query_group_pow2(q_tile, heads_per_kv)
+            )
+            if query_group <= 64:
+                return q_tile, partition, compute
+    return None
 
 
 def supports_shape(
@@ -684,12 +736,20 @@ def supports_shape(
     page_size: int,
     dtype: torch.dtype,
 ) -> bool:
-    return (
-        1 <= batch_size <= 32
-        and 5 <= query_length <= 8
-        and (head_num, head_num_kv, head_dim, page_size) == (12, 2, 256, 16)
-        and dtype == torch.bfloat16
-    )
+    """Qwen3.5-family geometries: head_dim 256, page 16, BF16, any GQA split.
+
+    Per-rank shapes come from the family at non-wasting TP splits:
+    27B (24Q/4KV): TP1 (24,4), TP2 (12,2), TP4 (6,1);
+    35B-A3B (16Q/2KV): TP1 (16,2), TP2 (8,1);
+    397B (128Q/8KV): TP1 (128,8), TP2 (64,4), TP4 (32,2).
+    """
+    if dtype != torch.bfloat16 or head_dim != 256 or page_size != 16:
+        return False
+    if not (1 <= batch_size <= 32 and 5 <= query_length <= 8):
+        return False
+    if head_num < 1 or head_num_kv < 1 or head_num % head_num_kv != 0:
+        return False
+    return _pick_config(batch_size, head_num // head_num_kv) is not None
 
 
 @lru_cache(maxsize=None)
@@ -711,23 +771,41 @@ class VerifyAttentionWorkspace:
     validates device metadata before replay; this wrapper never synchronizes it.
     """
 
-    def __init__(self, batch_size: int, query_length: int, device: torch.device):
-        if not supports_shape(batch_size, query_length, 12, 2, 256, 16, torch.bfloat16):
-            raise ValueError("verify attention requires B=1..32 and Q=5..8")
+    def __init__(
+        self,
+        batch_size: int,
+        query_length: int,
+        head_num: int,
+        head_num_kv: int,
+        head_dim: int,
+        page_size: int,
+        device: torch.device,
+    ):
+        if not supports_shape(
+            batch_size, query_length, head_num, head_num_kv, head_dim, page_size,
+            torch.bfloat16,
+        ):
+            raise ValueError(
+                "verify attention requires B=1..32, Q=5..8 and a supported "
+                "head geometry (head_dim 256, page 16, BF16)"
+            )
         self.batch_size = batch_size
         self.query_length = query_length
+        self.head_num = head_num
+        self.head_num_kv = head_num_kv
+        self.heads_per_kv = head_num // head_num_kv
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError("verify attention requires a CUDA/HIP device")
         if self.device.index is None:
             self.device = torch.device("cuda", torch.cuda.current_device())
-        _, self.q_tile, self.partition, self.compute = next(
-            c for c in _CONFIGS if batch_size <= c[0]
-        )
+        config = _pick_config(batch_size, self.heads_per_kv)
+        assert config is not None
+        self.q_tile, self.partition, self.compute = config
         self.parts = 4096 // self.partition
-        self.rows = self.q_tile * 6
+        self.rows = self.q_tile * self.heads_per_kv
         self.groups = batch_size * triton.cdiv(query_length, self.q_tile)
-        stats_shape = (self.groups, 2, self.parts, self.rows)
+        stats_shape = (self.groups, self.head_num_kv, self.parts, self.rows)
         self.exp_sums = torch.empty(
             stats_shape, device=self.device, dtype=torch.float32
         )
@@ -736,10 +814,10 @@ class VerifyAttentionWorkspace:
             (*stats_shape, 256), device=self.device, dtype=torch.bfloat16
         )
         self.counters = torch.zeros(
-            (self.groups, 2), device=self.device, dtype=torch.int32
+            (self.groups, self.head_num_kv), device=self.device, dtype=torch.int32
         )
         self.output = torch.empty(
-            (batch_size * query_length, 12, 256),
+            (batch_size * query_length, head_num, 256),
             device=self.device,
             dtype=torch.bfloat16,
         )
@@ -762,7 +840,7 @@ class VerifyAttentionWorkspace:
             )
         if (
             kv.ndim != 5
-            or tuple(kv.shape[1:]) != (2, 2, 16, 256)
+            or tuple(kv.shape[1:]) != (2, self.head_num_kv, 16, 256)
             or kv.dtype != torch.bfloat16
             or not kv.is_contiguous()
             or kv.device != self.device
@@ -790,7 +868,9 @@ class VerifyAttentionWorkspace:
             raise ValueError(
                 "live lengths must be contiguous int32 with one entry per stream"
             )
-        self.compiled_kernel = _verify_attention[(self.groups, 2, self.parts)](
+        self.compiled_kernel = _verify_attention[
+            (self.groups, self.head_num_kv, self.parts)
+        ](
             query,
             kv,
             block_table,
@@ -801,6 +881,9 @@ class VerifyAttentionWorkspace:
             self.counters,
             self.output,
             block_table.stride(0),
+            self.head_num,
+            self.heads_per_kv,
+            self.head_num_kv,
             self.query_length,
             self.q_tile,
             self.partition,
