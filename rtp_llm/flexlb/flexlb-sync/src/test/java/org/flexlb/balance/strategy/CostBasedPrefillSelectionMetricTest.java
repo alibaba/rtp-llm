@@ -43,8 +43,12 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -134,11 +138,41 @@ class CostBasedPrefillSelectionMetricTest {
                 Map.of(cacheWorkerKey, HostCacheMatch.local(2)),
                 CacheMatchSource.KVCM, 0L, 100L));
 
-        try (SelectedRole ignored = select()) {
+        try (SelectedRole selected = select()) {
+            commit(selected);
             verify(reporter).reportCacheHitMetrics(
                     RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
             verify(reporter).reportKvcmSelectedMatch(
                     RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L);
+        }
+    }
+
+    @Test
+    void abandonedSelectionsReportNoCacheMetricsAndACommitReportsExactlyOnce() {
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.1:8080@0", HostCacheMatch.local(2)),
+                CacheMatchSource.KVCM, 0L, 100L));
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            select().close();
+        }
+        verify(reporter, never()).reportCacheHitMetrics(
+                any(), anyString(), anyLong(), anyLong(), anyDouble());
+        verify(reporter, never()).reportKvcmSelectedMatch(
+                any(), anyString(), anyLong(), anyLong(), anyLong());
+        verify(reporter, never()).reportRoutingSelectedCacheMatchMetrics(any(), anyLong());
+        verify(reporter, never()).reportRoutingCandidateMaxCacheMatchMetrics(any(), anyLong());
+        verify(reporter, never()).reportCacheAffinityDecision(any(), anyString(), anyString());
+
+        try (SelectedRole selected = select()) {
+            Runnable telemetry = selected.takeCommitTelemetry();
+            telemetry.run();
+            verify(reporter, times(1)).reportCacheHitMetrics(
+                    RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
+            verify(reporter, times(1)).reportRoutingSelectedCacheMatchMetrics(
+                    RoleType.PREFILL, 200L);
+            verify(reporter, times(1)).reportRoutingCandidateMaxCacheMatchMetrics(
+                    RoleType.PREFILL, 200L);
         }
     }
 
@@ -231,6 +265,7 @@ class CostBasedPrefillSelectionMetricTest {
         configureAffinity(600L, 5.0);
 
         try (SelectedRole selected = select()) {
+            commit(selected);
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.2:8080", "CACHE_LEADER");
@@ -285,6 +320,7 @@ class CostBasedPrefillSelectionMetricTest {
         configureAffinity(maxExtraTtftMs, minPrefixHitPercent);
 
         try (SelectedRole selected = select()) {
+            commit(selected);
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.1:8080", reason);
@@ -303,10 +339,8 @@ class CostBasedPrefillSelectionMetricTest {
 
         assertEquals(0, selectedIndex,
                 "equal cache hit must preserve the minimum-TTFT baseline");
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL,
-                "10.1.0." + (selectedIndex + 1) + ":8080",
-                "FASTEST_IS_CACHE_BEST");
+        assertEquals("FASTEST_IS_CACHE_BEST", candidates.affinityDecision());
+        verify(reporter, never()).reportCacheAffinityDecision(any(), anyString(), anyString());
     }
 
     @Test
@@ -320,8 +354,7 @@ class CostBasedPrefillSelectionMetricTest {
                 candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
 
         assertEquals(0, selectedIndex);
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.1.0.1:8080", "NO_CACHE_ANYWHERE");
+        assertEquals("NO_CACHE_ANYWHERE", candidates.affinityDecision());
     }
 
     @Test
@@ -335,8 +368,7 @@ class CostBasedPrefillSelectionMetricTest {
                 candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
 
         assertEquals(1, selectedIndex);
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.1.0.2:8080", "CACHE_LEADER");
+        assertEquals("CACHE_LEADER", candidates.affinityDecision());
     }
 
     @Test
@@ -344,11 +376,13 @@ class CostBasedPrefillSelectionMetricTest {
         configureAffinity(600L, 5.0);
 
         try (SelectedRole selected = select()) {
+            commit(selected);
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
         context.getRequest().setRequestId("20002");
 
         try (SelectedRole selected = select()) {
+            commit(selected);
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
         verify(reporter, times(2))
@@ -384,6 +418,10 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = result.value()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
         }
+    }
+
+    private static void commit(SelectedRole selected) {
+        selected.takeCommitTelemetry().run();
     }
 
     private SelectedRole select() {

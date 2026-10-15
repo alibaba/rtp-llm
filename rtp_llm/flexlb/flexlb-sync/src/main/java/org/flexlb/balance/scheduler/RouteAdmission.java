@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.Logger;
 
 import java.util.List;
 import java.util.Objects;
@@ -56,6 +57,7 @@ public final class RouteAdmission implements AutoCloseable {
         ServerStatus prefillStatus = null;
         long prefillPlacementVersion = 0L;
         long prefillWorkMs = 0L;
+        Runnable commitTelemetry = null;
         DecodeEndpoint decodeEndpoint = null;
         WorkerEndpoint.GenerationPin decodePin = null;
         ServerStatus decodeStatus = null;
@@ -85,6 +87,7 @@ public final class RouteAdmission implements AutoCloseable {
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
+                    commitTelemetry = selected.takeCommitTelemetry();
                     continue;
                 }
                 if (role == RoleType.DECODE) {
@@ -119,7 +122,8 @@ public final class RouteAdmission implements AutoCloseable {
                             prefillPlacementVersion,
                             prefillWorkMs,
                             decodePin,
-                            decodePlacementVersion),
+                            decodePlacementVersion,
+                            commitTelemetry),
                     decodeRequest.bind(decodeStatus, decodeEndpoint, null));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
@@ -360,6 +364,19 @@ public final class RouteAdmission implements AutoCloseable {
         requireProvisional();
         ownership = Ownership.COMMITTED;
         closePins();
+        runCommitTelemetry();
+    }
+
+    private void runCommitTelemetry() {
+        Runnable telemetry = selection.commitTelemetry();
+        if (telemetry == null) {
+            return;
+        }
+        try {
+            telemetry.run();
+        } catch (RuntimeException failure) {
+            Logger.warn("Route selection telemetry failed: request_id={}", requestId, failure);
+        }
     }
 
     private void requireProvisional() {
@@ -385,5 +402,6 @@ public final class RouteAdmission implements AutoCloseable {
 
     private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
                              ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs,
-                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion) { }
+                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
+                             Runnable commitTelemetry) { }
 }

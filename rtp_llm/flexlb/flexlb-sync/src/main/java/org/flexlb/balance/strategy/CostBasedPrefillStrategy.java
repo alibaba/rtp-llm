@@ -156,17 +156,6 @@ public class CostBasedPrefillStrategy {
         cacheAwareService.trackRoutingPrediction(
                 requestId, roleType, group, best.getStatus(),
                 seqLen, bestCacheHit, cacheMatchResult);
-        HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
-        if (cacheMatchResult.source() == CacheMatchSource.KVCM && cacheMatchResult.querySucceeded()) {
-            engineHealthReporter.reportKvcmSelectedMatch(
-                    roleType,
-                    best.getStatus().getMetricIpPort(),
-                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
-                            selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
-                    selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
-                            selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen),
-                    seqLen);
-        }
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                 selectedIndex, balanceContext.selectionReason(roleType), rejections);
@@ -176,14 +165,45 @@ public class CostBasedPrefillStrategy {
                 config,
                 selectedTtft,
                 selectedPrefillMs); }
-        reportCacheHitMetrics(
-                roleType, best.getStatus().getMetricIpPort(), bestCacheHit, seqLen);
-        reportRoutingCacheMatchMetrics(
-                roleType,
+        return PlacementResult.success(selectedRole.onCommit(commitTelemetry(
+                roleType, best, cacheMatchResult, bestCacheHit, seqLen,
                 survivors.routingCacheMatchTokens(selectedIndex),
                 survivors.maximumRoutingCacheMatchTokens,
-                seqLen);
-        return PlacementResult.success(selectedRole);
+                survivors.affinityDecision())));
+    }
+
+    /**
+     * Cache counters for the selected route, captured now and reported once the route commits.
+     */
+    private Runnable commitTelemetry(
+            RoleType roleType,
+            PrefillEndpoint best,
+            CacheMatchResult cacheMatchResult,
+            long bestCacheHit,
+            long seqLen,
+            long selectedRoutingHitTokens,
+            long candidateMaxRoutingHitTokens,
+            String affinityDecision) {
+        String metricIpPort = best.getStatus().getMetricIpPort();
+        HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
+        boolean kvcmQueried = cacheMatchResult.source() == CacheMatchSource.KVCM
+                && cacheMatchResult.querySucceeded();
+        long localMatchTokens = selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                selectedMatch.localMatchBlocks(), cacheMatchResult.blockSize(), seqLen);
+        long globalMatchTokens = selectedMatch == null ? 0 : CacheMatchResult.matchedTokens(
+                selectedMatch.globalMatchBlocks(), cacheMatchResult.blockSize(), seqLen);
+        return () -> {
+            if (kvcmQueried) {
+                engineHealthReporter.reportKvcmSelectedMatch(
+                        roleType, metricIpPort, localMatchTokens, globalMatchTokens, seqLen);
+            }
+            reportCacheHitMetrics(roleType, metricIpPort, bestCacheHit, seqLen);
+            reportRoutingCacheMatchMetrics(
+                    roleType, selectedRoutingHitTokens, candidateMaxRoutingHitTokens, seqLen);
+            if (affinityDecision != null) {
+                reportCacheAffinityDecision(roleType, metricIpPort, affinityDecision);
+            }
+        };
     }
 
     private void recordDecision(
@@ -343,9 +363,7 @@ public class CostBasedPrefillStrategy {
         }
 
         if (selectedIndex >= 0 && affinityReason != null) {
-            reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getStatus().getMetricIpPort(),
-                    affinityReason);
+            survivors.recordAffinityDecision(affinityReason);
             if (Logger.isDebugEnabled()) {
                 Logger.debug(
                         "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "

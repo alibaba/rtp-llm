@@ -21,6 +21,7 @@ final class PrefillCandidateSet {
     boolean hasKnownTtft;
     long maximumCacheHit;
     long maximumRoutingCacheMatchTokens;
+    private String affinityDecision;
 
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
@@ -31,6 +32,7 @@ final class PrefillCandidateSet {
         hasKnownTtft = false;
         maximumCacheHit = 0L;
         maximumRoutingCacheMatchTokens = 0L;
+        affinityDecision = null;
     }
 
     void addCandidate(String address, PrefillEndpoint endpoint,
@@ -55,6 +57,8 @@ final class PrefillCandidateSet {
         size++;
     }
 
+    String affinityDecision() { return affinityDecision; }
+    void recordAffinityDecision(String decision) { affinityDecision = decision; }
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }

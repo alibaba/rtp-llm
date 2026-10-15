@@ -22,6 +22,9 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
+    private static final Runnable NO_TELEMETRY = () -> { };
+
+    private Runnable commitTelemetry = NO_TELEMETRY;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
@@ -151,6 +154,23 @@ public final class SelectedRole implements AutoCloseable {
 
     public long placementVersion() {
         return placementVersion;
+    }
+
+    /**
+     * Attach selection telemetry that runs only once this selection becomes a committed route.
+     */
+    public SelectedRole onCommit(Runnable telemetry) {
+        commitTelemetry = Objects.requireNonNull(telemetry, "telemetry");
+        return this;
+    }
+
+    /**
+     * Move the commit telemetry to the route admission that decides whether it runs.
+     */
+    public Runnable takeCommitTelemetry() {
+        Runnable owned = commitTelemetry;
+        commitTelemetry = NO_TELEMETRY;
+        return owned;
     }
 
     private static long endpointPlacementVersion(

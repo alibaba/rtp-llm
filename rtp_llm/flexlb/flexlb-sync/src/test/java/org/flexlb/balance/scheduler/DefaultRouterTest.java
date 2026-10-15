@@ -232,6 +232,8 @@ class DefaultRouterTest {
         SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
+        Runnable selectionTelemetry = mock(Runnable.class);
+        when(prefill.selection.takeCommitTelemetry()).thenReturn(selectionTelemetry);
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, "8", 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
@@ -250,6 +252,54 @@ class DefaultRouterTest {
         verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
         verify(decode.pin).close();
+        verify(selectionTelemetry, never()).run();
+    }
+
+    @Test
+    void directCommitRunsSelectionTelemetryExactlyOnce() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        BalanceContext context = context(82L);
+        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        SelectionFixture selected = selection(RoleType.PREFILL, 82L, "p", 8001, "g1");
+        Runnable selectionTelemetry = mock(Runnable.class);
+        when(selected.selection.takeCommitTelemetry()).thenReturn(selectionTelemetry);
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(selected.selection));
+        PrefillEndpoint endpoint = (PrefillEndpoint) selected.endpoint;
+        stubRouteCommit(endpoint, new org.flexlb.balance.projection.WorkSnapshot(
+                System.currentTimeMillis(), List.of(), List.of(), 0L));
+        var registration = mock(PrefillState.RouteReservation.class);
+        when(endpoint.reserveUnqueuedRoute(eq(selected.pin), any(), anyLong()))
+                .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
+
+        assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
+
+        verify(selectionTelemetry).run();
+    }
+
+    @Test
+    void failingSelectionTelemetryNeverFailsACommittedRoute() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        BalanceContext context = context(83L);
+        context.getConfig().setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
+        SelectionFixture selected = selection(RoleType.PREFILL, 83L, "p", 8001, "g1");
+        Runnable failingTelemetry = mock(Runnable.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("metrics unavailable"))
+                .when(failingTelemetry).run();
+        when(selected.selection.takeCommitTelemetry()).thenReturn(failingTelemetry);
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(selected.selection));
+        PrefillEndpoint endpoint = (PrefillEndpoint) selected.endpoint;
+        stubRouteCommit(endpoint, new org.flexlb.balance.projection.WorkSnapshot(
+                System.currentTimeMillis(), List.of(), List.of(), 0L));
+        var registration = mock(PrefillState.RouteReservation.class);
+        when(endpoint.reserveUnqueuedRoute(eq(selected.pin), any(), anyLong()))
+                .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
+
+        assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
+        verify(failingTelemetry).run();
     }
 
     @ParameterizedTest
