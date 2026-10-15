@@ -40,18 +40,21 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
     balance_pd_prefill_decode_rank_(
-        autil::EnvUtil::getEnv("RTP_PD_PREFILL_BALANCE_DECODE_RANK", false)) {
+        autil::EnvUtil::getEnv("RTP_PD_PREFILL_BALANCE_DECODE_RANK", false)),
+    fake_stream_poll_ms_(
+        std::min(std::max(autil::EnvUtil::getEnv("RTP_FIFO_FAKE_STREAM_POLL_MS", 10), 1), 100)) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
                      "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
-                     "balance_pd_prefill_decode_rank is [%d]",
+                     "balance_pd_prefill_decode_rank is [%d], fake_stream_poll_ms is [%d]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      max_batch_tokens_without_cache_,
                      cp_force_single_prefill_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_,
-                     balance_pd_prefill_decode_rank_);
+                     balance_pd_prefill_decode_rank_,
+                     fake_stream_poll_ms_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -714,8 +717,26 @@ bool FIFOScheduler::partitionChunkContinuations() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-        || !waiting_group_queue_.empty()) {
+    const bool has_retryable_backlog = !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+                                       || !waiting_group_queue_.empty() || !waiting_streams_.empty();
+    if (need_fill_fake_stream_ && !has_retryable_backlog) {
+        // Pure DP keepalive: this rank has running_streams_ empty and no backlog, so the wait
+        // is pacing back-to-back fake rounds for the EP/DP group rather than polling real work
+        // (new work wakes us via enqueue's notify). RTP_FIFO_FAKE_STREAM_POLL_MS (default 10,
+        // the historical quantum) lets the group's collective rendezvous recover most of the
+        // fake-round sleep instead of inheriting the full quantum.
+        const bool notified =
+            cond_.wait_for(lock, std::chrono::milliseconds(fake_stream_poll_ms_), [this] { return waitPredicate(); });
+        if (!notified && fake_stream_poll_ms_ != 10) {
+            const int64_t wait_count = keepalive_timeout_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (wait_count == 1 || wait_count % 1000 == 0) {
+                RTP_LLM_LOG_INFO("FIFOScheduler dp keepalive: pure-fake timeout waits=%ld poll_ms=%d",
+                                 wait_count,
+                                 fake_stream_poll_ms_);
+            }
+        }
+    } else if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+               || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
