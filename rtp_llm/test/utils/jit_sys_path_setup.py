@@ -412,27 +412,8 @@ def setup_jit_cache(cache_dir=None, packages=None):
     sys.argv[1] = test_binary + suffix
 
 
-def fix_fmha_gen_jit_cache() -> None:
-    """Clear stale cross-job fmha_gen JIT cache entries and verify the header.
-
-    On shared CI workers, two tests scheduled on the same node can share the
-    JIT cache scope; the first test to compile fmha_gen bakes its own
-    runfiles' absolute include paths into build.ninja, and the second test
-    then reuses that entry with paths into a partially-cleaned runfiles
-    tree. Deleting the fmha_gen cache entry forces regeneration with THIS
-    test's own include paths. Also stage the flashInferMetaInfo.h header
-    when the flashinfer_cubin extraction is partial on remote workers
-    (known gap: the 103a trtllm-gen cubin variant ships without it).
-
-    No-op on non-Blackwell workers: the glob only matches 100a/103a cache
-    roots and the header staging only triggers when the cubin entry is
-    missing.
-    """
-    _isolate_jit_scope_per_run()
-
-
 def _isolate_jit_scope_per_run() -> None:
-    """Give this test run its own JIT cache root.
+    """Give this test run its own JIT cache root (set before server spawn).
 
     Parallel tests on one worker share /tmp/rtp-llm/.jit_cache; an entry
     written by one test bakes that test's runfiles absolute paths into
@@ -440,8 +421,10 @@ def _isolate_jit_scope_per_run() -> None:
     entry recompiles against dead include paths (CI runs 79780452/79781607:
     the profiled perf pair died exactly this way while the unprofiled twin
     passed). The cache manager's test-only TEST_JIT_LOCAL_DIR override
-    provides per-run isolation; set it (before the server process spawns
-    and imports flashinfer) so no entry is ever shared across test runs.
+    provides per-run isolation; the manager keys the remote-restore scope
+    identity off the stable default root, so REMOTE_JIT_DIR warm entries
+    still restore under the per-run root. Idempotent: a preset override is
+    respected (callers that preset it keep full control).
     """
     import os
     import tempfile
@@ -452,10 +435,30 @@ def _isolate_jit_scope_per_run() -> None:
         prefix="jit_scope_"
     )
     os.environ["TEST_JIT_LOCAL_DIR"] = str(Path(base) / "jit_cache")
-    logging.info(
+    # WARNING so the activation survives unittest's default root level -
+    # a silent env regression in the reuse job would otherwise be
+    # invisible in its logs (round-8 review).
+    logging.warning(
         "isolated JIT cache root for this test run: %s",
         os.environ["TEST_JIT_LOCAL_DIR"],
     )
+
+
+def fix_fmha_gen_jit_cache() -> None:
+    """Per-run JIT scope isolation + stale-entry eviction + header staging.
+
+    1. _isolate_jit_scope_per_run(): per-run TEST_JIT_LOCAL_DIR (runs
+       unconditionally - NOT behind any import guard).
+    2. Evict stale cross-job fmha_gen entries under the shared root (the
+       pre-isolation mechanism, kept for callers that preset the override
+       or run with the shared root).
+    3. Stage flashInferMetaInfo.h when the flashinfer_cubin extraction is
+       partial on remote workers (known gap: the 103a trtllm-gen cubin
+       variant ships without it). Load-bearing under per-run isolation:
+       isolation forces cold compiles and the compile needs this header -
+       the vendored copy is the deterministic final source.
+    """
+    _isolate_jit_scope_per_run()
     for cache_root in Path("/tmp/rtp-llm/.jit_cache/v2").glob(
         "*/flashinfer/.cache/flashinfer/*/10*a/cached_ops/fmha_gen"
     ):

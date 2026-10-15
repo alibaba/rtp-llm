@@ -161,7 +161,14 @@ def resolve_scope(
     soabi = sysconfig.get_config_var("SOABI") or platform.machine()
     torch_scope = "-".join(map(str, (soabi, libc, accelerator, cpp, *abi)))
     scopes = {"accelerator": accelerator, "torch": torch_scope, "cxx": cpp}
-    selected, keys = [], [f"root-{local_root}", toolkit, accelerator, torch_scope]
+    # Test-only per-run roots (TEST_JIT_LOCAL_DIR) isolate the on-disk cache
+    # but must not fork the scope identity: remote snapshots are keyed off
+    # the stable default root so REMOTE_JIT_DIR restore still matches under
+    # a per-run root (mirrors the DG_JIT_CACHE_DIR guard in
+    # maga_server_manager, which prevents the same fork for preset
+    # component envs; round-8 review).
+    identity_root = local_root if local_root == LOCAL_JIT_ROOT else LOCAL_JIT_ROOT
+    selected, keys = [], [f"root-{identity_root}", toolkit, accelerator, torch_scope]
     flags = [f"{k}={v}" for k in COMPILE_FLAG_ENVS if (v := os.environ.get(k))]
     if flags:  # toolchain overrides change codegen: they belong in the key
         keys.append("flags-" + sha256("\0".join(flags).encode()).hexdigest()[:12])
