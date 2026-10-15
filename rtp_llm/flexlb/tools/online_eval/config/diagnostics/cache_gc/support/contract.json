@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "mock_patch_base": "441114244d",
+  "master_diagnostic_patch_base": "1141793e836cfbe0881ac2ae0dc78b347cb4dbc2",
+  "mock_patch_order": [
+    "mock-runtime.patch",
+    "mock-fixture-same-version.patch"
+  ],
+  "mock_patch_workdir": {
+    "mock-runtime.patch": ".",
+    "mock-fixture-same-version.patch": "rtp_llm/flexlb"
+  },
+  "master_patch_workdir": ".",
+  "scope": "Synthetic cache-response adapter; independent of inference KV capacity. Do not apply these patches over a newer fixture without reviewing differences.",
+  "required_observation": [
+    "poll health generation/status_age_ms/reported_alive",
+    "process_allocated_bytes",
+    "terminal cache_fingerprint"
+  ],
+  "runtime": "Java 21, Linux cgroup v2 and Docker; JARs are explicit inputs. Container inputs must be under container-readonly-root or the output parent."
+}

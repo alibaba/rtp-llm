@@ -1,0 +1,154 @@
+--- a/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/CacheSyncFixture.java
++++ b/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/CacheSyncFixture.java
+@@ -7,10 +7,25 @@
+ final class CacheSyncFixture {
+     private final int worker, workers, unique, shared;
+     private long offset, version = 1, calls, entries, bytes, changedResponses, changedKeys;
++    private long fullResponses, unchangedResponses, sum, xor, churnStart, appliedEpoch;
++    private final boolean omitUnchanged;
++    private final long intervalNanos;
++    private final java.util.function.LongSupplier clock;
+     private int delta, changeEvery;
+     private EngineRpcService.CacheStatusPB payload;
+ 
+     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion) {
++        this(worker, workers, unique, shared, initialVersion,
++                Boolean.getBoolean("flexlb.mock.cache.omit-unchanged"),
++                Long.getLong("flexlb.mock.cache.churn-interval-ms", 0L) * 1_000_000L, System::nanoTime);
++    }
++
++    CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion,
++            boolean omitUnchanged, long intervalNanos, java.util.function.LongSupplier clock) {
++        this.omitUnchanged = omitUnchanged;
++        this.intervalNanos = intervalNanos;
++        this.clock = clock;
++        if (intervalNanos < 0) throw new IllegalArgumentException("negative churn interval");
+         if (initialVersion <= 0 || workers < 3 || workers > 4096 || worker < 0 || worker >= workers || unique < 1
+                 || shared < 0 || (long) unique + 2L * shared > 1_000_000) {
+             throw new IllegalArgumentException("invalid ring cache fixture geometry");
+@@ -29,12 +44,17 @@
+ 
+     private void rebuild() {
+         var builder = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version);
++        sum = xor = 0;
+         // Disjoint signed-int64 namespaces; each adjacent pair owns one shared segment.
+-        for (int i = 0; i < unique; i++)
+-            builder.putCacheKeys(hash(((long) worker << 40) + offset + i), true);
++        for (int i = 0; i < unique; i++) {
++            long key = hash(((long) worker << 40) + offset + i);
++            builder.putCacheKeys(key, true); sum += key; xor ^= key;
++        }
+         for (int segment : new int[]{worker, (worker + workers - 1) % workers})
+-            for (int i = 0; i < shared; i++)
+-                builder.putCacheKeys(hash(Long.MIN_VALUE + ((long) segment << 40) + i), true);
++            for (int i = 0; i < shared; i++) {
++                long key = hash(Long.MIN_VALUE + ((long) segment << 40) + i);
++                builder.putCacheKeys(key, true); sum += key; xor ^= key;
++            }
+         payload = builder.build();
+         // Once per changed version, never walk the protobuf map merely to observe a response.
+         payload.getSerializedSize();
+@@ -44,26 +64,45 @@
+         if (delta < 0 || delta > unique || every < 0 || (delta == 0) != (every == 0))
+             throw new IllegalArgumentException("churn requires bounded delta and positive response cadence");
+         this.delta = delta; this.changeEvery = every;
++        churnStart = clock.getAsLong(); appliedEpoch = 0;
+     }
+ 
+-    synchronized EngineRpcService.CacheStatusPB response() {
++    synchronized EngineRpcService.CacheStatusPB response() { return response(-1L); }
++
++    synchronized EngineRpcService.CacheStatusPB response(long latestVersion) {
+         calls++;
+-        if (changeEvery > 0 && calls % changeEvery == 0) {
+-            if (offset + delta + unique >= (1L << 40))
++        long epoch = intervalNanos > 0 ? Math.max(0L, clock.getAsLong() - churnStart) / intervalNanos : 0L;
++        long steps = changeEvery == 0 ? 0L : intervalNanos > 0 ? epoch - appliedEpoch
++                : calls % changeEvery == 0 ? 1L : 0L;
++        if (steps > 0) {
++            long moved = Math.multiplyExact((long) delta, steps);
++            if (offset + moved + unique >= (1L << 40))
+                 throw new IllegalStateException("fixture key namespace exhausted");
+-            offset += delta; version++; changedResponses++; changedKeys += delta; rebuild();
++            offset += moved; version += steps; changedResponses++; changedKeys += moved;
++            appliedEpoch = epoch; rebuild();
+         }
+-        entries += payload.getCacheKeysCount();
+-        bytes += payload.getSerializedSize();
+-        return payload;
++        EngineRpcService.CacheStatusPB result = payload;
++        if (omitUnchanged && latestVersion >= 0 && latestVersion == version) {
++            result = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
++            unchangedResponses++;
++        } else {
++            fullResponses++;
++        }
++        entries += result.getCacheKeysCount();
++        bytes += result.getSerializedSize();
++        return result;
+     }
+ 
+     synchronized long version() { return version; }
+ 
+     synchronized Map<String, Object> snapshot() {
+-        return Map.of("keys", payload.getCacheKeysCount(), "version", version,
+-                "responses", calls, "entries", entries, "key_payload_bytes", bytes,
+-                "changed_responses", changedResponses,
+-                "added_keys", changedKeys, "removed_keys", changedKeys);
++        Map<String, Object> result = new java.util.LinkedHashMap<>();
++        result.put("keys", payload.getCacheKeysCount()); result.put("version", version);
++        result.put("responses", calls); result.put("entries", entries); result.put("key_payload_bytes", bytes);
++        result.put("changed_responses", changedResponses); result.put("added_keys", changedKeys);
++        result.put("removed_keys", changedKeys); result.put("full_responses", fullResponses);
++        result.put("unchanged_responses", unchangedResponses);
++        result.put("sum", Long.toUnsignedString(sum)); result.put("xor", Long.toUnsignedString(xor));
++        return result;
+     }
+ }
+--- a/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java
++++ b/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java
+@@ -5276,7 +5276,7 @@
+             CacheSyncFixture fixture = cacheSyncFixture;
+             if (fixture != null) status.setVersion(fixture.version());
+             if (request.getNeedCacheKeys() && fixture != null) {
+-                status.mergeFrom(fixture.response());
++                status.mergeFrom(fixture.response(request.getLatestCacheVersion()));
+             } else if (request.getNeedCacheKeys()) {
+                 for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
+                 if (memoryCache != null)
+--- a/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/CacheSyncFixtureTest.java
++++ b/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/CacheSyncFixtureTest.java
+@@ -50,4 +50,33 @@
+         assertThrows(IllegalArgumentException.class, () -> fixture.churn(101, 1));
+         assertThrows(IllegalArgumentException.class, () -> fixture.churn(10, 0));
+     }
++    @Test
++    void unchangedResponseIsLightweightButColdAndDifferentVersionRemainFull() {
++        var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, true, 0, () -> 0L);
++        assertEquals(306, fixture.response(-1).getCacheKeysCount());
++        assertEquals(0, fixture.response(2).getCacheKeysCount());
++        assertEquals(2, fixture.response(2).getVersion());
++        assertEquals(306, fixture.response(3).getCacheKeysCount());
++        assertEquals(2L, fixture.snapshot().get("unchanged_responses"));
++    }
++
++    @Test
++    void clockChurnIsIndependentFromPollingFrequencyAndCanBeFrozen() {
++        var now = new java.util.concurrent.atomic.AtomicLong();
++        var first = new CacheSyncFixture(0, 6, 176, 65, 2, false, 1000, now::get);
++        var second = new CacheSyncFixture(0, 6, 176, 65, 2, true, 1000, now::get);
++        first.churn(17, 2); second.churn(17, 2);
++        for (int i = 0; i < 40; i++) second.response(2);
++        now.set(1001);
++        var full = first.response(2);
++        var changed = second.response(2);
++        assertEquals(full.getCacheKeysMap(), changed.getCacheKeysMap());
++        assertEquals(17L, first.snapshot().get("added_keys"));
++        assertEquals(17L, second.snapshot().get("added_keys"));
++        second.churn(0, 0);
++        now.set(10000);
++        second.response(-1);
++        assertEquals(17L, second.snapshot().get("added_keys"));
++    }
++
+ }

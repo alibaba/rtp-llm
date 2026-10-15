@@ -1,0 +1,60 @@
+diff --git a/rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java b/rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java
+index b87b35972e..7f276992f1 100644
+--- a/rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java
++++ b/rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java
+@@ -7075,7 +7075,7 @@ public final class JavaMockEngineCluster {
+         synchronized MockRpcExecutors rpcExecutors(EventLoopGroup transport) {
+             if (rpcExecutors == null || rpcTransport.isTerminated()) {
+                 rpcExecutors = new MockRpcExecutors(eventLoopThreads,
+-                        Math.max(1024, 4 * (nPrefill + nDecode)));
++                        rpcQueueCapacity > 0 ? rpcQueueCapacity : Math.max(1024, 4 * (nPrefill + nDecode)));
+                 rpcTransport = transport;
+                 MockRpcExecutors owned = rpcExecutors;
+                 transport.terminationFuture().addListener(ignored -> owned.close());
+@@ -7092,6 +7092,8 @@ public final class JavaMockEngineCluster {
+         int nDecode = 4;
+         int baseGrpcPort = 61_000;
+         int eventLoopThreads = 32;
++        // Aggregate RPC admission queue; zero retains topology-derived capacity.
++        int rpcQueueCapacity = 0;
+         int completionThreads = 8;
+         /**
+          * Block-count pool overrides (capacity model v2): 0 = derive the pool
+@@ -7178,6 +7180,7 @@ public final class JavaMockEngineCluster {
+                     case "--n-decode" -> config.nDecode = Integer.parseInt(value);
+                     case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
+                     case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
++                    case "--rpc-queue-capacity" -> config.rpcQueueCapacity = Integer.parseInt(value);
+                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
+                     case "--auto-fetch" -> config.autoFetch = parseBooleanFlag(value, key);
+                     case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
+@@ -7251,6 +7254,9 @@ public final class JavaMockEngineCluster {
+             if (config.eventLoopThreads < 1 || config.completionThreads < 1) {
+                 throw new IllegalArgumentException("thread counts must be positive");
+             }
++            if (config.rpcQueueCapacity < 0) {
++                throw new IllegalArgumentException("--rpc-queue-capacity must be >= 0");
++            }
+             if (config.fetchAttachTimeoutMs < 1) {
+                 throw new IllegalArgumentException("--fetch-attach-timeout-ms must be >= 1");
+             }
+diff --git a/rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ClusterConfigParamTest.java b/rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ClusterConfigParamTest.java
+index a990066319..1d1b98ced6 100644
+--- a/rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ClusterConfigParamTest.java
++++ b/rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/ClusterConfigParamTest.java
+@@ -39,6 +39,15 @@ class ClusterConfigParamTest {
+         return args;
+     }
+ 
++    @Test
++    void aggregateRpcQueueCapacityIsExplicitAndValidated() {
++        assertEquals(0, JavaMockEngineCluster.Config.parse(baseArgs()).rpcQueueCapacity);
++        assertEquals(32768, JavaMockEngineCluster.Config.parse(
++                with(baseArgs(), "--rpc-queue-capacity", "32768")).rpcQueueCapacity);
++        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
++                with(baseArgs(), "--rpc-queue-capacity", "-1")));
++    }
++
+     @Test
+     void fetchIsRequiredByDefaultAndShortcutIsExplicit() {
+         var strict = JavaMockEngineCluster.Config.parse(baseArgs());
