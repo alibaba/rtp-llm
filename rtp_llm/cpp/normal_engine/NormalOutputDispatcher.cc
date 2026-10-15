@@ -791,6 +791,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
                                  -1,
                                  logprobs_offset,
                                  context_kv_all_rank_gpu_ready_at};
+    update_info.kv_ready_token_count = stream->seqLength();
     stream->update(update_info);
 }
 

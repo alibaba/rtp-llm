@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from typing_extensions import override
 
@@ -88,11 +88,16 @@ class LanguageCppEngine(BaseEngine):
             )
 
     @override
-    def _stop(self) -> None:
+    def _stop(
+        self, before_rpc_shutdown: Optional[Callable[[], None]] = None
+    ) -> None:
         # Stop the C++ request entry first so no more embedding calls are issued,
         # then close the local MMProcessEngine (stops its MMScheduler thread and
         # preprocessing executor).
-        self.rtp_llm_op_.stop()
+        if before_rpc_shutdown is None:
+            self.rtp_llm_op_.stop()
+        else:
+            self.rtp_llm_op_.stop(before_rpc_shutdown)
         if self.mm_process_engine is not None:
             self.mm_process_engine.stop()
             self.mm_process_engine = None

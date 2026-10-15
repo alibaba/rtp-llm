@@ -165,6 +165,19 @@ public:
         return completion_wall_times_us_;
     }
 
+    bool rpcSuccess() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!already_done_.load(std::memory_order_acquire) || !fatal_error_.empty()) {
+            return false;
+        }
+        for (const auto& context : worker_contexts_) {
+            if (!context || !context->status.ok()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
         bool                      report_connect_failure = false;
@@ -249,6 +262,13 @@ public:
                             error                = ErrorInfo(transRPCErrorCode(response.error_code()),
                                               location + ": " + response.error_message());
                         }
+                    }
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteResponsePB>) {
+                    if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
+                        error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
+                                          "StartWrite peer=" + ctx->server_addr + " key=" + ctx->request.unique_key()
+                                              + ": " + ctx->response.error_message());
                     }
                 }
                 if (error_info_.ok() && error.hasError()) {

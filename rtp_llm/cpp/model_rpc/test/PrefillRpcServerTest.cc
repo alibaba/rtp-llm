@@ -969,4 +969,14 @@ TEST(PrefillRpcServerTest, ExpiredPreparedInputIsReleasedBeforeAdmission) {
     EXPECT_TRUE(server.prepared_inputs_.empty());
 }
 
+TEST(PrefillRpcServerTest, StartWriteRejectsMissingEngine) {
+    PrefillRpcServer             server;
+    grpc::ServerContext              context;
+    P2PConnectorStartWriteRequestPB  request;
+    P2PConnectorStartWriteResponsePB response;
+    const auto                       status = server.StartWrite(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "cache manager is unavailable");
+}
+
 }  // namespace rtp_llm

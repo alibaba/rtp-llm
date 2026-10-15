@@ -46,6 +46,15 @@ public:
     ::grpc::Status
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
+public:
+    grpc::Status StartWrite(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteRequestPB* request,
+                            P2PConnectorStartWriteResponsePB*      response);
+
+    grpc::Status CancelWrite(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteRequestPB* request,
+                             P2PConnectorStartWriteResponsePB*       response);
+
 private:
     struct PreparedInputEntry {
         int64_t                        request_id;

@@ -7,6 +7,14 @@ namespace rtp_llm {
 
 class P2PKeyUtil {
 public:
+    static std::string makeWriteBackRouteLayerKey(const std::string& base_key,
+                                                 int layer_id,
+                                                 const std::string& cache_tag,
+                                                 int route_id,
+                                                 uint64_t plan_digest) {
+        return makeRouteLayerKey(base_key + "_wb", layer_id, cache_tag, route_id, plan_digest);
+    }
+
     /// @brief 传输 key：由编排层签发的 route_id 命名，而非两侧各自推导的 partition_id。
     ///
     /// 这是「双端约定」被彻底消灭的落点：send_req.unique_key 与 recv_req.unique_key 必须逐字节

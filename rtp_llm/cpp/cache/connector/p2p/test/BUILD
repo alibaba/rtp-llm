@@ -89,12 +89,16 @@ cc_test(
         "KVCacheManagerP2PReadTest.cc",
         "P2PQueueSaturationTest.cc",
         "P2PConnectorSchedulerTest.cc",
+        "P2PConnectorWriteSchedulerTest.cc",
         "main.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache/test:block_tree_cache_allocator_test_helper",
         ":mock_generate_stream",
         ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache:cache",
@@ -111,11 +115,14 @@ cc_test(
     name = "p2p_connector_worker_test",
     srcs = [
         "P2PConnectorWorkerTest.cc",
+        "P2PConnectorWriteWorkerTest.cc",
         "main.cc",
     ],
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
@@ -123,6 +130,23 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "decode_writeback_integration_test",
+    srcs = ["DecodeWritebackIntegrationTest.cc", "main.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/cpp/cache/test:block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
+    ] + device_impl_target(),
+    copts = test_copts,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
