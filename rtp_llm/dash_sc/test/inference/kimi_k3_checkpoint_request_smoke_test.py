@@ -20,6 +20,7 @@ import torch
 from PIL import Image
 from transformers import AutoTokenizer
 
+from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
@@ -184,6 +185,7 @@ class KimiK3DashScCheckpointSmokeTest(unittest.IsolatedAsyncioTestCase):
         engine_config = SimpleNamespace(
             load_config=SimpleNamespace(load_method=LoadMethod.AUTO),
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
+            kv_cache_config=KVCacheConfig(),
         )
         engine = MultimodalMixinFactory.create_multimodal_process_engine(
             model_config, engine_config, vit_config, device="cuda:0"
