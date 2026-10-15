@@ -2169,20 +2169,31 @@ class AttentionV41FP8(AttentionFP8):
             replay_starts = cp_swa_replay_starts(common.cp_ctx)
             if replay_starts is not None:
                 sizes = [min(n, self.window_size) for n in lengths_host]
-                return list(qkv.kv_full.split(sizes)), [
+                return prefill_kv_workspace.split_swa_rows(qkv.kv_full, sizes), [
                     p + s for p, s in zip(prefixes, replay_starts)
                 ]
             # Non-compacted paths recompute the fresh suffix. They must never
             # consume decoder state from a previous request's approximate cache.
             # Native prefix matching leaves at least one complete SWA window.
-            return list(qkv.kv_full.split(lengths_host)), prefixes
+            return (
+                prefill_kv_workspace.split_swa_rows(qkv.kv_full, lengths_host),
+                prefixes,
+            )
         if not common.any_cont:
-            return list(qkv.kv_full.split(lengths_host)), [0] * len(lengths_host)
+            return prefill_kv_workspace.split_swa_rows(qkv.kv_full, lengths_host), [
+                0
+            ] * len(lengths_host)
         buf = self._swa_prefill_concat(qkv, common, fuse_cache_write=fuse_cache_write)
         prefixes_host = self._host_prefill_prefixes(common)
         tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
         row_stride, width_stride = buf.stride()[1:]
         base_offset, batch_stride = buf.storage_offset(), buf.stride(0)
+        if buf.is_contiguous():
+            return prefill_kv_workspace.split_swa_rows(
+                buf.view(-1, buf.shape[2]),
+                [tails[b] + int(lengths_host[b]) for b in range(common.batch_size)],
+                row_starts=[b * buf.shape[1] for b in range(common.batch_size)],
+            ), [int(p) - t for p, t in zip(prefixes_host, tails)]
         return [
             buf.as_strided(
                 (tails[b] + int(lengths_host[b]), buf.shape[2]),
@@ -2245,10 +2256,15 @@ class AttentionV41FP8(AttentionFP8):
             return cached
         offsets, global_sizes = [], []
         offset = 0
-        for (g, _), sw in zip(globals_by_req, swa):
+        swa_sizes = (
+            swa.sizes
+            if isinstance(swa, prefill_kv_workspace.SwaRows)
+            else tuple(sw.shape[0] for sw in swa)
+        )
+        for (g, _), swa_rows in zip(globals_by_req, swa_sizes):
             offsets.append(offset)
             global_sizes.append(g.shape[0])
-            offset += g.shape[0] + sw.shape[0]
+            offset += g.shape[0] + swa_rows
         if len(offsets) == 1:
             # Single-request prefill: ``req_ids`` is all zeros, so indexing a
             # one-element tensor by it is a pure broadcast. Use the host scalars
@@ -2275,21 +2291,18 @@ class AttentionV41FP8(AttentionFP8):
                 from ._v41_prefill_metadata import try_chunk_metadata
 
                 compact_replay = cp_swa_replay_starts(common.cp_ctx) is not None
-                meta = (
-                    None
-                    if compact_replay
-                    else try_chunk_metadata(
-                        common.prefix_lengths,
-                        (
-                            common.cp_ctx.input_lengths_global
-                            if common.cp_on
-                            else common.input_lengths
-                        ),
-                        req_ids,
-                        self.compress_ratio,
-                        self.window_size,
-                        self.swa_bounded_replay,
-                    )
+                meta = try_chunk_metadata(
+                    common.prefix_lengths,
+                    (
+                        common.cp_ctx.input_lengths_global
+                        if common.cp_on
+                        else common.input_lengths
+                    ),
+                    req_ids,
+                    self.compress_ratio,
+                    self.window_size,
+                    self.swa_bounded_replay,
+                    compact_replay=compact_replay,
                 )
                 if meta is not None:
                     shared["prefill_chunk_meta"] = meta

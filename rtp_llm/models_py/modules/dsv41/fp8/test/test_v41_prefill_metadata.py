@@ -16,6 +16,48 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillMetadataTest(unittest.TestCase):
+    def test_compact_replay_ragged_lengths_prefixes_and_graph_updates(self):
+        # CED keeps the final window from each request, including short requests.
+        for dtype in (torch.int32, torch.int64):
+            p = torch.tensor([0, 31, 16387, 31744, 511], device="cuda", dtype=dtype)
+            n = torch.tensor([1, 127, 128, 1024, 259], device="cuda", dtype=dtype)
+            req = torch.tensor([4, 2, 0, 3, 1, -1, -5], device="cuda")
+            for ratio in (1, 2):
+                for replay in (False, True):
+
+                    def reference():
+                        prefixes, lengths = p.long(), n.long()
+                        swa_lengths = lengths.clamp(max=128)
+                        tails = (
+                            torch.zeros_like(prefixes)
+                            if replay
+                            else prefixes.clamp(max=127)
+                        )
+                        sizes = (prefixes + lengths) // ratio
+                        chunks = sizes + swa_lengths + tails
+                        return (
+                            (chunks.cumsum(0) - chunks)[req, None],
+                            sizes[req, None],
+                            (prefixes + lengths - swa_lengths)[req, None],
+                        )
+
+                    def actual():
+                        return fused.try_chunk_metadata(
+                            p, n, req, ratio, 128, replay, compact_replay=True
+                        )
+
+                    for got, expected in zip(actual(), reference()):
+                        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = actual()
+                    p.add_(17)
+                    n.add_(3)
+                    req.copy_(req.flip(0))
+                    graph.replay()
+                    for got, expected in zip(captured, reference()):
+                        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
     def test_chunk_metadata_preserves_long_arithmetic(self):
         for batch in (2, 32, 128):
             for dtype in (torch.int32, torch.int64):

@@ -59,6 +59,10 @@ def _metadata(m=33, *, row_major=False):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def setUp(self):
+        op._device_geometry.cache_clear()
+        self.addCleanup(op._device_geometry.cache_clear)
+
     def test_inverse_quant_buffers_elide_full_slices_and_cache_explicit_devices(self):
         inverse = _load(
             "v41_inverse_quant_contract",
@@ -504,14 +508,34 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     123,
                 )
 
-    def test_unverified_architecture_and_sms_fall_back(self):
-        for major, minor, sms in (
-            (9, 0, 132),
-            (10, 3, 144),
-            (10, 3, 152),
-            (10, 0, 151),
-            (10, 0, 148),
+    def test_blackwell_family_uses_actual_even_sms_and_caches_properties(self):
+        for index, (minor, sms) in enumerate(
+            ((0, 152), (3, 148), (3, 144), (0, 148), (1, 120))
         ):
+            with self.subTest(minor=minor, sms=sms), mock.patch.object(
+                torch.cuda,
+                "get_device_properties",
+                return_value=SimpleNamespace(
+                    major=10, minor=minor, multi_processor_count=sms
+                ),
+            ) as query:
+                device = torch.device("cuda", index)
+                self.assertTrue(op._device_supported(device))
+                self.assertTrue(op._device_supported(device))
+                self.assertEqual(op._device_geometry(index), (10, minor, sms))
+                query.assert_called_once_with(index)
+        with mock.patch.object(
+            torch.cuda, "current_device", return_value=0
+        ), mock.patch.object(
+            torch.cuda,
+            "get_device_properties",
+            side_effect=AssertionError("cached device"),
+        ):
+            self.assertTrue(op._device_supported(torch.device("cuda")))
+
+    def test_unsupported_family_or_noncluster_grid_falls_back(self):
+        for major, minor, sms in ((9, 0, 132), (12, 0, 148), (10, 0, 151), (10, 3, 0)):
+            op._device_geometry.cache_clear()
             with self.subTest(arch=(major, minor, sms)), mock.patch.object(
                 torch.cuda,
                 "get_device_properties",
@@ -520,6 +544,40 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(op.is_supported(*_metadata()))
+
+    def test_all_blackwell_devices_warm_both_schedules_and_prefill_rows(self):
+        _, weight = _metadata()
+        lib = SimpleNamespace(v41_wo_a_is_current=mock.Mock(return_value=1))
+        for minor, sms in ((0, 152), (3, 148), (1, 120)):
+            op._device_geometry.cache_clear()
+            with self.subTest(minor=minor, sms=sms), mock.patch.dict(
+                op._READY, {}, clear=True
+            ), mock.patch.object(torch.cuda, "device"), mock.patch.object(
+                torch.cuda,
+                "get_device_properties",
+                return_value=SimpleNamespace(
+                    major=10, minor=minor, multi_processor_count=sms
+                ),
+            ), mock.patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=False
+            ), mock.patch.object(
+                op, "_load", return_value=(lib, object())
+            ), mock.patch.object(
+                torch, "zeros"
+            ) as zeros, mock.patch.object(
+                torch, "full"
+            ), mock.patch.object(
+                torch.cuda, "current_stream"
+            ) as stream, mock.patch.object(
+                op, "try_grouped_quant"
+            ) as launch:
+                self.assertTrue(op.warmup(*weight))
+                self.assertEqual(
+                    [call.args[0][1] for call in zeros.call_args_list],
+                    [128, 256, 512, 4096, 12288],
+                )
+                self.assertEqual(launch.call_count, 5)
+                stream.return_value.synchronize.assert_called_once()
 
     def test_actual_attention_callsite_consumes_pair_and_retains_fallback(self):
         path = _ROOT / "attention_v41.py"
@@ -699,7 +757,9 @@ class WoAQuantCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not op._device_supported(torch.device("cuda", torch.cuda.current_device())):
-            raise unittest.SkipTest("Qualified SM100/SM103 device required")
+            raise unittest.SkipTest(
+                "Blackwell SM10x with two-CTA cluster grid required"
+            )
         import deep_gemm
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 

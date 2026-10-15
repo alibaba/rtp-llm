@@ -1,4 +1,4 @@
-"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100/SM103.
+"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on Blackwell SM10x.
 
 No compilation, CUDA initialization, or vendor-library import occurs at import.
 Unsupported or unprepared calls return None so the caller retains its BF16 path.
@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -40,15 +41,20 @@ _VENDOR_HASHES = {
 }
 
 
+@lru_cache(maxsize=16)
+def _device_geometry(index):
+    prop = torch.cuda.get_device_properties(index)
+    return prop.major, prop.minor, prop.multi_processor_count
+
+
 def _device_supported(device):
     if device.type != "cuda":
         return False
-    prop = torch.cuda.get_device_properties(device)
-    # The unchanged schedules are qualified only on these complete devices.
-    return (prop.major, prop.minor, prop.multi_processor_count) in (
-        (10, 0, 152),
-        (10, 3, 148),
-    )
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    major, _, sms = _device_geometry(index)
+    # sm_100f covers the Blackwell family; the persistent grid is compiled for
+    # the actual SM count. The unchanged two-CTA cluster needs an even grid.
+    return major == 10 and sms >= 2 and sms % 2 == 0
 
 
 def _weight_supported(weight, scale):
@@ -215,7 +221,7 @@ def _build_library(sms, dependencies):
 
 
 def _load(device):
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    sms = _device_geometry(device.index)[2]
     if sms not in _LIBRARIES:
         dependencies = _dependencies()
         if dependencies is None:
@@ -320,12 +326,8 @@ def warmup(weight, scale):
             return False
         _READY[device.index] = entry
         try:
-            prop = torch.cuda.get_device_properties(device)
-            rows = (
-                (128, 256, 512, 4096, 12288)
-                if (prop.major, prop.minor, prop.multi_processor_count) == (10, 3, 148)
-                else (128, 256)
-            )
+            major, minor, sms = _device_geometry(device.index)
+            rows = (128, 256, 512, 4096, 12288)
             for m in rows:
                 q = torch.zeros(
                     (8, m, 4096), dtype=torch.float8_e4m3fn, device=device
@@ -340,9 +342,9 @@ def warmup(weight, scale):
             logging.info(
                 "[DSV41 WoAQuant] device=%s SM=%d%d SMS=%d M=%s ready=True",
                 device,
-                prop.major,
-                prop.minor,
-                prop.multi_processor_count,
+                major,
+                minor,
+                sms,
                 rows,
             )
         except BaseException:
