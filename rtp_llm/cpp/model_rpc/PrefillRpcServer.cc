@@ -260,7 +260,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
-                                                  grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+                                                  grpc::ServerWriter<GenerateOutputsPB>* response_writer) try {
     const bool pd_separation = checkPDSupport(*request).supported;
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
@@ -380,6 +380,22 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     }
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
+} catch (const std::invalid_argument& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    const auto error_info =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context,
@@ -629,22 +645,6 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                             request->unique_key().c_str());
     }
     return grpc::Status::OK;
-} catch (const std::invalid_argument& e) {
-    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
-    const auto error_info =
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
-    return serializeErrorMsg(request_key, RequestInfo(), error_info);
-} catch (const std::exception& e) {
-    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(
-        request_key,
-        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
-} catch (...) {
-    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(
-        request_key,
-        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 grpc::Status
