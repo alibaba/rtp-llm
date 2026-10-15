@@ -41,37 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/**
- * Decode KV allocation semantics (production-aligned 20260903, Zola C++
- * forensics) — the four gaps closed against the production behavior:
- *
- * <ol>
- *   <li><b>D-side ALLOCATE retry window</b> (DecodeRpcServer.cc:1190-1217
- *       EXECUTE_WITH_RETRY: {@code decode_retry_times=100} /
- *       {@code decode_retry_interval_ms=1} / {@code decode_retry_timeout_ms=100}):
- *       a failed reservation retries a FRESH acquire inside the window —
- *       another request's release flips a RETRYABLE verdict mid-window — and
- *       only the window-exhausted verdict terminates. The loop runs
- *       synchronously on the caller's enqueue thread (mock has no real gRPC
- *       async) and never holds the D-side cache monitor across the sleep.</li>
- *   <li><b>PERMANENT vs RETRYABLE classification</b>
- *       (KVCacheAllocator.cc:100-110): {@code required + reserve > physical
- *       total} = PERMANENT (retrying is pointless — production still spins it
- *       to the timeout; counted in {@code lack_mem_rejects}); pool total
- *       sufficient but temporarily short = RETRYABLE (counted in
- *       {@code kv_admission_fails}). Both families retry identically.</li>
- *   <li><b>reserve_step constant front-load window</b> (speculative
- *       {@code reserve_step_ = gen_num_per_circle + 1}, non-speculative = 0):
- *       decode demand prices {@code ceil((seq_len + reserve_step)/spb)} —
- *       initial admission front-loads the window, growth CONSUMES it
- *       (never re-appends); 0 keeps the exact fit bit-identical.</li>
- *   <li><b>Master-surface 8211</b> (the P engine's closeGrpcStream rewrite of
- *       a D-side RESOURCE_EXHAUSTED into DECODE_MALLOC_FAILED): decode-side
- *       reservation rejections ack 8211 with the raw 602 in the message
- *       text; prefill-pool rejections keep 602 (the two pools surface
- *       different codes, exactly like production).</li>
- * </ol>
- */
+/** Decode capacity and wire errors. Real references: DecodeRpcServer::allocateResource,
+ * CoordinatorCacheManager and PrefillRpcServer::parseDownstreamError. */
 class DecodeKvAllocationSemanticsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -144,7 +115,7 @@ class DecodeKvAllocationSemanticsTest {
 
         // Widen the window for CI-load headroom (production 100/1/100 is
         // exercised by the exhaustion test below); the release lands at 50ms.
-        decode.setDecodeAllocateRetryPolicy(500, 2, 2000);
+
         Thread releaser = new Thread(() -> {
             try {
                 Thread.sleep(50);
@@ -180,106 +151,29 @@ class DecodeKvAllocationSemanticsTest {
         assertFalse(decode.isLeakDetected(), "no leak on D");
     }
 
-    /**
-     * A window-exhausted RETRYABLE failure terminates: A pins 9 blocks for
-     * the whole (default 100/1/100) window, B's fresh acquires keep failing
-     * until the timeout, and the reject surfaces as the master-facing 8211
-     * with the raw 602 in the message text — the RETRYABLE family counting
-     * on the D engine's kv_admission_fails (lack_mem_rejects stays 0 on BOTH
-     * engines: the P pool did not reject, and 9 + reserve fits the physical
-     * total).
-     */
     @Test
-    void retryWindowExhaustionTerminatesWithMasterSurface8211() throws Exception {
-        MockPerformanceModel model = performanceModel(tempDir, "5000", 1.0, 1.0);
-        JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
-        JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
-        int decodePort = decode.getGrpcPort();
-
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 9 * SPB, decodePort, 1))))
-                .getSuccessesCount(),
-                "A's reservation must succeed outright");
-
-        long startNanos = System.nanoTime();
-        EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(2, slot(0, inputWithDecode(101L, 9 * SPB, decodePort, 1))));
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-
-        assertEquals(1, ack.getErrorsCount(), "B must be rejected after the window");
-        assertEquals(0, ack.getSuccessesCount(), "a rejected request is never admitted");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
-                ack.getErrors(0).getErrorInfo().getErrorCode(),
-                "the decode-side reject acks the master-surface 8211");
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
-                "the raw 602 travels in the message text: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage()
-                        .contains("ALLOCATE retry window"),
-                "the message must name the exhausted window: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(elapsedMs >= 90,
-                "the default 100ms window must actually be spun, took " + elapsedMs + "ms");
-
-        Map<String, Map<Integer, Long>> metrics = perEngineMetrics();
-        assertEquals(1L, metrics.get("mock_engine_kv_admission_fails_total")
-                        .getOrDefault(decodePort, -1L),
-                "the RETRYABLE exhaustion counts on the D engine");
-        assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
-                        .getOrDefault(decodePort, -1L),
-                "9 + reserve fits the physical total — NOT PERMANENT");
-        assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
-                        .getOrDefault(prefill.getGrpcPort(), -1L),
-                "the P pool did not reject (100-block pool, 9-block demand)");
-        assertEquals(9L, heldBlocks(decodePort),
-                "A's pin survives the whole episode");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+    void temporaryCapacityWaitUsesRequestDeadlineWithoutCountingMallocFailure() throws Exception {
+        var model = performanceModel(tempDir, "5000", 1.0, 1.0);
+        var p = newPrefillService(model, 100); var d = newDecodeService(model, 10);
+        assertEquals(1, enqueue(p, batch(1, slot(0, inputWithDecode(100, 9 * SPB, d.getGrpcPort(), 1)))).getSuccessesCount());
+        var input = inputWithDecode(101, 9 * SPB, d.getGrpcPort(), 1);
+        input = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setTimeoutMs(150)).build();
+        long start = System.nanoTime();
+        var ack = enqueue(p, batch(2, slot(0, input)));
+        assertEquals(0, ack.getSuccessesCount()); assertEquals(603, ack.getErrors(0).getErrorInfo().getErrorCode());
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) >= 100);
+        assertEquals(0L, perEngineMetrics().get("mock_engine_kv_admission_fails_total").get(d.getGrpcPort()));
+        assertEquals(9, heldBlocks(d.getGrpcPort()));
     }
 
-    /**
-     * /set_perf {@code decode_retry_times=0} short-circuits the window: the
-     * same RETRYABLE geometry fails IMMEDIATELY (elapsed stays far below the
-     * 100ms production window) — the runtime override is wired end to end.
-     * A negative value is a 400 (neither a budget nor the explicit zero).
-     */
     @Test
-    void setPerfRetryPolicyShortCircuitsTheWindow() throws Exception {
-        MockPerformanceModel model = performanceModel(tempDir, "5000", 1.0, 1.0);
-        JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
-        JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
-        int decodePort = decode.getGrpcPort();
-
-        httpPost(controlPort(), "/set_perf", String.format(
-                "{\"engine\":\"%s\",\"decode_retry_times\":0,"
-                        + "\"decode_retry_interval_ms\":1,\"decode_retry_timeout_ms\":100}",
-                decode.getEngineName()));
-
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 9 * SPB, decodePort, 1))))
-                .getSuccessesCount(),
-                "A's reservation must succeed outright");
-
-        long startNanos = System.nanoTime();
-        EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(2, slot(0, inputWithDecode(101L, 9 * SPB, decodePort, 1))));
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-
-        assertEquals(1, ack.getErrorsCount(), "B still fails — zero retries configured");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
-                ack.getErrors(0).getErrorInfo().getErrorCode());
-        assertTrue(elapsedMs < 90,
-                "zero retries must fail fast, took " + elapsedMs + "ms");
-        assertEquals(1L, perEngineMetrics().get("mock_engine_kv_admission_fails_total")
-                        .getOrDefault(decodePort, -1L),
-                "the RETRYABLE failure still counts on the D engine");
-
-        HttpResponse<String> rejected = httpPostResponse(controlPort(), "/set_perf", String.format(
-                "{\"engine\":\"%s\",\"decode_retry_times\":-1}", decode.getEngineName()));
-        assertEquals(400, rejected.statusCode(), "negative decode_retry_times must be a 400");
-        assertTrue(MAPPER.readTree(rejected.body()).get("error").asText()
-                        .contains("decode_retry"),
-                "the error should name the field, got: " + rejected.body());
+    void obsoleteAllocationRetryOverridesAreRejected() throws Exception {
+        var d = newDecodeService(performanceModel(tempDir, "1"), 10);
+        for (String field : List.of("decode_retry_times", "decode_retry_interval_ms", "decode_retry_timeout_ms")) {
+            var result = httpPostResponse(controlPort(), "/set_perf", "{\"engine\":\"" + d.getEngineName() + "\",\"" + field + "\":0}");
+            assertEquals(400, result.statusCode());
+            assertTrue(result.body().contains("request timeout_ms"));
+        }
     }
 
     // ─────────────── Gap 2: PERMANENT vs RETRYABLE classification ───────────────
@@ -399,11 +293,8 @@ class DecodeKvAllocationSemanticsTest {
                     () -> stub.generateStreamCall(inputWithDecode(901L, SPB,
                             decode.getGrpcPort(), 1)).hasNext());
             assertEquals(Status.Code.RESOURCE_EXHAUSTED, dError.getStatus().getCode());
-            assertEquals("LACK_MEM (602, master-surface 8211): decode-side KV allocation "
-                    + "rejected by D engine port=" + decode.getGrpcPort()
-                    + " after its ALLOCATE retry window (need=1 blocks, avail=1024 tokens, spb=1024)",
-                    dError.getStatus().getDescription());
-            assertCapacityTrailer(dError, 8211);
+            assertEquals("decode ALLOCATE permanently exceeds KV capacity", dError.getStatus().getDescription());
+            assertCapacityTrailer(dError, 602);
             assertEquals(5L * SPB, prefill.getAvailableKvTokens());
             assertEquals(1L * SPB, decode.getAvailableKvTokens());
             prefill.setStopped(true);

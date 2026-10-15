@@ -125,7 +125,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueueAndFetch(prefill, batch(9050, slot(0,
-                inputWithDecode(51, 10, decode.getGrpcPort()))));
+                inputWithDecode(51, 10, decode.getGrpcPort(), 2))));
         awaitInflight(decode, 1, 1_000);
         awaitNoInflight(prefill, 1_000);
         assertEquals(0, prefill.getInflightCount(),

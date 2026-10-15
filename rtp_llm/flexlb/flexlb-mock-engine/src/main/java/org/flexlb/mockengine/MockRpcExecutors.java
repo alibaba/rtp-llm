@@ -57,6 +57,7 @@ final class MockRpcExecutors implements AutoCloseable {
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final Set<Thread> running = ConcurrentHashMap.newKeySet();
         private final AtomicInteger waiting = new AtomicInteger();
+        private final AtomicInteger callbacksInProgress = new AtomicInteger();
         private final LongAdder rejected = new LongAdder();
 
         int inFlight() { return maxCalls - calls.availablePermits(); }
@@ -82,7 +83,9 @@ final class MockRpcExecutors implements AutoCloseable {
             if (closing.get() || stopped.get()) admission.close(Status.UNAVAILABLE, new Metadata());
             // Reject through the normal RPC status path, never executor rejection.
             if (!admitted) return control;
-            return command -> callbacks.execute(() -> {
+            return command -> {
+                callbacksInProgress.incrementAndGet();
+                try { callbacks.execute(() -> {
                 boolean acquired = false;
                 Thread thread = Thread.currentThread();
                 running.add(thread);
@@ -110,8 +113,16 @@ final class MockRpcExecutors implements AutoCloseable {
                     admission.runners.remove(thread);
                     running.remove(thread);
                     if (acquired) workers.release();
+                    synchronized (Engine.this) {
+                        callbacksInProgress.decrementAndGet();
+                        Engine.this.notifyAll();
+                    }
                 }
-            });
+            }); } catch (RuntimeException error) {
+                synchronized (this) { callbacksInProgress.decrementAndGet(); notifyAll(); }
+                throw error;
+            }
+            };
         }
 
         @Override
@@ -144,6 +155,19 @@ final class MockRpcExecutors implements AutoCloseable {
             active.values().forEach(admission -> admission.close(Status.UNAVAILABLE
                     .withDescription("mock RPC engine stopping"), new Metadata()));
             running.forEach(Thread::interrupt);
+        }
+
+        synchronized void awaitStopped(long deadlineNanos) {
+            if (!stopped.get()) throw new IllegalStateException("engine admission is still open");
+            while (callbacksInProgress.get() != 0) {
+                long remaining = deadlineNanos - System.nanoTime();
+                if (remaining <= 0) throw new IllegalStateException("engine RPC callbacks did not stop; ownership retained");
+                try { TimeUnit.NANOSECONDS.timedWait(this, remaining); }
+                catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted awaiting engine callbacks", error);
+                }
+            }
             engines.remove(this);
         }
 

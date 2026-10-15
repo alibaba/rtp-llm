@@ -53,6 +53,9 @@ class MockRemoteDecodeProtocolTest {
                     }
 
                     @Override
+                    public void completePrefill() { completions.incrementAndGet(); }
+
+                    @Override
                     public void completed() {
                         completions.incrementAndGet();
                     }
@@ -117,4 +120,72 @@ class MockRemoteDecodeProtocolTest {
             assertEquals(0, completions.get());
         }
     }
+    @Test
+    void prefillCompletionSettlesReservationWithoutGeneratingOrCancelling() throws Exception {
+        CompletableFuture<Throwable> failure = new CompletableFuture<>();
+        try (var stream = connect(new CompletableFuture<>(), failure)) {
+            stream.allocated().get(3, TimeUnit.SECONDS);
+            stream.load().get(3, TimeUnit.SECONDS);
+            stream.completePrefill().get(3, TimeUnit.SECONDS);
+            assertEquals(0, starts.get());
+            assertEquals(1, completions.get());
+            assertEquals(1, cancelled.getCount());
+            assertFalse(failure.isDone());
+        }
+    }
+
+    @Test
+    void prefillCompletionIdentityMismatchCancelsLeaseWithExplicitError() {
+        var received = new java.util.ArrayList<EngineRpcService.GenerateOutputsPB>();
+        var error = new CompletableFuture<Throwable>();
+        AtomicInteger leases = new AtomicInteger();
+        var call = new MockRemoteDecodeCall((input, client, stopped) -> {
+            leases.incrementAndGet();
+            return new MockRemoteDecodeCall.Lease() {
+                public boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue) { return true; }
+                public void cancel() { leases.decrementAndGet(); }
+                public void completed() { leases.decrementAndGet(); }
+            };
+        }, new StreamObserver<>() {
+            public void onNext(EngineRpcService.GenerateOutputsPB value) { received.add(value); }
+            public void onError(Throwable value) { error.complete(value); }
+            public void onCompleted() { fail("identity mismatch cannot succeed"); }
+        }, Runnable::run);
+        call.onNext(EngineRpcService.GenerateRequestPB.newBuilder().setStage(EngineRpcService.RemoteStage.ALLOCATE)
+                .setRequestId(42).setClientId("owner").setInput(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42)).build());
+        assertTrue(received.getFirst().getSupportsPrefillCompletion());
+        call.onNext(EngineRpcService.GenerateRequestPB.newBuilder().setRequestId(42).setStage(EngineRpcService.RemoteStage.LOAD).build());
+        call.onNext(EngineRpcService.GenerateRequestPB.newBuilder().setRequestId(42).setClientId("wrong-owner")
+                .setStage(EngineRpcService.RemoteStage.PREFILL_COMPLETE).build());
+        assertEquals(io.grpc.Status.Code.INVALID_ARGUMENT, io.grpc.Status.fromThrowable(error.join()).getCode());
+        assertEquals(0, leases.get());
+    }
+
+    @Test
+    void unnegotiatedPrefillCompletionFailsAndClosesTheRemoteLease() throws Exception {
+        server = ServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+            @Override public StreamObserver<EngineRpcService.GenerateRequestPB> remoteGenerate(
+                    StreamObserver<EngineRpcService.GenerateOutputsPB> response) {
+                return new StreamObserver<>() {
+                    public void onNext(EngineRpcService.GenerateRequestPB request) {
+                        response.onNext(EngineRpcService.GenerateOutputsPB.getDefaultInstance());
+                    }
+                    public void onError(Throwable error) { cancelled.countDown(); }
+                    public void onCompleted() { response.onCompleted(); }
+                };
+            }
+        }).build().start();
+        channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+        try (var stream = new MockRemoteDecodeStream(channel,
+                EngineRpcService.GenerateInputPB.newBuilder().setRequestId(42).build(), "owner", 0,
+                value -> fail("no generation expected"), error -> {}, () -> fail("cannot succeed"))) {
+            stream.allocated().get(3, TimeUnit.SECONDS);
+            stream.load().get(3, TimeUnit.SECONDS);
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> stream.completePrefill().get(3, TimeUnit.SECONDS));
+            assertEquals(io.grpc.Status.Code.UNIMPLEMENTED, io.grpc.Status.fromThrowable(failure).getCode());
+            assertTrue(cancelled.await(3, TimeUnit.SECONDS));
+        }
+    }
+
 }

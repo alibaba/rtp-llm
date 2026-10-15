@@ -320,10 +320,10 @@ class BlockPoolMetricsObservabilityTest {
      * retired): an oversized decode request (11 blocks vs a 10-block pool,
      * cold LRU so the net demand alone overflows) cannot provision its lease
      * at hand-off admission. scheduleDecodeCompletion ACCEPTS and TERMINATES
-     * the request: the typed terminal carries the master-surface error 8211
+     * the request: the typed terminal carries the domain error 602
      * (DECODE_MALLOC_FAILED — the production P-side closeGrpcStream rewrite;
      * the raw 602 stays in the message text), the engine_events decode_done
-     * row carries error_code=8211 with cancelled=false, an error frame closes
+     * row carries error_code=602 with cancelled=false, an error frame closes
      * the client stream, the lifecycle ends "failed", and because 11 +
      * reserve > 10 total the failure classifies PERMANENT — lack_mem_rejects
      * counts 1 on the D engine (kv_admission_fails stays 0) — and every
@@ -350,14 +350,11 @@ class BlockPoolMetricsObservabilityTest {
                 -1, queue),
                 "the admission failure still ACCEPTS the request (accepted-and-terminal)");
 
-        // The client stream closes with an error frame: RpcErrorPB has no
-        // LACK_MEM enum face, so the frame carries UNKNOWN_ERROR and the
-        // numeric 602 contract travels in the message.
+        // Preserve the numeric domain code even though the protobuf enum has no named 602 value.
         EngineRpcService.GenerateOutputsPB frame = queue.poll(10, TimeUnit.SECONDS);
         assertNotNull(frame, "an error frame must close the stream");
         assertTrue(frame.hasErrorInfo(), "the closing frame is an error frame");
-        assertEquals(EngineRpcService.ErrorCodePB.UNKNOWN_ERROR,
-                frame.getErrorInfo().getErrorCode());
+        assertEquals(602, frame.getErrorInfo().getErrorCodeValue());
         assertTrue(frame.getErrorInfo().getErrorMessage().contains("LACK_MEM (602)"),
                 "the message must carry the 602 contract: "
                         + frame.getErrorInfo().getErrorMessage());
@@ -373,9 +370,9 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.TaskInfoPB terminal = status.getFinishedTaskList(0);
         assertEquals(201L, terminal.getRequestId());
         assertTrue(terminal.hasErrorInfo(), "the terminal must carry error info");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 terminal.getErrorInfo().getErrorCode(),
-                "decode terminals carry the master-surface 8211");
+                "decode terminals carry the domain 602");
         assertTrue(terminal.getErrorInfo().getErrorMessage().contains("602"),
                 "the raw 602 travels in the message text: "
                         + terminal.getErrorInfo().getErrorMessage());
@@ -384,14 +381,14 @@ class BlockPoolMetricsObservabilityTest {
                         .get("201").get("end_state"),
                 "the lifecycle must end failed");
 
-        // engine_events decode_done row: cancelled=false + error_code=8211
+        // engine_events decode_done row: cancelled=false + error_code=602
         // (the aggregate-side skip key).
         List<JsonNode> rows = readEventRows(eventsFile);
         assertEquals(1, rows.size(), "exactly one decode_done row");
         JsonNode row = rows.get(0);
         assertEquals("decode_done", row.path("event").asText());
-        assertEquals(8211L, row.path("error_code").asLong(),
-                "the failure row must carry error_code=8211 (master surface)");
+        assertEquals(602L, row.path("error_code").asLong(),
+                "the failure row must carry error_code=602 (master surface)");
         assertEquals(false, row.path("cancelled").asBoolean());
 
         // D-side accounting + full rollback: 11 + reserve > 10 total →
@@ -422,7 +419,7 @@ class BlockPoolMetricsObservabilityTest {
      * P-enqueue decode-KV reservation reject (the mock counterpart of
      * production's prepare-stage ALLOCATE rejection): a request that fits
      * the PREFILL pool but overflows the role_addrs-targeted DECODE pool is
-     * rejected SYNCHRONOUSLY in the enqueue ack with the master-surface 8211
+     * rejected SYNCHRONOUSLY in the enqueue ack with the domain 602
      * (raw 602 in the message text), the message marks the decode-side
      * allocation, the P lease is released (zero P residue), and because 11 +
      * reserve > 10 total the failure classifies PERMANENT — it counts on the
@@ -431,7 +428,7 @@ class BlockPoolMetricsObservabilityTest {
      * the D pool keeps no residue.
      */
     @Test
-    void enqueueDecodeReservationRejectIsSynchronous8211() throws Exception {
+    void enqueueDecodeReservationPreservesDomain602() throws Exception {
         MockPerformanceModel model = performanceModel(tempDir, "10");
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
@@ -447,17 +444,11 @@ class BlockPoolMetricsObservabilityTest {
                 enqueueAndFetch(prefill, batch(6, slot(0, tooBigForDecode)));
         assertEquals(1, ack.getErrorsCount(),
                 "the D-pool overflow must reject the request synchronously");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
-                "decode-side reservation rejects carry the master-surface 8211");
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
-                "the raw 602 travels in the message text: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage()
-                        .contains("decode-side KV allocation rejected by D engine port="
-                                + decodePort),
-                "the error message must mark the decode-side surface: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
+                "decode-side reservation rejects carry the domain 602");
+        assertEquals("decode ALLOCATE permanently exceeds KV capacity",
+                ack.getErrors(0).getErrorInfo().getErrorMessage());
 
         Map<String, Map<Integer, Long>> metrics =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));

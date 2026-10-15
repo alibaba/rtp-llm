@@ -41,12 +41,19 @@ class WhaleRemotePrefillTest {
 
     @AfterEach
     void tearDown() throws InterruptedException {
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            service.shutdown();
-        }
-        if (remoteServer != null) remoteServer.shutdownNow();
-        scheduler.shutdownNow();
-        scheduler.awaitTermination(3, TimeUnit.SECONDS);
+        var closes = new java.util.ArrayList<Runnable>();
+        if (remoteServer != null) closes.add(() -> {
+            remoteServer.shutdownNow();
+            try { assertTrue(remoteServer.awaitTermination(3, TimeUnit.SECONDS)); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IllegalStateException(error); }
+        });
+        services.values().forEach(service -> closes.add(service::shutdown));
+        closes.add(() -> {
+            scheduler.shutdownNow();
+            try { assertTrue(scheduler.awaitTermination(3, TimeUnit.SECONDS)); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IllegalStateException(error); }
+        });
+        ShutdownTasks.runAll(closes);
     }
 
     // ==================== multi-frame ttft < e2e ====================

@@ -586,24 +586,7 @@ final class MockControlServer {
             }
             if (body.has("decode_retry_times") || body.has("decode_retry_interval_ms")
                     || body.has("decode_retry_timeout_ms")) {
-                // D-side ALLOCATE retry window (production decode_retry_* /
-                // DecodeRpcServer.cc EXECUTE_WITH_RETRY, defaults 100/1/100):
-                // FULL-REPLACE policy — a partial POST supplies the engine's
-                // current values for the absent fields, so the window never
-                // ends up half-configured. Negative values are meaningless
-                // (0 = immediate fail, a valid degenerate) -> 400.
-                int times = body.path("decode_retry_times").asInt(
-                        service.getDecodeAllocateRetryTimes());
-                long intervalMs = body.path("decode_retry_interval_ms").asLong(
-                        service.getDecodeAllocateRetryIntervalMs());
-                long timeoutMs = body.path("decode_retry_timeout_ms").asLong(
-                        service.getDecodeAllocateRetryTimeoutMs());
-                if (times < 0 || intervalMs < 0 || timeoutMs < 0) {
-                    throw new ApiException(400, String.format(
-                            "decode_retry_* must be >= 0, got: times=%d interval_ms=%d timeout_ms=%d",
-                            times, intervalMs, timeoutMs));
-                }
-                service.setDecodeAllocateRetryPolicy(times, intervalMs, timeoutMs);
+                throw new ApiException(400, "decode_retry_* no longer controls KV capacity admission; use request timeout_ms");
             }
             return successResponse(service);
         });

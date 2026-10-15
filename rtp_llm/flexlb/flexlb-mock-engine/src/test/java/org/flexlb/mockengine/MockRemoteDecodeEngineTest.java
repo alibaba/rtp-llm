@@ -162,4 +162,22 @@ class MockRemoteDecodeEngineTest {
             awaitDrain();
         }
     }
+    @Test
+    void permanentAllocateFailureReleasesRequestDeadlineOwner() throws Exception {
+        start();
+        var input = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(99).addTokenIds(1)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(2)
+                        .setTimeoutMs(2000).setUniqueKey("{\"input_len\":16384}")).build();
+        try (var call = new MockRemoteDecodeStream(channel, input, "owner", 3000,
+                frame -> fail("failed allocation cannot produce output"), error -> {}, () -> {})) {
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> call.allocated().get(3, TimeUnit.SECONDS));
+            assertEquals(602, MockRpcErrors.downstream(failure).getErrorCode());
+            var field = decode.getClass().getDeclaredField("requestDeadlines");
+            field.setAccessible(true);
+            assertTrue(((Map<?, ?>) field.get(decode)).isEmpty(), "failed admission must release its timer owner");
+            awaitDrain();
+        }
+    }
+
 }

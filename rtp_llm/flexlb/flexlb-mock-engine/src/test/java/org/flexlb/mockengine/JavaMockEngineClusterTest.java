@@ -97,19 +97,22 @@ class JavaMockEngineClusterTest {
     }
 
     @Test
-    void dpSlotsAreIndependentBatchesWithPerSlotExecutionTime() throws Exception {
+    void singleDpRejectsForeignRankWithoutExecutingIt() throws Exception {
         JavaMockEngineCluster.FastRpcService service = service(model("100*batchSize", 1.0));
 
-        enqueueAndFetch(service, batch(21,
+        var ack = enqueueAndFetch(service, batch(21,
                 slot(0, input(1, 100)),
                 slot(1, input(2, 100))));
 
+        assertEquals(1, ack.getSuccessesCount());
+        assertEquals(1, ack.getErrorsCount());
+        assertEquals(3, ack.getErrors(0).getErrorInfo().getErrorCode());
         EngineRpcService.WorkerStatusPB finished = awaitStatus(service,
-                status -> status.getFinishedTaskListCount() == 2,
+                status -> status.getFinishedTaskListCount() == 1,
                 2_000);
         assertTrue(finished.getFinishedTaskListList().stream()
                 .allMatch(task -> task.getExecutionTimeMs() == 100));
-        assertEquals(List.of(0L, 1L), finished.getFinishedTaskListList().stream()
+        assertEquals(List.of(0L), finished.getFinishedTaskListList().stream()
                 .map(EngineRpcService.TaskInfoPB::getDpRank)
                 .sorted()
                 .toList());

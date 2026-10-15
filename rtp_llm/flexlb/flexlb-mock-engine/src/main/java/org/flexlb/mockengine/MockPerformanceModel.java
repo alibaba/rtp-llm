@@ -126,6 +126,8 @@ final class MockPerformanceModel {
     private MockEosModel eosModel;
     private volatile MockEosModel runtimeEosModel;
     boolean nativeTokenCacheKeys;
+    boolean prefillReuseCache = true;
+    boolean prefillDeviceCache = true;
     private final double sleepScale;
     private final double prefillScale;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
@@ -306,6 +308,8 @@ final class MockPerformanceModel {
         copy.prefillReserveBlockRatio = prefillReserveBlockRatio;
         copy.prefillBatchPolicy = prefillBatchPolicy;
         copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
+        copy.prefillReuseCache = prefillReuseCache;
+        copy.prefillDeviceCache = prefillDeviceCache;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.runtimePrefill = runtimePrefill;
         copy.runtimeDecode = runtimeDecode;
@@ -429,6 +433,12 @@ final class MockPerformanceModel {
         model.configuredPrefillExpression = prefillExpression;
         model.prefillGpuPrefixTree = prefill.path("enable_gpu_prefix_tree").asBoolean(true);
         model.decodeGpuPrefixTree = decode.path("enable_gpu_prefix_tree").asBoolean(true);
+        for (String field : List.of("reuse_cache", "enable_device_cache")) {
+            if (prefill.has(field) && !prefill.get(field).isBoolean())
+                throw new IllegalStateException("prefill." + field + " must be boolean");
+        }
+        model.prefillReuseCache = prefill.path("reuse_cache").asBoolean(true);
+        model.prefillDeviceCache = prefill.path("enable_device_cache").asBoolean(true);
         if (decode.has("reuse_cache")) {
             if (!decode.get("reuse_cache").isBoolean()) {
                 throw new IllegalStateException("decode.reuse_cache must be boolean");
@@ -555,7 +565,8 @@ final class MockPerformanceModel {
         // computation point. Unlike hitTokens it is NOT clamped to inputLen, so
         // a trace whose bh keys exceed the request's own block count keeps an
         // honest requested/hit key pair.
-        int hitBlocks = cache.prefixHitBlocks(blockKeys);
+        int hitBlocks = prefillDeviceCache && MockCachePolicy.reuse(input, nativeKeys, prefillReuseCache)
+                ? cache.prefixHitBlocks(MockCachePolicy.matchKeys(blockKeys, inputLen, blockSize, nativeKeys)) : 0;
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
         MockEosModel activeEos = runtimeEosModel;

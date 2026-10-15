@@ -40,15 +40,23 @@ FIFO 的主要语义：
 
 BATCH 默认 `--auto-fetch false`：Decode 先保留 KV 并报告 `KV_ALLOCATED`，Prefill 完成后释放计算槽，但保留 deferred context 和 connector KV，直到 Fetch、取消或过期。Fetch 可以在 Prefill 完成之前或之后接入。NON_BATCH 已有客户端流。正常测试需要回读完整输出；显式 schedule-only 实验的 auto-fetch 不等于客户端 Fetch 证据。`no_respond` 表示服务端 RPC 黑洞。
 
+请求 `timeout_ms` 使用跨准备、KV 等待、Prefill、Fetch 和 Decode 的绝对预算，缺省或非正数不设置请求 deadline。Fetch 接入 TTL 与帧间等待是独立约束，不重置请求预算。Decode ALLOCATE 对永久容量不足立即返回领域错误 602；临时不足等待容量代际变化，直到释放、取消或请求超时。`decode_retry_*` 不作为容量等待上限，`/set_perf` 拒绝这些旧覆盖字段。
+
+P 已产生完整输出时，远程路径协商并发送 `PREFILL_COMPLETE`；本地路径使用同一资源结算规则，不执行额外 Decode step。EnqueueBatch 在分配资源前整批拒绝重复 request_id，并拒绝与单 DP 引擎不符的 rank 及缺少 input 的成员。
+
 WorkerStatus 在移除 running 条目前先发布终态记录；running、保留的 completion 和 finished cursor 在同一监视器内取快照。队列操作和文件写入在快照临界区之外执行。
 `MOCK_COMPLETION_RETAIN_WINDOW` 控制保留容量，超出容量立即淘汰最旧记录；读取不消费记录。慢消费者无法补取已淘汰的 completion。
 `MOCK_STATUS_SNAPSHOT_LOG=true` 配合 `--events-file` 可记录状态 RPC 快照，排查终态遗漏。
 
-取消通过 gRPC `RpcService/Cancel`、HTTP `/cancel_request` 或进程内测试通道使用同一合同。停止 Decode、崩溃或强制移除会向所属 Prefill 响应队列投递 `8209 REMOTE_GENERATE_FAILED`；正常排空不产生断链错误。业务错误走 `error_info` 数据帧，响应队列只接受一个终态，不模拟真实 gRPC trailing status 或 keepalive 时延。
+取消通过 gRPC `RpcService/Cancel`、HTTP `/cancel_request` 或进程内测试通道使用同一合同。停止 Decode、崩溃或强制移除会向所属 Prefill 响应队列投递 `8209 REMOTE_GENERATE_FAILED`；正常排空不产生断链错误。容量和请求超时通过 gRPC status 与 `ErrorDetailsPB` trailer 返回；下游有效领域错误优先于传输层兜底。其他模拟业务错误仍走 `error_info` 数据帧，响应队列只接受一个终态；不模拟真实 keepalive 时延。
+
+单引擎关闭先停止准入、关闭调用并打断回调，验证 transport 与该引擎回调均退出后才释放端口和所有者。关闭失败保留资源归属，允许重试；线程忽略中断时不能报告关闭成功。
 
 协议和所有权细节统一见[请求生命周期](../tools/online_eval/docs/architecture/request-lifecycle.md)。
 
 ## Device 与 Memory cache
+
+Native-token 请求以部署级 `prefill.reuse_cache`、`decode.reuse_cache` 和请求 `reuse_cache` 共同决定复用；本地缓存层由部署配置决定，`prefill.enable_device_cache` 缺省为 true，host 层由 `prefill.memory_cache` 决定，不使用请求中的本地 tier 开关。实际复用 key 上限为 `floor((input_len - 1) / block_size)`，至少保留一个 token 计算。显式回放 block keys 保留合成 trace 的计数语义，不作为 native-token 命中边界的验证依据。
 
 Device pool 容量、已引用 block 与可回收前缀相互独立；压力不能靠增加命中率绕过物理容量或 reserve 水位。
 `prefill.enable_gpu_prefix_tree`、`decode.enable_gpu_prefix_tree` 控制角色的 GPU 前缀树驱逐；关闭后使用普通访问顺序 LRU，已引用 block 仍受保护。

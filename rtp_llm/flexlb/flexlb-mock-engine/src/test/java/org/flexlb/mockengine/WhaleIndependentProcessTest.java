@@ -74,9 +74,11 @@ class WhaleIndependentProcessTest {
         assertEquals(1, result.getSuccessesCount());
     }
 
-    private EngineRpcService.EnqueueBatchResponsePB enqueueAck(long id, String decodeIp) {
+    private EngineRpcService.EnqueueBatchResponsePB enqueueAck(long id, String decodeIp) { return enqueueAck(id, decodeIp, 5); }
+
+    private EngineRpcService.EnqueueBatchResponsePB enqueueAck(long id, String decodeIp, int tokens) {
         var input = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3))
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(5)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(tokens)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder().setRoleStr("DECODE")
                                 .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
                                 .setIp(decodeIp).setGrpcPort(base + 21)));
@@ -131,6 +133,25 @@ class WhaleIndependentProcessTest {
         assertTrue(second.has("702"));
         assertFalse(second.has("701"));
         assertFalse(Files.exists(directory.resolve("discovery.json")));
+    }
+
+    @Test
+    void oneTokenCompletesAcrossProcessesWithoutDecodeExecution() throws Exception {
+        start("127.0.0.3", base + 21, false, false);
+        start("127.0.0.2", base + 1, true, false);
+        channel = ManagedChannelBuilder.forAddress("127.0.0.2", base + 1).usePlaintext().build();
+        assertEquals(1, enqueueAck(799, "127.0.0.3", 1).getSuccessesCount());
+        var frames = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                .fetchResponse(EngineRpcService.FetchRequestPB.newBuilder().setRequestId(799).build());
+        assertTrue(frames.hasNext());
+        var terminal = frames.next();
+        assertTrue(terminal.getFlattenOutput().getFinished(0));
+        assertEquals(1, terminal.getFlattenOutput().getOutputIds().getShape(2));
+        assertFalse(frames.hasNext());
+        var state = new ObjectMapper().readTree(get("127.0.0.3", base + 20, "/snapshot")).elements().next();
+        assertTrue(state.has("busy_ms"));
+        assertEquals(0, state.path("busy_ms").asLong());
+        assertEquals(0, state.path("held_blocks").asLong());
     }
 
     private void awaitEndState(String ip, long id, String state) throws Exception {

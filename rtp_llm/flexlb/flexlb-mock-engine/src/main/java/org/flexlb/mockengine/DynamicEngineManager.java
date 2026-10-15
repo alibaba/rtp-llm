@@ -335,19 +335,17 @@ final class DynamicEngineManager {
                 server.shutdownNow();
             }
         }
-        try {
-            service.shutdown();
-        } finally {
+        ShutdownTasks.runAll(java.util.List.of(() -> {
             if (server != null) {
                 try {
                     if (!server.awaitTermination(2, TimeUnit.SECONDS))
-                        throw new IOException("engine transport did not terminate; port remains reserved");
+                        throw new IllegalStateException("engine transport did not terminate; port remains reserved");
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
-                    throw new IOException("interrupted awaiting engine transport", error);
+                    throw new IllegalStateException("interrupted awaiting engine transport", error);
                 }
             }
-        }
+        }, service::shutdown));
         synchronized (mutationLock) {
             if (server != null) serversByPort.remove(port, server);
             services.remove(port, service);
