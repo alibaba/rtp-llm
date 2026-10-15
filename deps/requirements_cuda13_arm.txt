@@ -9,9 +9,9 @@ mysql-connector-python
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl
 
-# Official DeepGEMM main@30e85d9 (2.8.2) and FlashMLA main@2e5429f, both CI-built
-# against torch 2.11+cu130; SHAs encoded in filename).
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2B30e85d9.cu132-cp310-cp310-linux_aarch64.whl
+# DeepGEMM internal ad62a90 (2.8.2 + explicit-device Mega-MoE views) and
+# FlashMLA main@2e5429f, CI-built against Torch 2.11+cu130.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bad62a90.cu132-cp310-cp310-linux_aarch64.whl
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl
 # Preserve existing model KV formats through a separate namespace.
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl
