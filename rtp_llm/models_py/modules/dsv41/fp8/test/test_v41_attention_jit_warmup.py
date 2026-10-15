@@ -35,6 +35,16 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_norm_quant_must_be_ready_before_requests(self):
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        quant = SimpleNamespace(warmup=Mock(return_value=True))
+        with patch.dict(sys.modules, {package: SimpleNamespace(_v41_norm_quant=quant)}):
+            warmup._warm_norm_quant("private-device")
+            quant.warmup.assert_called_once_with("private-device")
+            quant.warmup.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "attention RMSNorm quantization"):
+                warmup._warm_norm_quant("private-device")
+
     def test_ragged_swa_refresh_must_be_ready_before_requests(self):
         package = "rtp_llm.models_py.modules.dsv41.fp8"
         refresh = SimpleNamespace(warmup=Mock(return_value=True))
