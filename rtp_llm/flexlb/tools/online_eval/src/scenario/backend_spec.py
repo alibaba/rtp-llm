@@ -47,6 +47,8 @@ def make_env_spec(plan, profile, lease):
         spec.mock_heap = preset_runtime["mock_heap"]
     spec.mock_extra_args.extend(preset_runtime.get("mock_extra_args", []))
     for key in (
+        "master_jvm_heap",
+        "mock_heap",
         "prefill_cache_blocks",
         "decode_cache_blocks",
         "mock_auto_fetch",

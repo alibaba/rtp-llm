@@ -91,6 +91,9 @@ def read_environment(value, path):
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
+    for name in ("master_jvm_heap", "mock_heap"):
+        if name in value:
+            result[name] = value[name]
     return EnvironmentDeclaration.read_normalized(result), resolver
 
 

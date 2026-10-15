@@ -127,6 +127,14 @@ def _validate_decode_availability(max_requests, kv_percent):
         raise ValueError("decode_max_kv_usage_percent must be an integer in [1, 100]")
 
 
+def _cache_refresh_bounds(minimum, maximum):
+    lower = 50 if minimum is None else minimum
+    upper = 3000 if maximum is None else maximum
+    if type(lower) is not int or type(upper) is not int or not 1 <= lower <= upper <= 2147483647:
+        raise ValueError("invalid cache refresh interval bounds")
+    return lower, upper
+
+
 @dataclass(frozen=True)
 class ConfigOverride:
     """Explicit schema-v3 overrides; removed schema-v3 keys are rejected."""
@@ -144,6 +152,8 @@ class ConfigOverride:
     request_timeout_ms: Optional[int] = None
     decision_lifetime: Optional[float] = None
     status_rpc_ms: Optional[int] = None
+    cache_min_refresh_ms: Optional[int] = None
+    cache_max_refresh_ms: Optional[int] = None
     status_stale_after_ms: Optional[int] = None
     cleanup_interval_ms: Optional[int] = None
     decode_max_engine_requests: Optional[int] = None
@@ -162,6 +172,8 @@ class ConfigOverride:
             or self.decision_lifetime < 1
         ):
             raise ValueError("decision_lifetime must be finite and >= 1")
+        if self.cache_min_refresh_ms is not None or self.cache_max_refresh_ms is not None:
+            _cache_refresh_bounds(self.cache_min_refresh_ms, self.cache_max_refresh_ms)
         _validate_affinity(self.cache_affinity_max_extra_ttft_ms,
                            self.cache_affinity_min_prefix_hit_percent)
 
@@ -345,6 +357,8 @@ def build_flexlb_config(
     cache_affinity_min_prefix_hit_percent: float = 20,
     request_timeout_ms: int = GENERATOR_DEFAULTS["request_timeout_ms"],
     decision_lifetime: float = GENERATOR_DEFAULTS["decision_lifetime"],
+    cache_min_refresh_ms: Optional[int] = None,
+    cache_max_refresh_ms: Optional[int] = None,
     status_rpc_ms: int = GENERATOR_DEFAULTS["status_rpc_ms"],
     status_stale_after_ms: Optional[int] = GENERATOR_DEFAULTS["status_stale_after_ms"],
     cleanup_interval_ms: int = GENERATOR_DEFAULTS["cleanup_interval_ms"],
@@ -392,7 +406,7 @@ def build_flexlb_config(
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
-    return json.dumps(
+    rendered = json.dumps(
         {
             "schemaVersion": 3,
             "scheduler": scheduler_cfg,
@@ -436,10 +450,19 @@ def build_flexlb_config(
         },
         separators=(",", ":"),
     )
+    if cache_min_refresh_ms is not None or cache_max_refresh_ms is not None:
+        lower, upper = _cache_refresh_bounds(cache_min_refresh_ms, cache_max_refresh_ms)
+        doc = json.loads(rendered)
+        doc["workerRegistry"]["cacheStatus"] = {
+            "minRefreshIntervalMs": lower, "maxRefreshIntervalMs": upper}
+        return json.dumps(doc, separators=(",", ":"))
+    return rendered
 
 
 # override field -> document path for the stress base (edit-in-place).
 _STRESS_DOC_PATHS = {
+    "cache_min_refresh_ms": ("workerRegistry", "cacheStatus", "minRefreshIntervalMs"),
+    "cache_max_refresh_ms": ("workerRegistry", "cacheStatus", "maxRefreshIntervalMs"),
     "cache_affinity_max_extra_ttft_ms": ("router", "roles", "prefill", "cacheAffinity", "maxExtraTtftMs"),
     "cache_affinity_min_prefix_hit_percent": ("router", "roles", "prefill", "cacheAffinity", "minPrefixHitPercent"),
     "prefill_expression": ("router", "roles", "prefill", "executionTimeEstimator", "expression"),

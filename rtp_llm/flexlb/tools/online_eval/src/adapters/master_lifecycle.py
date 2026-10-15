@@ -32,6 +32,15 @@ BASE_MASTER_ENV = {
 }
 
 
+def master_jvm_options(spec):
+    """Apply the declared heap to the actual JVM, including HA instances."""
+    options = list(spec.master_jvm_args)
+    if spec.master_jvm_heap is not None:
+        options = [item for item in options if not item.startswith("-Xmx")]
+        options.append("-Xmx" + spec.master_jvm_heap)
+    return options
+
+
 class MasterLifecycle:
     def __init__(self, log):
         self._log = log
@@ -168,7 +177,7 @@ class MasterLifecycle:
         )
         argv = [
             java,
-            *spec.master_jvm_args,
+            *master_jvm_options(spec),
             *JAVA_MODULE_OPTS,
             "-jar",
             str(API_JAR),
@@ -359,6 +368,7 @@ class MasterLifecycle:
         log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
         argv = [
             java,
+            *master_jvm_options(spec),
             *JAVA_MODULE_OPTS,
             "-jar",
             str(API_JAR),

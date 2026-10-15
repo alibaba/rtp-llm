@@ -23,6 +23,36 @@ class Clock:
         return Deadline(seconds, self, self.sleep)
 
 
+@pytest.mark.parametrize("dual", [False, True])
+def test_declared_heap_reaches_single_and_dual_master_launch(tmp_path, monkeypatch, dual):
+    from adapters.environment import FlexEnv
+    from adapters.environment_config import EnvSpec, MasterSpec
+    import adapters.master_lifecycle as implementation
+
+    artifact = tmp_path / "master.jar"
+    artifact.write_bytes(b"master")
+    monkeypatch.setattr(implementation, "API_JAR", artifact)
+    monkeypatch.setattr(implementation, "resolve_java21", lambda: "/java21/bin/java")
+    monkeypatch.setattr(implementation, "wait_ready", lambda *args, **kwargs: True)
+    spec = EnvSpec(label="heap", master_profile="single-nonbatch", master_jvm_heap="64g",
+                   master_jvm_args=["-Xmx1g", "-XX:ActiveProcessorCount=32"])
+    env = FlexEnv(spec, tmp_path, 20000)
+    env.endpoint_file.write_text(json.dumps({"env": {"MODEL_SERVICE_CONFIG": "{}"}}))
+    launch = Mock(side_effect=RuntimeError("captured launch"))
+    monkeypatch.setattr(implementation.ProcessOps, "start", launch)
+    lifecycle = implementation.MasterLifecycle(Mock())
+    with pytest.raises(RuntimeError, match="captured launch"):
+        if dual:
+            lifecycle.start_master_instance(env, MasterSpec(name="A", http_port=18080))
+        else:
+            lifecycle.start_master(env)
+    argv = launch.call_args.args[0]
+    assert [item for item in argv if item.startswith("-Xmx")] == ["-Xmx64g"]
+    assert argv.index("-Xmx64g") < argv.index("-jar")
+    assert "-XX:ActiveProcessorCount=32" in argv
+    assert spec.master_jvm_args == ["-Xmx1g", "-XX:ActiveProcessorCount=32"]
+
+
 def test_shared_deadline_is_not_reset_between_phases():
     clock = Clock()
     deadline = clock.deadline()

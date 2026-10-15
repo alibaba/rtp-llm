@@ -77,7 +77,7 @@ def _time_origin(run, index):
     return f'unknown-origin-{index}'
 
 
-def _pair(prepared, labels, origins, *, baseline_index, include_original_panels):
+def _pair(prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
     colors = metric_colors(prepared[baseline_index])
@@ -120,6 +120,8 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
         panel = copy.deepcopy(original)
         panel.update(id='overlay:' + original['id'], title='对比 · ' + original.get('title', original['id']),
                      series=[], events=[], presets={}, timeSelectionKey='comparison-reference')
+        if time_range is not None:
+            panel['timeAxis'] = copy.deepcopy(time_range)
         metric_names = {}
         for i, source, n in entries:
             curve = copy.deepcopy(source['series'][n])
@@ -149,7 +151,8 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
         for i, source in candidates:
             if any(entry[0] == i for entry in entries):
                 panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name']) for e in source.get('events', []))
-        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，观测曲线为实线，门禁参考线保留虚线。保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
+        range_note = '时间范围取各 run 对齐后的显示范围并集。' if time_range is not None else '保留基准报告的显示范围。'
+        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，观测曲线为实线，门禁参考线保留虚线。保留基准报告的指标组合和数值轴；' + range_note + '未兼容的其他 run 曲线单独展示。'
         overlays.append(panel)
         pairing.append(dict(panel=original['id'], status='PAIRED', metrics=records))
     separate = []
@@ -251,11 +254,16 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
     origins = ['EVENT_ALIGNED'] * len(loaded) if aligned else [
         _time_origin(run, i) for i, run in enumerate(loaded)]
     baseline_index = labels.index(baseline)
+    display = ranges[baseline_index] or dict(min=0, max=1)
+    aligned_ranges = [value for value in ranges if value is not None] if aligned else []
+    if aligned_ranges:
+        display = dict(min=min(value['min'] for value in aligned_ranges),
+                       max=max(value['max'] for value in aligned_ranges))
     panels, pairing = _pair(prepared, labels, origins, baseline_index=baseline_index,
-                            include_original_panels=include_original_panels)
+                            include_original_panels=include_original_panels,
+                            time_range=display if aligned_ranges else None)
     time_alignment['display_ranges'] = dict(zip(labels, ranges))
     time_alignment['origins'] = dict(zip(labels, origins))
-    display = ranges[baseline_index] or dict(min=0, max=1)
     result = dict(purpose='OBSERVATION_ONLY', sources=sources,
         runs={label: run.analysis for label, run in zip(labels, loaded)},
         executions={label: run.execution for label, run in zip(labels, loaded)},

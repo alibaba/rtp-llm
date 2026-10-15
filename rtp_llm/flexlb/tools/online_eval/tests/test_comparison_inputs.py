@@ -194,6 +194,28 @@ def test_selected_baseline_sets_layout_and_display_range(tmp_path):
     assert len(result['panels'][0]['series']) == 3
 
 
+@pytest.mark.parametrize('baseline', ['short', 'long'])
+def test_event_aligned_comparison_does_not_clip_a_later_recovery(tmp_path, baseline):
+    short = bundle(tmp_path, 'short')
+    spec = json.loads((short / 'report-spec.json').read_text())
+    spec['timeAxis'] = {'min': 0, 'max': 40}
+    spec['events'] = [dict(id='scale', name='Scale', t=10),
+                      dict(id='recovered', name='Recovered', t=39)]
+    spec['panels'][0]['events'] = spec['events']
+    spec['panels'][0]['series'][0]['points'] = [{'x': 39, 'y': 9}]
+    long = write_bundle(tmp_path / 'long', 'run', 'long', {}, spec, meta=spec['run_meta'])
+    compare([short, long], tmp_path / 'out', labels=['short', 'long'], baseline=baseline,
+            alignment_event='scale', include_original_panels=True)
+    result = report(tmp_path / 'out')
+    assert result['timeAxis'] == {'min': -10, 'max': 30}
+    overlay = next(p for p in result['panels'] if p['id'].startswith('overlay:'))
+    assert overlay['timeAxis'] == result['timeAxis']
+    assert any(p['x'] == 29 for s in overlay['series'] for p in s['points'])
+    assert any(e['id'] == 'recovered' and e['t'] == 29 for e in overlay['events'])
+    separate = [p for p in result['panels'] if not p['id'].startswith('overlay:')]
+    assert {tuple(p['timeAxis'].values()) for p in separate} == {(-5, 15), (-10, 30)}
+
+
 def test_original_gate_is_not_inferred_from_execution_status():
     from types import SimpleNamespace
     from reporting.comparison import _original_result

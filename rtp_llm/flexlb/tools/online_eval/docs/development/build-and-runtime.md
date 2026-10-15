@@ -56,6 +56,11 @@ runner 为每个实例启动并回收 Master、Mock Engine、load client 和所�
 2. **拓扑与资源**：P/D 数量、端口基址、JVM heap、KV block 容量。
 3. **负载与证据**：请求数量或时长、replay/uniform、采集档位、输出目录。
 
+YAML 的 `environment.master_jvm_heap` 与 `environment.mock_heap` 可显式声明 JVM 堆大小，
+使用正整数与 `m/g` 单位；省略时沿用原有运行环境和性能档案默认值。
+显式配置会冻结到实例计划，并传入实际启动规格。JVM heap 不等于进程 RSS 上限，
+也不提供 CPU 或宿主内存隔离；隔离预算须由运行环境另外保证。
+
 四种形态由 `config/mode_profiles.yaml` 解释：
 
 | 简写 | decision | dispatcher | profile |

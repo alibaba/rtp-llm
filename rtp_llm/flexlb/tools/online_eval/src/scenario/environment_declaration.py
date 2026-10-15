@@ -99,6 +99,8 @@ class EnvironmentDeclaration:
     mock_fetch_attach_timeout_ms: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 1)})
     prefill_max_waiting_batches: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 0)})
     master_test_control: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
+    master_jvm_heap: str | None = None
+    mock_heap: str | None = None
     metric_whitelist: str | None = None
     zookeeper: ZooKeeperConfig | None = None
     model_override: ModelDeviation | None = None
@@ -106,6 +108,11 @@ class EnvironmentDeclaration:
     prefill_cache_policy: PrefillCachePolicy | None = None
 
     def __post_init__(self):
+        import re
+        for name in ("master_jvm_heap", "mock_heap"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not str or not re.fullmatch(r"[1-9][0-9]*[mMgG]", value)):
+                raise ValueError("environment." + name + " requires a positive JVM heap with m/g units")
         if self.backend != "java_mock" or self.discovery not in {"file", "discovery_file"}:
             raise ValueError("invalid environment backend/discovery")
         if self.master_layout not in {"single", "dual_standalone", "dual_zookeeper"}:

@@ -1085,6 +1085,7 @@ public final class JavaMockEngineCluster {
         private volatile AtomicLong[] prefillLanes = null;
         private final AtomicLong statusVersion = new AtomicLong();
         private final AtomicLong completionVersion = new AtomicLong();
+        private volatile CacheSyncFixture cacheSyncFixture;
         private final AtomicLong cacheVersion = new AtomicLong(1);
         private final Map<Integer, AtomicLong> nextPrefillAvailableNanosByDp = new ConcurrentHashMap<>();
         // ── KV capacity model v2: single block-pool truth ──
@@ -5272,7 +5273,11 @@ public final class JavaMockEngineCluster {
                     .setTotalKvCache(totalKvTokens)
                     .setBlockSize(performance.blockSize())
                     .setVersion(cacheVersion.get());
-            if (request.getNeedCacheKeys()) {
+            CacheSyncFixture fixture = cacheSyncFixture;
+            if (fixture != null) status.setVersion(fixture.version());
+            if (request.getNeedCacheKeys() && fixture != null) {
+                status.mergeFrom(fixture.response());
+            } else if (request.getNeedCacheKeys()) {
                 for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
                 if (memoryCache != null)
                     for (Long key : memoryCache.keys()) status.putCacheKeys(key, true);
@@ -5591,7 +5596,25 @@ public final class JavaMockEngineCluster {
 
         /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
         long getCacheVersion() {
-            return cacheVersion.get();
+            CacheSyncFixture fixture = cacheSyncFixture;
+            return fixture == null ? cacheVersion.get() : fixture.version();
+        }
+
+        synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
+                int unique, int shared, int delta, int every) {
+            if (!"PREFILL".equals(getRoleName()))
+                throw new IllegalArgumentException("cache fixture requires PREFILL");
+            if ("seed".equals(operation)) {
+                if (cacheSyncFixture != null) throw new IllegalArgumentException("fixture already seeded");
+                cacheSyncFixture = new CacheSyncFixture(worker, workers, unique, shared, cacheVersion.get() + 1);
+            } else if ("churn".equals(operation)) {
+                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
+                cacheSyncFixture.churn(delta, every);
+            } else if (!"inspect".equals(operation)) {
+                throw new IllegalArgumentException("unknown cache fixture operation");
+            }
+            if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
+            return cacheSyncFixture.snapshot();
         }
 
         @Override

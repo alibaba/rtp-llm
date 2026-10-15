@@ -91,6 +91,7 @@ final class MockControlServer {
         httpServer.createContext("/output_length", this::handleOutputLength);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
+        httpServer.createContext("/cache_fixture", this::handleCacheFixture);
         httpServer.createContext("/cache_evict", this::handleCacheEvict);
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
@@ -629,6 +630,37 @@ final class MockControlServer {
             builder.queueDepthLimit(depth);
             service.setFaultConfig(builder.build());
             return successResponse(service);
+        });
+    }
+
+    /** Explicit bounded synthetic cache-status fixture; never changes inference KV capacity. */
+    private void handleCacheFixture(HttpExchange exchange) throws IOException {
+        handleServicePost(exchange, (body, service) -> {
+            String operation = body.path("operation").asText();
+            java.util.Set<String> allowed = switch (operation) {
+                case "seed" -> java.util.Set.of("engine", "port", "operation", "worker", "workers", "unique", "shared");
+                case "churn" -> java.util.Set.of("engine", "port", "operation", "delta", "every");
+                case "inspect" -> java.util.Set.of("engine", "port", "operation");
+                default -> throw new ApiException(400, "unknown fixture operation");
+            };
+            var names = body.fieldNames();
+            while (names.hasNext())
+                if (!allowed.contains(names.next())) throw new ApiException(400, "unknown fixture field");
+            for (String field : allowed) {
+                if (java.util.Set.of("engine", "port", "operation").contains(field)) continue;
+                if (!body.path(field).isIntegralNumber() || !body.path(field).canConvertToInt())
+                    throw new ApiException(400, "fixture field requires int32: " + field);
+            }
+            try {
+                Map<String, Object> result = successResponse(service);
+                result.put("fixture", service.cacheFixture(operation,
+                        body.path("worker").asInt(), body.path("workers").asInt(),
+                        body.path("unique").asInt(), body.path("shared").asInt(),
+                        body.path("delta").asInt(), body.path("every").asInt()));
+                return result;
+            } catch (IllegalArgumentException e) {
+                throw new ApiException(400, e.getMessage());
+            }
         });
     }
 

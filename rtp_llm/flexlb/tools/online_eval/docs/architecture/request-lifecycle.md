@@ -90,6 +90,21 @@ D 提前分配后，P 入队拒绝会清理 D 的准备状态。Master 可能先
 Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别核账；
 单个 Master 无客户端流量不意味着共享引擎空闲。完整流量排空后再验证全局收尾。
 
+缓存同步协议测试可使用 Mock 的 `POST /cache_fixture`，按引擎名或端口定位。
+`seed` 接收 `worker/workers/unique/shared`，构造相邻 Worker 共享部分键的环形集合；
+`churn` 接收 `delta/every`，按实际完整缓存响应次数触发等量增删，传入两个零值冻结变化；
+`inspect` 返回当前版本、键数和累计响应条目、变更键数、protobuf 键载荷字节数。
+字节数包括 fixture 的 map 与 version，不能当成完整 RPC 响应或连接层流量。
+控制面不接收整批 key 列表，不在观测时重新序列化整个集合。
+
+fixture 显式替换该引擎的缓存状态响应键集合，独立于推理请求的 KV 容量、LRU 和驱逐。
+它只在单次隔离测试环境中使用，不能用于验收真实 KV 容量与请求缓存命中。
+版本变化时返回新集合；版本不变仍返回完整集合，供 Master 按真实协议解析和同步。
+每引擎的集合有上限，非法规模、非整数参数和重复初始化直接拒绝。
+使用 `inflight_status` 中的 `generation/reported_alive/status_age_ms` 观测 Master 已提交的
+状态；年龄采用单调时钟，负值表示尚未成功提交，不能当作零延迟。
+这些字段不扫描缓存 key，不获取 Worker 的状态写锁。
+
 ## 引擎成员与代际
 
 瞬时失联、永久故障、有序缩容是不同操作。有序缩容需要先撤销发现入口，确认 Master

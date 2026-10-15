@@ -108,7 +108,8 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual([p['x'] for p in panels[0]['series'][0]['points']], [-5, 0, 15])
         self.assertEqual([p['x'] for p in panels[0]['series'][1]['points']], [-10, -5, 10])
         self.assertIsNone(panels[0]['series'][0]['points'][1]['y'])
-        self.assertEqual(self.spec()['timeAxis']['min'], -10)
+        self.assertEqual(self.spec()['timeAxis']['min'], -15)
+        self.assertEqual(self.spec()['panels'][0]['timeAxis'], {'min': -15, 'max': 20})
         self.assertEqual(json.loads((a/'report-spec.json').read_text()), original)
 
     def test_differences_missing_panels_and_invalid_runs_are_not_execution_errors(self):
