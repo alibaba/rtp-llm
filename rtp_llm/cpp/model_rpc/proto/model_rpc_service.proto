@@ -288,6 +288,8 @@ message V41ImageInputPB {
     repeated int32 types = 5;
     string content_sha256 = 6;
     string processor_identity = 7;
+    // Original image payload retained only when content inspection is enabled.
+    bytes source_bytes = 8;
 }
 
 message V41RequestInputsPB {

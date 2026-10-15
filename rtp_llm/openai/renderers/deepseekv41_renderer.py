@@ -7,6 +7,7 @@ import uuid
 
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.multimodal.greennet_hook import greennet_enabled
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     V41ImageProcessorConfig,
     prepare_vl_inputs,
@@ -146,6 +147,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
                 self.image_processor_config,
                 url_loader=url_loader,
                 output_budget=output_budget,
+                retain_source_bytes=greennet_enabled(),
             )
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(

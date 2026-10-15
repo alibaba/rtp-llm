@@ -5,6 +5,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -437,6 +438,37 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "request-trace")
         self.assertEqual(request_info_pb.request_id, "request-id")
         self.assertEqual(request_info_pb.source_role, "frontend")
+
+    def test_trans_input_preserves_v41_inspection_payload(self):
+        source = b"\x89PNG\0\xff"
+        image = SimpleNamespace(
+            start=0,
+            patches=torch.ones(1, 3, 14, 14, dtype=torch.bfloat16),
+            n_vit_h=1,
+            n_vit_w=1,
+            types=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            content_sha256="a" * 64,
+            processor_identity="b" * 64,
+            source_bytes=source,
+        )
+        request = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([129264] * 4),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+            v41_inputs=SimpleNamespace(
+                prompt="",
+                token_ids=(129264,) * 4,
+                token_types=(0, 1, 2, 3),
+                image_mask=torch.tensor([True, True, True, True]),
+                images=(image,),
+            ),
+        )
+        wire = GenerateInputPB.FromString(trans_input(request).SerializeToString())
+        self.assertEqual(wire.v41_inputs.images[0].source_bytes, source)
+        torch.testing.assert_close(
+            trans_tensor(wire.v41_inputs.images[0].patches), image.patches
+        )
 
     def test_trans_input_fills_request_info_from_typed_headers(self):
         input_py = GenerateInput(
