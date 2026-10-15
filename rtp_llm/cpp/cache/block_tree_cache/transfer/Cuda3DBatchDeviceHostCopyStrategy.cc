@@ -13,7 +13,7 @@ namespace rtp_llm {
 StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<HostBufferView>&     hosts,
                                                              const std::vector<TransferDescriptor>& descriptors,
                                                              const std::vector<const GroupSet*>&    group_sets) {
-#if USING_CUDA && CUDART_VERSION >= 13000 && CUDART_VERSION < 14000
+#if USING_CUDA && !USE_PPU && CUDART_VERSION >= 13000 && CUDART_VERSION < 14000
     static const bool supported = [] {
         int driver_version  = 0;
         int runtime_version = 0;
