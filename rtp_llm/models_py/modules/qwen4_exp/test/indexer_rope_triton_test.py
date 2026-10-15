@@ -151,6 +151,16 @@ class IndexerRoPETritonTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(indexer.rope_inv_freq(config), expected))
         self.assertNotIn("_rope_inv_freq", indexer.state_dict())
+        self.assertNotIn("_score_weight_buffer", indexer.state_dict())
+        for rows in (1, 3, 4, 8, 16, 32, 128):
+            weights = indexer.score_weights(rows, expected.device)
+            reference = torch.full(
+                (rows, 2), 1.0 / 128**0.5, dtype=torch.float32, device=expected.device
+            )
+            self.assertTrue(torch.equal(weights, reference))
+        self.assertIsNone(indexer.score_weights(129, expected.device))
+        indexer.n_heads = 3
+        self.assertIsNone(indexer.score_weights(4, expected.device))
         self.assertIsNone(indexer.rope_inv_freq(self.config(base=10000.0)))
 
     def test_indexer_rmsnorm_matches_native_reduction_and_strides(self):
@@ -261,6 +271,10 @@ class IndexerRoPETritonTest(unittest.TestCase):
             eager, fused = context(), context()
             with patch(MODULE + ".try_build_text_rope", return_value=None), patch(
                 MODULE + ".try_apply_partial_rope", return_value=None
+            ), patch(
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton."
+                "try_write_target_window",
+                return_value=None,
             ):
                 expected = eager.select_target_verify_tokens(
                     q, raw, indexer=indexer, rope_config=config

@@ -64,9 +64,12 @@ def select_target_verify_tokens(
             "qwen4_exp QSA target-verify paged scoring requires CUDA tensors"
         )
 
-    query_positions = plan.visible_lengths - 1
-    flat_query_positions = query_positions.reshape(-1).to(torch.int64)
-    block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
+    flat_query_positions = plan.query_positions
+    block_starts = plan.block_starts
+    if flat_query_positions is None or block_starts is None:
+        query_positions = plan.visible_lengths - 1
+        flat_query_positions = query_positions.reshape(-1).to(torch.int64)
+        block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
@@ -139,12 +142,17 @@ def select_target_verify_tokens(
         current_cos.view(batch_size, query_len, 1, -1),
         current_sin.view(batch_size, query_len, 1, -1),
     )
-    score_weights = torch.full(
-        (token_count, head_num),
-        1.0 / math.sqrt(head_dim),
-        dtype=torch.float32,
-        device=q.device,
+    get_weights = getattr(indexer, "score_weights", None)
+    score_weights = (
+        get_weights(token_count, q.device) if callable(get_weights) else None
     )
+    if score_weights is None:
+        score_weights = torch.full(
+            (token_count, head_num),
+            1.0 / math.sqrt(head_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )

@@ -360,6 +360,23 @@ def write_target_window_with_undo_(
     ):
         raise ValueError("unsupported Qwen4 QSA target writer layout")
 
+    from .target_writer_triton import try_write_target_window
+
+    fused = try_write_target_window(
+        raw_keys,
+        prefixes,
+        rope_cos,
+        rope_sin,
+        gamma,
+        kv_pool,
+        kv_table,
+        state_pool,
+        state_table,
+        norm_eps=norm_eps,
+    )
+    if fused is not None:
+        return fused
+
     offsets = torch.arange(query_len, dtype=torch.int32, device=prefixes.device)
     positions = prefixes[:, None] + offsets[None, :]
     state_columns = (positions // 128).clamp(0, state_table.shape[1] - 1)

@@ -430,6 +430,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
         # Build with the same Torch pow/divide kernels as the reference before
         # capture. Device pow approximations can shift BF16 cos/sin values.
         frequency = None
+        score_weights = None
+        self._score_weights_key = None
         self._rope_inv_freq_key = None
         if (
             rope_config is not None
@@ -443,11 +445,31 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 -2.0 * torch.arange(32, dtype=torch.float32, device=qk_proj.device) / 64
             )
             self._rope_inv_freq_key = (base, 64)
+            if n_heads > 0 and head_dim > 0:
+                score_weights = torch.full(
+                    (128, n_heads),
+                    1.0 / math.sqrt(head_dim),
+                    dtype=torch.float32,
+                    device=qk_proj.device,
+                )
+                self._score_weights_key = (head_dim, n_heads)
         self.register_buffer("_rope_inv_freq", frequency, persistent=False)
+        self.register_buffer("_score_weight_buffer", score_weights, persistent=False)
 
     def rope_inv_freq(self, config):
         if self._rope_inv_freq_key == (float(config.base), int(config.dim)):
             return self._rope_inv_freq
+        return None
+
+    def score_weights(self, rows, device):
+        weights = self._score_weight_buffer
+        if (
+            weights is not None
+            and weights.device == device
+            and self._score_weights_key == (self.head_dim, self.n_heads)
+            and 0 < rows <= weights.shape[0]
+        ):
+            return weights[:rows]
         return None
 
     def project(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
