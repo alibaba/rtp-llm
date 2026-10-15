@@ -449,7 +449,7 @@ def render_cold_miss_2d(
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}}</style>
 <text x="70" y="55" class="title">{esc_text(model_label)}：Cache miss 的 seq_len–RT 趋势</text>
-<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用三次成功测量的中位 服务端 first_token_cost_time</text>"""
+<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用完整成功测量的中位 服务端 first_token_cost_time</text>"""
     ]
     out.append(line(x0, y1, x1, y1, "#0f172a", 2))
     out.append(line(x0, y0, x0, y1, "#0f172a", 2))

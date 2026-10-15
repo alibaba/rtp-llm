@@ -880,8 +880,7 @@ def _parse_input_ids_for_inference(request) -> ParsedInputIds | None:
     if inp.datatype == "INT32":
         if not raw or len(raw) & 3:
             return None
-        owned = bytearray(raw)
-        tensor = torch.frombuffer(owned, dtype=torch.int32)
+        tensor = torch.frombuffer(bytearray(raw), dtype=torch.int32)
         view = memoryview(raw).cast("i")
     elif inp.datatype == "INT64":
         if not raw or len(raw) & 7:
