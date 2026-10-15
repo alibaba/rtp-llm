@@ -11,9 +11,11 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <utility>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <variant>
+#include <unistd.h>
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
@@ -70,7 +72,8 @@ public:
          const SpeculativeExecutionConfig&          sp_config,
          std::shared_ptr<BroadcastManager>          broadcast_manager,
          std::shared_ptr<kvcm::ClientWrapper>       client_wrapper,
-         std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
+         std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+         bool gdr_enabled):
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
@@ -79,7 +82,9 @@ public:
         broadcast_manager_(std::move(broadcast_manager)),
         metrics_reporter_(std::move(metrics_reporter)),
         client_wrapper_(std::move(client_wrapper)),
-        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
+        gdr_enabled_(gdr_enabled),
+        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {
+    }
 
     bool init(const CacheTopology&                                                topology,
               StorageBackend::BufferResolver                                      buffer_resolver,
@@ -764,6 +769,13 @@ private:
         total_device_block_count_ = 0;
         std::unordered_set<const DeviceBlockPool*>         unique_pools;
         std::vector<kvcm::ClientWrapper::PoolRegistration> registrations;
+        std::vector<std::string>                             registration_tags;
+        std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag;
+        std::unordered_set<const DeviceBlockPool*>           unique_pools;
+        size_t                                                total_device_block_count = 0;
+        registrations.reserve(ordered_groups.size());
+        registration_tags.reserve(ordered_groups.size());
+        pools_by_tag.reserve(ordered_groups.size());
         for (int32_t group_id : ordered_groups) {
             const auto& tag  = groups.at(group_id).tag;
             const auto& pool = pool_resolver(tag);
@@ -785,6 +797,9 @@ private:
                                      kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
                                                                groups.at(group_id).group_name)});
         }
+        pools_by_tag_      = std::move(pools_by_tag);
+        registration_tags_ = std::move(registration_tags);
+        total_device_block_count_ = total_device_block_count;
         return registrations;
     }
 
@@ -1038,6 +1053,7 @@ private:
     std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
     std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
     std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
+    const bool gdr_enabled_;
     std::vector<std::string>             registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
     size_t                                              total_device_block_count_{0};
@@ -1074,7 +1090,19 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                                  sp_config,
                                  std::move(broadcast_manager),
                                  std::move(client_wrapper),
-                                 std::move(metrics_reporter))) {}
+                                 std::move(metrics_reporter), gdr_enabled)) {}
+
+KVCMStorageBackend::KVCMStorageBackend(const CacheConfig& cache_config,
+                                       const KVCacheConfig& kv_cache_config,
+                                       const RuntimeConfig& runtime_config,
+                                       const ParallelismConfig& parallelism_config,
+                                       const SpeculativeExecutionConfig& sp_config,
+                                       std::shared_ptr<BroadcastManager> broadcast_manager,
+                                       std::shared_ptr<kvcm::ClientWrapper> client_wrapper,
+                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
+    KVCMStorageBackend(cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config,
+                       std::move(broadcast_manager), remoteCacheGdrEnabled(), std::move(metrics_reporter),
+                       std::move(client_wrapper)) {}
 
 KVCMStorageBackend::~KVCMStorageBackend() = default;
 
