@@ -99,6 +99,7 @@ class ModelConfig(CppModelConfig):
         "tie_word_embeddings",
         "quantization",
         "enable_w4a16_sm120_dense_ffn",
+        "enable_nvfp4_dense_ffn",
         "mm_related_params",
         "vit_separation",
         "src_quantization_bit",
@@ -279,6 +280,18 @@ class ModelConfig(CppModelConfig):
                 * self.hidden_size
                 * ffn_weights
                 * 0.625
+            )
+        elif self.enable_nvfp4_dense_ffn:
+            ffn_weights = 3 if self.isGatedActivation() else 2
+            # NVFP4 replaces the base dtype for the FFN: 0.5 byte per weight
+            # plus one fp8 block-scale byte per 16 weights and a negligible
+            # per-tensor scale, against the layer_param_bytes already counted.
+            model_size -= (
+                self.num_layers
+                * self.inter_size
+                * self.hidden_size
+                * ffn_weights
+                * (layer_param_bytes - 0.5625)
             )
 
         if (
@@ -623,6 +636,7 @@ class ModelConfig(CppModelConfig):
         )
         self.w8a8_quant_chunk_rows: int = 1024
         self.enable_w4a16_sm120_dense_ffn: bool = False
+        self.enable_nvfp4_dense_ffn: bool = False
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -878,6 +892,25 @@ class ModelConfig(CppModelConfig):
         # This uses ModelConfig's __setattr__ which handles string-to-enum conversion
         self.data_type = data_type.to_str()
         # Store quant_config as instance attribute for later use
+        if self.enable_nvfp4_dense_ffn:
+            if quant_config is None:
+                raise ValueError(
+                    "enable_nvfp4_dense_ffn requires a base quantization "
+                    "(e.g. QUANTIZATION=FP8_PER_BLOCK) to layer on top of"
+                )
+            if quant_config.get_method() in ("modelopt_fp4", "FP4"):
+                raise ValueError(
+                    "enable_nvfp4_dense_ffn is redundant with a modelopt_fp4 "
+                    "base quantization"
+                )
+            if self.enable_w4a16_sm120_dense_ffn:
+                raise ValueError(
+                    "enable_nvfp4_dense_ffn and enable_w4a16_sm120_dense_ffn "
+                    "are mutually exclusive"
+                )
+            # The layered flag rides on the base quant config so QuantWeight
+            # selection and the linear factory can both see it.
+            quant_config.enable_nvfp4_dense_ffn = True
         self.quant_config = quant_config
 
         # Print final type results
@@ -1080,6 +1113,9 @@ def build_model_config(
         model_config.w8a8_quant_chunk_rows = quantization_config.w8a8_quant_chunk_rows
         model_config.enable_w4a16_sm120_dense_ffn = (
             quantization_config.enable_w4a16_sm120_dense_ffn
+        )
+        model_config.enable_nvfp4_dense_ffn = (
+            quantization_config.enable_nvfp4_dense_ffn
         )
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)

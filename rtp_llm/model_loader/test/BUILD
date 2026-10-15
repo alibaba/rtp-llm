@@ -65,6 +65,12 @@ py_test(
 )
 
 py_test(
+    name = "test_online_nvfp4_dense_ffn",
+    srcs = ["test_online_nvfp4_dense_ffn.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [

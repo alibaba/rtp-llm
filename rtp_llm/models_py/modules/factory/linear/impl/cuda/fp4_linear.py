@@ -41,7 +41,15 @@ class CudaFp4GEMMLinear(LinearBase):
 
         # Check quantization method
         quant_method = quant_config.get_method()
-        return quant_method == "modelopt_fp4"
+        if quant_method == "modelopt_fp4":
+            return True
+        # Layered NVFP4 dense FFN: the online loader emits packed uint8
+        # kernels with per-block fp8 scale + scale2 + input_scale on top of a
+        # non-fp4 base quant; no other quant method produces that combination.
+        return (
+            getattr(quant_config, "enable_nvfp4_dense_ffn", False)
+            and weight.dtype == torch.uint8
+        )
 
     @torch.inference_mode()
     def __init__(

@@ -552,13 +552,15 @@ class QuantizationConfig:
         self.quantization: str = ""
         self.w8a8_quant_chunk_rows: int = 1024
         self.enable_w4a16_sm120_dense_ffn: bool = False
+        self.enable_nvfp4_dense_ffn: bool = False
 
     def to_string(self):
         return (
             f"int8_mode: {self.int8_mode}\n"
             f"quantization: {self.quantization}\n"
             f"w8a8_quant_chunk_rows: {self.w8a8_quant_chunk_rows}\n"
-            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}"
+            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}\n"
+            f"enable_nvfp4_dense_ffn: {self.enable_nvfp4_dense_ffn}"
         )
 
     def get_quantization(self):

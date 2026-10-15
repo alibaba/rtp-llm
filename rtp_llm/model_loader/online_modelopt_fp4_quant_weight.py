@@ -19,7 +19,7 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
-from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
+from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
@@ -269,3 +269,153 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         processed[self.kernel.name] = kernel_w
         processed[self.scale.name] = scale_w
         return processed
+
+
+def _dense_ffn_scale_name(name: str) -> str:
+    if name == W.ffn_w1:
+        return W.ffn_s1
+    if name == W.ffn_w2:
+        return W.ffn_s2
+    if name == W.ffn_w3:
+        return W.ffn_s3
+    if name == W.ffn_w13:
+        return W.ffn_s13
+    raise ValueError(f"unsupported dense FFN weight: {name}")
+
+
+def _dense_ffn_scale_2_name(name: str) -> str:
+    if name == W.ffn_w1:
+        return W.ffn_w1_s2
+    if name == W.ffn_w2:
+        return W.ffn_w2_s2
+    if name == W.ffn_w3:
+        return W.ffn_w3_s2
+    if name == W.ffn_w13:
+        return W.ffn_w13_s2
+    raise ValueError(f"unsupported dense FFN weight: {name}")
+
+
+def _dense_ffn_input_scale_name(name: str) -> str:
+    if name == W.ffn_w1:
+        return W.ffn_w1_i_s
+    if name == W.ffn_w2:
+        return W.ffn_w2_i_s
+    if name == W.ffn_w3:
+        return W.ffn_w3_i_s
+    if name == W.ffn_w13:
+        return W.ffn_w13_i_s
+    raise ValueError(f"unsupported dense FFN weight: {name}")
+
+
+class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
+    """Online NVFP4 weight loader for dense FFN weights.
+
+    Layered on top of a non-fp4 base quantization via
+    ``quant_config.enable_nvfp4_dense_ffn``: the base quant (for example
+    FP8_PER_BLOCK) keeps covering attention and any remaining weights, while
+    the dense FFN gate/up/down projections are quantized to NVFP4 online with
+    the same math as the MoE path. ``input_scale`` stays 1.0 (no calibration
+    data), so the FP4 GEMM quantizes activations dynamically per 16-block.
+    """
+
+    dense_ffn_weight_list = [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
+
+    @classmethod
+    def support(
+        cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
+    ) -> bool:
+        if not getattr(quant_config, "enable_nvfp4_dense_ffn", False):
+            return False
+        if isinstance(src_weight_info, MoeAtomicWeight):
+            return False
+        return src_weight_info.name in cls.dense_ffn_weight_list
+
+    def __init__(
+        self,
+        src_weight_info: FfnAtomicWeight,
+        quant_config: QuantizationConfig,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        # The kernel sub-weight inherits the original loader so BF16 weights
+        # are read from the checkpoint through the existing FFN path.
+        kernel = FfnAtomicWeight(
+            name=src_weight_info.name,
+            weights=src_weight_info.weights,
+            process_fun=src_weight_info.process_fun,
+            data_type=None,  # use load_config.compute_dtype (bf16/fp16)
+            config=src_weight_info.config,
+        )
+        # Companion sub-weights are synthesized in _load_raw_tensor; their
+        # ``weights=[]`` keeps them out of the file-name listing path.
+        scale = FfnAtomicWeight(
+            name=_dense_ffn_scale_name(src_weight_info.name),
+            weights=[],
+            process_fun=identity,
+            data_type=torch.float8_e4m3fn,
+            config=src_weight_info.config,
+        )
+        scale_2 = FfnAtomicWeight(
+            name=_dense_ffn_scale_2_name(src_weight_info.name),
+            weights=[],
+            process_fun=identity,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+        input_scale = FfnAtomicWeight(
+            name=_dense_ffn_input_scale_name(src_weight_info.name),
+            weights=[],
+            process_fun=identity,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
+        sub_weights = {
+            kernel.name: kernel,
+            scale.name: scale,
+            scale_2.name: scale_2,
+            input_scale.name: input_scale,
+        }
+        super().__init__(
+            sub_weights,
+            quant_config=quant_config,
+            name=src_weight_info.name,
+            **{k: v for k, v in kwargs.items() if k != "name"},
+        )
+        self.kernel = kernel
+        self.scale = scale
+        self.scale_2 = scale_2
+        self.input_scale = input_scale
+        self._block_size = max(quant_config.group_size(), NVFP4_BLOCK_SIZE)
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        # Only the kernel sub-weight reads tensors from the checkpoint.
+        return self.kernel.get_tensor_names(layer_id, load_config)
+
+    def _load_raw_tensor(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        kernel_dict = self.kernel._load_raw_tensor(
+            tensor_source, layer_id, device, load_config
+        )
+        weight = kernel_dict[self.kernel.name]
+        if weight.dim() != 2:
+            raise ValueError(
+                f"online NVFP4 dense FFN expects 2D weights, got {tuple(weight.shape)}"
+            )
+        # Quantize on the device the tensor already lives on (typically GPU).
+        packed, block_scale, scale_2 = quantize_expert_to_nvfp4(
+            weight, block_size=self._block_size
+        )
+        input_scale = torch.ones([1], dtype=torch.float32, device=weight.device)
+        return {
+            self.kernel.name: packed,
+            self.scale.name: block_scale,
+            self.scale_2.name: scale_2.reshape([1]),
+            self.input_scale.name: input_scale,
+        }

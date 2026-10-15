@@ -327,6 +327,15 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:
             return False
+        # Layered NVFP4 dense FFN claims the dense FFN weights when
+        # enable_nvfp4_dense_ffn is on; exactly one QuantWeight may match.
+        if getattr(quant_config, "enable_nvfp4_dense_ffn", False) and name in (
+            W.ffn_w1,
+            W.ffn_w2,
+            W.ffn_w3,
+            W.ffn_w13,
+        ):
+            return False
         # V4 names are dispatched to the V4-specific subclass
         # (V4PerBlockFp8Weight) — keep the base class out of contention so the
         # registry's "must be exactly one match" check passes.

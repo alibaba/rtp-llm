@@ -283,7 +283,10 @@ class LinearFactory:
             "modelopt_fp4",
         ]
         if quant_method not in fp4_methods:
-            return False
+            # Layered NVFP4 dense FFN: the online loader emits packed uint8
+            # kernels on top of a non-fp4 base quant (e.g. FP8_PER_BLOCK).
+            if not getattr(quant_config, "enable_nvfp4_dense_ffn", False):
+                return False
 
         # Check if weight is FP8 format
         weight = weights.get(weight_key)

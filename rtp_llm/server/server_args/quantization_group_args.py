@@ -52,3 +52,14 @@ def init_quantization_group_args(parser, quantization_config):
         default=False,
         help=("是否开启 sm120 中小 batch 的 w4a16 ffn 量化来加速 gemm"),
     )
+    quantization_group.add_argument(
+        "--enable_nvfp4_dense_ffn",
+        env_name="ENABLE_NVFP4_DENSE_FFN",
+        bind_to=(quantization_config, "enable_nvfp4_dense_ffn"),
+        type=str2bool,
+        default=False,
+        help=(
+            "是否在基础量化之上将 dense FFN 权重在线量化为 NVFP4"
+            "(叠加式开关，注意力等其他权重仍按基础量化加载)"
+        ),
+    )
