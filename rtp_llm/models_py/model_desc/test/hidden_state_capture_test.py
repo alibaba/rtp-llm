@@ -424,9 +424,6 @@ def _forward_qwen3_next(model: Qwen3NextModel, inputs: SimpleNamespace):
     with patch(
         "rtp_llm.models_py.model_desc.qwen3_next.get_primary_attention_inputs",
         return_value=attention_inputs,
-    ), patch(
-        "rtp_llm.models_py.model_desc.qwen3_next.select_attention_inputs_for_layer",
-        return_value=attention_inputs,
     ):
         return model.forward(inputs, fmha_impl=object())
 
@@ -435,9 +432,6 @@ def _forward_kimi(model: KimiLinearModel, inputs: SimpleNamespace) -> torch.Tens
     attention_inputs = SimpleNamespace(is_prefill=False, is_target_verify=False)
     with patch(
         "rtp_llm.models_py.model_desc.kimi_linear.get_primary_attention_inputs",
-        return_value=attention_inputs,
-    ), patch(
-        "rtp_llm.models_py.model_desc.kimi_linear.select_attention_inputs_for_layer",
         return_value=attention_inputs,
     ):
         return model.forward(inputs, fmha_impl=object()).hidden_states
@@ -658,7 +652,8 @@ class HiddenStateCaptureTest(unittest.TestCase):
                     outputs.hidden_states, expected_capture if enabled else layer1 * 10
                 )
                 torch.testing.assert_close(
-                    outputs.mtp_target_hidden_states, torch.cat((layer0, layer1), dim=-1)
+                    outputs.mtp_target_hidden_states,
+                    torch.cat((layer0, layer1), dim=-1),
                 )
                 if aux_buffer is None:
                     aux_buffer = model._mtp_target_prompt_buffer
@@ -1169,9 +1164,11 @@ class HiddenStateCaptureTest(unittest.TestCase):
                     for tags in (("indexer_kv", "default"), ("default", "indexer_kv"))
                 ]
                 if with_cache:
-                    model.kv_cache = SimpleNamespace(
-                        get_layer_cache_groups=layer_caches.__getitem__
-                    )
+                    for layer_idx, caches in enumerate(layer_caches):
+                        caches_by_tag = {cache.tag: cache for cache in caches}
+                        model.layers[layer_idx].cache_binding = SimpleNamespace(
+                            cache_for_tag=caches_by_tag.__getitem__
+                        )
                 fmha_impl = {"indexer_kv": object(), "default": object()}
                 # Reuse the model across requests to check capture stays forward-local.
                 for capture_hidden_states in (True, False):

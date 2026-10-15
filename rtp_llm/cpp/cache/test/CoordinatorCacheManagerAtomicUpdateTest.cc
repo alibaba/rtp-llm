@@ -185,7 +185,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockReusesDroppedTailAt
     std::vector<TaggedBlockIdPair> mapping;
     ASSERT_TRUE(allocator_->updateKVBlock(resource, {1, 1}, /*copy_last_block=*/true, mapping));
     ASSERT_EQ(mapping.size(), 1u);
-    EXPECT_EQ(mapping[0].tag, config.topology().soleGroupForLayer(0).tag);
+    EXPECT_EQ(mapping[0].key.tag, config.topology().soleGroupForLayer(0).tag);
     EXPECT_EQ(mapping[0].src, blocks[2]);
     EXPECT_EQ(mapping[0].dst, blocks[1]);
     EXPECT_EQ(resource->blocks(0, "default"), (BlockIndicesType{blocks[0], blocks[1]}));

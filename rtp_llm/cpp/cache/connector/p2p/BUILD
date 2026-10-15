@@ -23,6 +23,7 @@ cc_library(
     name = "p2p_connector_config",
     hdrs = ["P2PConnectorConfig.h"],
     deps = [
+        "//rtp_llm/cpp/cache:cache_identity",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/config:config_modules",
     ],
@@ -40,6 +41,7 @@ cc_library(
         "LayerCacheBufferUtil.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_identity",
         ":layer_block_converter",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
@@ -59,6 +61,7 @@ cc_library(
         "LayerBlockConverterImpl.h",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_identity",
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
     ] + torch_deps(),
@@ -138,6 +141,7 @@ cc_library(
         "P2PKeyUtil.h",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_identity",
         ":components",
         ":layer_block_converter",
         ":layer_cache_buffer",

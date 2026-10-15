@@ -67,9 +67,7 @@ public:
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
 
-    // Canonical topology geometry. A merged MTP CacheConfig may have child-owned
-    // physical strides; its callers must use CacheConfig::{blockSizeBytesForGroup,
-    // totalGroupBlockSizeBytes} instead.
+    // Canonical geometry for this module-local topology.
     size_t           blockSizeBytesForGroup(std::string_view group_tag) const;
     std::vector<int> layerIdsForGroup(std::string_view group_tag) const;
 

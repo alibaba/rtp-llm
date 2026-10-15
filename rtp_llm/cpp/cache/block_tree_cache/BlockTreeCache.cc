@@ -175,7 +175,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     return resident_prefix_length;
 }
 
-int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
+int BlockTreeCache::evictForGroup(const ModuleGroupKey& group_tag, size_t num_blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
@@ -206,16 +206,15 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
                                             /*force_drop=*/true,
                                             num_blocks,
                                             std::min(reclaimed, num_blocks));
-    RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
-                      static_cast<int>(group_tag.size()),
-                      group_tag.data(),
+    RTP_LLM_LOG_DEBUG("%s group_set[%zu] reclaimed %zu/%zu device blocks",
+                      group_tag.debugString().c_str(),
                       location->group_set_id,
                       reclaimed,
                       num_blocks);
     return static_cast<int>(reclaimed);
 }
 
-BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
+BlockIndicesType BlockTreeCache::matchedBlocksForGroup(const ModuleGroupKey&                 group_tag,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
     return loader_.matchedBlocksForGroup(group_tag, matched_resources);
 }
@@ -247,8 +246,8 @@ void BlockTreeCache::reportMetrics() const {
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
-void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,
-                                       const std::vector<std::string>& required_group_tags) {
+void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr           publisher,
+                                       const std::vector<ModuleGroupKey>& required_group_tags) {
     std::lock_guard<std::mutex> lock(mutex_);
     tree_->setEventPublisher(std::move(publisher), required_group_tags);
 }

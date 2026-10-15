@@ -199,8 +199,8 @@ static std::vector<TransferDescriptor> makeBroadcastDescriptors() {
 static void expectSingleGroupBlock(const MemoryOperationRequestPB::CopyItem& item,
                                    const std::string&                        group_tag,
                                    BlockIdxType                              block) {
-    ASSERT_EQ(item.group_tags_size(), 1);
-    EXPECT_EQ(item.group_tags(0), group_tag);
+    ASSERT_EQ(item.groups_size(), 1);
+    EXPECT_EQ(item.groups(0).tag(), group_tag);
     ASSERT_EQ(item.group_blocks_size(), 1);
     EXPECT_EQ(item.group_blocks(0).tag(), group_tag);
     EXPECT_EQ(item.group_blocks(0).block_id(), block);
@@ -814,7 +814,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
         EXPECT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_block);
-        EXPECT_EQ(worker_request.copy_items(0).group_tags(0), "group0");
+        EXPECT_EQ(worker_request.copy_items(0).groups(0).tag(), "group0");
     }
 }
 
@@ -1119,10 +1119,10 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDe
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
     EXPECT_EQ(request.copy_items(0).mem_block(), 3);
     EXPECT_EQ(request.copy_items(0).disk_block(), 4);
-    EXPECT_EQ(request.copy_items(0).group_tags(0), "group0");
+    EXPECT_EQ(request.copy_items(0).groups(0).tag(), "group0");
     EXPECT_EQ(request.copy_items(1).mem_block(), 5);
     EXPECT_EQ(request.copy_items(1).disk_block(), 6);
-    EXPECT_EQ(request.copy_items(1).group_tags(0), "group1");
+    EXPECT_EQ(request.copy_items(1).groups(0).tag(), "group1");
 }
 
 static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {

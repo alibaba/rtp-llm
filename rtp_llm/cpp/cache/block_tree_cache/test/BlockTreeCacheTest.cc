@@ -2877,7 +2877,7 @@ TEST_F(BlockTreeCacheTest, PendingNodeBlocksInsertUntilLoadAbortWithoutAffecting
     config.enable_host_cache = true;
     auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     auto publisher           = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {"group0"});
+    cache->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
 
     const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(host_source));
@@ -2934,7 +2934,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache({device_pool});
 
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {"group0"});
+    cache->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
 
     BlockTreeMatchResult              result       = cache->match({200});
@@ -2968,7 +2968,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
 
 TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache_->setEventPublisher(publisher, {"group0"});
+    cache_->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
@@ -2995,7 +2995,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
     initializeSingleMemberGroupSets(groups, pools);
     auto cache     = makeBlockTreeCacheForTest(std::move(groups));
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {"group0", "group1"});
+    cache->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}, {CacheModuleId::main(), "group1"}});
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources, Tier::DEVICE);
@@ -3005,13 +3005,13 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
     cache->insert({100}, resources, Tier::DEVICE);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
     ASSERT_EQ(publisher->events.size(), 1u);
-    EXPECT_THROW(cache->setEventPublisher(publisher, {"missing"}), std::invalid_argument);
+    EXPECT_THROW(cache->setEventPublisher(publisher, {{CacheModuleId::main(), "missing"}}), std::invalid_argument);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
 }
 
 TEST_F(BlockTreeCacheTest, EventPublicationWithdrawsDuringDemotionAndRestoresAfterFailure) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache_->setEventPublisher(publisher, {"group0"});
+    cache_->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
@@ -3038,7 +3038,7 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
     cache_->insert({100}, resources, Tier::DEVICE);
     auto publisher    = std::make_shared<RecordingCachePublisher>();
     publisher->result = PublishResult::QUEUE_FULL;
-    cache_->setEventPublisher(publisher, {"group0"});
+    cache_->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
     EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
     const auto version = cache_->logicalCacheSnapshot().version;
     cache_->evictForGroup("group0", 1);
@@ -3054,7 +3054,7 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
 TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     auto cache     = makeHostOnlyLoadCache(makeStructuralDevicePools(1, "event_host"));
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {"group0"});
+    cache->setEventPublisher(publisher, {{CacheModuleId::main(), "group0"}});
     EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
     auto result  = cache->match({200});

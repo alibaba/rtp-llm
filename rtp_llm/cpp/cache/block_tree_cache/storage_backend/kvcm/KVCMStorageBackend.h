@@ -21,7 +21,7 @@ class ClientWrapper;
 // process transfers its own GPU blocks through its locally registered client.
 class KVCMStorageBackend final: public StorageBackend {
 public:
-    KVCMStorageBackend(const CacheConfig&                   cache_config,
+    KVCMStorageBackend(const CacheDomainConfig&             cache_config,
                        const KVCacheConfig&                 kv_cache_config,
                        const RuntimeConfig&                 runtime_config,
                        const ParallelismConfig&             parallelism_config,

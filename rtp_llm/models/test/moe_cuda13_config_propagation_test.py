@@ -38,6 +38,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
 )
+from rtp_llm.ops.compute_ops import CacheModuleId
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
 
@@ -353,6 +354,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         model._initialize_impl(
                             SimpleNamespace(
                                 kv_cache=None,
+                                module_id=CacheModuleId(0),
+                                module_count=1,
                                 is_speculative=False,
                                 is_decode_role=False,
                                 max_context_batch_size=3,

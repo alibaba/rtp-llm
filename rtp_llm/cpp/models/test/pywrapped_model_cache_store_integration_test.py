@@ -545,6 +545,41 @@ class CacheStoreForwardModel:
         return [self._forward_one(model_inputs) for model_inputs in inputs]
 
 
+class DeterministicCacheStoreForwardModel(CacheStoreForwardModel):
+    """Read nonzero cache bytes through the model's bound physical block table.
+
+    This fixture deliberately uses byte layouts with different main/draft
+    strides. Its frozen outputs detect a changed token, physical row selection,
+    cache binding, or cache content while retaining the real asynchronous writer.
+    It does not claim to exercise a real attention kernel or model checkpoint.
+    """
+
+    def initialize(self, resources) -> bool:
+        super().initialize(resources)
+        self.module_id = resources.module_id.value
+        for layer_cache in self.kv_cache.get_layer_cache_groups(0):
+            storage = layer_cache.kv_cache_base
+            values = torch.arange(storage.size(0), device=storage.device) * 7 + 3
+            storage.copy_(values.to(storage.dtype).unsqueeze(1).expand_as(storage))
+        return True
+
+    def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+        super()._forward_one(inputs)
+        layer_cache = self.kv_cache.get_layer_cache_groups(0)[0]
+        attention_inputs = inputs.attention_inputs
+        if isinstance(attention_inputs, dict):
+            attention_inputs = attention_inputs[layer_cache.tag]
+        positions = torch.arange(
+            inputs.input_ids.numel(), device=inputs.input_ids.device
+        )
+        logical_blocks = positions // layer_cache.seq_size_per_block
+        table = attention_inputs.kv_cache_block_id.to(inputs.input_ids.device).long()
+        physical_blocks = table[0, logical_blocks]
+        cache_values = layer_cache.kv_cache_base[physical_blocks, 0].to(torch.int32)
+        hidden_states = (inputs.input_ids * 3 + cache_values).to(torch.float16)
+        return PyModelOutputs(hidden_states.unsqueeze(1))
+
+
 class DirtyGenerationPrefillCaptureModel:
     """Fail on the graph-capture body after all eager generation-prefill warmups."""
 
@@ -892,7 +927,9 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                         grouped_cache,
                     )
                     self.assertSyncedBatches(results, skip_run)
-                    frames_per_batch = 1 if skip_run else 2
+                    # The module-cache header and shape hints always travel; the packed
+                    # payload adds one frame only when skip_run is false.
+                    frames_per_batch = 2 if skip_run else 3
                     self.assertEqual(
                         len(frames), len(_TP_SYNC_CAPTURE_FLAGS) * frames_per_batch
                     )
@@ -1112,15 +1149,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_after"], result["available_before"])
         self.assertFalse(result["manager_retained"])
 
-    def test_mtp_placeholders_preserve_model_tag_set_with_extra_payload_rows(self):
-        for scenario in ("mtp_placeholders", "mtp_placeholders_extra_payload"):
+    def test_mtp_local_tags_exclude_other_module_payload_rows(self):
+        for scenario in ("mtp_local_tags", "mtp_extra_payload"):
             with self.subTest(scenario=scenario):
                 model = CacheStoreForwardModel()
                 result = run_scenario(model, scenario)
-                self.assertEqual(model.seen_direct_inputs, [False])
+                self.assertEqual(model.seen_direct_inputs, [True])
                 self.assertEqual(
-                    model.seen_attention_tables,
-                    [{"unused": [[3, 4]], "draft": [[1, 2]], "other": [[5, 6]]}],
+                    model.seen_cache_tables,
+                    [{"draft": {"physical": [[1, 2]], "kernel": [[1, 2]]}}],
                 )
                 self.assertEqual(set(model.seen_cache_tables[0]), {"draft"})
                 self.assertEqual(set(result["base_addresses"]), {"draft"})
@@ -1133,12 +1170,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     [32, 64],
                 )
 
-    def test_missing_mtp_placeholder_is_rejected_before_forward(self):
+    def test_missing_mtp_local_tag_is_rejected_before_forward(self):
         model = CacheStoreForwardModel()
         with self.assertRaisesRegex(
-            RuntimeError, "missing model cache group tag=unused"
+            RuntimeError, "missing model cache group tag=draft"
         ):
-            run_scenario(model, "mtp_missing_placeholder")
+            run_scenario(model, "mtp_missing_tag")
         self.assertEqual(model.forward_calls, 0)
 
     def test_single_model_group_selects_direct_input_from_shared_payload(self):
@@ -1521,17 +1558,55 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertFalse(result["fake_kernel_defined"])
 
     def test_main_only_and_mtp_forward_outputs_are_logically_equivalent(self) -> None:
-        main_result = run_scenario(CacheStoreForwardModel(), "main_only_equivalence")
-        mtp_result = run_scenario(CacheStoreForwardModel(), "mtp_equivalence")
-
-        self.assertEqual(main_result["logits_defined"], mtp_result["logits_defined"])
-        torch.testing.assert_close(
-            main_result["hidden_states"], mtp_result["hidden_states"]
-        )
+        # Frozen before deleting mergeMTPModule. Tokens [1, 2, 3, 4] read
+        # cache bytes [10, 10, 17, 17] through physical blocks [1, 2].
+        expected = torch.tensor([[13], [16], [26], [29]], dtype=torch.float16)
+        for scenario, module_id, stride in (
+            ("main_only_equivalence", 0, 16),
+            ("mtp_equivalence", 1, 32),
+        ):
+            with self.subTest(scenario=scenario):
+                model = DeterministicCacheStoreForwardModel()
+                result = run_scenario(model, scenario)
+                self.assertEqual(model.module_id, module_id)
+                self.assertFalse(result["logits_defined"])
+                torch.testing.assert_close(
+                    result["hidden_states"], expected, rtol=0, atol=0
+                )
+                self.assertEqual(
+                    model.seen_cache_tables,
+                    [
+                        {
+                            "default": {
+                                "physical": [[1, 2, 3, 4]],
+                                "kernel": [[1, 2, 3, 4]],
+                            }
+                        }
+                    ],
+                )
+                record = _record_for_request(result, 701)
+                self.assertEqual(len(record["blocks"]), 2)
+                self.assertEqual(
+                    sorted(
+                        block["address"] - result["base_addresses"]["default"]
+                        for block in record["blocks"]
+                    ),
+                    [stride, 2 * stride],
+                )
+                self.assertEqual(
+                    {block["length"] for block in record["blocks"]}, {stride}
+                )
+                self.assertEqual(
+                    {block["key"] for block in record["blocks"]},
+                    {
+                        f"kv_model_id_{module_id}_token_id_str_7101_layer_id_0",
+                        f"kv_model_id_{module_id}_token_id_str_7102_layer_id_0",
+                    },
+                )
 
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
-        result = run_scenario(model, "mtp_sub_config")
+        result = run_scenario(model, "mtp_module_config")
 
         record = _record_for_request(result, 401)
         self.assertEqual(len(record["blocks"]), 2)
@@ -1776,7 +1851,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                PositionAwareCaptureModel(), "capture_cp"
+            )
             return
         events = []
         _FakeEagleMooncakeStore.events = events
@@ -1881,7 +1958,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         # Context-parallel input processing is a CUDA-only feature: the production
         # processor rejects ROCm builds by design. The ROCm lane verifies that
         # guard; the CUDA lane covers the full CP planning and restore logic.
-        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+        with self.assertRaisesRegex(
+            RuntimeError, "Context parallel not supported on ROCm"
+        ):
             run_scenario(model, scenario)
 
     def test_capture_fp8_passes_per_token_per_layer_scale(self) -> None:
@@ -2086,7 +2165,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens"
+            )
             return
         layout_statuses = []
 
@@ -2109,7 +2190,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(MalformedCaptureLayoutModel(), "capture_cp_malformed_layout")
+            self.assertRocmContextParallelRejected(
+                MalformedCaptureLayoutModel(), "capture_cp_malformed_layout"
+            )
             return
         layout_statuses = []
 
@@ -2139,7 +2222,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp"
+            )
             return
         layout_reduce_calls = []
 
@@ -2169,7 +2254,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_malformed_restored_width")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp_malformed_restored_width"
+            )
             return
         layout_statuses = []
 
@@ -2263,7 +2350,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                PositionAwareCaptureModel(), "capture_cp"
+            )
             return
         layout_statuses = []
 

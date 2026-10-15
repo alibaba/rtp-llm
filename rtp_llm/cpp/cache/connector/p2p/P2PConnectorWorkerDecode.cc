@@ -37,6 +37,10 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
         if (!layer_cache_buffer) {
             continue;
         }
+        RTP_LLM_CHECK_WITH_INFO(config_.hasLayer(layer_cache_buffer->moduleId(), layer_cache_buffer->getLayerId()),
+                                "P2P reader requires an active module/local layer: module=%zu layer=%d",
+                                layer_cache_buffer->moduleId().value(),
+                                layer_cache_buffer->getLayerId());
         const int         layer_id  = layer_cache_buffer->getLayerId();
         const std::string cache_tag = layer_cache_buffer->cacheTag();
 
@@ -44,8 +48,8 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
             auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(
                 layer_block_converter_, layer_cache_buffer, recv_partition_count, partition_id);
 
-            const std::string partition_layer_key =
-                P2PKeyUtil::makePartitionLayerTagKey(unique_key, layer_id, cache_tag, partition_id);
+            const std::string partition_layer_key = P2PKeyUtil::makePartitionLayerTagKey(
+                unique_key, layer_cache_buffer->moduleId(), layer_id, cache_tag, partition_id);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;

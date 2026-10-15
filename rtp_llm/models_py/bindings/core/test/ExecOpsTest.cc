@@ -224,9 +224,9 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
 static std::string cacheKeyAt(const torch_ext::PyCacheStoreInputs& inputs,
                               size_t                               index,
                               int                                  layer_id,
-                              const std::string&                   tag      = "default",
-                              size_t                               model_id = 0) {
-    return makeCacheKey(model_id, std::to_string(inputs.cache_keys.data_ptr<int64_t>()[index]), layer_id, tag);
+                              const std::string&                   tag       = "default",
+                              CacheModuleId                        module_id = CacheModuleId::main()) {
+    return makeCacheKey(module_id, std::to_string(inputs.cache_keys.data_ptr<int64_t>()[index]), layer_id, tag);
 }
 
 static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cache_base, size_t blocks_to_write = 4) {
@@ -255,8 +255,14 @@ static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cach
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -489,7 +495,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
                                layer_cache,
                                config,
                                std::make_shared<MockCacheStore>(),
-                               /*cache_model_id=*/0,
+                               /*module_id=*/CacheModuleId::main(),
                                /*cp_rank=*/0,
                                /*cp_size=*/1,
                                nullptr);
@@ -526,7 +532,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCallbackFailureReachesPublicationWait) {
         layer_cache,
         config,
         cache_store,
-        /*cache_model_id=*/0,
+        /*module_id=*/CacheModuleId::main(),
         /*cp_rank=*/0,
         /*cp_size=*/1,
         nullptr,
@@ -564,7 +570,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSynchronousThrowCompletesTokenExactlyOnce
                      layer_cache,
                      config,
                      cache_store,
-                     /*cache_model_id=*/0,
+                     /*module_id=*/CacheModuleId::main(),
                      /*cp_rank=*/0,
                      /*cp_size=*/1,
                      nullptr,
@@ -604,7 +610,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDuplicateCallbackDoesNotUnderflow) {
         layer_cache,
         config,
         cache_store,
-        /*cache_model_id=*/0,
+        /*module_id=*/CacheModuleId::main(),
         /*cp_rank=*/0,
         /*cp_size=*/1,
         nullptr,
@@ -642,7 +648,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreZeroSelectedBlocksRegistersNoCompletion) 
         layer_cache,
         config,
         cache_store,
-        /*cache_model_id=*/0,
+        /*module_id=*/CacheModuleId::main(),
         /*cp_rank=*/0,
         /*cp_size=*/1,
         nullptr,
@@ -681,7 +687,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTrackedPublicationWithoutCacheStoreThrows
         layer_cache,
         config,
         /*cache_store=*/nullptr,
-        /*cache_model_id=*/0,
+        /*module_id=*/CacheModuleId::main(),
         /*cp_rank=*/0,
         /*cp_size=*/1,
         nullptr,
@@ -738,8 +744,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -786,8 +798,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreIndependentPoolUsesGroupStride) {
     layer_cache.layer_id           = 1;
     layer_cache.tag                = "linear";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -836,8 +854,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     inputs.prefix_lengths_host  = torch::tensor({2}, torch::kInt32);
     inputs.host_kv_cache_offset = torch::tensor({{0, 1}}, torch::kInt32);
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/1, /*cp_size=*/2, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/1,
+                                           /*cp_size=*/2,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -903,7 +927,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreHybridCpStateAndPackedSwaReconstructMarke
                                                        layer_cache,
                                                        config,
                                                        cache_store,
-                                                       /*cache_model_id=*/0,
+                                                       /*module_id=*/CacheModuleId::main(),
                                                        rank,
                                                        cp_size,
                                                        nullptr));
@@ -972,8 +996,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpSingleTokenBlocksUseCanonicalKeys) {
 
     inputs.host_kv_cache_offset = torch::arange(static_cast<int64_t>(local_block_num), torch::kInt32).reshape({1, -1});
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/1, /*cp_size=*/2, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/1,
+                                           /*cp_size=*/2,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -1016,8 +1046,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUnscaledCpSwaKeepsFlatTailSlots) {
     layer_cache.layer_id           = 1;
     layer_cache.tag                = "state";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/1, /*cp_size=*/2, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/1,
+                                           /*cp_size=*/2,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -1056,8 +1092,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesRealRequestKeyCount) {
     inputs.input_lengths_host   = torch::tensor({22}, torch::kInt32);
     inputs.host_kv_cache_offset = torch::arange(static_cast<int64_t>(local_block_num), torch::kInt32).reshape({1, -1});
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/2, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/2,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
@@ -1101,8 +1143,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpFourPartialBundleSkipsPaddedSlots) {
 
     for (int cp_rank = 0; cp_rank < 4; ++cp_rank) {
         auto cache_store = std::make_shared<MockCacheStore>();
-        ASSERT_NO_THROW(runtimeWriteCacheStore(
-            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/4, nullptr));
+        ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                               layer_cache,
+                                               config,
+                                               cache_store,
+                                               /*module_id=*/CacheModuleId::main(),
+                                               cp_rank,
+                                               /*cp_size=*/4,
+                                               nullptr));
         ASSERT_EQ(cache_store->records.size(), 1u);
         const auto& record = cache_store->records.front();
         ASSERT_EQ(record.blocks.size(), cp_rank == 0 ? 2u : 1u);
@@ -1151,16 +1199,23 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinIgnoresPaddedBatchKeys) {
     layer_cache.tag                = "default";
     auto cache_store               = std::make_shared<MockCacheStore>();
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/2, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/2,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 2u);
     EXPECT_EQ(cache_store->records[0].blocks.size(), 1u);
-    EXPECT_NE(cache_store->records[0].blocks.find("kv_" + makeCacheKey(0, "100", 0, "default")),
+    EXPECT_NE(cache_store->records[0].blocks.find("kv_" + makeCacheKey(CacheModuleId(0), "100", 0, "default")),
               cache_store->records[0].blocks.end());
     EXPECT_EQ(cache_store->records[1].blocks.size(), 3u);
     for (const auto key : {200, 202, 204}) {
-        EXPECT_NE(cache_store->records[1].blocks.find("kv_" + makeCacheKey(0, std::to_string(key), 0, "default")),
+        EXPECT_NE(cache_store->records[1].blocks.find(
+                      "kv_" + makeCacheKey(CacheModuleId(0), std::to_string(key), 0, "default")),
                   cache_store->records[1].blocks.end());
     }
 }
@@ -1192,8 +1247,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpUnshardedFullKeepsAllSourceSlots) {
 
     for (int cp_rank = 0; cp_rank < 2; ++cp_rank) {
         auto cache_store = std::make_shared<MockCacheStore>();
-        ASSERT_NO_THROW(runtimeWriteCacheStore(
-            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/2, nullptr));
+        ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                               layer_cache,
+                                               config,
+                                               cache_store,
+                                               /*module_id=*/CacheModuleId::main(),
+                                               cp_rank,
+                                               /*cp_size=*/2,
+                                               nullptr));
         ASSERT_EQ(cache_store->records.size(), 1u);
         const auto& record = cache_store->records.front();
         ASSERT_EQ(record.blocks.size(), cache_key_count);
@@ -1236,8 +1297,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreHeterogeneousGroupUsesEndpointKeys) {
     inputs.host_kv_cache_offset =
         torch::arange(static_cast<int64_t>(group_block_count), torch::kInt32).reshape({1, -1});
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record    = cache_store->records.front();
@@ -1278,8 +1345,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpHeterogeneousGroupUsesOneLocalEndpointP
 
     for (int cp_rank = 0; cp_rank < 2; ++cp_rank) {
         auto cache_store = std::make_shared<MockCacheStore>();
-        ASSERT_NO_THROW(runtimeWriteCacheStore(
-            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/2, nullptr));
+        ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                               layer_cache,
+                                               config,
+                                               cache_store,
+                                               /*module_id=*/CacheModuleId::main(),
+                                               cp_rank,
+                                               /*cp_size=*/2,
+                                               nullptr));
 
         ASSERT_EQ(cache_store->records.size(), 1u);
         const auto&  record    = cache_store->records.front();
@@ -1315,8 +1388,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     ASSERT_EQ(cache_store->records[0].blocks.size(), block_num);
@@ -1351,8 +1430,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     const auto log_content = log_capture.content();
     EXPECT_EQ(log_content.find("PD_CACHE_KEY_WRITE_FAILED"), std::string::npos);
@@ -1408,8 +1493,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "linear";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u) << "Expected exactly one store() call for the single request";
     EXPECT_EQ(cache_store->records[0].block_count, 1u) << "LINEAR policy should store only its active tail block";
@@ -1441,7 +1532,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {
         layer_cache,
         config,
         cache_store,
-        /*cache_model_id=*/0,
+        /*module_id=*/CacheModuleId::main(),
         /*cp_rank=*/0,
         /*cp_size=*/1,
         nullptr,
@@ -1487,15 +1578,27 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
 
     auto linear_store = std::make_shared<MockCacheStore>();
     layer_cache.tag   = "linear";
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, linear_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           linear_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
     ASSERT_EQ(linear_store->records.size(), 1u);
     EXPECT_EQ(linear_store->records[0].block_count, 1u);
 
     auto full_store = std::make_shared<MockCacheStore>();
     layer_cache.tag = "full";
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, full_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           full_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
     ASSERT_EQ(full_store->records.size(), 1u);
     EXPECT_EQ(full_store->records[0].block_count, block_num);
 }
@@ -1511,8 +1614,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonLocalBlockTable) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    EXPECT_ANY_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    EXPECT_ANY_THROW(runtimeWriteCacheStore(inputs,
+                                            layer_cache,
+                                            config,
+                                            cache_store,
+                                            /*module_id=*/CacheModuleId::main(),
+                                            /*cp_rank=*/0,
+                                            /*cp_size=*/1,
+                                            nullptr));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreTag_LocalOffset) {
@@ -1532,8 +1641,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LocalOffset) {
     layer_cache.layer_id           = 1;
     layer_cache.tag                = "full";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     EXPECT_EQ(cache_store->records[0].block_count, 3u)
@@ -1560,8 +1675,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSkipsNullPhysicalBlocks) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     EXPECT_EQ(cache_store->records[0].block_count, 2u);
@@ -1593,8 +1714,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto second_key = "kv_" + cacheKeyAt(inputs, 1, 0);
@@ -1603,8 +1730,8 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow) {
               reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr()) + 64);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModelIdInKeyNamespace) {
-    constexpr size_t        cache_model_id = 23;
+TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModuleIdInKeyNamespace) {
+    constexpr CacheModuleId module_id(23);
     auto                    cache_store    = std::make_shared<MockCacheStore>();
     auto                    inputs         = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/1);
     auto                    config         = makeCacheConfig(/*tokens_per_block=*/2,
@@ -1623,10 +1750,10 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModelIdInKeyNamespace) {
     layer_cache.tag                = "default";
 
     ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, cache_model_id, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+        inputs, layer_cache, config, cache_store, module_id, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
-    EXPECT_NE(cache_store->records[0].blocks.find("kv_" + cacheKeyAt(inputs, 0, 0, "default", cache_model_id)),
+    EXPECT_NE(cache_store->records[0].blocks.find("kv_" + cacheKeyAt(inputs, 0, 0, "default", module_id)),
               cache_store->records[0].blocks.end());
 }
 
@@ -1668,12 +1795,18 @@ TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "default";
 
-    ASSERT_NO_THROW(runtimeWriteCacheStore(
-        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                           layer_cache,
+                                           config,
+                                           cache_store,
+                                           /*module_id=*/CacheModuleId::main(),
+                                           /*cp_rank=*/0,
+                                           /*cp_size=*/1,
+                                           nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 2u);
-    const auto first_key  = "kv_" + makeCacheKey(/*model_id=*/0, "100", /*layer_id=*/0, "default");
-    const auto second_key = "kv_" + makeCacheKey(/*model_id=*/0, "200", /*layer_id=*/0, "default");
+    const auto first_key  = "kv_" + makeCacheKey(CacheModuleId(0), "100", /*layer_id=*/0, "default");
+    const auto second_key = "kv_" + makeCacheKey(CacheModuleId(0), "200", /*layer_id=*/0, "default");
     EXPECT_NE(cache_store->records[0].blocks.find(first_key), cache_store->records[0].blocks.end());
     EXPECT_NE(cache_store->records[1].blocks.find(second_key), cache_store->records[1].blocks.end());
 }

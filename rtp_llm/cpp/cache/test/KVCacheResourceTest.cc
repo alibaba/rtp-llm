@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -29,6 +30,66 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
 }
 
 }  // namespace
+
+TEST(KVCacheResourceTest, ModuleRowsKeepEqualTagsIndependentAcrossCopiesAndResize) {
+    CacheConfig main;
+    main.layer_num          = 1;
+    main.seq_size_per_block = 8;
+    main.setTopology({makeResourceGroup("shared", CacheGroupType::FULL)}, {{0, {"shared"}}});
+    CacheConfig draft;
+    draft.layer_num          = 2;
+    draft.seq_size_per_block = 8;
+    draft.setTopology({makeResourceGroup("shared", CacheGroupType::LINEAR)}, {{0, {"shared"}}, {1, {"shared"}}});
+    CacheDomainConfig    domain(std::vector<CacheConfig>{main, draft});
+    const ModuleGroupKey main_key{CacheModuleId::main(), "shared"};
+    const ModuleGroupKey draft_key{CacheModuleId(1), "shared"};
+    KVCacheResource      resource;
+    resource.initGroups(domain);
+    resource.mutableBlockIds(main_key).assign({2, 3});
+    resource.mutableBlockIds(draft_key).assign({7});
+    EXPECT_EQ(resource.moduleCount(), 2u);
+    EXPECT_EQ(resource.groupKeys(), (std::vector<ModuleGroupKey>{main_key, draft_key}));
+    EXPECT_NE(resource.groupBlockIds(main_key), resource.groupBlockIds(draft_key));
+    EXPECT_EQ(resource.kernelBlocks(main_key), (BlockIndicesType{8, 9, 10, 11, 12, 13, 14, 15}));
+    EXPECT_EQ(resource.kernelBlocks(draft_key), (BlockIndicesType{7}));
+    EXPECT_EQ(resource.blockIdsForLayer(CacheModuleId(1), 1, "shared").blocks(), (BlockIndicesType{7}));
+    EXPECT_ANY_THROW(resource.blockIdsForLayer(CacheModuleId::main(), 1, "shared"));
+    EXPECT_ANY_THROW(resource.blocks(ModuleGroupKey{CacheModuleId(2), "shared"}));
+    EXPECT_ANY_THROW(resource.blocks(ModuleGroupKey{CacheModuleId(1), "missing"}));
+
+    auto copy = resource;
+    resource  = KVCacheResource{};
+    copy.mutableBlockIds(draft_key).assign({5, 6, 7});
+    EXPECT_EQ(copy.blocks(main_key), (BlockIndicesType{2, 3}));
+    EXPECT_EQ(copy.maxBlocksNum(), 3);
+    copy.resizeBlocks(0);
+    EXPECT_TRUE(copy.blocks(main_key).empty());
+    EXPECT_TRUE(copy.blocks(draft_key).empty());
+
+    // Lazy layer views used by beam forks preserve the same module address.
+    resource.initGroups(domain, false);
+    resource.mutableBlockIds(draft_key).assign({4});
+    EXPECT_EQ(resource.blockIdsForLayer(CacheModuleId(1), 1, "shared").blocks(), (BlockIndicesType{4}));
+}
+
+TEST(CacheDomainConfigTest, RejectsInvalidModuleLayerTagAndKeyGrid) {
+    CacheConfig main;
+    main.layer_num          = 1;
+    main.seq_size_per_block = 8;
+    main.setTopology({makeResourceGroup("main", CacheGroupType::FULL)}, {{0, {"main"}}});
+    CacheConfig draft = main;
+    draft.layer_num   = 2;
+    draft.setTopology({makeResourceGroup("draft", CacheGroupType::LINEAR)}, {{0, {"draft"}}, {1, {"draft"}}});
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft});
+    EXPECT_EQ(domain.groupIndex({CacheModuleId(1), "draft"}), 1u);
+    EXPECT_EQ(domain.groupForLayer(CacheModuleId(1), 1, "draft").tag, "draft");
+    EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId(2), 0, "draft"));
+    EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId(1), 2, "draft"));
+    EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId(1), 0, "main"));
+    draft.seq_size_per_block = 4;
+    EXPECT_ANY_THROW((CacheDomainConfig(std::vector<CacheConfig>{main, draft})));
+    EXPECT_ANY_THROW((CacheDomainConfig(std::vector<CacheConfig>{})));
+}
 
 TEST(GroupBlockIdsTest, CopyOwnsIdentityAndSharesHolders) {
     GroupBlockIds copy;

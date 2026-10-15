@@ -121,7 +121,7 @@ public:
                 (const ConfigMap&,
                  kv_cache_manager::RoleType,
                  const std::vector<PoolRegistration>&,
-                 const std::vector<std::string>&),
+                 const std::vector<ModuleGroupKey>&),
                 (override));
     MOCK_METHOD(void, shutdown, (), (noexcept, override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::Locations>),
@@ -151,15 +151,15 @@ public:
                  const kv_cache_manager::Locations&),
                 (override));
     MOCK_METHOD(bool,
-                loadKvCachesForTag,
-                (const std::string&,
+                loadKvCachesForGroup,
+                (const ModuleGroupKey&,
                  const kv_cache_manager::UriStrVec&,
                  kv_cache_manager::BlockBuffers&,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
                 (override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::UriStrVec>),
-                saveKvCachesForTag,
-                (const std::string&,
+                saveKvCachesForGroup,
+                (const ModuleGroupKey&,
                  const kv_cache_manager::UriStrVec&,
                  const kv_cache_manager::BlockBuffers&,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
@@ -358,7 +358,7 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     kv_cache_config.kvcm_server_address = "unused-test-address";
     RuntimeConfig runtime_config;
     runtime_config.model_name = "kvcm_test_model";
-    return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+    return BackendHandle(std::make_unique<KVCMStorageBackend>(CacheDomainConfig(environment.cache_config),
                                                               kv_cache_config,
                                                               runtime_config,
                                                               parallelism_config,

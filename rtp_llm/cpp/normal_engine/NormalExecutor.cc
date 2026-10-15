@@ -222,6 +222,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                                  cache_config,
                                                                  warm_up_,
                                                                  async_worker_count));
+    if (cache_manager) {
+        batch_stream_processor_->setCacheDomain(
+            cache_manager->cacheDomainConfig(),
+            is_propose_ ? CacheModuleId(1 + static_cast<size_t>(propose_model_index_)) : CacheModuleId::main());
+    }
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,
@@ -313,8 +318,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
-            cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
-                                                     model_input.kv_cache_group_tags);
+            cache_manager_->blockBatchCopyForForward(
+                model_input.cache_module_id, model_input.kv_cache_update_mapping, model_input.kv_cache_group_tags);
         }
     }
     {

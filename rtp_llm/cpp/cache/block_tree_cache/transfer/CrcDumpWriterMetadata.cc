@@ -15,7 +15,7 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
         {"group_set_id", std::to_string(descriptor.group_set_id)},
         {"kind", cacheGroupTypeName(group.groupType())},
         {"layout", group.usesPhysicalPayloadGeometry() ? "physical_pool_geometry" : "topology_geometry"},
-        {"member_count", std::to_string(group.groupTags().size())},
+        {"member_count", std::to_string(group.groupKeys().size())},
         {"output_written", store ? "true" : "false"},
         {"cpu_snapshot_role", store ? "candidate_output_after_failure" : "restore_source_after_failure"},
         {"gpu_footer_role", store ? "candidate_output" : "checked_source"},
@@ -25,9 +25,10 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
          descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "memory_pool" :
                                                                                         "disk_staging_buffer"},
     };
-    for (size_t member = 0; member < group.groupTags().size(); ++member) {
-        const auto& tag                                = group.groupTags()[member];
-        const auto& base                               = group.group(tag);
+    for (size_t member = 0; member < group.groupKeys().size(); ++member) {
+        const auto& key                                = group.groupKeys()[member];
+        const auto& tag                                = key.tag;
+        const auto& base                               = group.group(key);
         const auto  prefix                             = "member_" + std::to_string(member) + "_";
         metadata[prefix + "tag"]                       = tag;
         metadata[prefix + "kind"]                      = cacheGroupTypeName(base.policy.group_type);
@@ -46,11 +47,12 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
     for (size_t index = 0; index < tiles.size(); ++index) {
         const auto& tile            = tiles[index];
         const auto  prefix          = "layout_tile_" + std::to_string(index) + "_";
-        const auto& tag             = group.groupTags()[tile.member_group_id];
+        const auto& key             = group.groupKeys()[tile.member_group_id];
         metadata[prefix + "member"] = std::to_string(tile.member_group_id);
-        metadata[prefix + "tag"]    = tag;
+        metadata[prefix + "tag"]    = key.tag;
+        metadata[prefix + "module"] = std::to_string(key.module_id.value());
         metadata[prefix + "layer_id"] =
-            std::to_string(group.topologyPtr()->layerIdsForGroup(tag)[tile.local_layer_index]);
+            std::to_string(group.topologyPtr(key.module_id)->layerIdsForGroup(key.tag)[tile.local_layer_index]);
         metadata[prefix + "offset"] = std::to_string(tile.host_offset);
         metadata[prefix + "bytes"]  = std::to_string(tile.buffer.size_bytes);
     }

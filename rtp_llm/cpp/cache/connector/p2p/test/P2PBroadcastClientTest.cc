@@ -53,7 +53,7 @@ protected:
 
     // 创建测试用的 LayerCacheBuffer
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "default");
+        auto buffer = std::make_shared<LayerCacheBuffer>(CacheModuleId::main(), layer_id, "default");
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;
@@ -62,6 +62,27 @@ protected:
         return buffer;
     }
 };
+
+TEST_F(P2PBroadcastClientTest, BroadcastPreservesModuleLocalIdentityOnWire) {
+    auto main  = std::make_shared<LayerCacheBuffer>(CacheModuleId::main(), 0, "default");
+    auto draft = std::make_shared<LayerCacheBuffer>(CacheModuleId(1), 0, "default");
+    main->addBlockId(101, 7);
+    draft->addBlockId(101, 9);
+    FunctionRequestPB request;
+    client_->genBroadcastRequest(
+        request, 123, {main, draft}, {}, "request", currentTimeMs() + 5000, P2PConnectorBroadcastType::READ, 1);
+    FunctionRequestPB decoded;
+    ASSERT_TRUE(decoded.ParseFromString(request.SerializeAsString()));
+    ASSERT_EQ(decoded.p2p_request().layer_blocks_size(), 2);
+    const auto& blocks = decoded.p2p_request().layer_blocks();
+    EXPECT_EQ(blocks[0].module_id(), 0u);
+    EXPECT_EQ(blocks[1].module_id(), 1u);
+    EXPECT_EQ(blocks[0].layer_id(), blocks[1].layer_id());
+    EXPECT_EQ(blocks[0].cache_tag(), blocks[1].cache_tag());
+    EXPECT_EQ(blocks[0].cache_keys(0), blocks[1].cache_keys(0));
+    EXPECT_EQ(blocks[0].block_ids(0), 7u);
+    EXPECT_EQ(blocks[1].block_ids(0), 9u);
+}
 
 // ---------------------------- broadcast ----------------------------
 

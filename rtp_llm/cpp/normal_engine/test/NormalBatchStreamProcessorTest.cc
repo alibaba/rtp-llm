@@ -817,6 +817,106 @@ TEST_F(NormalBatchStreamProcessorTest, testSingleGroupGraphUsesSpecGeometry) {
     EXPECT_EQ(CudaGraphRunner::captureKernelBlockTableWidth(*topology, 513, 0), 16);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, DomainGatherSelectsIndependentTablesAndImmutableSnapshots) {
+    ModelConfig model;
+    model.max_seq_len = 64;
+    model.vocab_size  = 128;
+    model.num_layers  = 1;
+    CacheConfig main, draft;
+    main.layer_num          = 1;
+    draft.layer_num         = 2;
+    main.seq_size_per_block = draft.seq_size_per_block = 4;
+    main.fromGroupedSpecs({std::make_shared<MHAKVCacheSpec>("shared", 4, 4, 1)}, {{0}}, {CacheGroupType::FULL});
+    draft.fromGroupedSpecs({std::make_shared<MHAKVCacheSpec>("shared", 4, 2, 1)}, {{0, 1}}, {CacheGroupType::FULL});
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft, draft}, 2);
+    auto              query = std::make_shared<GenerateInput>();
+    query->input_ids        = hostIntBuffer({1, 2, 3});
+    query->generate_config  = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(domain);
+    resource.mutableBlockIds(0, {CacheModuleId::main(), "shared"}).assign({3, 5});
+    resource.mutableBlockIds(0, {CacheModuleId(1), "shared"}).assign({7, 9, 11});
+    resource.mutableBlockIds(0, {CacheModuleId(2), "shared"}).assign({21});
+    stream->setKVCache(resource);
+    stream->generate_status_->status = StreamState::RUNNING;
+    NormalBatchStreamProcessor processor(model, {}, {}, main, false);
+    processor.setCacheDomain(domain);
+    TensorHolder holder;
+    auto         inputs = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(inputs.ok());
+    ASSERT_EQ(inputs->module_cache_inputs.size(), 2u);
+    EXPECT_FALSE(inputs->kv_cache_block_id.is_cuda());
+    EXPECT_FALSE(inputs->kv_cache_kernel_block_id.is_cuda());
+    EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_block_id), (std::vector<int32_t>{3, 5}));
+    inputs->selectCacheModule(CacheModuleId(1));
+    EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_block_id), (std::vector<int32_t>{7, 9, 11}));
+    EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_kernel_block_id), (std::vector<int32_t>{14, 15, 18, 19, 22, 23}));
+    EXPECT_EQ(inputs->kernel_seq_size_per_block, 2u);
+    auto async_copy = *inputs;
+    inputs->selectCacheModule(CacheModuleId::main());
+    EXPECT_EQ(inputs->kernel_seq_size_per_block, 4u);
+    EXPECT_EQ(async_copy.cache_module_id, CacheModuleId(1));
+    EXPECT_EQ(toVec<int32_t>(async_copy.kv_cache_block_id), (std::vector<int32_t>{7, 9, 11}));
+    EXPECT_ANY_THROW(inputs->selectCacheModule(CacheModuleId(2)));
+
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_seq_len_upper_bound = 3;
+    state.next_module_cache_inputs = inputs->module_cache_inputs;
+    for (auto& cache : state.next_module_cache_inputs) {
+        cache.physical_blocks = cache.physical_blocks.to(torch::kCUDA);
+        cache.kernel_blocks   = cache.kernel_blocks.to(torch::kCUDA);
+    }
+    state.next_kv_cache_block_id_gpu        = state.next_module_cache_inputs[0].physical_blocks;
+    state.next_kv_cache_kernel_block_id_gpu = state.next_module_cache_inputs[0].kernel_blocks;
+    ASSERT_TRUE(GenerateStream::hasMtpCacheSnapshot(state));
+    // The next gather must ignore mutable host rows once the device pair is published.
+    resource.mutableBlockIds(0, {CacheModuleId(1), "shared"}).assign({99});
+    stream->setIsContextStream(false);
+    stream->setMtpAsyncDeviceState(state);
+    auto next = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(next.ok());
+    next->selectCacheModule(CacheModuleId(1));
+    EXPECT_EQ(toVec<int32_t>(next->kv_cache_block_id), (std::vector<int32_t>{7, 9, 11}));
+    state.next_module_cache_inputs[1].kernel_blocks = torch::Tensor();
+    EXPECT_FALSE(GenerateStream::hasMtpCacheSnapshot(state));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, DomainGatherCanSelectDifferentLeafMetadata) {
+    ModelConfig model;
+    model.max_seq_len = 64;
+    model.vocab_size  = 128;
+    model.num_layers  = 1;
+    CacheConfig main, draft;
+    main.layer_num = draft.layer_num = 1;
+    main.seq_size_per_block = draft.seq_size_per_block = 4;
+    main.fromGroupedSpecs({std::make_shared<MHAKVCacheSpec>("main", 4, 4, 1)}, {{0}}, {CacheGroupType::FULL});
+    draft.fromGroupedSpecs({std::make_shared<MHAKVCacheSpec>("draft", 4, 2, 1)}, {{0}}, {CacheGroupType::FULL});
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft});
+    auto              query = std::make_shared<GenerateInput>();
+    query->input_ids        = hostIntBuffer({1, 2, 3});
+    query->generate_config  = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(domain);
+    resource.mutableBlockIds(0, {CacheModuleId::main(), "main"}).assign({3});
+    resource.mutableBlockIds(0, {CacheModuleId(1), "draft"}).assign({7, 9});
+    stream->setKVCache(resource);
+    stream->generate_status_->status = StreamState::RUNNING;
+    NormalBatchStreamProcessor processor(model, {}, {}, main, false);
+    processor.setCacheDomain(domain, CacheModuleId(1));
+    TensorHolder holder;
+    auto         inputs = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(inputs.ok());
+    EXPECT_EQ(inputs->cache_module_id, CacheModuleId(1));
+    EXPECT_EQ(inputs->kv_cache_group_tags, (std::vector<std::string>{"draft"}));
+    EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_block_id), (std::vector<int32_t>{7, 9}));
+    EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_kernel_block_id), (std::vector<int32_t>{14, 15, 18, 19}));
+    EXPECT_EQ(inputs->kernel_seq_size_per_block, 2u);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRows) {
     for (const int full_bpk : {4, 128}) {
         for (const bool full_first : {false, true}) {

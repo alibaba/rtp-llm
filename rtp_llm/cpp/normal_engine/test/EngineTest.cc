@@ -358,16 +358,15 @@ TEST_F(NormalEngineTest, testCacheStoreProducerFactsFollowBoundWarmupCache) {
     parallelism.prefill_cp_config.kv_cache_sharded = true;
     auto       cache_config = CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
     const auto draft_config = cache_config;
-    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
-    cache_config.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
+    CacheDomainConfig cache_domain({cache_config, draft_config});
+    cache_domain.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
     auto       warmup_config       = CacheConfigCreator::createWarmupConfig(model, parallelism);
     const auto warmup_draft_config = warmup_config;
-    warmup_config.mtp_sub_configs.push_back(
-        warmup_config.mergeMTPModule(warmup_draft_config, 0, warmup_config.layer_num));
-    warmup_config.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
-    auto live_manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/false, nullptr, KVCacheConfig{}, parallelism);
-    auto fake_manager = std::make_shared<KVCacheManager>(warmup_config, /*warmup=*/true);
+    CacheDomainConfig warmup_domain({warmup_config, warmup_draft_config});
+    warmup_domain.finalizeBlockNums(/*global_block_num=*/2, RuntimeConfig{});
+    auto live_manager =
+        std::make_shared<KVCacheManager>(cache_domain, /*warmup=*/false, nullptr, KVCacheConfig{}, parallelism);
+    auto fake_manager = std::make_shared<KVCacheManager>(warmup_domain, /*warmup=*/true);
     ASSERT_TRUE(live_manager->init());
     ASSERT_TRUE(fake_manager->init());
     ASSERT_TRUE(live_manager->cacheConfig().request_projection_required);

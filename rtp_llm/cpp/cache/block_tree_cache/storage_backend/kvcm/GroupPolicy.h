@@ -29,43 +29,49 @@ class GroupPolicy {
 public:
     struct Group {
         Group() = default;
-        Group(bool        is_full,
-              uint64_t    group_name_bithash,
-              std::string group_name,
-              std::string tag              = {},
-              size_t      block_size_bytes = 0):
+        Group(bool           is_full,
+              uint64_t       group_name_bithash,
+              std::string    group_name,
+              ModuleGroupKey key              = {CacheModuleId::main(), {}},
+              size_t         block_size_bytes = 0):
             is_full(is_full),
             group_name_bithash(group_name_bithash),
             group_name(std::move(group_name)),
-            tag(std::move(tag)),
+            key(std::move(key)),
             block_size_bytes(block_size_bytes) {}
 
         bool        is_full            = true;
         uint64_t    group_name_bithash = 0;
         std::string group_name;
-        std::string tag;
+        ModuleGroupKey key;
         size_t      block_size_bytes = 0;
     };
     using GroupIdMap = std::map<int32_t, Group>;
     struct SpecInfo {
         int32_t     group_id;
         int32_t     tp_rank;
-        std::string tag;
+        ModuleGroupKey key;
     };
     using SpecInfoMap        = std::map<std::string, SpecInfo, std::less<>>;
     using SpecNames          = std::vector<std::string>;
     using LocationSpecGroups = std::map<std::string, std::vector<std::string>>;
 
-    GroupPolicy(const CacheTopology&                    topology,
-                StorageBackend::BufferResolver          buffer_resolver,
-                const std::vector<std::string>&         full_group_tags,
-                const std::vector<std::string>&         other_group_tags,
-                std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        topology_(topology),
+    GroupPolicy(const CacheDomainConfig&                   topology,
+                StorageBackend::BufferResolver             buffer_resolver,
+                const std::vector<ModuleGroupKey>&         full_group_tags,
+                const std::vector<ModuleGroupKey>&         other_group_tags,
+                std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes = {}):
+        domain_(topology),
         buffer_resolver_(std::move(buffer_resolver)),
         full_group_tags_(full_group_tags.begin(), full_group_tags.end()),
         other_group_tags_(other_group_tags.begin(), other_group_tags.end()),
         group_block_size_bytes_(std::move(group_block_size_bytes)) {}
+
+    GroupPolicy(const CacheTopology&                    topology,
+                StorageBackend::LeafBufferResolver      buffer_resolver,
+                const std::vector<std::string>&         full_group_tags,
+                const std::vector<std::string>&         other_group_tags,
+                std::unordered_map<std::string, size_t> group_block_size_bytes = {});
     virtual ~GroupPolicy() = default;
 
     virtual bool init() = 0;
@@ -78,9 +84,9 @@ public:
                                     size_t                    valid_keys_size,
                                     std::vector<std::string>& location_spec_group_names) const = 0;
 
-    virtual bool genBlockBuffers(const std::vector<std::string>& group_tags,
-                                 const std::vector<int32_t>&     block_ids,
-                                 kv_cache_manager::BlockBuffers& block_buffers) const = 0;
+    virtual bool genBlockBuffers(const std::vector<ModuleGroupKey>& group_tags,
+                                 const std::vector<int32_t>&        block_ids,
+                                 kv_cache_manager::BlockBuffers&    block_buffers) const = 0;
 
     const GroupIdMap& groups() const {
         return groups_;
@@ -112,16 +118,16 @@ protected:
                                  const char*                       kind,
                                  LocationView&                     location_view) const;
 
-    const CacheTopology&                    topology_;
+    const CacheDomainConfig                    domain_;
     StorageBackend::BufferResolver          buffer_resolver_;
-    std::set<std::string>                   full_group_tags_;
-    std::set<std::string>                   other_group_tags_;
-    std::unordered_map<std::string, size_t> group_block_size_bytes_;
+    std::set<ModuleGroupKey>                   full_group_tags_;
+    std::set<ModuleGroupKey>                   other_group_tags_;
+    std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes_;
 
     // group_id -> group
     GroupIdMap groups_;
     // Stable semantic identity resolved once during policy initialization.
-    std::unordered_map<std::string, int32_t> tag_to_group_id_;
+    std::unordered_map<ModuleGroupKey, int32_t> tag_to_group_id_;
     // max support 64 groups, contains all group combinations
     std::unordered_map<uint64_t, std::string> location_spec_group_map_;
     // spec_name -> spec_info
@@ -132,8 +138,19 @@ protected:
 
 class DefaultLayerGroupPolicy: public GroupPolicy {
 public:
+    DefaultLayerGroupPolicy(const CacheDomainConfig&                   topology,
+                            StorageBackend::BufferResolver             buffer_resolver,
+                            const std::vector<ModuleGroupKey>&         full_group_tags,
+                            const std::vector<ModuleGroupKey>&         other_group_tags,
+                            std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes = {}):
+        GroupPolicy(topology,
+                    std::move(buffer_resolver),
+                    full_group_tags,
+                    other_group_tags,
+                    std::move(group_block_size_bytes)) {}
+
     DefaultLayerGroupPolicy(const CacheTopology&                    topology,
-                            StorageBackend::BufferResolver          buffer_resolver,
+                            StorageBackend::LeafBufferResolver      buffer_resolver,
                             const std::vector<std::string>&         full_group_tags,
                             const std::vector<std::string>&         other_group_tags,
                             std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -153,9 +170,9 @@ public:
                             size_t                    valid_keys_size,
                             std::vector<std::string>& location_spec_group_names) const override;
 
-    bool genBlockBuffers(const std::vector<std::string>& group_tags,
-                         const std::vector<int32_t>&     block_ids,
-                         kv_cache_manager::BlockBuffers& block_buffers) const override;
+    bool genBlockBuffers(const std::vector<ModuleGroupKey>& group_tags,
+                         const std::vector<int32_t>&        block_ids,
+                         kv_cache_manager::BlockBuffers&    block_buffers) const override;
 
     std::string debugString() const override;
 
@@ -169,8 +186,19 @@ protected:
 
 class FullLayerGroupPolicy: public DefaultLayerGroupPolicy {
 public:
+    FullLayerGroupPolicy(const CacheDomainConfig&                   topology,
+                         StorageBackend::BufferResolver             buffer_resolver,
+                         const std::vector<ModuleGroupKey>&         full_group_tags,
+                         const std::vector<ModuleGroupKey>&         other_group_tags,
+                         std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes = {}):
+        DefaultLayerGroupPolicy(topology,
+                                std::move(buffer_resolver),
+                                full_group_tags,
+                                other_group_tags,
+                                std::move(group_block_size_bytes)) {}
+
     FullLayerGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+                         StorageBackend::LeafBufferResolver      buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -203,8 +231,18 @@ public:
 protected:
     void rebuildDerivedSpecInfo() override;
 
+    FullOtherGroupPolicy(const CacheDomainConfig&                   topology,
+                         StorageBackend::BufferResolver             buffer_resolver,
+                         const std::vector<ModuleGroupKey>&         full_group_tags,
+                         const std::vector<ModuleGroupKey>&         other_group_tags,
+                         uint32_t                                   write_interval,
+                         std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes = {}):
+        DefaultLayerGroupPolicy(
+            topology, std::move(buffer_resolver), full_group_tags, other_group_tags, std::move(group_block_size_bytes)),
+        write_interval_(write_interval) {}
+
     FullOtherGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+                         StorageBackend::LeafBufferResolver      buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          uint32_t                                write_interval,
@@ -225,8 +263,21 @@ protected:
 
 class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
 public:
+    FullLinearLayerGroupPolicy(const CacheDomainConfig&                   topology,
+                               StorageBackend::BufferResolver             buffer_resolver,
+                               const std::vector<ModuleGroupKey>&         full_group_tags,
+                               const std::vector<ModuleGroupKey>&         other_group_tags,
+                               uint32_t                                   linear_attention_write_interval,
+                               std::unordered_map<ModuleGroupKey, size_t> group_block_size_bytes = {}):
+        FullOtherGroupPolicy(topology,
+                             std::move(buffer_resolver),
+                             full_group_tags,
+                             other_group_tags,
+                             linear_attention_write_interval,
+                             std::move(group_block_size_bytes)) {}
+
     FullLinearLayerGroupPolicy(const CacheTopology&                    topology,
-                               StorageBackend::BufferResolver          buffer_resolver,
+                               StorageBackend::LeafBufferResolver      buffer_resolver,
                                const std::vector<std::string>&         full_group_tags,
                                const std::vector<std::string>&         other_group_tags,
                                uint32_t                                linear_attention_write_interval,

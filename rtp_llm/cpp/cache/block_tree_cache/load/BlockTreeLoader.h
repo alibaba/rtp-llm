@@ -49,8 +49,12 @@ public:
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType&               cache_keys,
                                      const std::function<bool(size_t)>& valid_prefix = {});
-    BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
+    BlockIndicesType     matchedBlocksForGroup(const ModuleGroupKey&                 group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
+    BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
+                                               const std::vector<MultiNodeResource>& matched_resources) const {
+        return matchedBlocksForGroup({CacheModuleId::main(), std::string(group_tag)}, matched_resources);
+    }
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void                 shutdown();
 

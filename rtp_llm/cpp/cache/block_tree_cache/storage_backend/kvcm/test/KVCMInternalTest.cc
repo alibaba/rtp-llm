@@ -30,7 +30,7 @@ GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t k
     return group;
 }
 
-StorageBackend::BufferResolver unusedResolver() {
+StorageBackend::LeafBufferResolver unusedResolver() {
     return [](int, const std::string&, int) { return std::vector<BlockInfo>{}; };
 }
 
@@ -81,7 +81,7 @@ makeMultiGroupLocation(size_t full_group_count, size_t linear_group_count, int t
     for (size_t group_id = 0; group_id < full_group_count + (include_linear ? linear_group_count : 0); ++group_id) {
         const bool        is_full = group_id < full_group_count;
         const std::string group_name =
-            (is_full ? "Ffull" : "Llinear") + std::to_string(is_full ? group_id : group_id - full_group_count);
+            (is_full ? "Fm0:full" : "Lm0:linear") + std::to_string(is_full ? group_id : group_id - full_group_count);
         for (int rank = 0; rank < tp_size; ++rank) {
             const std::string spec_name = genLocationSpecName(rank, group_name);
             location.emplace_back(kv_cache_manager::LocationSpecUnit{spec_name, "uri_" + spec_name});
@@ -121,9 +121,9 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
 
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
-    ASSERT_EQ(groups.count("Fz_groupFa_group"), 0u);
-    ASSERT_EQ(groups.at("Fa_groupFz_group"),
-              (std::vector<std::string>{"tp0_Fa_group", "tp1_Fa_group", "tp0_Fz_group", "tp1_Fz_group"}));
+    ASSERT_EQ(groups.count("Fm0:z_groupFm0:a_group"), 0u);
+    ASSERT_EQ(groups.at("Fm0:a_groupFm0:z_group"),
+              (std::vector<std::string>{"tp0_Fm0:a_group", "tp1_Fm0:a_group", "tp0_Fm0:z_group", "tp1_Fm0:z_group"}));
 
     const auto first_groups    = groups;
     const auto first_spec_info = policy.spec_info_map();
@@ -136,7 +136,7 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
         ASSERT_NE(actual, policy.spec_info_map().end());
         EXPECT_EQ(actual->second.group_id, expected.group_id);
         EXPECT_EQ(actual->second.tp_rank, expected.tp_rank);
-        EXPECT_EQ(actual->second.tag, expected.tag);
+        EXPECT_EQ(actual->second.key, expected.key);
     }
 }
 
@@ -155,17 +155,17 @@ TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndS
 
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
-    EXPECT_EQ(groups.at("Fa_groupFz_group"),
-              (std::vector<std::string>{"tp0_Fa_group", "tp1_Fa_group", "tp0_Fz_group", "tp1_Fz_group"}));
-    EXPECT_EQ(groups.at("Fa_groupFz_groupLa_linearLz_linear"),
-              (std::vector<std::string>{"tp0_Fa_group",
-                                        "tp1_Fa_group",
-                                        "tp0_Fz_group",
-                                        "tp1_Fz_group",
-                                        "tp0_La_linear",
-                                        "tp1_La_linear",
-                                        "tp0_Lz_linear",
-                                        "tp1_Lz_linear"}));
+    EXPECT_EQ(groups.at("Fm0:a_groupFm0:z_group"),
+              (std::vector<std::string>{"tp0_Fm0:a_group", "tp1_Fm0:a_group", "tp0_Fm0:z_group", "tp1_Fm0:z_group"}));
+    EXPECT_EQ(groups.at("Fm0:a_groupFm0:z_groupLm0:a_linearLm0:z_linear"),
+              (std::vector<std::string>{"tp0_Fm0:a_group",
+                                        "tp1_Fm0:a_group",
+                                        "tp0_Fm0:z_group",
+                                        "tp1_Fm0:z_group",
+                                        "tp0_Lm0:a_linear",
+                                        "tp1_Lm0:a_linear",
+                                        "tp0_Lm0:z_linear",
+                                        "tp1_Lm0:z_linear"}));
 }
 
 TEST(KVCMInternalTest, InvalidAggregateBuildDoesNotPublishPartialState) {
@@ -190,10 +190,10 @@ TEST(KVCMInternalTest, FullAndLinearTP2LoadsOnlyTheNewestLinearLocation) {
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     kv_cache_manager::Locations locations{
-        makeLocation({"tp0_Ffull", "tp1_Ffull"}),
-        makeLocation({"tp0_Ffull", "tp1_Ffull", "tp0_Llinear", "tp1_Llinear"}),
-        makeLocation({"tp0_Ffull", "tp1_Ffull"}),
-        makeLocation({"tp0_Ffull", "tp1_Ffull", "tp0_Llinear", "tp1_Llinear"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full", "tp0_Lm0:linear", "tp1_Lm0:linear"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full", "tp0_Lm0:linear", "tp1_Lm0:linear"}),
     };
     LocationsView view;
     ASSERT_TRUE(policy.filterNeedLoadLocations(locations, view));
@@ -202,8 +202,8 @@ TEST(KVCMInternalTest, FullAndLinearTP2LoadsOnlyTheNewestLinearLocation) {
     EXPECT_EQ(view[1].size(), 2u);
     EXPECT_EQ(view[2].size(), 2u);
     EXPECT_EQ(view[3].size(), 4u);
-    EXPECT_EQ(view[1][0].spec_name, "tp0_Ffull");
-    EXPECT_EQ(view[1][1].spec_name, "tp1_Ffull");
+    EXPECT_EQ(view[1][0].spec_name, "tp0_Fm0:full");
+    EXPECT_EQ(view[1][1].spec_name, "tp1_Fm0:full");
 }
 
 TEST(KVCMInternalTest, FullAndLinearTP2ReturnsNoRemotePrefixWithoutLinearState) {
@@ -217,8 +217,8 @@ TEST(KVCMInternalTest, FullAndLinearTP2ReturnsNoRemotePrefixWithoutLinearState) 
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     const kv_cache_manager::Locations locations{
-        makeLocation({"tp0_Ffull", "tp1_Ffull"}),
-        makeLocation({"tp0_Ffull", "tp1_Ffull"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full"}),
+        makeLocation({"tp0_Fm0:full", "tp1_Fm0:full"}),
     };
     LocationsView view;
     EXPECT_TRUE(policy.filterNeedLoadLocations(locations, view));
@@ -237,7 +237,7 @@ TEST(KVCMInternalTest, FullAndLinearTP2RejectsIncompleteRankSet) {
 
     LocationsView view;
     EXPECT_FALSE(policy.filterNeedLoadLocations(
-        kv_cache_manager::Locations{makeLocation({"tp0_Ffull", "tp0_Llinear", "tp1_Llinear"})}, view));
+        kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full", "tp0_Lm0:linear", "tp1_Lm0:linear"})}, view));
 }
 
 TEST(KVCMInternalTest, FullOnlyTP2RejectsMissingAndDuplicateRanks) {
@@ -248,14 +248,14 @@ TEST(KVCMInternalTest, FullOnlyTP2RejectsMissingAndDuplicateRanks) {
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     LocationsView view;
-    EXPECT_FALSE(policy.filterNeedLoadLocations(kv_cache_manager::Locations{makeLocation({"tp0_Ffull"})}, view));
+    EXPECT_FALSE(policy.filterNeedLoadLocations(kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full"})}, view));
     EXPECT_TRUE(view.empty());
-    EXPECT_FALSE(
-        policy.filterNeedLoadLocations(kv_cache_manager::Locations{makeLocation({"tp0_Ffull", "tp0_Ffull"})}, view));
+    EXPECT_FALSE(policy.filterNeedLoadLocations(
+        kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full", "tp0_Fm0:full"})}, view));
     EXPECT_TRUE(view.empty());
 
     const kv_cache_manager::Locations reversed{
-        makeLocation({"tp1_Ffull", "tp0_Ffull"}),
+        makeLocation({"tp1_Fm0:full", "tp0_Fm0:full"}),
     };
     ASSERT_TRUE(policy.filterNeedLoadLocations(reversed, view));
     ASSERT_EQ(view.size(), 1u);
@@ -273,14 +273,16 @@ TEST(KVCMInternalTest, FullAndLinearTP2RejectsDuplicateFullOrLinearSpecs) {
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     LocationsView view;
-    EXPECT_FALSE(
-        policy.filterNeedLoadLocations(kv_cache_manager::Locations{makeLocation({"tp0_Ffull", "tp0_Ffull"})}, view));
+    EXPECT_FALSE(policy.filterNeedLoadLocations(
+        kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full", "tp0_Fm0:full"})}, view));
     EXPECT_TRUE(view.empty());
     EXPECT_FALSE(policy.filterNeedLoadLocations(
-        kv_cache_manager::Locations{makeLocation({"tp0_Ffull", "tp0_Ffull", "tp0_Llinear", "tp1_Llinear"})}, view));
+        kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full", "tp0_Fm0:full", "tp0_Lm0:linear", "tp1_Lm0:linear"})},
+        view));
     EXPECT_TRUE(view.empty());
     EXPECT_FALSE(policy.filterNeedLoadLocations(
-        kv_cache_manager::Locations{makeLocation({"tp0_Ffull", "tp1_Ffull", "tp0_Llinear", "tp0_Llinear"})}, view));
+        kv_cache_manager::Locations{makeLocation({"tp0_Fm0:full", "tp1_Fm0:full", "tp0_Lm0:linear", "tp0_Lm0:linear"})},
+        view));
     EXPECT_TRUE(view.empty());
 }
 
@@ -348,8 +350,8 @@ TEST(KVCMInternalTest, FullLinearMultiGroupLoadMatrixCoversTP1TP2AndTwoFullGroup
 }
 
 TEST(KVCMInternalTest, FullLinearMultiGroupWriteMatrixPreservesIntervalsAndHoles) {
-    const std::string full_name      = "Ffull0";
-    const std::string aggregate_name = "Ffull0Llinear0Llinear1";
+    const std::string full_name      = "Fm0:full0";
+    const std::string aggregate_name = "Fm0:full0Lm0:linear0Lm0:linear1";
     struct WriteCase {
         uint32_t                 interval;
         std::vector<bool>        include_linear;
@@ -413,7 +415,7 @@ TEST(KVCMInternalTest, FullLinearTwoFullGroupsRejectPartialFullState) {
     auto          partial_full = makeMultiGroupLocation(/*full_group_count=*/2, /*linear_group_count=*/2, 2, true);
     partial_full.erase(std::remove_if(partial_full.begin(),
                                       partial_full.end(),
-                                      [](const auto& spec) { return spec.spec_name == "tp1_Ffull1"; }),
+                                      [](const auto& spec) { return spec.spec_name == "tp1_Fm0:full1"; }),
                        partial_full.end());
     EXPECT_FALSE(policy.filterNeedLoadLocations({partial_full}, view));
 
@@ -436,7 +438,7 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionPreservesLegacyIntervals) {
     ASSERT_TRUE(last_only.buildLocationSpecGroups(/*tp_size=*/2, last_only_groups));
     std::vector<std::string> selected;
     ASSERT_TRUE(last_only.getNeedWriteGroups(makeStorageRequest(handles), handles.size(), selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{"Ffull", "Ffull", "Ffull", "FfullLlinear"}));
+    EXPECT_EQ(selected, (std::vector<std::string>{"Fm0:full", "Fm0:full", "Fm0:full", "Fm0:fullLm0:linear"}));
 
     FullLinearLayerGroupPolicy every_two(
         *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"}, /*write_interval=*/2);
@@ -445,7 +447,7 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionPreservesLegacyIntervals) {
     ASSERT_TRUE(every_two.buildLocationSpecGroups(/*tp_size=*/2, every_two_groups));
     selected.clear();
     ASSERT_TRUE(every_two.getNeedWriteGroups(makeStorageRequest(handles), handles.size(), selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "Ffull", "Ffull", "FfullLlinear"}));
+    EXPECT_EQ(selected, (std::vector<std::string>{"Fm0:fullLm0:linear", "Fm0:full", "Fm0:full", "Fm0:fullLm0:linear"}));
 }
 
 TEST(KVCMInternalTest, FullAndLinearWriteIntervalOnePreservesLegacyDefaultAndPartialSelection) {
@@ -469,7 +471,8 @@ TEST(KVCMInternalTest, FullAndLinearWriteIntervalOnePreservesLegacyDefaultAndPar
     const auto partial_groups = std::vector<std::vector<StorageBlockHandle>>{
         {{"full", 10}, {"linear", 20}}, {{"full", 11}, {"linear", 21}}, {{"full", 12}}, {{"full", 13}, {"linear", 23}}};
     ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest(partial_groups), partial_groups.size(), selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "FfullLlinear", "Ffull", "FfullLlinear"}));
+    EXPECT_EQ(selected,
+              (std::vector<std::string>{"Fm0:fullLm0:linear", "Fm0:fullLm0:linear", "Fm0:full", "Fm0:fullLm0:linear"}));
 }
 
 TEST(KVCMInternalTest, FullOnlyTP2PreservesOffsetAndCanonicalMultiGroupWrites) {
@@ -482,9 +485,9 @@ TEST(KVCMInternalTest, FullOnlyTP2PreservesOffsetAndCanonicalMultiGroupWrites) {
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     const kv_cache_manager::Locations locations{
-        makeLocation({"tp0_Fa_full", "tp1_Fa_full", "tp0_Fz_full", "tp1_Fz_full"}),
-        makeLocation({"tp0_Fa_full", "tp1_Fa_full", "tp0_Fz_full", "tp1_Fz_full"}),
-        makeLocation({"tp0_Fa_full", "tp1_Fa_full", "tp0_Fz_full", "tp1_Fz_full"}),
+        makeLocation({"tp0_Fm0:a_full", "tp1_Fm0:a_full", "tp0_Fm0:z_full", "tp1_Fm0:z_full"}),
+        makeLocation({"tp0_Fm0:a_full", "tp1_Fm0:a_full", "tp0_Fm0:z_full", "tp1_Fm0:z_full"}),
+        makeLocation({"tp0_Fm0:a_full", "tp1_Fm0:a_full", "tp0_Fm0:z_full", "tp1_Fm0:z_full"}),
     };
     LocationsView view;
     ASSERT_TRUE(policy.filterNeedLoadLocations(locations, view, /*block_mask=*/1));
@@ -497,7 +500,8 @@ TEST(KVCMInternalTest, FullOnlyTP2PreservesOffsetAndCanonicalMultiGroupWrites) {
         {{"z_full", 10}, {"a_full", 20}}, {{"z_full", 11}, {"a_full", 21}}, {{"z_full", 12}, {"a_full", 22}}};
     std::vector<std::string> selected;
     ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest(handles), handles.size(), selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{"Fa_fullFz_full", "Fa_fullFz_full", "Fa_fullFz_full"}));
+    EXPECT_EQ(selected,
+              (std::vector<std::string>{"Fm0:a_fullFm0:z_full", "Fm0:a_fullFm0:z_full", "Fm0:a_fullFm0:z_full"}));
 }
 
 TEST(KVCMInternalTest, FullOnlySelectsAggregateOrSingletonFromAvailableGroups) {
@@ -512,7 +516,7 @@ TEST(KVCMInternalTest, FullOnlySelectsAggregateOrSingletonFromAvailableGroups) {
     auto                     request = makeStorageRequest({{{"z_full", 10}, {"a_full", 20}}, {{"z_full", 11}}});
     std::vector<std::string> selected;
     ASSERT_TRUE(policy.getNeedWriteGroups(request, request.handles.size(), selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{"Fa_fullFz_full", "Fz_full"}));
+    EXPECT_EQ(selected, (std::vector<std::string>{"Fm0:a_fullFm0:z_full", "Fm0:z_full"}));
 }
 
 TEST(KVCMInternalTest, SingleFullGroupUsesEmptyWriteGroupShortcut) {
@@ -553,24 +557,14 @@ TEST(KVCMInternalTest, DefaultPolicyRejectsUnusedTopologyGroupWithoutPublishingR
         ++resolver_calls;
         return std::vector<BlockInfo>{};
     };
-    DefaultLayerGroupPolicy policy(*topology, resolver, {"unused", "full"}, {});
-    EXPECT_FALSE(policy.init());
-    EXPECT_TRUE(policy.groups().empty());
-    GroupPolicy::LocationSpecGroups groups{{"sentinel", {"existing"}}};
-    EXPECT_FALSE(policy.buildLocationSpecGroups(1, groups));
-    EXPECT_EQ(groups, (GroupPolicy::LocationSpecGroups{{"sentinel", {"existing"}}}));
+    EXPECT_THROW((void)DefaultLayerGroupPolicy(*topology, resolver, {"full", "unused"}, {}), std::runtime_error);
     EXPECT_EQ(resolver_calls, 0u);
 }
 
 TEST(KVCMInternalTest, FullPolicyRejectsUnusedGroupWithoutPublishingRegistration) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("unused", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), {"full", "unused"}, {});
-    EXPECT_FALSE(policy.init());
-    EXPECT_TRUE(policy.groups().empty());
-    GroupPolicy::LocationSpecGroups groups{{"sentinel", {"existing"}}};
-    EXPECT_FALSE(policy.buildLocationSpecGroups(1, groups));
-    EXPECT_EQ(groups, (GroupPolicy::LocationSpecGroups{{"sentinel", {"existing"}}}));
+    EXPECT_THROW((void)FullLayerGroupPolicy(*topology, unusedResolver(), {"full", "unused"}, {}), std::runtime_error);
 }
 
 TEST(KVCMInternalTest, EmptyLayerTopologyIsRejectedBeforePolicyPublication) {
@@ -587,9 +581,8 @@ TEST(KVCMInternalTest, FullOtherInitRejectsUnusedTopologyGroupWithoutResolvingBu
             ++resolver_calls;
             return std::vector<BlockInfo>{};
         };
-        FullLinearLayerGroupPolicy policy(*topology, resolver, {"full"}, {"linear"}, 1);
-        EXPECT_FALSE(policy.init()) << "used tag=" << used_tag;
-        EXPECT_TRUE(policy.groups().empty());
+        EXPECT_THROW((void)FullLinearLayerGroupPolicy(*topology, resolver, {"full"}, {"linear"}, 1),
+                     std::runtime_error);
         EXPECT_EQ(resolver_calls, 0u);
     }
 }
@@ -622,36 +615,42 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
     EXPECT_EQ(location_groups.size(), static_cast<size_t>(group_count + 1));
 }
 
-TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
-    auto topology = CacheTopology::create({makeGroup("default", 0, CacheGroupType::FULL, /*stride=*/32)},
-                                          {{0, {"default"}}, {1, {"default"}}, {2, {"default"}}});
-    const std::array<size_t, 3>    layer_bytes{32, 64, 64};
-    std::array<uint8_t, 3>         storage{};
-    StorageBackend::BufferResolver resolver = [&layer_bytes,
-                                               &storage](int layer_id, const std::string& tag, int block_id) {
+TEST(KVCMInternalTest, SameTagModulePoliciesResolveIndependentBytesAndExcludeInactiveSlots) {
+    CacheConfig main;
+    main.layer_num          = 1;
+    main.seq_size_per_block = 8;
+    main.setTopology({makeGroup("default", 0, CacheGroupType::FULL, 32)}, {{0, {"default"}}});
+    CacheConfig draft = main;
+    draft.setTopology({makeGroup("default", 0, CacheGroupType::FULL, 64)}, {{0, {"default"}}});
+    CacheDomainConfig              domain({main, draft, draft}, 2);
+    std::array<uint8_t, 32>        main_storage{};
+    std::array<uint8_t, 64>        draft_storage{};
+    StorageBackend::BufferResolver resolver = [&](CacheModuleId module, int layer, const std::string& tag, int block) {
+        EXPECT_EQ(layer, 0);
         EXPECT_EQ(tag, "default");
-        EXPECT_EQ(block_id, 7);
+        EXPECT_EQ(block, 7);
+        EXPECT_LT(module.value(), 2u);
         BlockInfo info;
         info.is_cuda    = true;
-        info.addr       = &storage.at(static_cast<size_t>(layer_id));
-        info.size_bytes = layer_bytes.at(static_cast<size_t>(layer_id));
+        info.addr       = module.isMain() ? main_storage.data() : draft_storage.data();
+        info.size_bytes = module.isMain() ? main_storage.size() : draft_storage.size();
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology,
-                                std::move(resolver),
-                                /*full_group_tags=*/{"default"},
-                                /*other_group_tags=*/{},
-                                /*exact physical group sizes=*/{{"default", 160}});
+    FullLayerGroupPolicy policy(
+        domain, std::move(resolver), {{CacheModuleId::main(), "default"}, {CacheModuleId(1), "default"}}, {});
     ASSERT_TRUE(policy.init());
-    EXPECT_EQ(policy.groups().at(0).block_size_bytes, 160u);
-
+    GroupPolicy::LocationSpecGroups location_groups;
+    ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups));
+    EXPECT_EQ(policy.spec_info_map().size(), 2u);
+    EXPECT_EQ(policy.spec_info_map().at("tp0_Fm0:default").key.module_id, CacheModuleId::main());
+    EXPECT_EQ(policy.spec_info_map().at("tp0_Fm1:default").key.module_id, CacheModuleId(1));
     kv_cache_manager::BlockBuffers buffers;
-    ASSERT_TRUE(policy.genBlockBuffers(/*group_tags=*/{"default"}, /*block_ids=*/{7}, buffers));
-    ASSERT_EQ(buffers.size(), 1u);
-    ASSERT_EQ(buffers.front().iovs.size(), 3u);
-    EXPECT_EQ(buffers.front().iovs[0].size, 32u);
-    EXPECT_EQ(buffers.front().iovs[1].size, 64u);
-    EXPECT_EQ(buffers.front().iovs[2].size, 64u);
+    ASSERT_TRUE(
+        policy.genBlockBuffers({{CacheModuleId(1), "default"}, {CacheModuleId::main(), "default"}}, {7, 7}, buffers));
+    ASSERT_EQ(buffers.size(), 2u);
+    EXPECT_EQ(buffers[0].iovs[0].size, 64u);
+    EXPECT_EQ(buffers[1].iovs[0].size, 32u);
+    EXPECT_THROW(policy.genBlockBuffers({{CacheModuleId(2), "default"}}, {7}, buffers), std::runtime_error);
 }
 
 TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups) {
@@ -726,11 +725,11 @@ TEST(KVCMInternalTest, BufferRoutingUsesStableTagsAndValidatesAggregateSize) {
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers;
-    ASSERT_TRUE(policy.genBlockBuffers({"semantic_tag"}, {7}, buffers));
+    ASSERT_TRUE(policy.genBlockBuffers({{CacheModuleId::main(), "semantic_tag"}}, {7}, buffers));
     ASSERT_EQ(buffers.size(), 1u);
     EXPECT_EQ(buffers.front().iovs.size(), 1u);
 
-    EXPECT_THROW(policy.genBlockBuffers({"missing"}, {7}, buffers), std::runtime_error);
+    EXPECT_THROW(policy.genBlockBuffers({{CacheModuleId::main(), "missing"}}, {7}, buffers), std::runtime_error);
 }
 
 TEST(KVCMInternalTest, SameLayerGroupsRouteBySemanticTagNotNumericOrder) {
@@ -752,7 +751,10 @@ TEST(KVCMInternalTest, SameLayerGroupsRouteBySemanticTagNotNumericOrder) {
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers;
-    ASSERT_TRUE(policy.genBlockBuffers({"a_group", "z_group", "a_group"}, {22, 11, 23}, buffers));
+    ASSERT_TRUE(policy.genBlockBuffers(
+        {{CacheModuleId::main(), "a_group"}, {CacheModuleId::main(), "z_group"}, {CacheModuleId::main(), "a_group"}},
+        {22, 11, 23},
+        buffers));
     EXPECT_EQ(
         calls,
         (std::vector<std::tuple<int, std::string, int>>{{0, "a_group", 22}, {0, "z_group", 11}, {0, "a_group", 23}}));
@@ -787,7 +789,8 @@ TEST(KVCMInternalTest, BufferSizeMismatchDoesNotPublishPartialBuffers) {
     kv_cache_manager::BlockBuffers buffers(1);
     buffers.front().iovs.push_back(
         {kv_cache_manager::MemoryType::CPU, sentinel_storage.data(), sentinel_storage.size(), false});
-    EXPECT_FALSE(policy.genBlockBuffers({"full", "other"}, {7, 8}, buffers));
+    EXPECT_FALSE(
+        policy.genBlockBuffers({{CacheModuleId::main(), "full"}, {CacheModuleId::main(), "other"}}, {7, 8}, buffers));
     ASSERT_EQ(buffers.size(), 1u);
     ASSERT_EQ(buffers.front().iovs.size(), 1u);
     EXPECT_EQ(buffers.front().iovs.front().type, kv_cache_manager::MemoryType::CPU);

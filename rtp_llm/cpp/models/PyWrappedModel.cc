@@ -219,6 +219,10 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 
 // Helper function to build PyAttentionInputs from GptModelInputs
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
+    RTP_LLM_CHECK_WITH_INFO(inputs.module_cache_inputs.empty() || inputs.cache_module_id == module_id_,
+                            "model module=%zu received cache input module=%zu",
+                            module_id_.value(),
+                            inputs.cache_module_id.value());
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
@@ -502,8 +506,8 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         by_tag.emplace(group.tag, std::move(group_inputs));
     }
 
-    // The model topology, including placeholders, determines the input shape;
-    // extra rows in a shared target payload do not make a single-group model tagged.
+    // Only groups owned by this module determine its attention input shape.
+    // Extra payload rows do not make a single-group module tagged.
     py_attn_inputs = by_tag.at(model_groups.front().tag);
     if (model_groups.size() == 1) {
         return {};

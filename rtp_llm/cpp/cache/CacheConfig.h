@@ -75,9 +75,6 @@ public:
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
-    // mtp-model configurations
-    std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
-
     CacheConfig() {}
 
     uint32_t layer_all_num() const {
@@ -87,19 +84,6 @@ public:
         RTP_LLM_CHECK_WITH_INFO(cache_topology->layers().size() <= std::numeric_limits<uint32_t>::max(),
                                 "CacheConfig layer count exceeds uint32_t range");
         return static_cast<uint32_t>(cache_topology->layers().size());
-    }
-
-    static uint32_t
-    mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
-        constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
-        if (module_index < 0 || module_layer_num == 0 || local_layer_id < 0
-            || static_cast<uint32_t>(local_layer_id) >= module_layer_num) {
-            return invalid;
-        }
-        const uint64_t global_layer_id = static_cast<uint64_t>(main_layer_num)
-                                         + static_cast<uint64_t>(module_index) * module_layer_num
-                                         + static_cast<uint32_t>(local_layer_id);
-        return global_layer_id < invalid ? static_cast<uint32_t>(global_layer_id) : invalid;
     }
 
     int groupNums() const {
@@ -250,9 +234,7 @@ public:
         return total;
     }
 
-    // The merged topology owns logical tag membership, while each MTP child
-    // remains the authority for its physical byte layout. Resolve that owner
-    // on demand instead of copying a second geometry table into the topology.
+    // Physical descriptors are resolved within this module-local leaf.
     const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
 
     const std::vector<std::string>& groupTags() const {
@@ -263,9 +245,6 @@ public:
                              const std::vector<uint32_t>&    block_nums,
                              const std::vector<size_t>&      kv_block_stride_bytes,
                              const std::vector<size_t>&      kv_scale_stride_bytes);
-
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 

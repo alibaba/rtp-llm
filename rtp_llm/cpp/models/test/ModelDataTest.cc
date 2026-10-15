@@ -337,6 +337,51 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
 }
 
+void checkDomainTpRound(int rank) {
+    GptModelInputs inputs;
+    inputs.module_cache_inputs.resize(2);
+    for (size_t m = 0; m < 2; ++m) {
+        auto& cache = inputs.module_cache_inputs[m];
+        cache.tags =
+            rank == 0 ? std::vector<std::string>{"shared", "other"} : std::vector<std::string>{"other", "shared"};
+        cache.kernel_seq_size_per_block = m == 0 ? 4 : 2;
+        if (rank == 0) {
+            cache.physical_blocks = (torch::arange(4, torch::kInt32) + static_cast<int>(m * 10)).reshape({2, 1, 2});
+            cache.kernel_blocks   = (torch::arange(8, torch::kInt32) + static_cast<int>(m * 20)).reshape({2, 1, 4});
+            cache.group_types     = torch::tensor({1, 0}, torch::kInt32);
+            cache.update_mapping  = torch::tensor({0, 7, 9}, torch::kInt32).reshape({1, 3});
+        }
+    }
+    inputs.setSelectedCacheInputs(CacheModuleId::main(), inputs.module_cache_inputs[0]);
+    if (rank == 0) {
+        inputs.combo_tokens     = torch::tensor({7}, torch::kInt32);
+        inputs.input_lengths    = torch::tensor({1}, torch::kInt32);
+        inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    }
+    ParallelismConfig config;
+    config.tp_size = 2;
+    config.tp_rank = rank;
+    for (const auto module : {CacheModuleId::main(), CacheModuleId(1)}) {
+        if (rank == 0) {
+            inputs.selectCacheModule(module);
+        }
+        tpSyncModelInputs(inputs, config);
+        EXPECT_EQ(inputs.cache_module_id, module);
+        const auto order = rank == 0 ? torch::tensor({0, 1}, torch::kInt64) : torch::tensor({1, 0}, torch::kInt64);
+        for (size_t m = 0; m < 2; ++m) {
+            const auto& cache = inputs.module_cache_inputs[m];
+            expectIntTensor(
+                cache.physical_blocks,
+                (torch::arange(4, torch::kInt32) + static_cast<int>(m * 10)).reshape({2, 1, 2}).index_select(0, order));
+            expectIntTensor(
+                cache.kernel_blocks,
+                (torch::arange(8, torch::kInt32) + static_cast<int>(m * 20)).reshape({2, 1, 4}).index_select(0, order));
+            expectIntTensor(cache.update_mapping,
+                            torch::tensor({rank == 0 ? 0 : 1, 7, 9}, torch::kInt32).reshape({1, 3}));
+        }
+    }
+}
+
 void checkLegacyUntaggedTpRound(GptModelInputs& inputs, int rank) {
     const auto physical = torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({2, 2});
     const auto kernel   = torch::tensor({5, 6, 7, 8, 9, 10}, torch::kInt32).reshape({2, 3});
@@ -375,6 +420,7 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     checkGroupedTpRound(inputs, rank, {"single_group"}, false);
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group"}, true);
     checkLegacyUntaggedTpRound(inputs, rank);
+    checkDomainTpRound(rank);
 
     if (rank == 0) {
         inputs = GptModelInputs{};

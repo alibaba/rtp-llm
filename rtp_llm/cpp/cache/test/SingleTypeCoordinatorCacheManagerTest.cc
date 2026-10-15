@@ -193,10 +193,10 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     return m;
 }
 
-static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers,
-                                                               int      mtp_module_num,
-                                                               uint32_t block_num,
-                                                               uint32_t mtp_module_layers = 1) {
+static rtp_llm::CacheDomainConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers,
+                                                                     int      mtp_module_num,
+                                                                     uint32_t block_num,
+                                                                     uint32_t mtp_module_layers = 1) {
     auto score_model_config   = makeTestModelConfig(main_layers);
     auto propose_model_config = makeTestModelConfig(mtp_module_layers);
 
@@ -212,16 +212,17 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    auto       config              = CacheConfigCreator::createConfig(score_model_config,
-                                                   parallelism_config,
-                                                   kv_cache_config,
-                                                   sp_config,
-                                                   &propose_model_config,
-                                                   /*is_mtp=*/true,
-                                                   /*is_eagle=*/false);
+    auto       config              = CacheConfigCreator::createDomainConfig(score_model_config,
+                                                         parallelism_config,
+                                                         kv_cache_config,
+                                                         sp_config,
+                                                         &propose_model_config,
+                                                         /*is_mtp=*/true,
+                                                         /*is_eagle=*/false);
     const auto candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, score_model_config, runtime_config, kv_cache_config, parallelism_config, std::nullopt, sp_config);
-    return rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
+    config.finalizeBlockNums(candidate_block_num, runtime_config);
+    return config;
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -1296,56 +1297,25 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertIndexToAddr) {
     }
 }
 
-TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleNoMtp) {
-    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
-    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
-
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/3), 3u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/-1),
-              std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/4),
-              std::numeric_limits<uint32_t>::max());
-
-    // no mtp sub-model
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0),
-              std::numeric_limits<uint32_t>::max());
-}
-
-TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleWithMtp) {
-    auto config = makeMtpCacheConfigByCreateSpConfig(
-        /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
-    allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
-
-    // main model: global == local
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/1), 1u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/2),
-              std::numeric_limits<uint32_t>::max());
-
-    // Global ids follow main_layers + module_index * module_layers + local_layer.
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0), 2u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/1), 3u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/2), 4u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/0), 5u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/1), 6u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/2), 7u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/3),
-              std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(3), /*local_layer_id=*/0),
-              std::numeric_limits<uint32_t>::max());
-}
-
-TEST_F(SingleTypeCoordinatorCacheManagerTest, MtpGlobalLayerIdRejectsInvalidModuleAndLocalIds) {
-    constexpr auto invalid = std::numeric_limits<uint32_t>::max();
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/0), 2u);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/2), 4u);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/1, /*module_layers=*/3, /*local=*/0), 5u);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/1, /*module_layers=*/3, /*local=*/2), 7u);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/-1, /*module_layers=*/3, /*local=*/0), invalid);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/-1), invalid);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/3), invalid);
-    EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/0, /*local=*/0), invalid);
+TEST_F(SingleTypeCoordinatorCacheManagerTest, ModuleLocalAddressBoundsAndIndependentBacking) {
+    auto domain = makeMtpCacheConfigByCreateSpConfig(2, 2, 8, 3);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(domain);
+    ASSERT_TRUE(allocator_->init());
+    std::vector<void*> bases;
+    for (size_t module = 0; module < domain.moduleCount(); ++module) {
+        const auto id    = CacheModuleId(module);
+        const auto count = domain.module(id).layer_num;
+        const auto base  = allocator_->convertIndexToAddr(id, 0, "default", 1).kv_addr;
+        ASSERT_NE(base, nullptr);
+        for (const auto previous : bases) {
+            EXPECT_NE(previous, base);
+        }
+        bases.push_back(base);
+        EXPECT_NE(allocator_->convertIndexToAddr(id, count - 1, "default", 1).kv_addr, nullptr);
+        EXPECT_THROW(allocator_->convertIndexToAddr(id, -1, "default", 1), std::runtime_error);
+        EXPECT_THROW(allocator_->convertIndexToAddr(id, count, "default", 1), std::runtime_error);
+    }
+    EXPECT_THROW(allocator_->convertIndexToAddr(CacheModuleId(3), 0, "default", 1), std::runtime_error);
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, SingleLayerMtpConfigSlicesDescriptorAndAttentionType) {
@@ -1505,7 +1475,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ManagerLayoutsPreserveSingleTypeGr
 
     const auto all_layout  = manager->allLayerCacheBase();
     const auto main_layout = manager->getMainModelGroupedCacheLayerLayout();
-    ASSERT_EQ(all_layout.group("default").size(), 8u);
+    ASSERT_EQ(all_layout.group("default").size(), 2u);
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
@@ -1532,8 +1502,12 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ManagerLayoutsPreserveSingleTypeGr
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1)), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(2)), all_layout, /*global_begin=*/5);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1)),
+                  manager->allLayerCacheBase(CacheModuleId(1)),
+                  0);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(2)),
+                  manager->allLayerCacheBase(CacheModuleId(2)),
+                  0);
     EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId::main()), std::runtime_error);
     EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(3)), std::runtime_error);
 }

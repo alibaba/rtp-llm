@@ -150,7 +150,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             const torch_ext::LayerKVCache&       layer_kv,
                             const CacheConfig&                   cache_config,
                             std::shared_ptr<CacheStore>          cache_store,
-                            size_t                               cache_model_id,
+                            CacheModuleId                        module_id,
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,
@@ -351,7 +351,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const int64_t cache_key_id =
                 cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(first.key_index)];
             const std::string cache_key =
-                makeCacheKey(cache_model_id, std::to_string(cache_key_id), layer_kv.layer_id, layer_kv.tag);
+                makeCacheKey(module_id, std::to_string(cache_key_id), layer_kv.layer_id, layer_kv.tag);
             publication_lease_keys.push_back(cache_key_id);
             publication_lease_blocks.push_back(block_id);
             for (const auto& region : regions) {
@@ -390,7 +390,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     register_store_completion(publication_lease_keys, publication_lease_blocks, layer_kv.tag);
             }
             auto store_callback = [layer_id = layer_kv.layer_id,
-                                   cache_model_id,
+                                   module_id,
                                    tag = layer_kv.tag,
                                    request_id,
                                    request_blocks,
@@ -399,7 +399,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d "
                                         "tag=%s error_code=%d error=%s buffer={%s}",
                                         static_cast<long>(request_id),
-                                        cache_model_id,
+                                        module_id.value(),
                                         layer_id,
                                         tag.c_str(),
                                         static_cast<int>(ec),
@@ -412,7 +412,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     } else {
                         store_completion(std::make_exception_ptr(std::runtime_error(
                             "cache-store publication failed for request " + std::to_string(request_id) + ", model "
-                            + std::to_string(cache_model_id) + ", layer " + std::to_string(layer_id) + ", tag " + tag
+                            + std::to_string(module_id.value()) + ", layer " + std::to_string(layer_id) + ", tag " + tag
                             + ", error code " + std::to_string(static_cast<int>(ec)))));
                     }
                 }

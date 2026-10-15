@@ -72,6 +72,7 @@ cc_library(
         ":subscriber",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//rtp_llm/cpp/cache:storage_3fs",
+        "//rtp_llm/cpp/cache:cache_identity",
         "@grpc//:grpc++",
     ],
 )

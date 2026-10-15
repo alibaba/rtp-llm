@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
@@ -274,6 +276,85 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     EXPECT_EQ(code, TransferErrorCode::OK);
     EXPECT_TRUE(task->success());
     EXPECT_TRUE(verifyDevice(gpu_buf.data_ptr(), content));
+}
+
+// Module-local addresses are resolved independently on each peer. Both modules
+// deliberately reuse layer/tag/block/key/partition coordinates and have different strides.
+class TensorModuleConverter: public LayerBlockConverter {
+public:
+    explicit TensorModuleConverter(std::vector<torch::Tensor> buffers): buffers_(std::move(buffers)) {}
+    std::vector<BlockInfo> convertIndexToBuffer(CacheModuleId      module_id,
+                                                int                layer_id,
+                                                const std::string& tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id) const override {
+        EXPECT_EQ(layer_id, 0);
+        EXPECT_EQ(tag, "default");
+        EXPECT_EQ(block_id, 1);
+        EXPECT_EQ(partition_count, 1);
+        EXPECT_EQ(partition_id, 0);
+        const auto&  tensor = buffers_.at(module_id.value());
+        const size_t stride = tensor.nbytes() / 2;
+        return {BlockInfo{true,
+                          tensor.get_device(),
+                          static_cast<int32_t>(tensor.scalar_type()),
+                          static_cast<char*>(tensor.data_ptr()) + stride,
+                          stride}};
+    }
+    std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        return {};
+    }
+
+private:
+    std::vector<torch::Tensor> buffers_;
+};
+
+TEST_F(TcpSenderReceiverTest, ModuleLocalCoordinatesTransferToIndependentBacking) {
+    ASSERT_TRUE(device_initialized_);
+    std::vector<torch::Tensor>                     sources, destinations;
+    std::vector<std::shared_ptr<LayerCacheBuffer>> buffers;
+    std::vector<IKVCacheRecvTaskPtr>               tasks;
+    std::vector<std::string>                       keys;
+    for (size_t m = 0; m < 2; ++m) {
+        const size_t stride = m == 0 ? 32 : 64;
+        sources.push_back(torch::full({static_cast<int64_t>(2 * stride)},
+                                      41 + m,
+                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA)));
+        destinations.push_back(torch::zeros_like(sources.back()));
+        auto buffer = std::make_shared<LayerCacheBuffer>(CacheModuleId(m), 0, "default");
+        buffer->addBlockId(101, 1);
+        buffers.push_back(buffer);
+        keys.push_back(P2PKeyUtil::makePartitionLayerTagKey("module_roundtrip", CacheModuleId(m), 0, "default", 0));
+    }
+    at::cuda::getCurrentCUDAStream().synchronize();
+    ASSERT_NE(keys[0], keys[1]);
+    auto          src_converter = std::make_shared<TensorModuleConverter>(sources);
+    auto          dst_converter = std::make_shared<TensorModuleConverter>(destinations);
+    const int64_t deadline      = currentTimeMs() + 10000;
+    for (size_t m = 0; m < 2; ++m) {
+        RecvRequest request;
+        request.unique_key  = keys[m];
+        request.deadline_ms = deadline;
+        request.block_info  = LayerCacheBufferUtil::buildKeyBlockInfos(dst_converter, buffers[m]);
+        tasks.push_back(receiver_->recv(request));
+        ASSERT_NE(tasks.back(), nullptr);
+    }
+    // Reverse send order to expose a receiver map that aliases the two modules.
+    for (int m : {1, 0}) {
+        SendRequest request;
+        request.ip          = "127.0.0.1";
+        request.port        = test_port_;
+        request.unique_key  = keys[m];
+        request.deadline_ms = deadline;
+        request.block_info  = LayerCacheBufferUtil::buildKeyBlockInfos(src_converter, buffers[m]);
+        ASSERT_EQ(syncSend(*sender_, request), TransferErrorCode::OK);
+        ASSERT_TRUE(tasks[m]->success());
+    }
+    for (size_t m = 0; m < 2; ++m) {
+        const size_t stride = m == 0 ? 32 : 64;
+        EXPECT_TRUE(verifyDevice(destinations[m].data_ptr(), std::string(stride, '\0') + std::string(stride, 41 + m)));
+    }
 }
 
 // ===========================================================================

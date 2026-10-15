@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheDomainConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
@@ -115,25 +116,25 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     EXPECT_EQ(first->groupForLayer(0, "linear").tag, reversed->groupForLayer(0, "linear").tag);
 }
 
-TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
-    CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({makeGroup("full")}, {{0, {"full"}}});
-
-    for (int module = 0; module < 2; ++module) {
-        CacheConfig draft;
-        draft.layer_num = 2;
-        draft.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+TEST(CacheTopologyTest, DomainResolvesModuleLocalLayersWithIndependentSameTagGroups) {
+    CacheConfig main;
+    main.layer_num          = 1;
+    main.seq_size_per_block = 8;
+    main.setTopology({makeGroup("full")}, {{0, {"full"}}});
+    CacheConfig draft;
+    draft.layer_num          = 2;
+    draft.seq_size_per_block = 8;
+    draft.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft, draft});
+    EXPECT_EQ(&domain.groupForLayer(CacheModuleId::main(), 0, "full"), &domain.main().group("full"));
+    for (size_t m = 1; m < domain.moduleCount(); ++m) {
+        const auto& group = domain.module(CacheModuleId(m)).group("full");
+        EXPECT_EQ(&domain.groupForLayer(CacheModuleId(m), 0, "full"), &group);
+        EXPECT_EQ(&domain.groupForLayer(CacheModuleId(m), 1, "full"), &group);
+        EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId(m), 2, "full"));
     }
-
-    EXPECT_EQ(&config.physicalGroupForLayer(0, "full"), &config.group("full"));
-    for (int module = 0; module < 2; ++module) {
-        const auto& group = config.mtp_sub_configs[module]->group("full");
-        EXPECT_EQ(&config.physicalGroupForLayer(1 + module * 2, "full"), &group);
-        EXPECT_EQ(&config.physicalGroupForLayer(2 + module * 2, "full"), &group);
-    }
-    EXPECT_ANY_THROW((void)config.physicalGroupForLayer(5, "full"));
+    EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId::main(), 1, "full"));
+    EXPECT_ANY_THROW(domain.groupForLayer(CacheModuleId(3), 0, "full"));
 }
 
 TEST(CacheTopologyTest, GroupTagsKeepConstructionOrderAndStableStorage) {
@@ -172,24 +173,26 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
     EXPECT_NE(config.topologyPtr(), retained);
 }
 
-TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
-    CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({makeLayoutGroup("full", 2)}, {{0, {"full"}}});
+TEST(CacheTopologyTest, DomainFinalizationPreservesLeafGeometryAndPublishedTopology) {
+    CacheConfig main;
+    main.layer_num          = 1;
+    main.seq_size_per_block = 8;
+    main.setTopology({makeLayoutGroup("full", 2)}, {{0, {"full"}}});
     CacheConfig draft;
     draft.layer_num = 1;
+    draft.seq_size_per_block = 8;
     draft.setTopology({makeLayoutGroup("full", 5)}, {{0, {"full"}}});
-    const auto child = config.mergeMTPModule(draft, 0, 1);
-    config.mtp_sub_configs.push_back(child);
-    const auto main_stride  = config.group("full").kvBlockStrideBytes();
-    const auto draft_stride = config.physicalGroupForLayer(1, "full").kvBlockStrideBytes();
-    const auto total_bytes  = config.blockSizeBytesForGroup("full");
+    CacheDomainConfig domain(std::vector<CacheConfig>{main, draft});
+    const auto        retained     = domain.module(CacheModuleId(1)).topologyPtr();
+    const auto        main_stride  = domain.main().group("full").kvBlockStrideBytes();
+    const auto        draft_stride = retained->group("full").kvBlockStrideBytes();
     ASSERT_NE(main_stride, draft_stride);
-    config.setGroupBlockLayout({"full"}, {23}, {main_stride}, {config.group("full").kvScaleStrideBytes()});
-    EXPECT_EQ(config.group("full").block_num, 23u);
-    EXPECT_EQ(config.physicalGroupForLayer(1, "full").kvBlockStrideBytes(), draft_stride);
-    EXPECT_EQ(config.blockSizeBytesForGroup("full"), total_bytes);
-    EXPECT_EQ(config.mtp_sub_configs.front(), child);
+    domain.finalizeBlockNums(23, {});
+    EXPECT_EQ(domain.main().group("full").block_num, 23u);
+    EXPECT_EQ(domain.module(CacheModuleId(1)).group("full").block_num, 23u);
+    EXPECT_EQ(domain.main().group("full").kvBlockStrideBytes(), main_stride);
+    EXPECT_EQ(domain.module(CacheModuleId(1)).group("full").kvBlockStrideBytes(), draft_stride);
+    EXPECT_EQ(retained->group("full").block_num, 16u);
 }
 
 TEST(CacheTopologyTest, InvalidTaggedLayoutsNeverPublishPartialUpdates) {

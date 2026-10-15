@@ -1,3 +1,4 @@
+#include <set>
 #include <gtest/gtest.h>
 #include <unordered_map>
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
@@ -618,7 +619,7 @@ TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
     EXPECT_ANY_THROW(manager->init());
 }
 
-TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudget) {
+TEST_F(KVCacheManagerTest, CandidateDomainAllocatesIndependentDraftPoolsWithinBudget) {
     ModelConfig target;
     target.num_layers                   = 1;
     target.max_seq_len                  = 64;
@@ -637,41 +638,42 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     SpeculativeExecutionConfig sp;
     sp.type                     = SP_TYPE_MTP;
     sp.gen_num_per_cycle        = 2;
-    auto       candidate_config = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+    auto       candidate_config = CacheConfigCreator::createDomainConfig(target, {}, options, sp, &draft, true);
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
-    EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
-    for (const auto& sub : candidate_config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, 0u);
+    ASSERT_EQ(candidate_config.moduleCount(), 3u);
+    for (size_t m = 0; m < candidate_config.moduleCount(); ++m) {
+        EXPECT_EQ(candidate_config.module(CacheModuleId(m)).group("default").block_num, 0u);
     }
-    candidate_config.finalizeBlockNums(candidate, RuntimeConfig{});
-    const auto     child    = candidate_config.mtp_sub_configs[0];
-    const auto     topology = candidate_config.topologyPtr();
+    candidate_config.finalizeBlockNums(candidate, {});
+    const auto     topology = candidate_config.main().topologyPtr();
     KVCacheManager manager(candidate_config, false, nullptr, options, {}, {}, sp);
     ASSERT_TRUE(manager.init());
-    const auto& config = manager.cacheConfig();
-    EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
-    const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
-    const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
-    ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
+    ASSERT_EQ(manager.cacheDomainConfig().moduleCount(), 3u);
+    const auto& pools = manager.coordinator_manager_->groupBlockPools();
+    ASSERT_EQ(pools.size(), 3u);
+    // Each owner has one contiguous backing; all three are charged by the same N.
     constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
     constexpr size_t budget_bytes    = 1024 * 1024;
-    EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
-    EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
-    EXPECT_LE(pool->getTotalSizeBytes(), budget_bytes);
-    EXPECT_GT(pool->getTotalSizeBytes() + bytes_per_block, budget_bytes);
-    for (const auto& sub : config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, candidate);
+    EXPECT_EQ(candidate, budget_bytes / bytes_per_block);
+    size_t                allocated_bytes = 0;
+    std::set<const void*> backings;
+    for (size_t m = 0; m < pools.size(); ++m) {
+        const auto& leaf = manager.cacheDomainConfig().module(CacheModuleId(m));
+        EXPECT_EQ(leaf.group("default").block_num, candidate);
+        auto pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pools[m]->config_);
+        ASSERT_NE(pool_config, nullptr);
+        ASSERT_EQ(pool_config->memory_layouts.size(), 1u);
+        const size_t stride = m == 0 ? 32 : 64;
+        EXPECT_EQ(pools[m]->getTotalSizeBytes(), candidate * stride);
+        allocated_bytes += pools[m]->getTotalSizeBytes();
+        backings.insert(manager.coordinator_manager_->convertIndexToAddr(CacheModuleId(m), 0, "default", 0).kv_addr);
     }
-    // Manager consumes the completed topology without cloning or changing child capacities.
-    EXPECT_EQ(manager.cacheConfig().mtp_sub_configs[0], child);
+    EXPECT_EQ(backings.size(), 3u);
+    EXPECT_EQ(allocated_bytes, candidate * bytes_per_block);
+    EXPECT_LE(allocated_bytes, budget_bytes);
+    EXPECT_GT(allocated_bytes + bytes_per_block, budget_bytes);
     EXPECT_EQ(manager.cacheConfig().topologyPtr(), topology);
-    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->group("default").block_num, candidate);
 }
 
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
@@ -2027,7 +2029,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
         appendValidGroupedTransfer(tiered_manager, request);
         auto* mixed = request.mutable_mem_request()->add_copy_items();
         mixed->CopyFrom(request.mem_request().copy_items(0));
-        mixed->set_group_tags(0, "missing");
+        mixed->mutable_groups(0)->set_tag("missing");
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);

@@ -1545,7 +1545,9 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        impls = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)
@@ -1590,7 +1592,7 @@ class Qwen3NextModel(GptModelBase):
         for layer in self.layers:
             if layer.layer_type == HybridAttentionType.LINEAR:
                 continue
-            binding = layer.cache_binding
+            binding = getattr(layer, "cache_binding", None)
             if binding is None:
                 continue
             for tag in binding.group_tags:
@@ -1680,7 +1682,9 @@ class Qwen3NextModel(GptModelBase):
             None,
         )
         if linear_layer_idx is not None:
-            linear_binding = self.layers[linear_layer_idx].cache_binding
+            linear_binding = getattr(
+                self.layers[linear_layer_idx], "cache_binding", None
+            )
             linear_attention_inputs = (
                 linear_binding.select_attention_inputs(inputs.attention_inputs)
                 if linear_binding is not None
@@ -1737,9 +1741,10 @@ class Qwen3NextModel(GptModelBase):
             for layer_idx, layer in enumerate(self.layers):
                 if layer.layer_type != HybridAttentionType.LINEAR:
                     continue
+                binding = getattr(layer, "cache_binding", None)
                 selected_inputs = (
-                    layer.cache_binding.select_attention_inputs(inputs.attention_inputs)
-                    if layer.cache_binding is not None
+                    binding.select_attention_inputs(inputs.attention_inputs)
+                    if binding is not None
                     else inputs.attention_inputs
                 )
                 input_groups = (
@@ -1785,7 +1790,7 @@ class Qwen3NextModel(GptModelBase):
             self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
-            binding = decoder_layer.cache_binding
+            binding = getattr(decoder_layer, "cache_binding", None)
             layer_attention_inputs = (
                 binding.select_attention_inputs(inputs.attention_inputs)
                 if binding is not None
