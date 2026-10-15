@@ -95,7 +95,7 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         low = (packed & 0x0F)
         high = (packed >> 4)
         lut = torch.tensor(
-            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
             device=packed.device,
         )
         sign = lambda q: torch.where(q >= 8, -1.0, 1.0)
