@@ -101,6 +101,12 @@ class Xing4ConfigTest(unittest.TestCase):
         self.assertEqual(config.tie_word_embeddings, False)
         self.assertEqual(config.config_dtype, "bfloat16")
 
+        # lm_head stays in checkpoint dtype (bf16): the framework default
+        # enable_fp32_lm_head=True would force fp32 storage, doubling the
+        # [131072,3584] lm_head bytes and missing the C++
+        # cublas_gemm_bf16_bf16_fp32 fast path.
+        self.assertFalse(config.enable_fp32_lm_head)
+
         # MoE routing
         self.assertEqual(config.moe_k, 4)
         self.assertEqual(config.expert_num, 64)
@@ -130,7 +136,79 @@ class Xing4ConfigTest(unittest.TestCase):
         self.assertEqual(config.moe_layer_index, [0])
         self.assertEqual(config.hc_mult, 1)
         self.assertEqual(config.hc_sinkhorn_iters, 0)
+        # shared_head.head.weight feeds the same C++ lm_head exit; keep the
+        # draft lm_head bf16 like the target model.
+        self.assertFalse(config.enable_fp32_lm_head)
         self.assertEqual(Xing4Mtp.get_weight_cls(), Xing4MtpWeight)
+
+    def test_lm_head_keeps_checkpoint_bf16_dtype(self):
+        """lm_head must load as bf16 so the C++ lm_head mm takes the
+        cublas_gemm_bf16_bf16_fp32 fast path (bf16 inputs, fp32 accumulate)
+        instead of the fp32 gemv fallback.
+
+        The Xing4.0 checkpoint stores lm_head.weight /
+        model.layers.40.shared_head.head.weight as BF16 [131072, 3584] and
+        lists lm_head in modules_to_not_convert. Loading chain under test:
+        ModelDeployWeightInfo.get_weight_info() -> _fix_fp32_lm_head is
+        skipped when enable_fp32_lm_head=False, so the AtomicWeight
+        data_type stays None and AtomicWeight._load_raw_tensor casts to
+        load_config.compute_dtype (bf16 for this model).
+        """
+        import torch
+
+        from rtp_llm.model_loader.tensor_source import TensorSource
+        from rtp_llm.utils.model_weight import W
+
+        class _Bf16LmHeadSource(TensorSource):
+            """Minimal checkpoint source returning a bf16 lm_head shard."""
+
+            def load_tensor(self, name, data_type=torch.float16):
+                return [torch.randn(16, 8, dtype=torch.bfloat16)]
+
+            def has_tensor(self, name):
+                return True
+
+            def get_database(self):
+                return None
+
+        load_config = SimpleNamespace(compute_dtype=torch.bfloat16)
+
+        def _lm_head_descriptor(weight_cls, config):
+            weight = weight_cls(
+                config, _fake_parallelism(), _fake_hw_kernel(), SimpleNamespace()
+            )
+            info = weight.get_weight_info()
+            matches = [w for w in info.weights if w.name == W.lm_head]
+            self.assertEqual(len(matches), 1)
+            return matches[0]
+
+        for weight_cls, config_factory in (
+            (Xing4Weight, Xing4._create_config),
+            (Xing4MtpWeight, Xing4Mtp._create_config),
+        ):
+            with self.subTest(model=weight_cls.__name__):
+                config = config_factory(TESTDATA_DIR)
+                # Model-side default: no forced fp32 storage dtype.
+                self.assertFalse(config.enable_fp32_lm_head)
+                descriptor = _lm_head_descriptor(weight_cls, config)
+                self.assertIsNone(descriptor.data_type)
+
+                loaded = descriptor._load_raw_tensor(
+                    _Bf16LmHeadSource(), None, "cpu", load_config
+                )
+                self.assertEqual(loaded[W.lm_head].dtype, torch.bfloat16)
+
+        # Contrast: the framework default (enable_fp32_lm_head=True) is the
+        # operative switch — flipping it back re-forces fp32 storage, which is
+        # the slow fp32 gemv path this model opts out of.
+        config = Xing4._create_config(TESTDATA_DIR)
+        config.enable_fp32_lm_head = True
+        descriptor = _lm_head_descriptor(Xing4Weight, config)
+        self.assertEqual(descriptor.data_type, torch.float32)
+        loaded = descriptor._load_raw_tensor(
+            _Bf16LmHeadSource(), None, "cpu", load_config
+        )
+        self.assertEqual(loaded[W.lm_head].dtype, torch.float32)
 
     def test_layer_weight_info_contains_hc_weights(self):
         config = Xing4._create_config(TESTDATA_DIR)

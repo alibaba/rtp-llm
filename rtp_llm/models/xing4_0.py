@@ -80,6 +80,17 @@ class Xing4(DeepSeekV2):
         # Xing4.0 checkpoints use "dtype" instead of "torch_dtype".
         if config.config_dtype is None:
             config.config_dtype = config_json.get("dtype")
+        # Keep lm_head in its checkpoint dtype (bf16, listed in
+        # modules_to_not_convert). The framework default
+        # ``enable_fp32_lm_head=True`` calls _fix_fp32_lm_head which forces
+        # the AtomicWeight data_type to fp32, doubling resident weight bytes
+        # (939MB -> 1.88GB for [131072,3584]) and sending the C++
+        # PyWrappedModel::forwardPostLayers lm_head mm to the generic fp32
+        # fallback (gemv2T_kernel, ~288us per decode step at bs1 on SM103)
+        # instead of the cublas_gemm_bf16_bf16_fp32 tensor-core fast path
+        # (PyWrappedModel.cc lm_head_mm, bf16 inputs / fp32 accumulate).
+        # Same choice as DeepSeek-V4 (models/deepseek_v4.py).
+        config.enable_fp32_lm_head = False
         return config
 
     def support_cuda_graph(self) -> bool:
@@ -178,6 +189,10 @@ class Xing4Mtp(DeepSeekV3Mtp):
         # C++/cuda-graph plumbing does not widen draft hidden states.
         config.hc_mult = 1
         config.hc_sinkhorn_iters = 0
+        # shared_head.head.weight is BF16 [131072,3584] and feeds the same C++
+        # lm_head exit as the target model; keep it bf16 for the
+        # cublas_gemm_bf16_bf16_fp32 fast path (see Xing4._create_config).
+        config.enable_fp32_lm_head = False
         return config
 
     def _create_python_model(self):
