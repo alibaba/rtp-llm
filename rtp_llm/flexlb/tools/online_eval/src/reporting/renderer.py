@@ -182,6 +182,7 @@ def render(spec):
                         "source_type": s.get("source_type"),
                         "role": s.get("role"),
                         "metric_id": s.get("metric_id"),
+                        "metric_color": s.get("metric_color"),
                         "statistics_samples": _statistics_samples(s.get("statistics_points")),
                         "provenance": s.get("provenance"),
                         "name": s.get("name", ""),

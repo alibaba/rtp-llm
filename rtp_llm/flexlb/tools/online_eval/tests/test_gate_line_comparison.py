@@ -70,6 +70,8 @@ def test_three_runs_keep_each_floor_window_and_style_in_the_overlay(tmp_path, al
         original = json.loads(originals['ABC'.index(run)])['panels'][0]['series'][0]
         assert curve['points'] == [dict(p, x=p['x'] - shifts[run]) for p in original['points']]
     assert len({s['color'] for s in references}) == 2
+    assert len({s['metric_color'] for s in references}) == 1
+    assert len({s['metric_color'] for s in observations}) == 1
     assert {k: v['verdict'] for k, v in result['runs'].items()} == {'A': 'PASS', 'B': 'FAIL', 'C': 'PASS'}
     assert 'verdict' not in result
     assert originals == [(path / 'report-spec.json').read_bytes() for path in paths]
@@ -77,3 +79,4 @@ def test_three_runs_keep_each_floor_window_and_style_in_the_overlay(tmp_path, al
     payload, _ = json.JSONDecoder().raw_decode(html.split('const SPEC = ', 1)[1])
     assert sum(s.get('role') == 'gate_reference' for p in payload['panels'] for s in p['series']) == 2
     assert all(s['dash'] == [6, 4] for p in payload['panels'] for s in p['series'] if s.get('role') == 'gate_reference')
+    assert [s['metric_color'] for s in payload['panels'][0]['series']] == [s['metric_color'] for s in series]

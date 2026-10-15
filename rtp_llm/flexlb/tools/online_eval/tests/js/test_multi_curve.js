@@ -1,7 +1,7 @@
 // 手动运行入口：node tests/js/test_multi_curve.js
 const assert = require('node:assert/strict');
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; this.classes=new Set(); this.classList={toggle:(name,on)=>{if(on)this.classes.add(name);else this.classes.delete(name);}}; }
+  constructor(tag) { this.tag = tag; this.value = ''; this.children = []; this.style = {}; this.attributes = {}; this.classes=new Set(); this.classList={toggle:(name,on)=>{if(on)this.classes.add(name);else this.classes.delete(name);}}; }
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   setAttribute(key,value) { this.attributes[key]=value; }
@@ -80,7 +80,7 @@ assert.equal(choices.children.filter(c=>c.tag==='label')[1].hidden,false);
 search.value='';search.oninput();
 picker.onkeydown({key:'Escape'});assert.equal(dropdown.hidden,true);
 const presetSelect=toolbar.children.find(c=>c.className==='multi-presets');
-presetSelect.value='Queue';presetSelect.onchange();
+presetSelect.children[1].children[1].children.find(e=>e.title==='Queue').onclick();
 assert.deepEqual(chart.visible,[false,true]);
 assert.match(pickerButton.textContent,/1\/2/);
 assert.equal(legend.children[0].classes.has('is-muted'),true);
@@ -154,7 +154,7 @@ assert.equal(gateValues.children[0].textContent,'阈值 95 %');
 assert.equal(gateValues.children[1].textContent,'窗口 0–10 s');
 assert.equal(gateChart.data.datasets[0].pointRadius,0);
 
-// Hundreds of presets stay in a native dropdown rather than creating header rows.
+// Hundreds of presets stay in a searchable popup rather than creating header rows.
 const denseRoot=new Element('root');
 const manyPresets=Object.fromEntries(Array.from({length:200},(_,i)=>['指标组 '+i,['one']]));
 const dense=FlexMultiCurve.mount(denseRoot,{title:'dense',caption:'',axes:{y:{title:'count'}},
@@ -163,12 +163,44 @@ const dense=FlexMultiCurve.mount(denseRoot,{title:'dense',caption:'',axes:{y:{ti
 const denseToolbar=denseRoot.children[0].children.find(e=>e.className==='multi-toolbar');
 assert.equal(denseToolbar.children.length,6);
 const densePresets=denseToolbar.children.find(e=>e.className==='multi-presets');
-assert.equal(densePresets.children.length,201);
-densePresets.value='指标组 199';densePresets.onchange();
-assert.deepEqual(dense.visible,[true,false]);assert.equal(densePresets.value,'');
+assert.equal(densePresets.children[1].children[1].children.length,200);
+densePresets.children[1].children[1].children[199].onclick();
+assert.deepEqual(dense.visible,[true,false]);assert.equal(densePresets.children[0].children[1].textContent,'指标组 199');
 denseToolbar.children.find(e=>e.textContent==='全选').onclick();assert.deepEqual(dense.visible,[true,true]);
 denseToolbar.children.find(e=>e.textContent==='清空').onclick();assert.deepEqual(dense.visible,[false,false]);
 const denseEvents=denseRoot.children[0].children.find(e=>e.className==='multi-events');
 assert.match(denseEvents.children[0].textContent,/1 条标记 \/ 2 个原始事件/);
 assert.match(denseEvents.children[1].children[0].children[1].textContent,/A · 开始 @ 0.100000 s/);
 assert.match(denseEvents.children[1].children[0].children[2].textContent,/B · 开始 @ 0.200000 s/);
+
+// Group colors use metric hue, never the lighter/darker run shade.
+const coloredSeries=[
+ {name:'A qps',metric_id:'qps',axis:'qps',unit:'requests/s',color:'#123456',metric_color:'#1677ff'},
+ {name:'B qps',metric_id:'qps',axis:'qps',unit:'requests/s',color:'#789abc',metric_color:'#1677ff'},
+ {name:'A latency',metric_id:'latency',axis:'ms',unit:'ms',color:'#aa5500',metric_color:'#fa8c16'},
+ {name:'B latency',metric_id:'latency',axis:'ms',unit:'ms',color:'#cc8844',metric_color:'#fa8c16'}];
+assert.equal(FlexMultiCurve.presetColor(['A qps'],coloredSeries),'#1677ff');
+assert.equal(FlexMultiCurve.presetColor(['B qps'],coloredSeries),'#1677ff');
+assert.equal(FlexMultiCurve.presetColor(['B latency'],coloredSeries),'#fa8c16');
+assert.equal(FlexMultiCurve.presetColor([],coloredSeries),'#94a3b8');
+assert.equal(densePresets.children[0].children[1].textContent,'快捷选择：run / 指标组');
+const presetPopup=densePresets.children[1],presetSearch=presetPopup.children[0],presetRows=presetPopup.children[1].children;
+densePresets.children[0].onclick();assert.equal(presetPopup.hidden,false);assert.equal(documentClicks.size,1);
+presetSearch.value='199';presetSearch.oninput();
+assert.equal(presetRows.filter(row=>!row.hidden).length,1);
+assert.equal(presetRows[199].children[0].style.backgroundColor,'#123456');
+densePresets.events.keydown({key:'ArrowDown',preventDefault(){}});assert.equal(presetRows[199].focused,true);
+presetRows[199].onclick();assert.equal(presetPopup.hidden,true);assert.equal(documentClicks.size,0);
+assert.equal(presetRows[199].attributes['aria-pressed'],'true');
+densePresets.children[0].onclick();
+const densePicker=denseToolbar.children[0];densePicker.children[0].onclick();
+assert.equal(presetPopup.hidden,true);assert.equal(densePicker.children[1].hidden,false);assert.equal(documentClicks.size,1);
+densePicker.onkeydown({key:'Escape'});assert.equal(documentClicks.size,0);
+densePresets.children[0].onclick();presetSearch.value='no such group';presetSearch.oninput();assert.equal(presetPopup.children[2].hidden,false);
+for(const listener of [...documentClicks])listener({target:new Element('outside')});assert.equal(presetPopup.hidden,true);assert.equal(documentClicks.size,0);
+densePresets.children[0].onclick();densePresets.onkeydown({key:'Escape'});assert.equal(presetPopup.hidden,true);assert.equal(densePresets.children[0].focused,true);
+
+// A browser may clear a search on Escape without an input event; reopening reconciles the filter.
+presetSearch.value='';densePresets.children[0].onclick();
+assert.equal(presetRows.filter(row=>!row.hidden).length,200);assert.equal(presetPopup.children[2].hidden,true);
+densePresets.onkeydown({key:'Escape'});

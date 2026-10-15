@@ -136,6 +136,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
             if reference is not None:
                 metric_color = colors[original['id'], original['series'].index(reference)]
                 curve['hidden'] = reference.get('hidden', False)
+            curve['metric_color'] = metric_color
             curve.update(curve_style(metric_color, i, len(labels)))
             if curve.get('role') == 'gate_reference':
                 curve.update(dash=source['series'][n]['dash'], marker_count=0)

@@ -12,6 +12,23 @@
     function bound(t,inclusive) {let lo=0,hi=times.length;while(lo<hi){const mid=(lo+hi)>>1;if(times[mid]<t||(inclusive&&times[mid]===t))lo=mid+1;else hi=mid;}return lo;}
     return (lo,hi)=>{const a=bound(lo,false),b=bound(hi,true),n=counts[b]-counts[a];return {mean:n?(sums[b]-sums[a])/n:null,count:n,total:b-a};};
   }
+  function presetColor(names, series) {
+    const selected=series.filter(s=>names.includes(s.name));
+    if(!selected.length)return '#94a3b8';
+    const first=selected[0], oneMetric=first.metric_id&&selected.every(s=>s.metric_id===first.metric_id&&s.role===first.role);
+    const family=s=>JSON.stringify([s.axis||'y',s.unit||'']);
+    const source=!oneMetric&&selected.every(s=>family(s)===family(first)) ? series.find(s=>family(s)===family(first)) : first;
+    return source.metric_color||source.color||'#94a3b8';
+  }
+  function popupPicker(container,button,popup,search,beforeOpen) {
+    function closeOutside(event){if(!container.contains(event.target))setOpen(false);}
+    function setOpen(open){popup.hidden=!open;button.setAttribute('aria-expanded',String(open));
+      document.removeEventListener('click',closeOutside);
+      if(open){beforeOpen();document.addEventListener('click',closeOutside);search.focus();}}
+    button.onclick=()=>setOpen(popup.hidden);
+    container.onkeydown=event=>{if(event.key==='Escape'){setOpen(false);button.focus();}};
+    return setOpen;
+  }
   function mount(parent, panel, context) {
     const domain=context.timeAxis;
     const selections=parent._flexTimeSelections||(parent._flexTimeSelections=new Map());
@@ -140,25 +157,48 @@
       legend.appendChild(item);plottedLabels.push(item);});
     function filterChoices() {const query=search.value.trim().toLocaleLowerCase();legendLabels.forEach((label,i)=>{label.hidden=!!query&&!datasets[i].label.toLocaleLowerCase().includes(query);});groups.forEach(group=>{group.element.hidden=group.indices.every(i=>legendLabels[i].hidden);});}
     search.oninput=filterChoices;
-    function closePicker(event) {if(!picker.contains(event.target)) setPickerOpen(false);}
-    function setPickerOpen(open) {dropdown.hidden=!open;pickerButton.setAttribute('aria-expanded',String(open));
-      document.removeEventListener('click',closePicker);
-      if(open) {document.addEventListener('click',closePicker);search.focus();}}
-    pickerButton.onclick=()=>setPickerOpen(dropdown.hidden);
-    picker.onkeydown=event=>{if(event.key==='Escape') {setPickerOpen(false);pickerButton.focus();}};
+    const setPickerOpen=popupPicker(picker,pickerButton,dropdown,search,()=>{setPresetsOpen(false);filterChoices();});
     function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor.slice(0,7)+'33';});
       legendLabels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';});
       plottedLabels.forEach((label,i)=>{label.style.opacity=(chart.isDatasetVisible(i)?1:0.45)*(index===null||i===index?1:0.38);label.classList.toggle('is-focused',index===i);});chart.update('none');}
+    let activePreset=null;
+    const presetEntries=[];
     function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});
       inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);plottedLabels[i].classList.toggle('is-muted',!input.checked);plottedLabels[i].setAttribute('aria-pressed',String(input.checked));});
-      pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';focus(focused);fillHover(lastHover,focused);}
+      pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';
+      presetEntries.forEach(entry=>{entry.active=datasets.every((d,i)=>chart.isDatasetVisible(i)===entry.selected.includes(d.label));entry.button.classList.toggle('is-active',entry.active);entry.button.setAttribute('aria-pressed',String(entry.active));});
+      const active=presetEntries.find(entry=>entry.name===activePreset&&entry.active);
+      presetLabel.textContent=active?active.name:'快捷选择：run / 指标组';presetButton.title=active?active.name:'快捷选择 run 或指标组';
+      presetDot.style.backgroundColor=active?active.color:'#94a3b8';if(!active)activePreset=null;
+      focus(focused);fillHover(lastHover,focused);}
+
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
-    const presets=document.createElement('select');presets.className='multi-presets';presets.setAttribute('aria-label','快捷选择 run 或指标组');
-    const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='快捷选择：run / 指标组';presets.appendChild(placeholder);
-    Object.keys(panel.presets || {}).forEach(name=>{const option=document.createElement('option');option.value=name;option.textContent=name;presets.appendChild(option);});
-    presets.hidden=!Object.keys(panel.presets || {}).length;
-    presets.onchange=()=>{const selected=(panel.presets||{})[presets.value];if(!selected)return;datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));presets.value='';refresh();};
-    toolbar.appendChild(presets);
+    const presets=document.createElement('div');presets.className='multi-presets';presets.hidden=!Object.keys(panel.presets||{}).length;
+    const presetButton=document.createElement('button');presetButton.type='button';presetButton.className='multi-presets-button';presetButton.setAttribute('aria-expanded','false');presetButton.setAttribute('aria-label','快捷选择 run 或指标组');
+    const presetDot=document.createElement('i');presetDot.className='multi-preset-dot';presetDot.setAttribute('aria-hidden','true');
+    const presetLabel=document.createElement('span');presetLabel.className='multi-preset-label';
+    const presetArrow=document.createElement('span');presetArrow.textContent='▾';presetButton.append(presetDot,presetLabel,presetArrow);presets.appendChild(presetButton);
+    const presetMenu=document.createElement('div');presetMenu.className='multi-dropdown multi-preset-dropdown';presetMenu.hidden=true;
+    const presetSearch=document.createElement('input');presetSearch.type='search';presetSearch.className='multi-search';presetSearch.placeholder='搜索 run / 指标组';presetSearch.setAttribute('aria-label','搜索快捷预设');presetMenu.appendChild(presetSearch);
+    const presetList=document.createElement('div');presetList.className='multi-preset-list';presetMenu.appendChild(presetList);
+    const emptyPreset=document.createElement('p');emptyPreset.textContent='没有匹配的预设';emptyPreset.hidden=true;presetMenu.appendChild(emptyPreset);
+    const setPresetsOpen=popupPicker(presets,presetButton,presetMenu,presetSearch,()=>{setPickerOpen(false);filterPresets();});
+    Object.entries(panel.presets||{}).forEach(([name,selected])=>{
+      const button=document.createElement('button');button.type='button';button.className='multi-preset-choice';button.title=name;
+      const color=presetColor(selected,panel.series),dot=document.createElement('i');dot.className='multi-preset-dot';dot.style.backgroundColor=color;dot.setAttribute('aria-hidden','true');button.appendChild(dot);
+      const label=document.createElement('span');label.textContent=name;button.appendChild(label);
+      button.onclick=()=>{activePreset=name;datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));refresh();setPresetsOpen(false);presetButton.focus();};
+      presetList.appendChild(button);presetEntries.push({name,selected,color,button});
+    });
+    function filterPresets(){const query=presetSearch.value.trim().toLocaleLowerCase();presetEntries.forEach(e=>{e.button.hidden=!e.name.toLocaleLowerCase().includes(query);});emptyPreset.hidden=presetEntries.some(e=>!e.button.hidden);}
+    presetSearch.oninput=filterPresets;
+    presets.addEventListener('keydown',event=>{if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;
+      if(presetMenu.hidden)setPresetsOpen(true);
+      const visible=presetEntries.filter(e=>!e.button.hidden);if(!visible.length)return;
+      const current=visible.findIndex(e=>e.button===document.activeElement),delta=event.key==='ArrowUp'?-1:1;
+      const index=event.key==='Home'?0:event.key==='End'?visible.length-1:current<0?(delta>0?0:visible.length-1):(current+delta+visible.length)%visible.length;
+      visible[index].button.focus();event.preventDefault();});
+    presets.appendChild(presetMenu);toolbar.appendChild(presets);
     button('全选',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,true));refresh();});button('清空',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,false));refresh();});
     const range=document.createElement('div');range.className='multi-range';const from=document.createElement('input'),to=document.createElement('input');for(const el of [from,to]){el.type='number';el.step='1';el.style.width='90px';}
     from.setAttribute('aria-label','区间开始秒');to.setAttribute('aria-label','区间结束秒');range.append('拖拽选区 / 秒 ',from,' — ',to);toolbar.appendChild(range);
@@ -178,5 +218,5 @@
     canvas.addEventListener('pointerleave',()=>{if(!brush){focus(null);fillHover(null);}});
     selection.update(selection.min,selection.max);refresh();return chart;
   }
-  root.FlexMultiCurve={mount,statistics};
+  root.FlexMultiCurve={mount,statistics,presetColor};
 })(typeof window === 'undefined' ? globalThis : window);
