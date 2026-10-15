@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -163,8 +164,15 @@ def concat_and_cast_mha_k_triton(
     )
 
 
+def _use_trtllm_gen_prefill() -> bool:
+    """Env gate for the trtllm-gen ragged prefill (default off, A/B form)."""
+    return os.environ.get("XING4_MLA_TRTLLM_GEN_PREFILL", "0") == "1"
+
+
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
+    _trtllm_gen_workspace = None  # class-level lazy workspace (uint8, 128 MiB)
+    _trtllm_lens_cache = None  # (key, (bs, max_q, max_kv), qo_indptr, kv_indptr)
 
     def __init__(
         self,
@@ -242,6 +250,42 @@ class MlaFlashInferPrefillOp(object):
             1, dtype=torch.int32, device=self.block_table.device
         )
         self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
+        if _use_trtllm_gen_prefill():
+            # trtllm-gen ragged branch captures: cum kv indptr, per-seq lens,
+            # and the host scalars the kernel takes. The two .item() maxes
+            # are cached by indptr identity: every layer's op plans with the
+            # SAME mla_params tensors within a forward, so the syncs happen
+            # once per forward, not once per layer (40x).
+            self._trtllm_kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
+            self._trtllm_seq_lens = self._trtllm_kv_indptr.diff()
+            cache_key = (
+                self.qo_indptr.data_ptr(),
+                self._trtllm_kv_indptr.data_ptr(),
+            )
+            cached = MlaFlashInferPrefillOp._trtllm_lens_cache
+            if cached is not None and cached[0] == cache_key:
+                (
+                    self._trtllm_batch_size,
+                    self._trtllm_max_q_len,
+                    self._trtllm_max_kv_len,
+                ) = cached[1]
+            else:
+                self._trtllm_batch_size = int(self.qo_indptr.numel()) - 1
+                self._trtllm_max_q_len = int(
+                    torch.diff(self.qo_indptr).max().item()
+                )
+                self._trtllm_max_kv_len = int(self._trtllm_seq_lens.max().item())
+                # Hold refs to the key tensors so data_ptr stays unique.
+                MlaFlashInferPrefillOp._trtllm_lens_cache = (
+                    cache_key,
+                    (
+                        self._trtllm_batch_size,
+                        self._trtllm_max_q_len,
+                        self._trtllm_max_kv_len,
+                    ),
+                    self.qo_indptr,
+                    self._trtllm_kv_indptr,
+                )
 
     def _reuse_kv_cache_indexed_batched(
         self,
@@ -387,10 +431,49 @@ class MlaFlashInferPrefillOp(object):
         value_states = kv[:, :, self.qk_nope_head_dim :]
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
 
+        if _use_trtllm_gen_prefill():
+            return self._trtllm_ragged_run(q, k, value_states)
         # TODO: add TRT prefill support
         attn_output = self.prefill_wrapper.run(q, k, value_states)
         attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         return attn_output
+
+    def _trtllm_ragged_run(
+        self, q: torch.Tensor, k: torch.Tensor, value_states: torch.Tensor
+    ) -> torch.Tensor:
+        """trtllm-gen ragged prefill (XING4_MLA_TRTLLM_GEN_PREFILL=1).
+
+        Drop-in replacement for ``prefill_wrapper.run`` on the same
+        decompressed MHA-form q/k/v the wrapper path builds. The bmm1 scale
+        carries the same sm_scale the flashinfer plan uses (sqrt folded);
+        bf16 inputs take unit quant scales (bmm2/o_sf = 1.0).
+        """
+        import flashinfer
+
+        if MlaFlashInferPrefillOp._trtllm_gen_workspace is None:
+            MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.empty(
+                128 * 1024 * 1024, dtype=torch.uint8, device=q.device
+            )
+        attn_output = flashinfer.prefill.trtllm_ragged_attention_deepseek(
+            query=q,
+            key=k,
+            value=value_states,
+            workspace_buffer=MlaFlashInferPrefillOp._trtllm_gen_workspace,
+            seq_lens=self._trtllm_seq_lens,
+            max_q_len=self._trtllm_max_q_len,
+            max_kv_len=self._trtllm_max_kv_len,
+            bmm1_scale=self.scale * self.softmax_extra_scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=self._trtllm_batch_size,
+            window_left=-1,
+            cum_seq_lens_q=self.qo_indptr,
+            cum_seq_lens_kv=self._trtllm_kv_indptr,
+            enable_pdl=None,
+            is_causal=True,
+            return_lse=False,
+        )
+        return attn_output.view(-1, self.num_heads, self.v_head_dim)
 
 
 class MlaFlashInferDecodeOp(object):
