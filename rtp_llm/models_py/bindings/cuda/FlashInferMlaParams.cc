@@ -392,22 +392,26 @@ void FlashInferMlaAttnParams::refreshBuffer(
     // shape-updated views below (the padded tails are never read). At
     // decode batch 1 this moves ~130 live elements instead of the full
     // ~1M-element buffer (~4MB pinned H2D per step).
-    auto copy_live = [&](const torch::Tensor& h, const torch::Tensor& d) {
-        size_t bytes = static_cast<size_t>(h.numel()) * sizeof(int32_t);
+    // Copy the NEW live element counts: the host tensors still carry the
+    // previous step's sizes at this point (the shape updates below have not
+    // run yet), so h.numel() would under-copy on batch growth and leave a
+    // stale device tail. The callers pass the new extents explicitly.
+    auto copy_new = [&](const torch::Tensor& h, const torch::Tensor& d, int64_t live_elements) {
+        size_t bytes = static_cast<size_t>(live_elements) * sizeof(int32_t);
         if (bytes > 0) {
             cudaMemcpyAsync(d.data_ptr(), h.data_ptr(), bytes, cudaMemcpyHostToDevice, stream);
         }
     };
-    copy_live(decode_page_indptr_h, decode_page_indptr_d);
-    copy_live(prefill_ragged_kv_len_indptr_h, prefill_ragged_kv_len_indptr_d);
-    copy_live(qo_indptr_h, qo_indptr_d);
-    copy_live(batch_indice_h, batch_indice_d);
-    copy_live(positions_h, positions_d);
-    copy_live(kvlen_h, kvlen_d);
-    copy_live(paged_kv_last_page_len_h, paged_kv_last_page_len_d);
-    copy_live(page_indice_h, page_indice_d);
-    copy_live(reuse_cache_page_indice_h, reuse_cache_page_indice_d);
-    copy_live(batch_reuse_info_vec_h, batch_reuse_info_vec_d);
+    copy_new(decode_page_indptr_h, decode_page_indptr_d, batch_size + 1);
+    copy_new(prefill_ragged_kv_len_indptr_h, prefill_ragged_kv_len_indptr_d, batch_size + 1);
+    copy_new(qo_indptr_h, qo_indptr_d, batch_size + 1);
+    copy_new(batch_indice_h, batch_indice_d, input_token_num);
+    copy_new(positions_h, positions_d, input_token_num);
+    copy_new(kvlen_h, kvlen_d, batch_size);
+    copy_new(paged_kv_last_page_len_h, paged_kv_last_page_len_d, batch_size);
+    copy_new(page_indice_h, page_indice_d, page_num);
+    copy_new(reuse_cache_page_indice_h, reuse_cache_page_indice_d, reuse_page_num);
+    copy_new(batch_reuse_info_vec_h, batch_reuse_info_vec_d, batch_reuse_info_size);
 
     // Update tensor shapes (without reallocating memory)
     // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef

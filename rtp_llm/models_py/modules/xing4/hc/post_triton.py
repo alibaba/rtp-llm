@@ -239,9 +239,7 @@ def hc_post_triton(
     res_f = residual.view(T, hc, H)
     out_f = out.view(T, hc, H)
 
-    import triton as _triton
-
-    _hc_post_kernel[(T, _triton.cdiv(H, block_h))](
+    _hc_post_kernel[(T, triton.cdiv(H, block_h))](
         post_f,
         comb_f,
         x_f,
