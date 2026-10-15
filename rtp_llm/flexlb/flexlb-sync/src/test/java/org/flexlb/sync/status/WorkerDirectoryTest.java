@@ -1,17 +1,22 @@
 package org.flexlb.sync.status;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -24,6 +29,67 @@ class WorkerDirectoryTest {
 
     private WorkerDirectory workerDirectory;
     private EndpointRegistry registry;
+
+    @Test
+    void retirementLogContainsDecisionFailureAndCleanupOutcome() {
+        WorkerStatus status = status(RoleType.PREFILL, "group", 8080);
+        var lease = status.tryBeginStatusPoll(1L);
+        lease.pollTrace().record(Stage.RPC_COMPLETED, new IllegalStateException("deadline exceeded"));
+        lease.close();
+        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        Mockito.doThrow(new IllegalStateException("cache cleanup failed"))
+                .when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        var logger = Mockito.mock(org.slf4j.Logger.class);
+        discover(status);
+        try (var logs = new TraceLogs()) {
+            status.lock.lock();
+            EndpointRegistry.DetachedGeneration detached;
+            try {
+                detached = workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status,
+                        "STATUS_EXPIRED", 10_000_000L);
+            } finally {
+                status.lock.unlock();
+            }
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status,
+                    detached, cache, logger);
+            assertTrue(logs.lines.stream().anyMatch(line -> line.contains(status.getIpPort())));
+            assertTrue(logs.lines.stream().anyMatch(line -> line.contains("operation=RETIREMENT")
+                    && line.contains("result=ERROR")), "cache cleanup failure must not be reported as successful retirement");
+            var snapshot = status.trace().snapshot();
+            assertEquals("RETIREMENT_CLEANUP_END", snapshot.phase());
+            assertEquals("RPC_COMPLETED", snapshot.poll().failureStage());
+            assertTrue(snapshot.error().contains("cache cleanup failed"));
+            assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
+            assertTrue(workerDirectory.statusSnapshot(RoleType.PREFILL).isEmpty());
+        } finally {
+            registry.close();
+        }
+    }
+
+    private static final class TraceLogs extends AppenderBase<ILoggingEvent>
+            implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                LoggerFactory.getLogger("syncLogger");
+        private final ConcurrentLinkedQueue<String> lines = new ConcurrentLinkedQueue<>();
+
+        private TraceLogs() {
+            start();
+            logger.addAppender(this);
+        }
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            if (event.getMessage().startsWith("event=worker_trace ")) {
+                lines.add(event.getFormattedMessage());
+            }
+        }
+
+        @Override
+        public void close() {
+            logger.detachAppender(this);
+            stop();
+        }
+    }
 
     @BeforeEach
     void setUp() {

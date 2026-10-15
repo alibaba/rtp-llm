@@ -307,7 +307,7 @@ class CostBasedPrefillSelectionMetricTest {
         response.setRunningTaskInfo(Map.of("1", task));
         status.lock.lock();
         try {
-            endpoint.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response))).run();
+            endpoint.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response), null)).run();
         } finally {
             status.lock.unlock();
         }
