@@ -291,11 +291,13 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                 columns[None] >= vis[:, None], -torch.inf
             )
 
-        def candidate_step(state, logits, vis, selected_rows, *args):
+        def candidate_step(state, logits, vis, selected_rows, *args, **kwargs):
             if fast:
                 self.assertIsInstance(selected_rows, slice)
             chunk_calls.append(selected_rows)
-            return original_candidates(state, logits, vis, selected_rows, *args)
+            return original_candidates(
+                state, logits, vis, selected_rows, *args, **kwargs
+            )
 
         def select(logits, vis, topk, *, out, bounds):
             destinations.append(out)
