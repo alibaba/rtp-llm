@@ -9,6 +9,7 @@ from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
+    RopeStyle,
     check_rope_cache,
     get_rope_cache_once,
 )
@@ -125,7 +126,13 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset=params.kv_cache_offset,
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                # Keep the rtp_kernel fused op on its historical no-cache
+                # MRoPE path (per-pair on-the-fly coefficients); the shared
+                # rope cache now serves Mrope configs for the in-repo kernels.
+                rope_cache.data
+                if rope_config.style != RopeStyle.Mrope
+                and check_rope_cache(rope_config, rope_cache)
+                else None
             ),
             padding_offset=params.padding_offset,
             position_ids=params.position_ids,
@@ -341,7 +348,12 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                # See the prefill path above: keep MRoPE on the historical
+                # no-cache branch of the rtp_kernel fused op.
+                rope_cache.data
+                if rope_config.style != RopeStyle.Mrope
+                and check_rope_cache(rope_config, rope_cache)
+                else None
             ),
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
