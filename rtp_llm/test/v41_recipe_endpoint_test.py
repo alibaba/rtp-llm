@@ -623,6 +623,51 @@ class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
                             final.usage.prompt_tokens_details.cached_tokens, 2
                         )
 
+    async def test_pd_usage_preserves_prefill_reuse_without_decode_fallback(self):
+        for prefill_reuse in (343040, 0):
+            for streaming in (True, False):
+                with self.subTest(prefill_reuse=prefill_reuse, streaming=streaming):
+
+                    async def source():
+                        for index, token in enumerate((ord("a"), 0)):
+                            yield GenerateOutputs(
+                                generate_outputs=[
+                                    GenerateOutput(
+                                        output_ids=torch.tensor([[token]]),
+                                        finished=index == 1,
+                                        aux_info=AuxInfo(
+                                            input_len=347211,
+                                            output_len=index + 1,
+                                            pd_sep=True,
+                                            reuse_len=prefill_reuse,
+                                            prefill_total_reuse_len=prefill_reuse,
+                                            decode_total_reuse_len=347136,
+                                        ),
+                                    )
+                                ]
+                            )
+
+                    frames = [
+                        frame
+                        async for frame in make_renderer().render_response_stream(
+                            source(),
+                            request(stream=streaming),
+                            GenerateConfig(is_streaming=streaming),
+                        )
+                    ]
+                    usage = frames[-1].usage
+                    self.assertEqual(usage.prompt_tokens, 347211)
+                    self.assertEqual(usage.completion_tokens, 2)
+                    self.assertEqual(usage.total_tokens, 347213)
+                    if prefill_reuse:
+                        self.assertEqual(
+                            usage.prompt_tokens_details.cached_tokens, prefill_reuse
+                        )
+                    else:
+                        # Zero cache hits omit details; decode's post-transfer KV
+                        # length must not become a prompt cache hit count.
+                        self.assertIsNone(usage.prompt_tokens_details)
+
     async def test_length_keeps_partial_content_and_usage(self):
         final, content, _, _ = await self._render(
             "short", request(stream=True), max_tokens=5, eos=False
