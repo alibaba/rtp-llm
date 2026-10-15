@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,7 +12,7 @@ namespace rtp_llm {
 
 struct TreeNode {
     CacheKeyType                                cache_key{0};
-    size_t                                      index{0};
+    size_t                                      index{std::numeric_limits<size_t>::max()};
     std::vector<int>                            token_ids;
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};

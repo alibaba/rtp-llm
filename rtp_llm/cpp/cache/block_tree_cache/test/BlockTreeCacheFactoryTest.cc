@@ -1654,7 +1654,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     cache->insert(CacheKeysType{703}, refill_resources, Tier::DEVICE);
 
     const auto after_refill = cache->getKeySnapshot();
-    EXPECT_EQ(after_refill.version, before_refill.version + 1);
+    EXPECT_EQ(after_refill.version, before_refill.version);
     EXPECT_EQ(after_refill.keys, before_refill.keys);
     ASSERT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{refill_a->front()}));
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), 2u);

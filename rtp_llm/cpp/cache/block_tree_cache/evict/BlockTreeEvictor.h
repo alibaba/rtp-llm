@@ -46,7 +46,7 @@ struct CandidateStats {
 class BlockTreeEvictor {
 public:
     using IsTierEnabledFn = std::function<bool(Tier)>;
-    using SettledFn       = std::function<void(bool tree_data_mutated, bool check_watermark)>;
+    using SettledFn       = std::function<void(bool check_watermark)>;
 
     BlockTreeEvictor(BlockTree*                     tree,
                      EvictionPolicy                 device_policy,

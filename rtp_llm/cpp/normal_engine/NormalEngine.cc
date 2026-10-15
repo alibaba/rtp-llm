@@ -68,26 +68,12 @@ bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const
            && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
 }
 
-bool cacheStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
 // Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
 // (RTP_LLM_DEVICE_INPUT == "1"); the guard below rejects combinations that
 // the executor's device-input path cannot handle.
 bool deviceInputEnabled() {
     const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
     return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
-bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
-    if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
-        return false;
-    }
-    return std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
-        return stream && !stream->isFakeStream() && stream->isContextStream();
-    });
 }
 
 #if USING_CUDA
@@ -885,13 +871,7 @@ absl::Status NormalEngine::step() try {
             step_profiler_.startStep();
         }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        const bool refresh_cache_status_snapshot =
-            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
-        if (status.ok() && refresh_cache_status_snapshot) {
-            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
-            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
-        }
         if (propose_params_) {
             step_profiler_.finishStep();
         }
