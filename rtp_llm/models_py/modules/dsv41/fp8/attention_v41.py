@@ -3083,7 +3083,7 @@ class AttentionV41FP8(AttentionFP8):
         slots.masked_fill_(selected < 0, -1)
         return slots.int()
 
-    def _forward_decode_body(self, x, metadata):
+    def _forward_decode_body(self, x, metadata, shared_input_quant=None):
         from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
             decode_compute_qkv,
         )
@@ -3134,6 +3134,7 @@ class AttentionV41FP8(AttentionFP8):
                 x,
                 positions,
                 freqs_cis=freqs,
+                shared_input_quant=shared_input_quant,
                 swa_pool=swa_pool,
                 swa_slots=None if swa_slots is None else swa_slots[:T],
                 **({"mega_attention": mega} if mega is not None else {}),

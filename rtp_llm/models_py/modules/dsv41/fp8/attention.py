@@ -1800,6 +1800,8 @@ class AttentionFP8(nn.Module):
         x: torch.Tensor,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",
         kv_cache: Optional[Any] = None,
+        *,
+        shared_input_quant=None,
     ) -> torch.Tensor:
         """qwen3-style: ``kv_cache`` (framework KVCache handle) flows in
         as a kwarg. Stashed for the duration of this call so pool views
@@ -1812,7 +1814,15 @@ class AttentionFP8(nn.Module):
                 attn_metadata = attn_metadata.decoder_swa_metadata
             self._set_compressor_pool_context()
             try:
-                return self._forward_decode_body(x, attn_metadata)
+                return self._forward_decode_body(
+                    x,
+                    attn_metadata,
+                    **(
+                        {"shared_input_quant": shared_input_quant}
+                        if shared_input_quant is not None
+                        else {}
+                    ),
+                )
             finally:
                 self._clear_compressor_pool_context()
 

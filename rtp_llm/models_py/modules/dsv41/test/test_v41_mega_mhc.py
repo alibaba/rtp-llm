@@ -127,6 +127,12 @@ def assert_outputs_close(actual, expected):
 
 
 class V41MegaMHCCPUTest(unittest.TestCase):
+    def test_fp8_cpu_fallback_does_not_load_backend(self):
+        case = make_case((1, 6), "cpu")
+        with patch(f"{_MODULE}._get_mega_mhc") as backend:
+            self.assertIsNone(try_fused_post_pre(**case, output_fp8=True))
+            backend.assert_not_called()
+
     def test_cpu_fallback_does_not_load_backend_or_change_state(self):
         torch.manual_seed(41)
         case = make_case((1, 6), "cpu")
@@ -152,6 +158,151 @@ class V41MegaMHCCudaTest(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(41)
+
+    @torch.inference_mode()
+    def test_fp8_compact_padding(self):
+        case = make_case((1, 6))
+        result = try_fused_post_pre(**case, original_tokens=512, output_fp8=True)
+        self.assertIsNotNone(result[4])
+        q, sf = result[4]
+        self.assertEqual(q.shape, (1, 6, 5120))
+        self.assertEqual(sf.shape, (6, 40))
+        self.assertGreater(sf.stride(1), 6)
+        baseline = try_fused_post_pre(**case, original_tokens=512)
+        for value, ref in zip(result[:4], baseline):
+            torch.testing.assert_close(value, ref, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_fp8_eager_outputs_follow_native_scale_policy(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8_v3,
+        )
+
+        for rows in (1, 6, 48, 160, 192):
+            case = make_case((1, rows))
+            from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+            linear = V41MXFP8Linear(
+                (torch.randn(1792, 5120, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+                torch.ones(56, 160, device="cuda").to(torch.float8_e8m0fnu),
+            )
+
+            def run():
+                result = try_fused_post_pre(**case, output_fp8=True)
+                self.assertIsNotNone(result)
+                self.assertIsNotNone(result[4])
+                return result
+
+            for scale in (1.0, 1e-8, 0.0):
+                case["norm"].weight.fill_(scale)
+                result = run()
+                normalized = result[1].reshape(rows, 5120)
+                q, sf = result[4]
+                groups = normalized.float().reshape(rows, 160, 32)
+                exponents = torch.ceil(torch.log2(groups.abs().amax(-1) / 448)).clamp(
+                    min=-22
+                )
+                expected_q = (groups / torch.exp2(exponents)[..., None]).to(
+                    torch.float8_e4m3fn
+                )
+                expected_sf = (
+                    (
+                        (exponents.to(torch.int64) + 127).view(rows, 40, 4)
+                        << (torch.arange(4, device="cuda") * 8)
+                    )
+                    .sum(-1)
+                    .to(torch.int32)
+                )
+                torch.testing.assert_close(
+                    q.reshape(rows, 160, 32).view(torch.uint8),
+                    expected_q.view(torch.uint8),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(sf, expected_sf, rtol=0, atol=0)
+                legacy_q, legacy_sf = sgl_per_token_group_quant_fp8_v3(normalized)
+                if scale == 1.0:
+                    torch.testing.assert_close(
+                        q.reshape(rows, 5120).view(torch.uint8),
+                        legacy_q.view(torch.uint8),
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(sf, legacy_sf, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        linear.forward_quantized(q, sf),
+                        linear(result[1]),
+                        rtol=0,
+                        atol=0,
+                    )
+                baseline = try_fused_post_pre(**case)
+                for got, ref in zip(result[:4], baseline):
+                    torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_native_fp8_multinode_graph_dynamic_inputs(self):
+        # Production captures successive layer transitions on the same stream.
+        # Equal M makes every transition cover the same persistent barrier slots.
+        # These are HC call topologies, not a full Attention/MoE service test.
+        for rows, nodes in ((1, 2), (6, 2), (48, 2), (160, 5), (192, 75)):
+            with self.subTest(rows=rows, nodes=nodes):
+                cases = [make_case((1, rows)) for _ in range(nodes)]
+                originals = [case["attn_out"].clone() for case in cases]
+                # Main verify: 75 HC transitions, 32 native FP8 consumers.
+                # Draft: five BF16 transitions. Small cases cover native FP8.
+                fp8_nodes = (
+                    set(range(1, 65, 2))
+                    if nodes == 75
+                    else set() if nodes == 5 else set(range(nodes))
+                )
+
+                def run():
+                    outputs = []
+                    for index, case in enumerate(cases):
+                        fp8 = index in fp8_nodes
+                        result = try_fused_post_pre(**case, output_fp8=fp8)
+                        self.assertIsNotNone(result)
+                        values = (*result[:4], case["next_hc"].pre_mix_out)
+                        if fp8:
+                            self.assertIsNotNone(result[4])
+                            values += result[4]
+                        outputs.append(values)
+                    return outputs
+
+                references = []
+                for scale in (1.0, -0.75):
+                    for case, initial in zip(cases, originals):
+                        case["attn_out"].copy_(initial * scale)
+                    references.append(
+                        [tuple(x.clone() for x in values) for values in run()]
+                    )
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    run()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    outputs = run()
+                for replay in range(1000):
+                    state = replay % 2
+                    for case, initial in zip(cases, originals):
+                        case["attn_out"].copy_(initial * (1.0 if state == 0 else -0.75))
+                    graph.replay()
+                    checks = [
+                        torch.all(
+                            a.contiguous().view(torch.uint8)
+                            == b.contiguous().view(torch.uint8)
+                        )
+                        for actual, expected in zip(outputs, references[state])
+                        for a, b in zip(actual, expected)
+                    ]
+                    passed = torch.stack(checks).cpu().tolist()
+                    self.assertTrue(
+                        all(passed),
+                        f"replay={replay}, failing fields="
+                        f"{[i for i, ok in enumerate(passed) if not ok]}",
+                    )
 
     @torch.no_grad()
     def check_case(self, case):

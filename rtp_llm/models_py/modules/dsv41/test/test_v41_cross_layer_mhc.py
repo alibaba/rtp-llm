@@ -110,7 +110,10 @@ def run_blocks(blocks, hidden, input_ids, captures=(), attn_fn=None):
     return hidden, DelayedHCHead(blocks[-1].ffn_hc).head(hidden), *captured
 
 
-def reference_transition(output, residual, post, comb, previous, next_hc, norm):
+def reference_transition(
+    output, residual, post, comb, previous, next_hc, norm, *, output_fp8=False
+):
+    assert not output_fp8
     residual = previous.post(output, residual, post, comb)
     x, post, comb = next_hc.pre(residual)
     normalized = norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
@@ -208,6 +211,68 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             )
         return fused.call_count
 
+    def test_prequantized_input_reaches_attention_and_preserves_fallback(self):
+        quantized = (torch.empty(3, 2, 8), torch.empty(6, 1))
+        seen = []
+
+        class QuantizedAttention(TestAttention):
+            def forward_decode(
+                self, x, metadata, kv_cache=None, shared_input_quant=None
+            ):
+                seen.append(shared_input_quant)
+                return super().forward_decode(x, metadata, kv_cache)
+
+        blocks = make_blocks()
+        for block in blocks:
+            block.attn = QuantizedAttention()
+
+        def backend(*args, output_fp8=False):
+            self.assertTrue(output_fp8)
+            return (*reference_transition(*args), quantized)
+
+        with patch.object(
+            transition, "_can_quantize_attention_input", return_value=True
+        ), patch.object(transition, "try_fused_post_pre", side_effect=backend):
+            got = run_blocks(blocks, self.hidden, self.ids)
+        self.assertIsNone(seen[0])
+        self.assertIs(seen[1], quantized)
+        self.assertIs(seen[2], quantized)
+        with patch.dict(os.environ, {"DSV41_FUSED_CROSS_LAYER_MHC": "0"}):
+            expected = run_blocks(make_blocks(), self.hidden, self.ids)
+        for value, ref in zip(got, expected):
+            torch.testing.assert_close(value, ref, rtol=0, atol=0)
+
+    def test_fp8_gate_preserves_overrides_and_non_native_attention(self):
+        layer = make_blocks()[0]
+        self.assertFalse(
+            transition._can_quantize_attention_input(layer, self.hidden, lambda x: x)
+        )
+        self.assertFalse(
+            transition._can_quantize_attention_input(layer, self.hidden, None)
+        )
+
+    def test_native_fp8_is_independent_of_standalone_quant_backend(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        layer = make_blocks()[0]
+        layer.attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(layer.attn)
+        layer.attn.q_norm = torch.ones(8)
+        layer.attn.q_lora_rank = 8
+        with patch(
+            "rtp_llm.models_py.modules.dsv41._v41_fused_qkv.is_supported",
+            return_value=True,
+        ):
+            for backend in ("auto", "legacy", "v2", "v3"):
+                with self.subTest(backend=backend), patch.dict(
+                    os.environ, {"DSV4_FP8_QUANT_KERNEL": backend}
+                ):
+                    self.assertTrue(
+                        transition._can_quantize_attention_input(
+                            layer, self.hidden, None
+                        )
+                    )
+
     def test_two_transitions_and_final_delayed_head(self):
         self.assertEqual(self.compare(backend=reference_transition), 2)
 
@@ -229,7 +294,7 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         )
 
     def test_unsupported_backend_materializes_original_post(self):
-        self.assertEqual(self.compare(backend=lambda *args: None), 2)
+        self.assertEqual(self.compare(backend=lambda *args, output_fp8=False: None), 2)
 
     def test_pending_values_do_not_escape_a_forward(self):
         blocks = make_blocks()

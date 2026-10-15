@@ -78,6 +78,7 @@ def decode_compute_qkv(
     swa_pool: torch.Tensor | None = None,
     swa_slots: torch.Tensor | None = None,
     mega_attention=None,
+    shared_input_quant=None,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -95,9 +96,18 @@ def decode_compute_qkv(
         try_project_quantized_qkv,
     )
 
-    quantized_qkv = try_project_quantized_qkv(attn, x)
+    quantized_qkv = try_project_quantized_qkv(
+        attn,
+        x,
+        quantized_input=shared_input_quant,
+    )
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
-    fused_qkv = attn._try_fused_qr_kv(x) if quantized_qkv is None else quantized_qkv[:2]
+    if quantized_qkv is not None:
+        fused_qkv = quantized_qkv[:2]
+    elif shared_input_quant is not None:
+        fused_qkv = attn._try_fused_qr_kv(x, shared_input_quant)
+    else:
+        fused_qkv = attn._try_fused_qr_kv(x)
     # Q path; fused KV remains a view until its strided RMSNorm/RoPE below.
     if fused_qkv is None:
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)

@@ -1,3 +1,4 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 package(default_visibility = ["//visibility:public"])
@@ -20,7 +21,6 @@ _TESTS = [
     "test_v41_decode_indexer",
     "test_v41_decode_topk",
     "test_v41_decode_preprocessing",
-    "test_v41_decode_qkv_integration",
     "test_v41_deepselect",
     "test_v41_fp4_codec",
     "test_v41_flash_mla_cache_format",
@@ -73,13 +73,15 @@ _X86_TESTS = [
     "test_v41_prefill_deepselect",
     "test_v41_deepselect",
     "test_v41_decode_attention_fusion",
-    "test_v41_decode_qkv_integration",
 ]
 
 [
     py_test(
         name = name,
-        srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py", "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py"],
+        srcs = glob(["*.py"]) + [
+            "//rtp_llm/test/pytest:pytest_main.py",
+            "//rtp_llm/models_py/modules/dsv4/fp8/test:test_prefill_common_metadata_cuda.py",
+        ],
         main = "//rtp_llm/test/pytest:pytest_main.py",
         args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
         deps = [
@@ -108,3 +110,25 @@ _X86_TESTS = [
     )
     for name in _TESTS
 ]
+
+
+cuda13_sm100_py_test(
+    name = "test_v41_decode_qkv_integration",
+    srcs = [
+        "test_v41_decode_qkv_integration.py",
+        "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_decode_qkv_integration.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    env = {"RTP_V41_REQUIRE_SM10X": "1"},
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)

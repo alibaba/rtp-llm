@@ -120,6 +120,17 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             )
         )
 
+    def test_fp8_warmup_requests_both_output_modes(self):
+        source = block()
+        pair = (source.attn_hc, source.ffn_hc, source.ffn_norm)
+        with patch.object(
+            warmup.v41_mega_mhc, "try_fused_post_pre", return_value=()
+        ) as operation:
+            warmup._launch_mega(pair, 6, "cpu")
+        self.assertEqual(operation.call_count, 2)
+        self.assertEqual(operation.call_args_list[0].kwargs, {})
+        self.assertEqual(operation.call_args_list[1].kwargs, {"output_fp8": True})
+
     def test_collects_real_units_and_only_correct_in_block_seams(self):
         first, same, other = block(), block(), block(eps=2e-5)
         units, pairs = warmup._collect_v41_hc_configs(model(first, same, other))
@@ -223,7 +234,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             fn._dsv41_prenorm_tf32_cache = "dummy-cache"
             return torch.zeros(1, 6, 24)
 
-        def mega(x, residual, post, comb, previous, following, norm):
+        def mega(
+            x, residual, post, comb, previous, following, norm, *, output_fp8=False
+        ):
             self.assertIs(previous, pair[0])
             self.assertIs(following, pair[1])
             self.assertEqual(tuple(previous.pre_mix_out.shape), (6, 4))

@@ -377,6 +377,7 @@ class Block(nn.Module):
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
+        shared_input_quant = None
         if _prepared_attn is None:
             x = self._inject_engram(x)
             residual = x
@@ -392,13 +393,24 @@ class Block(nn.Module):
                 bsz, q_len, dim_
             )
         else:
-            residual, x_pre, post, comb = _prepared_attn
+            residual, x_pre, post, comb = _prepared_attn[:4]
+            if len(_prepared_attn) == 5:
+                shared_input_quant = _prepared_attn[4]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
-            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+            attn_out = self.attn.forward_decode(
+                x_pre,
+                attn_metadata,
+                kv_cache=kv_cache,
+                **(
+                    {"shared_input_quant": shared_input_quant}
+                    if shared_input_quant is not None
+                    else {}
+                ),
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
         fused_mhc = (
