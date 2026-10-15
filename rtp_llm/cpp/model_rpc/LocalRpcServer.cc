@@ -270,7 +270,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             stream->reportError(first.error.code(), first.error.ToString());
             return serializeErrorMsg(request_key, first.error);
         }
-        stream->checkTimeout();
         const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
@@ -369,8 +368,6 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
             auto&      stream = streams[i];
             const auto key =
                 "batch item " + std::to_string(i) + " request " + std::to_string(stream->generateInput()->request_id);
-            if (stream->getStatus() != StreamState::FINISHED)
-                stream->checkTimeout();
             if (stream->hasError())
                 return fail(serializeErrorMsg(
                     key, ErrorInfo(stream->statusInfo().code(), key + ": " + stream->statusInfo().ToString())));
