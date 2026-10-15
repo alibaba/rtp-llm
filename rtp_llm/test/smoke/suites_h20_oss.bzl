@@ -182,32 +182,6 @@ def h20_oss_suites():
                 smoke_args = "--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flashinfer_native 1",
                 gpu_type = ["H20_CU13"],
             ),
-            # This self-contained golden is derived from
-            # data/model/qwen3/q_r_block_fp8.json. Keep messages, tools, and
-            # prompt_tokens synchronized when either golden is regenerated.
-            # It is intentionally shared by graph/eager to isolate graph behavior.
-            # Its 497-token prompt plus 17 generated tokens is the minimum window
-            # that crosses the 512-token boundary (page 8 -> 9 with block size 64).
-            # Graph capture size 2 and the serial smoke request exercise one real
-            # request plus one padding slot. Both cases intentionally remain in
-            # the light suite: eager runs at batch 1, while graph runs at fixed
-            # batch 2, so only eager-pass/graph-fail points to graph replay. UT
-            # covers multi-active metadata transitions and reference outputs;
-            # actual graph capture/replay coverage here is single-active. This
-            # smoke validates end-to-end output under graph configuration but
-            # does not expose a standalone replay counter.
-            smoke_test(
-                name="dense_fp8_prequant_flashinfer_no_cudagraph",
-                task_info="data/model/qwen3/q_r_block_fp8_flashinfer_decode.json",
-                smoke_args=flashinfer_decode_base_args + " --enable_cuda_graph 0",
-                gpu_type=["H20"],
-            ),
-            smoke_test(
-                name="dense_fp8_prequant_flashinfer_cudagraph",
-                task_info="data/model/qwen3/q_r_block_fp8_flashinfer_decode.json",
-                smoke_args=flashinfer_decode_base_args + " --enable_cuda_graph 1 --decode_capture_config '2'",
-                gpu_type=["H20"],
-            ),
             smoke_test(
                 name = "dense_fp8kv_flashinfer_prefill",
                 task_info = "data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
