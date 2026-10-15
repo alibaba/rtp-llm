@@ -11,6 +11,9 @@
 
 namespace rtp_llm {
 
+constexpr size_t kP2PDecodeKickoffThreadCount = 4;
+constexpr size_t kP2PDecodeKickoffQueueSize   = 1024;
+
 inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     // Reuse the reserved per-worker slot right after cache_store_listen_port.
     // Keep port 0 unchanged so tests can still request an ephemeral port.
@@ -25,6 +28,7 @@ struct P2PConnectorSchedulerConfig {
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
+    int64_t                     p2p_writeback_timeout_ms     = 5000;
     std::shared_ptr<const CacheTopology> topology;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
@@ -50,6 +54,7 @@ struct P2PConnectorSchedulerConfig {
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
+        config.p2p_writeback_timeout_ms        = cache_store_config.p2p_writeback_timeout_ms;
         return config;
     }
 };
@@ -60,6 +65,7 @@ struct P2PConnectorWorkerConfig {
     int p2p_prefill_sender_thread_count = 4;
     int p2p_prefill_sender_queue_size   = 10000;
 
+    int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
     int64_t load_cache_timeout_ms = 5000;
 
@@ -81,6 +87,8 @@ struct P2PConnectorWorkerConfig {
         config.load_cache_timeout_ms = pd_sep_config.load_cache_timeout_ms;
         config.p2p_prefill_sender_thread_count = cache_store_config.p2p_prefill_sender_thread_count;
         config.p2p_prefill_sender_queue_size   = cache_store_config.p2p_prefill_sender_queue_size;
+        config.p2p_resource_store_timeout_check_interval_ms =
+            cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.transfer_backend_config.cache_store_rdma_mode         = pd_sep_config.cache_store_rdma_mode;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;
@@ -114,6 +122,7 @@ struct P2PConnectorWorkerConfig {
 };
 
 struct P2PConnectorConfig {
+    bool     p2p_writeback_enable = false;
     RoleType role_type = RoleType::PDFUSION;
     int      tp_rank   = 0;
 
@@ -128,6 +137,7 @@ struct P2PConnectorConfig {
                                      bool                     is_mla,
                                      size_t                   llm_kv_block_size_bytes) {
         P2PConnectorConfig config;
+        config.p2p_writeback_enable = cache_store_config.p2p_writeback_enable;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =

@@ -1120,6 +1120,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_staging_total_bytes", &CacheStoreConfig::p2p_rdma_staging_total_bytes)
         .def_readwrite("p2p_prefill_sender_thread_count", &CacheStoreConfig::p2p_prefill_sender_thread_count)
         .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
+        .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
+        .def_readwrite("p2p_writeback_timeout_ms", &CacheStoreConfig::p2p_writeback_timeout_ms)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1148,10 +1150,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_total_bytes,
                                       self.p2p_prefill_sender_thread_count,
-                                      self.p2p_prefill_sender_queue_size);
+                                      self.p2p_prefill_sender_queue_size,
+                                      self.p2p_writeback_enable,
+                                      self.p2p_writeback_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 26) {
+                if (t.size() != 28) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1181,6 +1185,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_staging_total_bytes = t[23].cast<int64_t>();
                 c.p2p_prefill_sender_thread_count = t[24].cast<int>();
                 c.p2p_prefill_sender_queue_size = t[25].cast<int>();
+                c.p2p_writeback_enable = t[26].cast<bool>();
+                c.p2p_writeback_timeout_ms = t[27].cast<int64_t>();
                 return c;
             }));
 

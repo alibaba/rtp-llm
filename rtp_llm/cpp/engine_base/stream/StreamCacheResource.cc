@@ -352,6 +352,15 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
+                if (target_tier == Tier::DEVICE && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
+                    MetaImpl meta(false, false, "");
+                    meta.fillRoutingContext(stream_);
+                    resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
+                                                                     stream_->completeTokenIdsPtr(),
+                                                                     stream_->inputLength(),
+                                                                     stream_->writebackKVReadyTokenCount(),
+                                                                     meta);
+                }
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
@@ -643,7 +652,7 @@ bool StreamCacheResource::asyncLoadCache() {
     if (stream_->queryPdSep() && !p2p_load_context_ && resource_context_.cache_manager
         && resource_context_.cache_manager->hasP2PConnector()) {
         auto meta = std::make_shared<MetaImpl>(
-            reuseCache() && enableHostCache(), reuseCache() && resource_context_.enable_remote_cache, stream_->traceId());
+            reuseCache() && enableMemoryCache(), reuseCache() && resource_context_.enable_remote_cache, stream_->traceId());
         meta->generate_stream_ = stream_;
         meta->fillRoutingContext(stream_);
         const size_t tree_covered_block_num = treeCoveredBlockNum();

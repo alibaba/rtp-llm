@@ -381,4 +381,14 @@ TEST(PDCancelRegistryTest, LateAdmissionRetainsOrdinaryCancellationCause) {
     EXPECT_EQ(registry.admit(request, "late109", "", currentTimeMs() + 1000, handle).code(),
               ErrorCode::GENERATE_TIMEOUT);
 }
+TEST(PrefillRpcServerTest, StartWriteRejectsMissingEngine) {
+    PrefillRpcServer             server;
+    grpc::ServerContext              context;
+    P2PConnectorStartWriteRequestPB  request;
+    P2PConnectorStartWriteResponsePB response;
+    const auto                       status = server.StartWrite(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "cache manager is unavailable");
+}
+
 }  // namespace rtp_llm

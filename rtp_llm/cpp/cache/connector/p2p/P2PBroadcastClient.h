@@ -28,9 +28,11 @@ public:
     bool init();
 
     struct Result {
-        Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result):
-            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {
-            if (tp_broadcast_result_) {
+        Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result,
+               bool fail_on_rpc_error = true):
+            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()),
+            fail_on_rpc_error_(fail_on_rpc_error) {
+            if (tp_broadcast_result_ && fail_on_rpc_error_) {
                 tp_broadcast_result_->onDone([result = tp_broadcast_result_]() { result->waitDone(); });
             }
         }
@@ -45,7 +47,7 @@ public:
         bool done() const {
             const bool completed = locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
             if (completed) {
-                if (tp_broadcast_result_) {
+                if (tp_broadcast_result_ && fail_on_rpc_error_) {
                     // Use the common fatal path for CQ failures and RPC deadlines.
                     tp_broadcast_result_->waitDone();
                 }
@@ -64,6 +66,21 @@ public:
             }
         }
 
+        bool rpcSuccess() const {
+            if (locally_completed_) {
+                return true;
+            }
+            if (!tp_broadcast_result_ || !tp_broadcast_result_->done() || !tp_broadcast_result_->rpcSuccess()) {
+                return false;
+            }
+            for (const auto& response : tp_broadcast_result_->responses()) {
+                if (!response.has_p2p_response()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         int64_t totalCostTimeUs() const {
             return total_cost_time_us_.load();
         }
@@ -80,6 +97,7 @@ public:
         int64_t                            start_time_us_;
         mutable std::atomic<int64_t>       total_cost_time_us_{0};
         bool                               locally_completed_{false};
+        bool                               fail_on_rpc_error_{true};
     };
 
     /// @brief 向所有 TP worker 广播一次 P2P 传输请求。
@@ -99,6 +117,7 @@ public:
         std::vector<std::pair<std::string, uint32_t>> peer_workers;
         RankRoutes                                    routes;
         uint64_t                                      plan_digest{0};
+        int                                           worker_rank{0};
     };
 
     std::shared_ptr<Result> broadcast(BroadcastParams params);
@@ -140,7 +159,18 @@ public:
     /// @param poll_timeout_ms 单次 broadcast 的 gRPC 超时（毫秒）
     LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
 
+public:
+    std::shared_ptr<TpBroadcastResult> controlWriteAsync(const std::string&        unique_key,
+                                                         P2PConnectorBroadcastType type,
+                                                         int64_t                   transfer_deadline_ms,
+                                                         int64_t                   control_timeout_ms);
+    std::shared_ptr<TpBroadcastResult>
+    queryLeaseStatusAsync(const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms);
+    static LeaseStatusResult leaseStatus(const std::shared_ptr<TpBroadcastResult>& result);
+
 private:
+    std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
+
     std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms);

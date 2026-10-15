@@ -13,11 +13,14 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
 class CPSlotMapper;
 class BlockTreeCache;
+class LoadAsyncContext;
+struct BlockTreeMatchResult;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class KVCacheGroup;
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
@@ -94,6 +97,14 @@ public:
                                     int                            target_batch_size) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
+    // Holds the matched prefix and prepares local-load and receive targets. The caller commits the load.
+    ErrorInfo admitWriteBackDecodeCache(const CacheKeysType&               cache_keys,
+                                        size_t                             required_prefix_blocks,
+                                        KVCacheResourcePtr&                resource,
+                                        size_t&                            start_block,
+                                        std::shared_ptr<LoadAsyncContext>& load_context);
+    // Commits a received writeback resource into the cache.
+    ErrorInfo    commitWriteBackDecodeCache(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
@@ -172,6 +183,12 @@ protected:
     // instead of being errored out under cache pressure.
     virtual MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;
+    ErrorInfo populateMatchedBlocks(const BlockTreeMatchResult& match_result, KVCacheResource& resource) const;
+    void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
+    ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
+                                       int               target_seq_len,
+                                       bool              enable_reuse_cache,
+                                       LoadAsyncContext* load_context) const;
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;

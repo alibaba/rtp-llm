@@ -65,6 +65,34 @@ public:
         }
     }
 
+public:
+    grpc::Status StartWrite(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteRequestPB* request,
+                            P2PConnectorStartWriteResponsePB*      response) override {
+        if (prefill_server_) {
+            return prefill_server_->StartWrite(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWrite");
+    }
+
+    grpc::Status WriteReady(grpc::ServerContext*                   context,
+                            const P2PConnectorWriteReadyRequestPB* request,
+                            P2PConnectorWriteReadyResponsePB*      response) override {
+        if (decode_server_) {
+            return decode_server_->WriteReady(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement WriteReady");
+    }
+
+    grpc::Status CancelWrite(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteRequestPB* request,
+                             P2PConnectorStartWriteResponsePB*       response) override {
+        if (prefill_server_) {
+            return prefill_server_->CancelWrite(context, request, response);
+        }
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement CancelWrite");
+    }
+
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>  decode_server_;

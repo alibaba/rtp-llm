@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from typing_extensions import override
 
@@ -32,10 +32,14 @@ class EmbeddingCppEngine(BaseEngine):
         self.mm_process_engine: Optional[MMProcessEngine] = None
 
     @override
-    def _stop(self) -> None:
+    def _stop(
+        self, before_rpc_shutdown: Optional[Callable[[], None]] = None
+    ) -> None:
         # Stop the C++ engine first so it issues no more embedding calls, then
         # close the local MMProcessEngine (which stops its MMScheduler thread and
         # preprocessing executor).
+        if before_rpc_shutdown is not None:
+            before_rpc_shutdown()
         self.cpp_engine.stop()
         if self.mm_process_engine is not None:
             self.mm_process_engine.stop()

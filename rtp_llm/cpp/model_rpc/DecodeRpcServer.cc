@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include <algorithm>
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
@@ -503,6 +504,19 @@ void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_p
         aux_info->set_decode_memory_reuse_len(decode_memory_reuse_len);
         aux_info->set_decode_disk_reuse_len(decode_disk_reuse_len);
     }
+}
+
+grpc::Status DecodeRpcServer::WriteReady(grpc::ServerContext*                   context,
+                                         const P2PConnectorWriteReadyRequestPB* request,
+                                         P2PConnectorWriteReadyResponsePB*      response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+    }
+    engine_->getCacheManager()->handleWriteReady(*request, *response);
+    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

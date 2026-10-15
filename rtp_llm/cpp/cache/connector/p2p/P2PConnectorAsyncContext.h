@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeWriteHelper.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -10,9 +11,13 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
 #include <algorithm>
+#include "autil/LoopThread.h"
+#include "autil/ThreadPool.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -262,6 +267,132 @@ private:
     std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
     size_t                                                     lease_poll_cursor_{0};
     int64_t                                                    control_submit_retry_ms_{0};
+};
+
+class P2PConnectorAsyncWriteContext:
+    public AsyncContext,
+    public std::enable_shared_from_this<P2PConnectorAsyncWriteContext> {
+public:
+    using ReadyHandler = std::function<ErrorInfo(const P2PConnectorWriteReadyRequestPB&)>;
+    using PeerCancel   = std::function<std::shared_ptr<DecodeWriteHelper::CancelResult>()>;
+
+    P2PConnectorAsyncWriteContext(std::string                         unique_key,
+                                  int64_t                             deadline_ms,
+                                  std::shared_ptr<P2PBroadcastClient> client,
+                                  int64_t                             control_timeout_ms,
+                                  int64_t                             lease_query_timeout_ms,
+                                  std::function<void()>               on_released      = {},
+                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr);
+
+    void               waitDone() override;
+    void               onDone(DoneCallback callback) override;
+    bool               done() const override;
+    bool               success() const override;
+    void               checkDone();
+    void               cancel(const ErrorInfo& error = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled"));
+    bool               beginKickoff();
+    void               setCallResults(std::shared_ptr<P2PBroadcastClient::Result> result);
+    bool               resourceHoldPending() const;
+    const std::string& uniqueKey() const {
+        return unique_key_;
+    }
+    ErrorInfo errorInfo() const override;
+
+    bool      beginWorkerCall();
+    void      finishWithoutTransfer(const ErrorInfo& error = ErrorInfo::OkStatus());
+    int64_t   deadlineMs() const;
+    void      setPlannedBytes(int64_t bytes);
+    void      setReadyHandler(ReadyHandler handler);
+    ErrorInfo acceptWriteReady(const P2PConnectorWriteReadyRequestPB& request);
+    bool      beginPeerCall(PeerCancel cancel);
+    void      setPeerCallResult(std::shared_ptr<DecodeWriteHelper::Result> result);
+
+private:
+    friend class P2PConnectorAsyncWriteContextChecker;
+
+    void                  expireTransferDeadlineIfNeeded();
+    void                  checkCancelDone();
+    void                  setNotification(const std::shared_ptr<P2PNotification>& notification);
+    int64_t               nextWakeupMs() const;
+    void                  runControl(const std::shared_ptr<autil::ThreadPool>& control_pool);
+    void                  failStopIfLeaseUnconfirmed();
+    void                  dispatchDoneCallbacks();
+    std::function<void()> completionCallback() const;
+    void                  registerWriteCompletionCallbacksLocked();
+    void                  notify() const;
+
+    void    failLocked(const ErrorInfo& error);
+    void    checkPeerResultLocked();
+    void    tryFinishLocked(const ErrorInfo& error);
+    void    finishLocked(const ErrorInfo& error);
+    int64_t holdUntilMsLocked() const;
+    bool    retentionExpired() const;
+    struct DoneNotifier {
+        P2PConnectorAsyncWriteContext& context;
+        ~DoneNotifier() {
+            context.dispatchDoneCallbacks();
+        }
+    };
+
+    const std::string                   unique_key_;
+    int64_t                             deadline_ms_;
+    std::shared_ptr<P2PBroadcastClient> client_;
+    const int64_t                       control_timeout_ms_;
+    const int64_t                       lease_query_timeout_ms_;
+    kmonitor::MetricsReporterPtr        metrics_reporter_;
+    WriteSchedulerMetricsCollector      metrics_;
+    const int64_t                       start_time_us_{currentTimeUs()};
+
+    mutable std::mutex                          mutex_;
+    std::condition_variable                     cv_;
+    std::vector<DoneCallback>                   done_callbacks_;
+    std::shared_ptr<P2PNotification>            notification_;
+    bool                                        kickoff_started_{false};
+    bool                                        calls_ready_{false};
+    bool                                        cancelled_{false};
+    bool                                        done_{false};
+    bool                                        released_{false};
+    bool                                        transfer_stopped_{false};
+    std::shared_ptr<P2PBroadcastClient::Result> start_result_;
+    bool                                        control_submitting_{false};
+    int64_t                                     control_next_ms_{0};
+    int64_t                                     control_interval_ms_{10};
+
+    std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> control_result_;
+
+    ReadyHandler                                     ready_handler_;
+    std::string                                      ready_request_;
+    bool                                             ready_submitting_{false};
+    bool                                             peer_pending_{false};
+    bool                                             peer_stopped_{false};
+    PeerCancel                                       peer_cancel_;
+    std::shared_ptr<DecodeWriteHelper::Result>       peer_result_;
+    std::shared_ptr<DecodeWriteHelper::CancelResult> peer_cancel_result_;
+    std::function<void()>                            on_released_;
+    ErrorInfo                                        error_;
+};
+
+class P2PConnectorAsyncWriteContextChecker {
+public:
+    ~P2PConnectorAsyncWriteContextChecker();
+    bool   init();
+    bool   addContext(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context);
+    void   cancelAll();
+    void   stop();
+    size_t inflightContextCount() const;
+    std::shared_ptr<P2PConnectorAsyncWriteContext> findContext(const std::string& key) const;
+
+private:
+    void    checkOnce();
+    int64_t nextWakeupMs() const;
+
+    mutable std::mutex                                                    mutex_;
+    std::map<std::string, std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts_;
+    std::thread                                                           thread_;
+    bool                                                                  accepting_{false};
+    std::atomic<bool>                                                     stopping_{false};
+    std::shared_ptr<P2PNotification>   notification_{std::make_shared<P2PNotification>()};
+    std::shared_ptr<autil::ThreadPool> control_pool_;
 };
 
 }  // namespace rtp_llm

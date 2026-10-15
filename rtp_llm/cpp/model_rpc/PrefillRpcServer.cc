@@ -1,6 +1,7 @@
 #include <unordered_set>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
@@ -650,6 +651,32 @@ void PrefillRpcServer::cancelCleanupTick() {
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::StartWrite(grpc::ServerContext*                   context,
+                                              const P2PConnectorStartWriteRequestPB* request,
+                                              P2PConnectorStartWriteResponsePB*      response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+    }
+    engine_->getCacheManager()->handleWrite(*request, *response, [context]() { return context->IsCancelled(); });
+    return grpc::Status::OK;
+}
+
+grpc::Status PrefillRpcServer::CancelWrite(grpc::ServerContext*                    context,
+                                           const P2PConnectorCancelWriteRequestPB* request,
+                                           P2PConnectorStartWriteResponsePB*       response) {
+    if (context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    if (!engine_ || !engine_->getCacheManager()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+    }
+    engine_->getCacheManager()->cancelP2PWrite(*request, *response);
     return grpc::Status::OK;
 }
 

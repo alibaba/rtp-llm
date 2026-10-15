@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <c10/core/Event.h>
 #include <grpc++/grpc++.h>
@@ -18,15 +19,19 @@ class KVCacheConnectorLayerContext;
 class Meta;
 class P2PBroadcastClient;
 class P2PSchedulerPrefillRead;
+class P2PSchedulerPrefillWrite;
+class KVCacheAllocator;
 class LayerBlockConverter;
 class P2PWorkerPrefillRead;
 class P2PConnectorMetricsCollector;
+class P2PWorkerPrefillWrite;
 
 class P2PConnectorPrefill {
 public:
     P2PConnectorPrefill(P2PConnectorConfig                          config,
                         const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                        const kmonitor::MetricsReporterPtr&         metrics_reporter);
+                        const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                        std::shared_ptr<KVCacheAllocator>           allocator = nullptr);
     ~P2PConnectorPrefill();
 
     bool init();
@@ -70,6 +75,25 @@ public:
         return stream_store_;
     }
 
+public:
+    void processWrite(const P2PConnectorStartWriteRequestPB& request,
+                      P2PConnectorStartWriteResponsePB&      response,
+                      std::function<bool()>                  is_cancelled = nullptr);
+
+    void cancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+
+    bool processWritePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
+
+    bool cancelProcessWritePerRank(const std::string& unique_key,
+                                    int64_t            deadline_ms,
+                                    FunctionResponsePB& response);
+
+    bool queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response);
+
+    bool processWriteReadyPerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
+
+    void stopWriteback();
+
 private:
     grpc::Status waitForResourceEntry(const std::string&                          unique_key,
                                       int64_t                                     request_deadline_ms,
@@ -92,6 +116,10 @@ private:
     std::unique_ptr<P2PSchedulerPrefillRead> scheduler_;
     std::shared_ptr<P2PWorkerPrefillRead>    worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
+    std::shared_ptr<P2PBroadcastClient>            write_registration_client_;
+    std::unique_ptr<P2PWorkerPrefillWrite>         write_worker_;
+    std::shared_ptr<KVCacheAllocator>              allocator_;
+    std::unique_ptr<P2PSchedulerPrefillWrite>      write_scheduler_;
 };
 
 }  // namespace rtp_llm

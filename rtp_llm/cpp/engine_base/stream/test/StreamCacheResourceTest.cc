@@ -298,6 +298,7 @@ protected:
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
+        model_config.vocab_size = 128;
         RuntimeConfig runtime_config;
         model_config.vocab_size = 1024;
         model_config.max_seq_len = 2048;
@@ -1648,6 +1649,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
     stream_->generateConfig()->pd_separation = true;
     auto& resource = stream_->streamCacheResource();
+    stream_->generateConfig()->pd_separation = true;
     stream_->generateConfig()->max_new_tokens = 1;
     stream_->generate_status_->status         = StreamState::LOADING_CACHE;
 

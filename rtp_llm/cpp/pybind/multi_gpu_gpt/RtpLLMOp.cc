@@ -2,6 +2,7 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <pybind11/functional.h>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -470,7 +471,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
-void RtpLLMOp::stop() {
+void RtpLLMOp::stop(const std::function<void()>& before_rpc_shutdown) {
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (model_rpc_service_) {
@@ -488,6 +489,12 @@ void RtpLLMOp::stop() {
                     break;
                 }
             }
+        }
+        stopWriteback();
+        if (before_rpc_shutdown) {
+            before_rpc_shutdown();
+        }
+        if (grpc_server_) {
             RTP_LLM_LOG_INFO("Server shutdowning");
             grpc_server_->Shutdown();
             grpc_server_.reset();
@@ -544,7 +551,18 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop, py::arg("before_rpc_shutdown") = py::none());
+}
+
+void RtpLLMOp::stopWriteback() {
+    if (model_rpc_service_) {
+        if (auto engine = model_rpc_service_->getEngine()) {
+            if (auto cache_manager = engine->getCacheManager()) {
+                pybind11::gil_scoped_release release;
+                cache_manager->stopWriteback();
+            }
+        }
+    }
 }
 
 }  // namespace rtp_llm

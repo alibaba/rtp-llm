@@ -103,9 +103,11 @@ protected:
         // Keep the manager, allocator reference handling, connector, planner and
         // scheduler real. Only remote worker/Prefill responses are test services;
         // no transfer backend is needed to inspect the emitted RPC payloads.
-        manager_ = std::make_unique<KVCacheManager>(config);
+        PDSepConfig pd_config;
+        pd_config.role_type = RoleType::DECODE;
+        manager_ = std::make_unique<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, ParallelismConfig{},
+                                                  RuntimeConfig{}, SpeculativeExecutionConfig{}, pd_config);
         manager_->allocator_ = allocator_;
-        manager_->pd_sep_config_.role_type = RoleType::DECODE;
         manager_->p2p_connector_ = std::move(connector);
 
         auto input = std::make_shared<GenerateInput>();

@@ -12,14 +12,19 @@ namespace rtp_llm {
 
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                           const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+                           const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                           std::shared_ptr<KVCacheAllocator>           allocator):
+    config_(std::move(config)),
+    layer_block_converter_(layer_block_converter),
+    metrics_reporter_(metrics_reporter),
+    allocator_(std::move(allocator)) {}
 
 P2PConnector::~P2PConnector() = default;
 
 bool P2PConnector::init() {
     if (config_.role_type == RoleType::PREFILL) {
-        prefill_ = std::make_unique<P2PConnectorPrefill>(config_, layer_block_converter_, metrics_reporter_);
+        prefill_ =
+            std::make_unique<P2PConnectorPrefill>(config_, layer_block_converter_, metrics_reporter_, allocator_);
         if (!prefill_->init()) {
             RTP_LLM_LOG_ERROR("init failed: prefill connector init failed");
             return false;
@@ -90,9 +95,7 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     prefill_->processRead(request, response, std::move(is_cancelled));
 }
 
-namespace {
-
-void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
+void P2PConnector::setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
     auto* p2p_response = response.mutable_p2p_response();
     if (error_info.hasError()) {
         p2p_response->set_error_code(transErrorCodeToRPC(error_info.code()));
@@ -102,8 +105,6 @@ void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
         p2p_response->set_error_message("");
     }
 }
-
-}  // namespace
 
 bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (!prefill_ && !decode_) {
@@ -122,6 +123,7 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     int64_t     deadline_ms = p2p_request.deadline_ms();
 
     const auto reject_role = [&response, &p2p_request]() {
+        response.mutable_p2p_response()->Clear();
         ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                              "P2P request type does not match connector role: "
                                  + std::to_string(p2p_request.type()));
@@ -165,13 +167,89 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
                                                           response) :
                        reject_role();
         case P2PConnectorBroadcastType::QUERY_LEASE_STATUS:
+            if (p2p_request.lease_operation() == HANDLE_WRITE) {
+                return prefill_ ? prefill_->queryLeaseStatusPerRank(unique_key, response) : reject_role();
+            }
+            if (p2p_request.lease_operation() != READ) {
+                setP2PResponse(response, ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid lease operation"));
+                return false;
+            }
             return decode_ ? decode_->queryLeaseStatusPerRank(unique_key, response) : reject_role();
+        case P2PConnectorBroadcastType::WRITE:
+            return decode_ ? decode_->writePerRank(p2p_request, response) : reject_role();
+        case P2PConnectorBroadcastType::HANDLE_WRITE:
+            return prefill_ ? prefill_->processWritePerRank(p2p_request, response) : reject_role();
+        case P2PConnectorBroadcastType::CANCEL_WRITE:
+            return decode_ ? decode_->cancelWritePerRank(unique_key, deadline_ms, response) : reject_role();
+        case P2PConnectorBroadcastType::CANCEL_HANDLE_WRITE:
+            return prefill_ ? prefill_->cancelProcessWritePerRank(unique_key, deadline_ms, response) : reject_role();
+        case P2PConnectorBroadcastType::HANDLE_WRITE_READY:
+            return prefill_ ? prefill_->processWriteReadyPerRank(p2p_request, response) : reject_role();
         default:
             RTP_LLM_LOG_WARNING("executeFunction failed, unsupported p2p_request type %d", p2p_request.type());
             auto* p2p_response = response.mutable_p2p_response();
             p2p_response->set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED));
             p2p_response->set_error_message("unsupported p2p_request type");
             return false;
+    }
+}
+
+std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(KVCacheResourcePtr      resource,
+                                                       std::vector<int>        token_ids,
+                                                       int                     input_length,
+                                                       size_t                  kv_ready_token_count,
+                                                       Meta::P2PRoutingContext routing) {
+    return decode_ ? decode_->write(
+               std::move(resource), std::move(token_ids), input_length, kv_ready_token_count, std::move(routing)) :
+                     nullptr;
+}
+
+void P2PConnector::cancelWrite(const std::shared_ptr<AsyncContext>& context) {
+    if (decode_) {
+        decode_->cancelWrite(context);
+    }
+}
+
+void P2PConnector::handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                               P2PConnectorStartWriteResponsePB&      response,
+                               std::function<bool()>                  is_cancelled) {
+    if (prefill_) {
+        prefill_->processWrite(request, response, std::move(is_cancelled));
+    } else {
+        response.Clear();
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS));
+        response.set_error_message("Prefill connector is not initialized");
+        response.set_stopped(true);
+    }
+}
+
+void P2PConnector::handleWriteReady(const P2PConnectorWriteReadyRequestPB& request,
+                                    P2PConnectorWriteReadyResponsePB&      response) {
+    if (decode_) {
+        decode_->handleWriteReady(request, response);
+    } else {
+        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        response.set_error_message("writeback is unavailable");
+    }
+}
+
+void P2PConnector::handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request,
+                                     P2PConnectorStartWriteResponsePB&       response) {
+    if (prefill_) {
+        prefill_->cancelWrite(request, response);
+    } else {
+        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        response.set_error_message("writeback is unavailable");
+        response.set_stopped(true);
+    }
+}
+
+void P2PConnector::stopWriteback() {
+    if (decode_) {
+        decode_->stopWriteback();
+    }
+    if (prefill_) {
+        prefill_->stopWriteback();
     }
 }
 

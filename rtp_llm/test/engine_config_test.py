@@ -1,3 +1,4 @@
+import pickle
 from types import SimpleNamespace
 from unittest import TestCase, main
 
@@ -198,10 +199,7 @@ class EngineConfigTest(TestCase):
         config.max_rpc_timeout_ms = 67890
         state = config.__getstate__()
         self.assertEqual(len(state), 10)
-        restored = PDSepConfig()
-        maybe_restored = restored.__setstate__(state)
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.role_type, RoleType.DECODE)
         self.assertEqual(restored.load_cache_timeout_ms, 12345)
@@ -228,11 +226,8 @@ class EngineConfigTest(TestCase):
         config.p2p_prefill_sender_thread_count = 8
         config.p2p_prefill_sender_queue_size = 20000
         state = config.__getstate__()
-        self.assertEqual(len(state), 26)
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(state)
-        if maybe_restored is not None:
-            restored = maybe_restored
+        self.assertEqual(len(state), 28)
+        restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
@@ -245,13 +240,23 @@ class EngineConfigTest(TestCase):
         config.p2p_rdma_enable_h2d_copy = True
         config.p2p_rdma_staging_total_bytes = 32 * 1024 * 1024
 
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(config.__getstate__())
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
 
         self.assertTrue(restored.p2p_rdma_enable_h2d_copy)
         self.assertEqual(restored.p2p_rdma_staging_total_bytes, 32 * 1024 * 1024)
+
+
+    def test_cache_store_config_preserves_writeback_fields(self):
+        config = CacheStoreConfig()
+        self.assertFalse(config.p2p_writeback_enable)
+        self.assertEqual(config.p2p_writeback_timeout_ms, 5000)
+        config.p2p_writeback_enable = True
+        config.p2p_writeback_timeout_ms = 1234
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(len(config.__getstate__()), 28)
+        self.assertTrue(restored.p2p_writeback_enable)
+        self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
 
 
 class SetupPdSepConfigTest(TestCase):

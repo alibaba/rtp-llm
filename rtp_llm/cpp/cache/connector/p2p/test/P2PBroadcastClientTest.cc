@@ -1,3 +1,4 @@
+#include <limits>
 #include <thread>
 #include <chrono>
 #include <future>
@@ -382,6 +383,26 @@ TEST_F(P2PCancelLifetimeTest, CancelHandleReadSurvivesCallerReleaseUntilCompleti
 
 TEST_F(P2PCancelLifetimeTest, CancelReadReleasesKeepaliveAfterRpcTimeout) {
     checkLifetime(P2PConnectorBroadcastType::CANCEL_READ, true);
+}
+
+TEST_F(P2PBroadcastClientTest, SenderLeaseQueriesAreNotSupported) {
+    EXPECT_EQ(client_->queryLeaseStatusAsync("sender", WRITE, 100), nullptr);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PBroadcastClientTest, WriteControlsRejectInvalidTimeoutWithoutSending) {
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+    for (const auto timeout_ms : {int64_t{0}, int64_t{-1}, int64_t(std::numeric_limits<int>::max()) + 1}) {
+        for (const auto type : {CANCEL_WRITE, CANCEL_HANDLE_WRITE}) {
+            EXPECT_EQ(client_->controlWriteAsync("invalid-timeout", type, deadline_ms, timeout_ms), nullptr);
+        }
+    }
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 0);
+    }
 }
 
 }  // namespace rtp_llm

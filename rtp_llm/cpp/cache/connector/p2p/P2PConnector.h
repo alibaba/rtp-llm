@@ -2,11 +2,13 @@
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <functional>
 #include <memory>
@@ -15,10 +17,10 @@
 
 namespace rtp_llm {
 
-class Meta;
 class P2PConnectorPrefill;
 class P2PConnectorDecode;
 class P2PConnectorResourceStore;
+class KVCacheAllocator;
 
 /**
  * Q: 如何保证kvcache不被写坏
@@ -32,7 +34,8 @@ class P2PConnector {
 public:
     P2PConnector(P2PConnectorConfig                          config,
                  const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                 const kmonitor::MetricsReporterPtr&         metrics_reporter);
+                 const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                 std::shared_ptr<KVCacheAllocator>           allocator = nullptr);
     ~P2PConnector();
 
 public:
@@ -65,10 +68,31 @@ public:
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     void cancelRead(const std::shared_ptr<AsyncContext>& context);
 
+public:
+    std::shared_ptr<AsyncContext> asyncWrite(KVCacheResourcePtr      resource,
+                                             std::vector<int>        token_ids,
+                                             int                     input_length,
+                                             size_t                  kv_ready_token_count,
+                                             Meta::P2PRoutingContext routing);
+
+    void cancelWrite(const std::shared_ptr<AsyncContext>& context);
+
+    void handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                     P2PConnectorStartWriteResponsePB&      response,
+                     std::function<bool()>                  is_cancelled = nullptr);
+
+    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
+    void handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+
+    void stopWriteback();
+
+    static void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info = ErrorInfo::OkStatus());
+
 private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
+    std::shared_ptr<KVCacheAllocator>    allocator_;
 
     std::unique_ptr<P2PConnectorPrefill> prefill_;
     std::unique_ptr<P2PConnectorDecode>  decode_;

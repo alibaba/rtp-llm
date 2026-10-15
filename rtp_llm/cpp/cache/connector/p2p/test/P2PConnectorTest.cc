@@ -209,6 +209,63 @@ protected:
 
 // ==================== handleRead 测试 ====================
 
+TEST_F(P2PConnectorTest, MissingReadLeaseRemainsStoppedThroughUnifiedQuery) {
+    P2PConnector decode(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(decode.init());
+    FunctionRequestPB request;
+    auto*             query = request.mutable_p2p_request();
+    query->set_type(QUERY_LEASE_STATUS);
+    query->set_lease_operation(READ);
+    query->set_unique_key("missing-read-lease");
+    FunctionResponsePB response;
+    ASSERT_TRUE(decode.executeFunction(request, response));
+    EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    ASSERT_TRUE(response.p2p_response().has_lease_status());
+    const auto& status = response.p2p_response().lease_status();
+    EXPECT_TRUE(status.sealed());
+    EXPECT_TRUE(status.stopped());
+    EXPECT_EQ(status.started_ops(), 0);
+    EXPECT_EQ(status.finished_ops(), 0);
+}
+
+TEST_F(P2PConnectorTest, WriteCommandsAreDisabledByDefault) {
+    FunctionRequestPB request;
+    request.mutable_p2p_request()->set_type(HANDLE_WRITE);
+    FunctionResponsePB response;
+    EXPECT_FALSE(connector_->executeFunction(request, response));
+    EXPECT_NE(response.p2p_response().error_message().find("disabled"), std::string::npos);
+
+    auto decode = std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(decode->init());
+    request.mutable_p2p_request()->set_type(WRITE);
+    EXPECT_FALSE(decode->executeFunction(request, response));
+    EXPECT_NE(response.p2p_response().error_message().find("disabled"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, EnabledWriteCommandsDispatchOnlyToMatchingRole) {
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        auto config = role == RoleType::PREFILL ? config_ : createDecodeConfig();
+        config.p2p_writeback_enable = true;
+        config.tp_rank               = 1;
+        config.worker_config.tp_rank = 1;
+        auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+        ASSERT_TRUE(connector->init());
+        FunctionRequestPB request;
+        auto* write = request.mutable_p2p_request();
+        write->set_type(role == RoleType::PREFILL ? HANDLE_WRITE : WRITE);
+        write->set_unique_key("empty_write_rank");
+        write->set_deadline_ms(currentTimeMs() + 5000);
+        FunctionResponsePB response;
+        ASSERT_TRUE(connector->executeFunction(request, response));
+        EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+
+        write->set_type(role == RoleType::PREFILL ? WRITE : HANDLE_WRITE);
+        EXPECT_FALSE(connector->executeFunction(request, response));
+        EXPECT_NE(response.p2p_response().error_message().find("does not match connector role"), std::string::npos);
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    }
+}
+
 TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
     auto resource = createValidKVCacheResource();
     resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});

@@ -112,39 +112,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         match_cost_time_us                       = match_end_time_us - match_begin_time_us;
         load_attempted                           = match_result.async_context != nullptr;
         load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
-        match_result.async_context.reset();
         matched_device_blocks = match_result.matched_device_blocks;
         total_logical_blocks  = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
-        BlockIndicesType ready_group_blocks =
-            block_tree_cache_->matchedBlocksForGroup(0, match_result.matched_device_resources);
         block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
-        for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
-            block_ids_0.setAt(i, ready_group_blocks[i]);
+        if (populateMatchedBlocks(match_result, kv_resource->cacheResource(0)).hasError()) {
+            return rollback();
         }
-
-        if (load_context && !load_context->empty()) {
-            for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-                const BlockIndicesType& source_blocks = load_context->loadDescs()[desc_index].source_blocks;
-                const size_t            path_index    = load_context->loadDescs()[desc_index].path_index;
-                if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
-                    const BlockIdxType current = block_ids_0.blocks()[path_index];
-                    if (!isNullBlockIdx(current) && current != source_blocks.front()) {
-                        return rollback();
-                    }
-                    block_ids_0.setAt(path_index, source_blocks.front());
-                    continue;
-                }
-                if (load_context->joinedLoads()[desc_index]) {
-                    const std::vector<BlockIdxType>& joined_targets =
-                        load_context->loadDescs()[desc_index].target_blocks;
-                    const BlockIdxType current = block_ids_0.blocks()[path_index];
-                    if (!isNullBlockIdx(current) && current != joined_targets.front()) {
-                        return rollback();
-                    }
-                    block_ids_0.setAt(path_index, joined_targets.front());
-                }
-            }
-        }
+        match_result.async_context.reset();
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(matched_device_blocks);
     }
 

@@ -376,6 +376,10 @@ class DpSeperationCaseRunner(CaseRunner):
             if frontend_server_manager is None
             else frontend_server_manager
         )
+        self.server_managers = {
+            "prefill": prefill_server_manager,
+            "decode": decode_server_manager,
+        }
 
         if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
             servers = {

@@ -2,11 +2,14 @@
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -14,7 +17,9 @@ class Meta;
 class LayerBlockConverter;
 class P2PBroadcastClient;
 class P2PSchedulerDecodeRead;
+class P2PSchedulerDecodeWrite;
 class P2PWorkerDecodeRead;
+class P2PWorkerDecodeWrite;
 
 class P2PConnectorDecode {
 public:
@@ -44,6 +49,25 @@ public:
 
     bool queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response);
 
+public:
+    std::shared_ptr<AsyncContext> write(KVCacheResourcePtr      resource,
+                                        std::vector<int>        token_ids,
+                                        int                     input_length,
+                                        size_t                  kv_ready_token_count,
+                                        Meta::P2PRoutingContext routing);
+
+    void cancelWrite(const std::shared_ptr<AsyncContext>& context);
+
+    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
+
+    bool writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
+
+    bool cancelWritePerRank(const std::string& unique_key,
+                             int64_t            deadline_ms,
+                             FunctionResponsePB& response);
+
+    void stopWriteback();
+
 private:
     const P2PConnectorConfig                      config_;
     std::shared_ptr<LayerBlockConverter>          layer_block_converter_;
@@ -51,6 +75,8 @@ private:
     std::shared_ptr<P2PBroadcastClient>           tp_broadcast_client_;
     std::unique_ptr<P2PSchedulerDecodeRead> scheduler_;
     std::unique_ptr<P2PWorkerDecodeRead>    worker_;
+    std::unique_ptr<P2PWorkerDecodeWrite>         write_worker_;
+    std::unique_ptr<P2PSchedulerDecodeWrite>      write_scheduler_;
 };
 
 }  // namespace rtp_llm

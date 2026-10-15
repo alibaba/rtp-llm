@@ -1,4 +1,5 @@
 #include <limits>
+#include <algorithm>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -53,6 +54,11 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
                                       const std::string&             unique_key,
                                       int64_t                        deadline_ms) {
 
+    const bool write =
+        !requests.empty()
+        && (requests.front().p2p_request().type() == WRITE || requests.front().p2p_request().type() == HANDLE_WRITE
+            || requests.front().p2p_request().type() == HANDLE_WRITE_READY);
+
     // gRPC 超时与物理传输共用绝对 deadline_ms（D）。
     for (const auto& request : requests) {
         const auto request_deadline_ms = request.p2p_request().request_deadline_ms();
@@ -90,7 +96,7 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         return nullptr;
     }
 
-    return std::make_shared<Result>(unique_key, result);
+    return std::make_shared<Result>(unique_key, result, !write);
 }
 
 void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                  request,
@@ -110,6 +116,8 @@ void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                 
     p2p_request->set_deadline_ms(params.deadline_ms);
     p2p_request->set_request_deadline_ms(params.request_deadline_ms);
     p2p_request->set_type(params.type);
+    p2p_request->set_plan_digest(params.plan_digest);
+    p2p_request->set_worker_rank(params.worker_rank);
 
     // 本 worker 那一份传输计划。为空即「该 worker 无任务」—— 这取代了
     // allow_empty_projection 作为空投影的权威信号。
@@ -240,6 +248,79 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
         result.ranks.push_back(rs);
     }
     result.success = true;
+    return result;
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>
+P2PBroadcastClient::broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms) {
+    if (!tp_broadcast_manager_ || timeout_ms <= 0 || timeout_ms > std::numeric_limits<int>::max()) {
+        RTP_LLM_LOG_WARNING("P2P broadcast unavailable or invalid timeout_ms=%ld", timeout_ms);
+        return nullptr;
+    }
+    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
+                       std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&              request,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(context.get(), request, cq); };
+    return tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(timeout_ms), rpc_call);
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>
+P2PBroadcastClient::controlWriteAsync(const std::string&        unique_key,
+                                      P2PConnectorBroadcastType type,
+                                      int64_t                   transfer_deadline_ms,
+                                      int64_t                   control_timeout_ms) {
+    if (!tp_broadcast_manager_ || unique_key.empty() || (type != CANCEL_WRITE && type != CANCEL_HANDLE_WRITE)) {
+        return nullptr;
+    }
+    std::vector<FunctionRequestPB> requests(tp_broadcast_manager_->workerNum());
+    for (auto& request : requests) {
+        auto* p2p = request.mutable_p2p_request();
+        p2p->set_unique_key(unique_key);
+        p2p->set_type(type);
+        p2p->set_deadline_ms(transfer_deadline_ms);
+    }
+    return broadcastRpc(requests, control_timeout_ms);
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> P2PBroadcastClient::queryLeaseStatusAsync(
+    const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms) {
+    if (!tp_broadcast_manager_ || unique_key.empty() || operation != HANDLE_WRITE) {
+        return nullptr;
+    }
+    std::vector<FunctionRequestPB> requests(tp_broadcast_manager_->workerNum());
+    for (auto& request : requests) {
+        auto* p2p = request.mutable_p2p_request();
+        p2p->set_unique_key(unique_key);
+        p2p->set_type(QUERY_LEASE_STATUS);
+        p2p->set_lease_operation(operation);
+    }
+    return broadcastRpc(requests, poll_timeout_ms);
+}
+
+P2PBroadcastClient::LeaseStatusResult
+P2PBroadcastClient::leaseStatus(const std::shared_ptr<TpBroadcastResult>& broadcast) {
+    LeaseStatusResult result;
+    if (!broadcast || !broadcast->done() || !broadcast->rpcSuccess()) {
+        return result;
+    }
+    for (const auto& response : broadcast->responses()) {
+        LeaseStatusResult::RankStatus rank;
+        if (response.has_p2p_response() && response.p2p_response().error_code() == ErrorCodePB::NONE_ERROR
+            && response.p2p_response().has_lease_status()) {
+            const auto& lease = response.p2p_response().lease_status();
+            rank.sealed       = lease.sealed();
+            rank.started_ops  = lease.started_ops();
+            rank.finished_ops = lease.finished_ops();
+            rank.stopped      = lease.stopped();
+            rank.valid        = rank.started_ops >= 0 && rank.finished_ops >= 0 && rank.finished_ops <= rank.started_ops
+                         && rank.stopped == (rank.sealed && rank.started_ops == rank.finished_ops);
+        }
+        result.ranks.push_back(rank);
+    }
+    result.success =
+        !result.ranks.empty()
+        && std::all_of(result.ranks.begin(), result.ranks.end(), [](const auto& rank) { return rank.valid; });
     return result;
 }
 

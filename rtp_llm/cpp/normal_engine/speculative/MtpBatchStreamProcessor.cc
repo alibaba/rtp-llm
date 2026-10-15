@@ -1494,6 +1494,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        spec_update_infos.back().kv_ready_token_count = stream->seqLength();
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1552,6 +1553,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         if (stream_idx < spec_decode_output.processor_errors.size()) {
             spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
         }
+        spec_update_info.kv_ready_token_count = stream->seqLength() + cur_accept_len - 1;
         spec_update_infos.push_back(std::move(spec_update_info));
 
         // Draft hidden layout differs per mode: the device-state path keeps a

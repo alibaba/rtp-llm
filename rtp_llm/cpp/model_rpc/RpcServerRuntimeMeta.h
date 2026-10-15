@@ -165,9 +165,9 @@ public:
         }
         task_info.error_code                   = error_code;
         task_info.error_message                = error_message;
-        task_info.priority_preemption_progress = error_code == ErrorCode::PRIORITY_PREEMPTED ?
-                                                     PriorityPreemptionProgress::CANCELED :
-                                                     PriorityPreemptionProgress::NONE;
+        task_info.priority_preemption_progress =
+            error_code == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED) ? PriorityPreemptionProgress::CANCELED :
+                                                                             PriorityPreemptionProgress::NONE;
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }

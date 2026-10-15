@@ -2,6 +2,7 @@ import gc
 import logging
 import threading
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.access_logger.access_logger import AccessLogger
@@ -192,7 +193,13 @@ class BackendManager(object):
 
             engine_stop_error = None
             try:
-                self.engine.stop()
+                if (
+                    self.py_env_configs.cache_store_config.p2p_writeback_enable
+                    and self.py_env_configs.parallelism_config.world_size > 1
+                ):
+                    self.engine.stop(self._wait_for_writeback_stop)
+                else:
+                    self.engine.stop()
             except Exception as e:
                 engine_stop_error = e
                 logging.exception("engine stop failed during backend shutdown")
@@ -206,6 +213,25 @@ class BackendManager(object):
                         raise
             if engine_stop_error is not None:
                 raise engine_stop_error
+
+    def _wait_for_writeback_stop(self) -> None:
+        pc = self.py_env_configs.parallelism_config
+
+        # TCPStore is independent of the model collectives, which may still be exiting.
+        store = self._distributed_server.store
+        drained_keys = [
+            f"shutdown_writeback_drained_{rank}" for rank in range(pc.world_size)
+        ]
+        observed_keys = [
+            f"shutdown_writeback_observed_{rank}" for rank in range(pc.world_size)
+        ]
+        timeout = timedelta(days=36500)
+        store.set(drained_keys[pc.world_rank], "1")
+        store.wait(drained_keys, timeout)
+        store.set(observed_keys[pc.world_rank], "1")
+        # The TCPStore owner must stay alive until every peer has observed the drain.
+        if pc.world_rank == 0:
+            store.wait(observed_keys, timeout)
 
     def ready(self):
         if self.engine is not None:

@@ -2,9 +2,22 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
 
 namespace rtp_llm {
+
+class WriteSchedulerMetricsCollector {
+public:
+    bool      prefill{false};
+    bool      submitted{false};
+    bool      no_transfer{false};
+    const char* skip_reason{nullptr};
+    ErrorInfo error;
+    int64_t   total_cost_time_us{0};
+    int64_t   hold_time_us{0};
+    int64_t   planned_bytes{0};
+};
 
 /// @brief P2P connector 的指标采集器，与 P2PConnectorMetrics 一一对应。
 ///
@@ -96,8 +109,17 @@ public:
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, P2PConnectorMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, WriteSchedulerMetricsCollector* collector);
 
 private:
+    kmonitor::MutableMetric* writeback_qps_metric             = nullptr;
+    kmonitor::MutableMetric* writeback_skipped_qps_metric     = nullptr;
+    kmonitor::MutableMetric* writeback_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* writeback_no_transfer_qps_metric = nullptr;
+    kmonitor::MutableMetric* writeback_cost_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* writeback_hold_time_us_metric    = nullptr;
+    kmonitor::MutableMetric* writeback_planned_bytes_metric   = nullptr;
+
     kmonitor::MutableMetric* decode_schedule_server_call_cost_time_us_metric    = nullptr;
     kmonitor::MutableMetric* decode_schedule_tp_sync_cost_time_us_metric        = nullptr;
     kmonitor::MutableMetric* decode_schedule_plan_cost_time_us_metric           = nullptr;

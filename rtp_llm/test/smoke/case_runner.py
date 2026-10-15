@@ -109,6 +109,7 @@ class CaseRunner(object):
         # parallelism.
         self.parallel_qr = max(1, int(parallel_qr or 1))
         self.remote_kvcm_server: Optional[RemoteKVCMServer] = None
+        self.server_managers: Dict[str, MagaServerManager] = {}
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
@@ -546,6 +547,16 @@ class CaseRunner(object):
             return "/batch_infer"
         return task_endpoint or "/"
 
+    def _resolve_server(
+        self, q_r: Dict[str, Any], default_server: MagaServerManager
+    ) -> MagaServerManager:
+        role = q_r.get("server_role")
+        if role is None:
+            return default_server
+        if role not in self.server_managers:
+            raise SmokeException(QueryStatus.VALID_FAILED, f"Unknown server_role: {role}")
+        return self.server_managers[role]
+
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
         if request_endpoint == DASH_ENDPOINT:
@@ -620,8 +631,9 @@ class CaseRunner(object):
                 request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 try:
+                    query_server = self._resolve_server(q_r, server_manager)
                     comparer_cls(
-                        server_manager,
+                        query_server,
                         request_endpoint,
                         q_r,
                         Tracer(),
@@ -729,8 +741,9 @@ class CaseRunner(object):
             q_idx, q_r, request_endpoint, cls = item
             tracer = Tracer()
             try:
+                query_server = self._resolve_server(q_r, server_manager)
                 cls(
-                    server_manager, request_endpoint, q_r, tracer, self.batch_infer
+                    query_server, request_endpoint, q_r, tracer, self.batch_infer
                 ).run()
                 return (q_idx, QueryStatus.OK, "", tracer, None, "")
             except SmokeException as e:
