@@ -297,7 +297,8 @@ def _read_ninja_graph(op_dir: Path, max_files: int = 16) -> str:
     return "".join(chunks)
 
 
-def _patch_flashinfer_ninja_reuse(site_packages_path: Path) -> None:
+def _patch_flashinfer_ninja_reuse(site_packages_path) -> None:
+    site_packages_path = Path(site_packages_path)
     """Patch the copied flashinfer's JitSpec.build to rewrite stale ninja files.
 
     flashinfer reuses a pre-existing cached op's build.ninja as-is, so an op
