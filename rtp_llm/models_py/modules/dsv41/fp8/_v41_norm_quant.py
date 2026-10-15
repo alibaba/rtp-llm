@@ -8,10 +8,20 @@ The packed int32 scales are suitable for V41MXFP8Linear's (1, 1, 32) recipe.
 from __future__ import annotations
 
 import os
+import threading
+from functools import lru_cache
 
 import torch
 import triton
 import triton.language as tl
+
+_READY = set()
+_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=16)
+def _device_supported(device):
+    return torch.cuda.get_device_capability(device)[0] == 10
 
 
 @triton.jit
@@ -114,7 +124,7 @@ def _v41_norm_quant_kernel(x, weight, norm, quant, scales, scale_stride, eps, le
 
 
 def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
-    """Metadata gate for contiguous BF16 [M,5120] inference on SM100.
+    """Metadata gate for contiguous BF16 [M,5120] inference on Blackwell SM10x.
 
     Finiteness is a caller precondition, not a synchronizing device scan.
     """
@@ -131,7 +141,7 @@ def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
         and weight.data_ptr() % 16 == 0
         and not x.requires_grad
         and not weight.requires_grad
-        and torch.cuda.get_device_capability(x.device) == (10, 0)
+        and _device_supported(x.device)
     )
 
 
@@ -185,3 +195,27 @@ def rmsnorm_group32_quant(
             enable_fp_fusion=False,
         )
     return out_norm, quant, scales
+
+
+@torch.inference_mode()
+def warmup(device):
+    """Compile both quant policies before serving; row count is only the grid."""
+    device = torch.device(device)
+    if device.type != "cuda":
+        return False
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    if not _device_supported(device):
+        return False
+    with torch.cuda.device(device), _LOCK:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("V41 norm quant warmup must precede CUDA graph capture")
+        if device.index in _READY:
+            return True
+        x = torch.zeros((1, 5120), dtype=torch.bfloat16, device=device)
+        weight = torch.ones(5120, dtype=torch.bfloat16, device=device)
+        for mode in ("legacy", "v2"):
+            rmsnorm_group32_quant(x, weight, quant_kernel=mode, out_norm=x)
+        torch.cuda.current_stream(device).synchronize()
+        _READY.add(device.index)
+    return True
