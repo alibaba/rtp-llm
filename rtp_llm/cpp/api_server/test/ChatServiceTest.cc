@@ -495,7 +495,7 @@ TEST_F(ChatServiceTest, ChatCompletions_StreamErrorJsonEscaped) {
         return true;
     }));
     EXPECT_CALL(*mock_writer_, WriteDone()).WillOnce(Return(true));
-    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _)).Times(1);
+    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _, 0)).Times(1);
 
     EXPECT_NO_THROW(chat_service_->chatCompletions(writer_, request, 10086));
 
