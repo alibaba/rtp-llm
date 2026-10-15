@@ -48,12 +48,14 @@ kvcm_backend_test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:group_policy",
     "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/metrics:metrics",
     "//rtp_llm/cpp/model_rpc:model_rpc_pool",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:env_util",
     "@havenask//aios/autil:json",
+    "@havenask//aios/kmonitor:kmonitor_client_cpp",
 ]
 
 cc_test_wrapper(
@@ -73,7 +75,11 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
 )
 
 cc_test_wrapper(
