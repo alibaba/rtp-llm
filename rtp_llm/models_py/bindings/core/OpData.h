@@ -76,6 +76,7 @@ struct GptModelInputs {
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
     torch::Tensor request_id;             // int64, [context_batch_size]
+    torch::Tensor request_deadline_ms;    // int64, [context_batch_size], absolute deadline in milliseconds
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Bytes/physical block/layer for a single group; zero for multiple groups.
