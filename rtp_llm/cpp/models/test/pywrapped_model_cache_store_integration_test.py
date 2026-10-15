@@ -1520,6 +1520,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertFalse(result["fake_physical_defined"])
         self.assertFalse(result["fake_kernel_defined"])
 
+    def test_main_only_and_mtp_forward_outputs_are_logically_equivalent(self) -> None:
+        main_result = run_scenario(CacheStoreForwardModel(), "main_only_equivalence")
+        mtp_result = run_scenario(CacheStoreForwardModel(), "mtp_equivalence")
+
+        self.assertEqual(main_result["logits_defined"], mtp_result["logits_defined"])
+        torch.testing.assert_close(
+            main_result["hidden_states"], mtp_result["hidden_states"]
+        )
+
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "mtp_sub_config")
@@ -1533,7 +1542,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
         self.assertEqual({block["length"] for block in record["blocks"]}, {32})
         self.assertTrue(
-            all("model_id_7_" in block["key"] for block in record["blocks"])
+            all("model_id_1_" in block["key"] for block in record["blocks"])
         )
         self.assertTrue(all("_tag_draft" in block["key"] for block in record["blocks"]))
 

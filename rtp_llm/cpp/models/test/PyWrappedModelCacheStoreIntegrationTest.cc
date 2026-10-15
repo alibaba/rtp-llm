@@ -498,8 +498,7 @@ struct Scenario {
     GptModelInputs                   inputs;
     ParallelismConfig                parallelism;
     DeviceResourceConfig             device_resources;
-    size_t                           model_id{0};
-    std::optional<int>               mtp_cache_config_index;
+    CacheModuleId                    module_id = CacheModuleId::main();
     bool                             replace_cp_processor{false};
     bool                             report_invalid_num_valid_tokens{false};
     bool                             corrupt_restored_width{false};
@@ -541,6 +540,31 @@ Scenario makeMicroBatchScenario() {
                              /*global_stride_bytes=*/16);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+    return scenario;
+}
+
+Scenario makeModuleEquivalenceScenario(bool with_mtp) {
+    auto main_config  = makeCacheConfig({{"default", 2, 16}});
+    auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"default", 2, 32}}));
+    if (with_mtp) {
+        main_config.mtp_sub_configs.push_back(draft_config);
+    }
+    const auto& selected_config = with_mtp ? *draft_config : main_config;
+    auto        layout          = makeLayout(selected_config);
+    auto        inputs          = makeInputs(/*input_lengths=*/{4},
+                             /*request_ids=*/{701},
+                             /*cache_keys=*/{7101, 7102, 7103, 7104},
+                             /*cache_keys_width=*/4,
+                             /*block_ids=*/{1, 2, 3, 4},
+                             /*group_tags=*/{"default"},
+                             /*block_table_width=*/4,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/with_mtp ? 32 : 16);
+    Scenario scenario{
+        std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+    if (with_mtp) {
+        scenario.module_id = CacheModuleId(1);
+    }
     return scenario;
 }
 
@@ -646,8 +670,7 @@ Scenario makeMtpScenario() {
                              /*global_stride_bytes=*/32);
     Scenario scenario{
         std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-    scenario.model_id               = 7;
-    scenario.mtp_cache_config_index = 0;
+    scenario.module_id = CacheModuleId(1);
     return scenario;
 }
 
@@ -682,8 +705,7 @@ Scenario makeScenario(const std::string& name) {
         inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
         Scenario scenario{
             std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-        scenario.model_id               = 7;
-        scenario.mtp_cache_config_index = 0;
+        scenario.module_id = CacheModuleId(1);
         return scenario;
     }
     if (name == "micro_batch_multi_tag") {
@@ -750,6 +772,12 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "cp_actual_lengths_rank1") {
         return makeContextParallelScenario(/*tp_rank=*/1);
+    }
+    if (name == "main_only_equivalence") {
+        return makeModuleEquivalenceScenario(/*with_mtp=*/false);
+    }
+    if (name == "mtp_equivalence") {
+        return makeModuleEquivalenceScenario(/*with_mtp=*/true);
     }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();
@@ -1131,7 +1159,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     GptModelInitParams params{weights,
                               description,
                               cacheless_warmup ? std::nullopt : std::make_optional(scenario.layout),
-                              scenario.model_id,
+                              scenario.module_id,
                               scenario.parallelism,
                               HWKernelConfig{},
                               ProfilingDebugLoggingConfig{},
@@ -1143,7 +1171,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               /*max_seq_len=*/64,
                               scenario.hidden_size,
                               manager,
-                              scenario.mtp_cache_config_index,
                               /*hc_mult=*/1,
                               metrics_reporter,
                               /*kernel_block_table_width=*/0,
@@ -1233,6 +1260,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     }
 
     auto result                    = serializeResult(*cache_store, scenario.base_addresses, output);
+    if (scenario_name == "main_only_equivalence" || scenario_name == "mtp_equivalence") {
+        result["hidden_states"] =
+            output.all_hidden_states.defined() ? py::cast(output.all_hidden_states.detach().cpu()) : py::none();
+        result["logits_defined"] = output.logits.defined();
+    }
     auto capture_metrics           = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = capture_metrics[0];
     result["capture_metric_types"] = capture_metrics[1];
@@ -1295,7 +1327,7 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
         GptModelInitParams params{weights,
                                   description,
                                   layout.layout,
-                                  /*model_id=*/0,
+                                  CacheModuleId::main(),
                                   ParallelismConfig{},
                                   hw_kernel_config,
                                   ProfilingDebugLoggingConfig{},
@@ -1306,8 +1338,7 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   MlaOpsType::AUTO,
                                   /*max_seq_len=*/4,
                                   /*hidden_size=*/4,
-                                  manager,
-                                  /*mtp_cache_config_index=*/std::nullopt};
+                                  manager};
         params.kernel_block_table_width = 1;
         try {
             PyWrappedModel model(params, py_model);
@@ -1371,7 +1402,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     GptModelInitParams params{weights,
                               description,
                               layout.layout,
-                              /*model_id=*/0,
+                              CacheModuleId::main(),
                               ParallelismConfig{},
                               hw_kernel_config,
                               ProfilingDebugLoggingConfig{},
@@ -1382,8 +1413,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/4,
                               /*hidden_size=*/4,
-                              manager,
-                              /*mtp_cache_config_index=*/std::nullopt};
+                              manager};
     params.kernel_block_table_width = 1;
 
     if (!forward_flags.empty()) {

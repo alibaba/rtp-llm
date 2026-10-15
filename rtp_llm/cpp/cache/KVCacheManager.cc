@@ -351,14 +351,15 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
 }
 
-const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
-    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
-                            "Invalid mtp_module_id: %d, must be in range [0, %zu)",
-                            mtp_module_id,
+const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(CacheModuleId module_id) const {
+    RTP_LLM_CHECK_WITH_INFO(!module_id.isMain() && module_id.value() <= config_.mtp_sub_configs.size(),
+                            "Invalid CacheModuleId: %zu, must be in range [1, %zu]",
+                            module_id.value(),
                             config_.mtp_sub_configs.size());
+    const size_t module_index = module_id.value() - 1;
     RTP_LLM_CHECK_WITH_INFO(
-        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    return *config_.mtp_sub_configs[mtp_module_id];
+        config_.mtp_sub_configs[module_index] != nullptr, "mtp_sub_configs[%zu] is null", module_index);
+    return *config_.mtp_sub_configs[module_index];
 }
 
 // 显存管理和缓存分配
@@ -600,6 +601,25 @@ std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     return coordinator_manager_->convertIndexToBuffer(layer_id, group_tag, block_id, partition_count, partition_id);
 }
 
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(CacheModuleId      module_id,
+                                                            int                local_layer_id,
+                                                            const std::string& group_tag,
+                                                            int                block_id) const {
+    const uint32_t global_layer_id = coordinator_manager_->convertToGlobalLayerId(module_id, local_layer_id);
+    return coordinator_manager_->convertIndexToBuffer(static_cast<int>(global_layer_id), group_tag, block_id);
+}
+
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(CacheModuleId      module_id,
+                                                            int                local_layer_id,
+                                                            const std::string& group_tag,
+                                                            int                block_id,
+                                                            int                partition_count,
+                                                            int                partition_id) const {
+    const uint32_t global_layer_id = coordinator_manager_->convertToGlobalLayerId(module_id, local_layer_id);
+    return coordinator_manager_->convertIndexToBuffer(
+        static_cast<int>(global_layer_id), group_tag, block_id, partition_count, partition_id);
+}
+
 std::vector<CacheBlockRegion>
 KVCacheManager::queryDecodeCacheBlockRegions(int                     global_layer_id,
                                              const std::string&      tag,
@@ -661,24 +681,24 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
-GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
-    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
-                            "Invalid mtp_module_id: %d, must be in range [0, %zu)",
-                            mtp_module_id,
+GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(CacheModuleId module_id) const {
+    RTP_LLM_CHECK_WITH_INFO(!module_id.isMain() && module_id.value() <= config_.mtp_sub_configs.size(),
+                            "Invalid CacheModuleId: %zu, must be in range [1, %zu]",
+                            module_id.value(),
                             config_.mtp_sub_configs.size());
-
-    const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
-    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
+    const size_t module_index   = module_id.value() - 1;
+    const auto&  mtp_sub_config = config_.mtp_sub_configs[module_index];
+    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", module_index);
     const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
     std::vector<size_t> global_layer_ids;
     global_layer_ids.reserve(mtp_layer_num);
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-            config_.layer_num, mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
+            config_.layer_num, static_cast<int>(module_index), mtp_layer_num, static_cast<int>(local_layer_id));
         RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                "invalid MTP global layer: main=%u module=%d module_layers=%u local=%u",
+                                "invalid MTP global layer: main=%u module=%zu module_layers=%u local=%u",
                                 config_.layer_num,
-                                mtp_module_id,
+                                module_id.value(),
                                 mtp_layer_num,
                                 local_layer_id);
         global_layer_ids.push_back(global_layer_id);

@@ -557,14 +557,11 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     mirco_batch_input.attention_inputs,
                     self.fmha_config,
                 )
+                binding = layer.cache_binding
                 out = layer(
                     hidden_states=inputs,
                     fmha_impl=fmha_impl,
-                    kv_cache=(
-                        self.kv_cache.get_layer_cache(i)
-                        if self.kv_cache is not None
-                        else None
-                    ),
+                    kv_cache=binding.sole_cache() if binding is not None else None,
                 )
                 self.send_to_ffn_service(out)
         outputs: List[PyModelOutputs] = []

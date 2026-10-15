@@ -40,18 +40,17 @@ CacheStoreAsyncWriter::PendingTaskGuard::~PendingTaskGuard() {
 
 CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                      device_id,
                                              std::shared_ptr<KVCacheManager>          cache_manager,
-                                             size_t                                   cache_model_id,
-                                             std::optional<int>                       mtp_cache_config_index,
+                                             CacheModuleId                            module_id,
                                              std::optional<std::chrono::milliseconds> store_completion_timeout,
                                              std::optional<std::pair<int, int>>       producer_cp_topology):
     device_id_(device_id),
     store_completion_timeout_(resolveStoreCompletionTimeout(store_completion_timeout)),
     cache_manager_(std::move(cache_manager)),
-    cache_model_id_(cache_model_id) {
+    module_id_(module_id) {
     if (cache_manager_) {
         const CacheConfig* selected_config = &cache_manager_->cacheConfig();
-        if (mtp_cache_config_index.has_value()) {
-            selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
+        if (!module_id.isMain()) {
+            selected_config = &cache_manager_->getMTPModuleCacheConfig(module_id);
         }
         cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
 
@@ -438,7 +437,7 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                 cache_config,
                 cache_store,
                 register_store_completion,
-                cache_model_id = cache_model_id_,
+                cache_model_id = module_id_.value(),
                 cp_rank        = cp_rank_,
                 cp_size        = cp_size_,
                 event          = std::move(event)]() mutable {

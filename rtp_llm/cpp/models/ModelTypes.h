@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -49,7 +50,7 @@ struct GptModelInitParams {
     const rtp_llm::Weights                       weights;
     const GptModelDescription                    description;
     const std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout;
-    size_t                                       model_id = 0;
+    CacheModuleId                                module_id = CacheModuleId::main();
     ParallelismConfig                            parallelism_config;
     HWKernelConfig                               hw_kernel_config;
     ProfilingDebugLoggingConfig                  profile_debug_logging_config;
@@ -61,8 +62,6 @@ struct GptModelInitParams {
     int64_t                                      max_seq_len  = 0;
     int64_t                                      hidden_size  = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
-    // nullopt selects the main-model cache config; otherwise selects this MTP module config.
-    std::optional<int> mtp_cache_config_index;
     // DSv4 head-channel residual multiplier. Default 1 (no expansion).
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
@@ -259,7 +258,7 @@ public:
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
-    size_t                      model_id_ = 0;
+    CacheModuleId               module_id_ = CacheModuleId::main();
 };
 
 }  // namespace rtp_llm

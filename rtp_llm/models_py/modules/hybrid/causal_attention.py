@@ -28,10 +28,9 @@ class CausalAttention(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
-        layer_idx: int = 0,
     ):
         super().__init__()
-        self.layer_idx = layer_idx
+        self.cache_binding = None
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
@@ -83,7 +82,10 @@ class CausalAttention(nn.Module):
         qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        local_layer_id = (
+            self.cache_binding.local_layer_id if self.cache_binding is not None else 0
+        )
+        attn_output = fmha_impl.forward(qkv, kv_cache, local_layer_id)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)

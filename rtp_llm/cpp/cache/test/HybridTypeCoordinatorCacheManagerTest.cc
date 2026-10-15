@@ -652,13 +652,13 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridNoMtp)
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/4),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/3), 3u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/4),
               std::numeric_limits<uint32_t>::max());
 
     // no mtp sub-model
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
 }
 
@@ -678,12 +678,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridWithMt
         EXPECT_TRUE(sub->layerIdsForGroup("linear").empty());
     }
 
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 4u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/2), 2u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0), 4u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/0), 5u);
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/1),
               std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
+    EXPECT_EQ(allocator->convertToGlobalLayerId(CacheModuleId(3), /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
 }
 
@@ -704,7 +704,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EagleMapsSoleDefaultFullDraftGroup
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
-    const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
+    const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1));
     EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
     EXPECT_TRUE(layout.group("linear").empty());
 }
@@ -1071,7 +1071,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpLayoutProjectionRecountsActiveL
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
 
-    const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
+    const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1));
     ASSERT_EQ(layout.topology().layers().size(), 1u);
     EXPECT_EQ(layout.group("full").activeLayerCount(), 1u);
     EXPECT_FALSE(layout.group("full").empty());

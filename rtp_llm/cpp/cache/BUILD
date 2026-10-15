@@ -82,6 +82,7 @@ cc_library(
     ],
     hdrs = [
         "CacheConfig.h",
+        "CacheModuleId.h",
         "CachePhysicalRegion.h",
         "CacheTopology.h",
     ],
@@ -114,6 +115,7 @@ cc_library(
     ],
     hdrs = [
         "CacheConfig.h",
+        "CacheModuleId.h",
         "CacheTier.h",
         "Types.h",
         "WarmUpResult.h",

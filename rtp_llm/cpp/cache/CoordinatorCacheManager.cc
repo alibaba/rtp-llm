@@ -273,8 +273,8 @@ bool CoordinatorCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContex
     return block_tree_cache_ != nullptr && block_tree_cache_->abortPendingLoad(context);
 }
 
-uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
-    if (model_id == 0) {
+uint32_t CoordinatorCacheManager::convertToGlobalLayerId(CacheModuleId module_id, int local_layer_id) const {
+    if (module_id.isMain()) {
         // main model: local_layer_id is the global layer id
         if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < config_.layer_num) {
             return static_cast<uint32_t>(local_layer_id);
@@ -283,16 +283,17 @@ uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int lo
         return std::numeric_limits<uint32_t>::max();
     }
 
-    if (model_id > config_.mtp_sub_configs.size()) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: model_id=%zu out of range (mtp_sub_configs=%zu)",
-                          model_id,
+    if (module_id.value() > config_.mtp_sub_configs.size()) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: module_id=%zu out of range (mtp_sub_configs=%zu)",
+                          module_id.value(),
                           config_.mtp_sub_configs.size());
         return std::numeric_limits<uint32_t>::max();
     }
 
-    const auto& sub = config_.mtp_sub_configs[model_id - 1];
+    const size_t module_index = module_id.value() - 1;
+    const auto&  sub          = config_.mtp_sub_configs[module_index];
     if (!sub) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", module_index);
         return std::numeric_limits<uint32_t>::max();
     }
     if (local_layer_id < 0 || static_cast<size_t>(local_layer_id) >= sub->layer_num) {
@@ -301,7 +302,7 @@ uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int lo
     }
 
     return CacheConfig::mtpGlobalLayerId(
-        config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
+        config_.layer_num, static_cast<int>(module_index), sub->layer_num, local_layer_id);
 }
 
 void CoordinatorCacheManager::blockCopy(int src_block_index, int dest_block_index) {

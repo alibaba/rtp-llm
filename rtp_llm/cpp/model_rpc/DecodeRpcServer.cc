@@ -1160,7 +1160,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     const size_t            mtp_model_id           = module_plan.module_index;
                     const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
 
-                    const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
+                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(CacheModuleId(1 + mtp_model_id));
                     const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
 
                     RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,

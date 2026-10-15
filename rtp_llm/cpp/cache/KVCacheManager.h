@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
@@ -57,7 +58,7 @@ public:
     }
 
     const CacheConfig& cacheConfig() const;
-    const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
+    const CacheConfig& getMTPModuleCacheConfig(CacheModuleId module_id) const;
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
@@ -114,6 +115,14 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(CacheModuleId module_id, int local_layer_id, const std::string& group_tag, int block_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(CacheModuleId      module_id,
+                                                int                local_layer_id,
+                                                const std::string& group_tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id) const;
 
     // Resolve an already selected logical page to this decoder's physical
     // destination. Missing blocks retain a region with null buffer.addr.
@@ -132,7 +141,7 @@ public:
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
     // for mtp module
-    GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
+    GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(CacheModuleId module_id) const;
 
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;

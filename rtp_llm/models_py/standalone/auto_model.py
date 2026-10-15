@@ -98,6 +98,9 @@ class AutoModel:
         self._init_kv_cache()
 
         self.model.kv_cache = self.kv_cache
+        # Standalone models never receive PyModelInitResources; resolve the
+        # main-module layer bindings so forward() sees the attached cache.
+        self.model.bind_layer_caches()
 
         # init tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_config.ckpt_path)

@@ -61,7 +61,7 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
-        model_inputs_logger_->log(inputs, role, model->model_id_);
+        model_inputs_logger_->log(inputs, role, model->module_id_.value());
     }
     if (is_dspark_ && role != ModelInputsModelRole::TARGET && inputs.engram_token_windows.defined()) {
         auto draft_inputs                 = inputs;
@@ -806,7 +806,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     GroupedCacheLayerLayout draft_cache_layer_layout;
     if (cache_manager) {
         target_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
-        draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
+        draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1));
     }
 
     // Target and draft writers share the same physical producer cache. Warmup
@@ -822,7 +822,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ? std::make_optional(target_cache_layer_layout) : std::nullopt,
-         params.model_id,
+         CacheModuleId::main(),
          params.parallelism_config,
          params.hw_kernel_config,
          params.profiling_debug_logging_config,
@@ -834,7 +834,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
          cache_manager,
-         std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.cache_store_producer_cp_topology = producer_cp_topology;
@@ -892,15 +891,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                  params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 
-    for (auto& mtp_params : *propose_params->mtp_model_params_) {
-        auto model_params =
+    for (size_t draft_module_slot = 0; draft_module_slot < propose_params->mtp_model_params_->size();
+         ++draft_module_slot) {
+        auto& mtp_params = (*propose_params->mtp_model_params_)[draft_module_slot];
+        auto  model_params =
             GptModelInitParams({mtp_params->gpt_weights,
                                 Executor::genModelDescription(mtp_params->model_config_,
                                                               mtp_params->parallelism_config,
                                                               mtp_params->eplb_config,
                                                               mtp_params->moe_config),
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
-                                mtp_params->model_id,
+                                CacheModuleId(1 + draft_module_slot),
                                 mtp_params->parallelism_config,
                                 params.hw_kernel_config,
                                 params.profiling_debug_logging_config,
@@ -912,7 +913,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
                                 cache_manager,
-                                std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
         model_params.metrics_reporter = metrics_reporter_;
         model_params.cache_store_producer_cp_topology = producer_cp_topology;
@@ -1300,7 +1300,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(CacheModuleId(1));
         applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = model_output.all_hidden_states;
@@ -2010,7 +2010,7 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(CacheModuleId(1));
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
@@ -2227,7 +2227,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
 
 void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(CacheModuleId(1));
     // DSpARK carries its proposal through the model-owned state buffers rather
     // than the post-rejection model input, so there is nothing to re-broadcast.
     if (parallelism_config_.tp_size > 1 && !is_dspark_) {
@@ -2306,7 +2306,7 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   proposal_input.input_lengths.size(0));
 
-    const auto& draft_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    const auto& draft_cache_cfg = cache_manager_->getMTPModuleCacheConfig(CacheModuleId(1));
     applyCacheStrideToModelInput(proposal_input, draft_cache_cfg);
     int64_t start_time_us  = autil::TimeUtility::currentTimeInMicroSeconds();
     auto    propose_output = runDSparkProposeForward(proposal_input);
@@ -2591,7 +2591,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
+    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(CacheModuleId(1));
     applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
 
     GptModelOutputs            draft_decode_model_output;

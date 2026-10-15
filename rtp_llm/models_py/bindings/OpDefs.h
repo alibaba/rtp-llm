@@ -5,12 +5,15 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <algorithm>
+#include <functional>
 #include <map>
+#include <stdexcept>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -45,6 +48,95 @@ struct LayerKVCache {
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
         tag(std::move(tag)) {}
+};
+
+// Immutable per-decoder-layer cache address resolved once during model
+// initialization. group_caches is ordered to match group_tags.
+struct LayerCacheBinding {
+    rtp_llm::CacheModuleId    module_id;
+    size_t                    local_layer_id;
+    std::vector<std::string>  group_tags;
+    std::vector<LayerKVCache> group_caches;
+
+    LayerCacheBinding(rtp_llm::CacheModuleId    module_id,
+                      size_t                    local_layer_id,
+                      size_t                    module_count,
+                      size_t                    layer_count,
+                      std::vector<std::string>  group_tags,
+                      std::vector<LayerKVCache> group_caches):
+        module_id(module_id),
+        local_layer_id(local_layer_id),
+        group_tags(std::move(group_tags)),
+        group_caches(std::move(group_caches)) {
+        if (module_count == 0 || module_id.value() >= module_count) {
+            throw std::runtime_error("CacheModuleId " + std::to_string(module_id.value())
+                                     + " is outside module range [0, " + std::to_string(module_count) + ")");
+        }
+        if (local_layer_id >= layer_count) {
+            throw std::runtime_error("local layer " + std::to_string(local_layer_id) + " is outside layer range [0, "
+                                     + std::to_string(layer_count) + ")");
+        }
+        if (this->group_tags.empty() || this->group_caches.empty()) {
+            throw std::runtime_error("layer " + std::to_string(local_layer_id) + " has no KV cache group");
+        }
+        if (this->group_tags.size() != this->group_caches.size()) {
+            throw std::runtime_error("layer " + std::to_string(local_layer_id)
+                                     + " has mismatched KV cache tags and caches");
+        }
+    }
+
+    pybind11::object selectAttentionInputs(const pybind11::object& attention_inputs) const {
+        if (!pybind11::isinstance<pybind11::dict>(attention_inputs)) {
+            return attention_inputs;
+        }
+        const pybind11::dict attention_map = attention_inputs.cast<pybind11::dict>();
+        pybind11::list       selected;
+        for (const auto& tag : group_tags) {
+            if (!attention_map.contains(pybind11::str(tag))) {
+                throw std::runtime_error("attention input tag " + tag + " is missing");
+            }
+            selected.append(attention_map[pybind11::str(tag)]);
+        }
+        if (group_tags.size() == 1) {
+            return attention_map[pybind11::str(group_tags.front())];
+        }
+        return selected;
+    }
+
+    pybind11::object selectFmhaImpl(const pybind11::object& fmha_impl) const {
+        if (!pybind11::isinstance<pybind11::dict>(fmha_impl)) {
+            return fmha_impl;
+        }
+        const pybind11::dict impl_map = fmha_impl.cast<pybind11::dict>();
+        pybind11::list       selected;
+        for (const auto& tag : group_tags) {
+            if (!impl_map.contains(pybind11::str(tag))) {
+                throw std::runtime_error("FMHA tag " + tag + " is missing");
+            }
+            selected.append(impl_map[pybind11::str(tag)]);
+        }
+        if (group_tags.size() == 1) {
+            return impl_map[pybind11::str(group_tags.front())];
+        }
+        return selected;
+    }
+
+    LayerKVCache soleCache() const {
+        if (group_caches.size() != 1) {
+            throw std::runtime_error("layer " + std::to_string(local_layer_id)
+                                     + " does not have a sole KV cache group");
+        }
+        return group_caches.front();
+    }
+
+    LayerKVCache cacheForTag(const std::string& tag) const {
+        auto it = std::find(group_tags.begin(), group_tags.end(), tag);
+        if (it == group_tags.end()) {
+            throw std::runtime_error("KV cache group " + tag + " is not bound to layer "
+                                     + std::to_string(local_layer_id));
+        }
+        return group_caches[static_cast<size_t>(it - group_tags.begin())];
+    }
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -85,6 +177,18 @@ public:
             layer_caches.push_back(getLayerCache(layer_id, tag));
         }
         return layer_caches;
+    }
+
+    LayerCacheBinding getLayerCacheBinding(rtp_llm::CacheModuleId module_id, size_t module_count, int layer_id) const {
+        validateLayer(layer_id);
+        auto                     caches = getLayerCacheGroups(layer_id);
+        std::vector<std::string> tags;
+        tags.reserve(caches.size());
+        for (const auto& cache : caches) {
+            tags.push_back(cache.tag);
+        }
+        return LayerCacheBinding(
+            module_id, static_cast<size_t>(layer_id), module_count, layerCount(), std::move(tags), std::move(caches));
     }
 
     std::vector<std::string> groupTags() const {
@@ -233,6 +337,8 @@ private:
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
+    rtp_llm::CacheModuleId module_id;
+    size_t                 module_count           = 1;
     bool                   is_speculative         = false;
     bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;

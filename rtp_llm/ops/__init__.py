@@ -226,6 +226,8 @@ class EmptyClass:
 _COMPUTE_SYMBOLS = {
     "compute_ops",
     "KVCache",
+    "CacheModuleId",
+    "LayerCacheBinding",
     "LayerKVCache",
     "PyAttentionInputs",
     "PyCacheStoreInputs",
@@ -255,6 +257,8 @@ _rdma_ops_error: Optional[BaseException] = None
 
 def _set_compute_fallbacks() -> None:
     globals()["rtp_llm_ops"] = EmptyClass
+    globals()["CacheModuleId"] = EmptyClass
+    globals()["LayerCacheBinding"] = EmptyClass
     globals()["LayerKVCache"] = EmptyClass
     globals()["KVCache"] = EmptyClass
     globals()["PyAttentionInputs"] = EmptyClass
@@ -280,6 +284,8 @@ def _load_compute_ops(required: bool = False) -> None:
             import librtp_compute_ops
 
             globals()["KVCache"] = librtp_compute_ops.KVCache
+            globals()["CacheModuleId"] = librtp_compute_ops.CacheModuleId
+            globals()["LayerCacheBinding"] = librtp_compute_ops.LayerCacheBinding
             globals()["LayerKVCache"] = librtp_compute_ops.LayerKVCache
             globals()["CacheStoreWriter"] = librtp_compute_ops.CacheStoreWriter
             globals()["PyAttentionInputs"] = librtp_compute_ops.PyAttentionInputs

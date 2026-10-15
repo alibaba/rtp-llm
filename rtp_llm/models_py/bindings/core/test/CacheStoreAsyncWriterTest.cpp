@@ -332,11 +332,11 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
 
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
+        /*device_id=*/-1, cache_manager, CacheModuleId(1));
 
     EXPECT_EQ(writer.cache_manager_, cache_manager);
     EXPECT_EQ(writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
-    EXPECT_EQ(writer.cache_model_id_, 7);
+    EXPECT_EQ(writer.module_id_, CacheModuleId(1));
     EXPECT_EQ(writer.cp_rank_, 0);
     EXPECT_EQ(writer.cp_size_, 1);
 }
@@ -352,8 +352,9 @@ TEST_F(CacheStoreAsyncWriterTest, RequiresExplicitPhysicalCpTopology) {
     auto cache_manager                             = std::make_shared<KVCacheManager>(
         config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
     EXPECT_THROW((void)CacheStoreAsyncWriter(/*device_id=*/-1, cache_manager), std::exception);
-    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0,
-                                 /*mtp_cache_config_index=*/std::nullopt,
+    CacheStoreAsyncWriter writer(/*device_id=*/-1,
+                                 cache_manager,
+                                 CacheModuleId::main(),
                                  /*store_completion_timeout=*/std::nullopt,
                                  std::make_pair(1, 2));
 
@@ -368,8 +369,7 @@ TEST_F(CacheStoreAsyncWriterTest, ExplicitProducerTopologyUsesProvidedValues) {
     for (const auto [rank, size] : std::vector<std::pair<int, int>>{{0, 1}, {1, 2}, {3, 4}}) {
         CacheStoreAsyncWriter writer(/*device_id=*/-1,
                                      cache_manager,
-                                     /*cache_model_id=*/0,
-                                     /*mtp_cache_config_index=*/std::nullopt,
+                                     CacheModuleId::main(),
                                      /*store_completion_timeout=*/std::nullopt,
                                      std::make_pair(rank, size));
         EXPECT_EQ(writer.cp_rank_, rank);
@@ -389,8 +389,11 @@ TEST_F(CacheStoreAsyncWriterTest, DraftConfigKeepsExplicitProducerTopology) {
     auto cache_manager = std::make_shared<KVCacheManager>(
         main_config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
     CacheStoreAsyncWriter draft_writer(
-        /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0,
-        /*store_completion_timeout=*/std::nullopt, std::make_pair(1, 2));
+        /*device_id=*/-1,
+        cache_manager,
+        CacheModuleId(1),
+        /*store_completion_timeout=*/std::nullopt,
+        std::make_pair(1, 2));
 
     EXPECT_EQ(draft_writer.cache_config_->groupTags(), std::vector<std::string>{"draft"});
     EXPECT_EQ(draft_writer.cp_rank_, 1);
@@ -471,7 +474,7 @@ TEST_F(CacheStoreAsyncWriterTest, FinishSubmissionsDoesNotFinishPublication) {
 
 TEST_F(CacheStoreAsyncWriterTest, DelayedPublicationCompletesBeforeTerminalTimeout) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(500));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(500));
     writer.init(/*track_store_completions=*/true);
     auto complete = writer.registerStoreCompletion();
     writer.finishSubmissions();
@@ -486,7 +489,7 @@ TEST_F(CacheStoreAsyncWriterTest, DelayedPublicationCompletesBeforeTerminalTimeo
 
 TEST_F(CacheStoreAsyncWriterTest, MissingPublicationCallbackTimesOutAndReleasesCycle) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(20));
     writer.init(/*track_store_completions=*/true);
     auto missing_completion = writer.registerStoreCompletion();
     (void)missing_completion;
@@ -502,7 +505,7 @@ TEST_F(CacheStoreAsyncWriterTest, MissingPublicationCallbackTimesOutAndReleasesC
 
 TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(20));
     writer.init(/*track_store_completions=*/true);
     auto complete = writer.registerStoreCompletion();
     writer.finishSubmissions();
@@ -536,7 +539,7 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
     ASSERT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks);
 
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(20));
     writer.init(/*track_store_completions=*/true);
     auto complete = writer.registerStoreCompletion(std::move(publication_lease));
     writer.finishSubmissions();
@@ -583,7 +586,7 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "stored";
 
-    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, CacheModuleId::main());
     writer.init(/*track_store_completions=*/false);
     writer.write(inputs, layer_cache);
     writer.waitAllDone();
@@ -681,7 +684,7 @@ INSTANTIATE_TEST_SUITE_P(TpRanks,
 
 TEST_F(CacheStoreAsyncWriterTest, PublicationCancellationFailsWaitAndReleasesCycle) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::seconds(1));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::seconds(1));
     writer.init(/*track_store_completions=*/true);
     auto complete = writer.registerStoreCompletion();
     writer.finishSubmissions();
@@ -792,7 +795,7 @@ TEST_F(CacheStoreAsyncWriterTest, UntrackedWriteWithoutCacheStoreIsSilentNoOp) {
 
 TEST_F(CacheStoreAsyncWriterTest, WorkerThreadPublicationRegistrationCompletesCycle) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(5000));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(5000));
     writer.init(/*track_store_completions=*/true);
     auto completion_state = writer.active_store_completion_state_;
     ASSERT_NE(completion_state, nullptr);
@@ -813,7 +816,7 @@ TEST_F(CacheStoreAsyncWriterTest, WorkerThreadPublicationRegistrationCompletesCy
 
 TEST_F(CacheStoreAsyncWriterTest, WorkerExceptionTerminatesPublicationWithoutWaitingForTimeout) {
     CacheStoreAsyncWriter writer(
-        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(30000));
+        /*device_id=*/-1, nullptr, CacheModuleId::main(), std::chrono::milliseconds(30000));
     writer.init(/*track_store_completions=*/true);
     // Registered but never completed: the failing task is what would have published it.
     auto complete = writer.registerStoreCompletion();

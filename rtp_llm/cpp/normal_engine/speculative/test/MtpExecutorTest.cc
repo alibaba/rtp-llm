@@ -238,7 +238,7 @@ public:
 
     FakeModel(const GptModelInitParams& params) {
         weights_  = params.weights;
-        model_id_ = params.model_id;
+        module_id_ = params.module_id;
     }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
@@ -832,7 +832,7 @@ public:
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
-             params.model_id,
+             CacheModuleId::main(),
              params.parallelism_config});
 
         GptModelInitParams draft_model_params(
@@ -840,7 +840,7 @@ public:
              Executor::genModelDescription(
                  params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
              std::nullopt,
-             params.model_id,
+             CacheModuleId(1),
              params.parallelism_config});
 
         auto fake_target_model        = std::make_unique<FakeModel>(target_model_params);

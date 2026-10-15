@@ -61,7 +61,7 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         params.gpt_weights,
         Executor::genModelDescription(model_config_, parallelism_config, eplb_config, params.moe_config),
         nullopt,  // no kv cache buffer for embedding executor
-        0,
+        rtp_llm::CacheModuleId::main(),
         parallelism_config,
     });
     model_init_params.metrics_reporter = metrics_reporter_;

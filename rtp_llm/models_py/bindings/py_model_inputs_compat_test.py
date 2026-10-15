@@ -8,30 +8,20 @@ import torch
 from rtp_llm.models_py.model_desc.block_map import (
     get_layer_cache_for_group,
     get_layer_caches_for_groups,
-    select_attention_inputs_for_layer,
     select_fmha_impl_for_group,
 )
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType, KVCacheConfig
 from rtp_llm.ops.compute_ops import (
+    CacheModuleId,
     CacheStoreWriter,
     KVCache,
+    LayerCacheBinding,
     LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
 )
-
-
-class _RoutingCache:
-    def __init__(self, layer_tags: list[list[str]]) -> None:
-        self._layer_tags = layer_tags
-
-    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
-        return [
-            LayerKVCache(torch.ones(1), 1, layer_id, tag)
-            for tag in self._layer_tags[layer_id]
-        ]
 
 
 class _ConcreteRoutingCache:
@@ -132,8 +122,10 @@ class PyModelInputsCompatTest(unittest.TestCase):
         }
 
         for class_name, runtime_class in (
+            ("CacheModuleId", CacheModuleId),
             ("CacheStoreWriter", CacheStoreWriter),
             ("KVCache", KVCache),
+            ("LayerCacheBinding", LayerCacheBinding),
             ("LayerKVCache", LayerKVCache),
             ("PyAttentionInputs", PyAttentionInputs),
         ):
@@ -260,6 +252,121 @@ class PyModelInputsCompatTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             LayerKVCache(base, 16, 3, 2, "full", scale)
 
+    def test_layer_cache_binding_validates_module_and_local_layer(self) -> None:
+        cache = LayerKVCache(torch.ones(1), 1, 0, "default")
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"CacheModuleId 1 is outside module range \[0, 1\)"
+        ):
+            LayerCacheBinding(CacheModuleId(1), 0, 1, 1, ["default"], [cache])
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"local layer 1 is outside layer range \[0, 1\)"
+        ):
+            LayerCacheBinding(CacheModuleId(0), 1, 1, 1, ["default"], [cache])
+
+    def test_layer_cache_binding_selects_module_local_inputs_and_tables(self) -> None:
+        main_inputs = self._attn_inputs(is_prefill=True, input_length=4)
+        draft_inputs = self._attn_inputs(is_prefill=True, input_length=4)
+        main_cache = LayerKVCache(torch.ones(1), 8, 0, "main_default")
+        draft_cache = LayerKVCache(torch.ones(1) * 2, 8, 0, "draft_default")
+        main_impl = object()
+        draft_impl = object()
+
+        main = LayerCacheBinding(
+            CacheModuleId(0), 0, 2, 2, ["main_default"], [main_cache]
+        )
+        draft = LayerCacheBinding(
+            CacheModuleId(1), 0, 2, 2, ["draft_default"], [draft_cache]
+        )
+
+        self.assertEqual(main.module_id, CacheModuleId(0))
+        self.assertEqual(draft.module_id, CacheModuleId(1))
+        self.assertEqual(main.local_layer_id, 0)
+        self.assertEqual(draft.local_layer_id, 0)
+        self.assertIs(
+            main.select_attention_inputs(
+                {"main_default": main_inputs, "draft_default": draft_inputs}
+            ),
+            main_inputs,
+        )
+        self.assertIs(
+            draft.select_attention_inputs(
+                {"main_default": main_inputs, "draft_default": draft_inputs}
+            ),
+            draft_inputs,
+        )
+        self.assertIs(
+            main.select_fmha_impl(
+                {"main_default": main_impl, "draft_default": draft_impl}
+            ),
+            main_impl,
+        )
+        self.assertIs(
+            draft.select_fmha_impl(
+                {"main_default": main_impl, "draft_default": draft_impl}
+            ),
+            draft_impl,
+        )
+        self.assertEqual(
+            main.sole_cache().kv_cache_base.data_ptr(),
+            main_cache.kv_cache_base.data_ptr(),
+        )
+        self.assertEqual(
+            draft.cache_for_tag("draft_default").kv_cache_base.data_ptr(),
+            draft_cache.kv_cache_base.data_ptr(),
+        )
+
+    def test_layer_cache_binding_returns_multi_tag_inputs_in_binding_order(
+        self,
+    ) -> None:
+        full = self._attn_inputs(is_prefill=False, input_length=1)
+        linear = self._attn_inputs(is_prefill=False, input_length=1)
+        full.kv_cache_kernel_block_id = torch.tensor([[10]], dtype=torch.int32)
+        linear.kv_cache_kernel_block_id = torch.tensor([[20]], dtype=torch.int32)
+        full_cache = LayerKVCache(torch.ones(1), 1, 0, "full")
+        linear_cache = LayerKVCache(torch.ones(1) * 2, 1, 0, "linear")
+        full_impl = object()
+        linear_impl = object()
+        binding = LayerCacheBinding(
+            CacheModuleId(0), 0, 1, 1, ["full", "linear"], [full_cache, linear_cache]
+        )
+
+        selected = binding.select_attention_inputs({"linear": linear, "full": full})
+        self.assertIsInstance(selected, list)
+        self.assertIs(selected[0], full)
+        self.assertIs(selected[1], linear)
+
+        selected_impl = binding.select_fmha_impl(
+            {"linear": linear_impl, "full": full_impl}
+        )
+        self.assertIsInstance(selected_impl, list)
+        self.assertIs(selected_impl[0], full_impl)
+        self.assertIs(selected_impl[1], linear_impl)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "does not have a sole KV cache group"
+        ):
+            binding.sole_cache()
+        self.assertEqual(
+            binding.cache_for_tag("linear").kv_cache_base.data_ptr(),
+            linear_cache.kv_cache_base.data_ptr(),
+        )
+
+    def test_single_group_adapter_resolves_layer_cache_binding(self) -> None:
+        cache = torch.ones(2, 3)
+        adapter = SingleGroupKVCacheAdapter([cache], 2)
+        binding = adapter.get_layer_cache_binding(CacheModuleId(0), 1, 0)
+
+        self.assertEqual(binding.module_id, CacheModuleId(0))
+        self.assertEqual(binding.local_layer_id, 0)
+        self.assertEqual(binding.group_tags, ["default"])
+        self.assertEqual(
+            binding.sole_cache().kv_cache_base.data_ptr(), cache.data_ptr()
+        )
+        impl = object()
+        self.assertIs(binding.select_fmha_impl({"default": impl}), impl)
+
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
         full = self._attn_inputs(is_prefill=False, input_length=1)
         linear = self._attn_inputs(is_prefill=False, input_length=1)
@@ -268,9 +375,15 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         inputs = PyModelInputs()
         inputs.attention_inputs = {"full": full, "linear": linear}
-        selected = select_attention_inputs_for_layer(
-            inputs, _RoutingCache([["linear"]]), 0
+        binding = LayerCacheBinding(
+            CacheModuleId(0),
+            0,
+            1,
+            1,
+            ["linear"],
+            [LayerKVCache(torch.ones(1), 1, 0, "linear")],
         )
+        selected = binding.select_attention_inputs(inputs.attention_inputs)
 
         self.assertEqual(20, selected.kv_cache_kernel_block_id.item())
         self.assertFalse(hasattr(selected, "kv_cache_kernel_block_id_by_group"))

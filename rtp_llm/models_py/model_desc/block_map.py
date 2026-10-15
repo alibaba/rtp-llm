@@ -141,39 +141,6 @@ def get_group_tags_for_layers(
     return tags
 
 
-def select_attention_inputs_for_layer(
-    inputs: PyModelInputs,
-    kv_cache: LayeredKVCache | None,
-    local_layer_idx: int,
-) -> PyAttentionInputs | list[PyAttentionInputs]:
-    """Return the group-local input(s) owned by a model-local layer."""
-    value = get_attention_inputs_value(inputs)
-    if isinstance(value, PyAttentionInputs):
-        return value
-
-    tags = get_layer_tags(kv_cache, local_layer_idx)
-    selected = [select_attention_inputs_for_tag(value, tag) for tag in tags]
-    return selected[0] if len(selected) == 1 else selected
-
-
-def select_fmha_impl_for_layer(
-    fmha_impl: T | Mapping[str, T],
-    kv_cache: LayeredKVCache | None,
-    local_layer_idx: int,
-) -> T | list[T]:
-    if not isinstance(fmha_impl, Mapping):
-        return fmha_impl
-    tags = get_layer_tags(kv_cache, local_layer_idx)
-    selected = []
-    for tag in tags:
-        if tag not in fmha_impl:
-            raise RuntimeError(
-                f"FMHA tag {tag!r} is missing; available tags={list(fmha_impl)}"
-            )
-        selected.append(fmha_impl[tag])
-    return selected[0] if len(selected) == 1 else selected
-
-
 def select_fmha_impl_for_group(fmha_impl: Mapping[str, T], group_tag: str) -> T:
     if not isinstance(fmha_impl, Mapping):
         raise RuntimeError(

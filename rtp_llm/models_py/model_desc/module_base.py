@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
+    CacheModuleId,
     KVCache,
     PyModelInitResources,
     PyModelInputs,
@@ -57,13 +58,13 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
+        self.module_id: Optional[CacheModuleId] = None
+        self.module_count = 1
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -99,6 +100,9 @@ class GptModelBase(nn.Module):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
+        self.module_id = init_resource.module_id
+        self.module_count = init_resource.module_count
+        self.bind_layer_caches()
         if self.kv_cache is not None:
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
@@ -111,11 +115,41 @@ class GptModelBase(nn.Module):
             )
             logging.info(
                 f"GptModelBase initialized with "
+                f"module_id={self.module_id.value}, "
+                f"module_count={self.module_count}, "
                 f"num_kv_layers={num_layers}, "
                 f"layer0_kv_cache_shapes={layer0_shapes}, "
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
         return True
+
+    def bind_layer_caches(self) -> None:
+        """Resolve immutable layer cache bindings once at cache-attach time.
+
+        PyWrappedModel resolves the module identity through initialize() and calls
+        this method there. Models that attach a Python-owned cache directly (the
+        standalone inference path) are main-module models and bind with the
+        default identity.
+        """
+        layers = getattr(self, "layers", None)
+        if layers is None:
+            v4 = getattr(self, "v4", None)
+            layers = getattr(v4, "layers", None)
+        if layers is None:
+            return
+        module_id = self.module_id if self.module_id is not None else CacheModuleId(0)
+        for local_layer_id, decoder_layer in enumerate(layers[: self.layer_num]):
+            binding = (
+                self.kv_cache.get_layer_cache_binding(
+                    module_id, self.module_count, local_layer_id
+                )
+                if self.kv_cache is not None
+                else None
+            )
+            decoder_layer.cache_binding = binding
+            self_attn = getattr(decoder_layer, "self_attn", None)
+            if self_attn is not None:
+                self_attn.cache_binding = binding
 
     def prepare_fmha_impl(
         self,
@@ -243,9 +277,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

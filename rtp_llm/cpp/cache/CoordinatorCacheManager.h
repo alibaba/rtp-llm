@@ -12,6 +12,7 @@
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/CacheModuleId.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -149,7 +150,7 @@ public:
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
-    uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
+    uint32_t convertToGlobalLayerId(CacheModuleId module_id, int local_layer_id) const;
 
 protected:
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.

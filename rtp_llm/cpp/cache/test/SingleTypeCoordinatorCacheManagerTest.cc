@@ -1300,15 +1300,15 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleNoMtp)
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
 
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/-1),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/3), 3u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/-1),
               std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/4),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/4),
               std::numeric_limits<uint32_t>::max());
 
     // no mtp sub-model
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
 }
 
@@ -1318,21 +1318,21 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleWithMt
     allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
 
     // main model: global == local
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/1), 1u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/0), 0u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/1), 1u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId::main(), /*local_layer_id=*/2),
               std::numeric_limits<uint32_t>::max());
 
     // Global ids follow main_layers + module_index * module_layers + local_layer.
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 2u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1), 3u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/2), 4u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 5u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/1), 6u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/2), 7u);
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/3),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/0), 2u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/1), 3u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/2), 4u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/0), 5u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/1), 6u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(2), /*local_layer_id=*/2), 7u);
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(1), /*local_layer_id=*/3),
               std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/3, /*local_layer_id=*/0),
+    EXPECT_EQ(allocator_->convertToGlobalLayerId(CacheModuleId(3), /*local_layer_id=*/0),
               std::numeric_limits<uint32_t>::max());
 }
 
@@ -1532,10 +1532,10 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ManagerLayoutsPreserveSingleTypeGr
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(0), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(1), all_layout, /*global_begin=*/5);
-    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(-1), std::runtime_error);
-    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(2), std::runtime_error);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(1)), all_layout, /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(2)), all_layout, /*global_begin=*/5);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId::main()), std::runtime_error);
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(CacheModuleId(3)), std::runtime_error);
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockIdCopyMatchesRawKVAndScaleBytes) {

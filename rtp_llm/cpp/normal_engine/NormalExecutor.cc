@@ -125,10 +125,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
          cache_manager ?
-             std::make_optional(is_propose_ ? cache_manager->getMTPModuleGroupedCacheLayerLayout(propose_model_index_) :
+             std::make_optional(is_propose_ ? cache_manager->getMTPModuleGroupedCacheLayerLayout(
+                                                  CacheModuleId(1 + static_cast<size_t>(propose_model_index_))) :
                                               cache_manager->getMainModelGroupedCacheLayerLayout()) :
              std::nullopt,
-         params.model_id,
+         is_propose_ ? CacheModuleId(1 + static_cast<size_t>(propose_model_index_)) : CacheModuleId::main(),
          params.parallelism_config,
          params.hw_kernel_config,
          params.profiling_debug_logging_config,
@@ -140,7 +141,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
          cache_manager,
-         is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
     // Main and draft writers use the same bound physical cache. Warmup binds
@@ -161,7 +161,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
-            is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
+            is_propose_ ?
+                cache_manager->getMTPModuleCacheConfig(CacheModuleId(1 + static_cast<size_t>(propose_model_index_))) :
+                cache_manager->cacheConfig();
         const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
         const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
         const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
@@ -205,10 +207,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
+    const auto& cache_config =
+        cache_manager ?
+            (is_propose_ ?
+                 cache_manager->getMTPModuleCacheConfig(CacheModuleId(1 + static_cast<size_t>(propose_model_index_))) :
+                 cache_manager->cacheConfig()) :
+            CacheConfig();
 
     const int async_worker_count =
         tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
@@ -328,7 +332,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (model_inputs_logger_) {
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
-            model_inputs_logger_->log(model_input, role, model_->model_id_);
+            model_inputs_logger_->log(model_input, role, model_->module_id_.value());
         }
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;

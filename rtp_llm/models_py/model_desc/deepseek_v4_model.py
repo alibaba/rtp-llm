@@ -616,6 +616,7 @@ class DeepSeekV4Model(GptModelBase):
 
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
+        self.bind_layer_caches()
 
         self._load_extra_weights(self.weight)
         del self.weight
@@ -763,6 +764,7 @@ class DeepSeekV4Model(GptModelBase):
         # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
+        self.bind_layer_caches()
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
