@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.ple import (
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )

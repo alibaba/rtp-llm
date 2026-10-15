@@ -16,8 +16,8 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.indexer import Qwen4ExpQSAIndexer
-from rtp_llm.models_py.modules.qwen4_exp.indexer_score import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.indexer_score import (
     qsa_indexer_score,
     quantize_per_head,
 )

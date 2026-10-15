@@ -7,7 +7,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.base.cuda.select_topk import SelectTopk
-from rtp_llm.models_py.modules.qwen4_exp.moe_topk_triton import Qwen4ExpMoeTopk
+from rtp_llm.models_py.modules.qwen4_exp.moe.moe_topk_triton import Qwen4ExpMoeTopk
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

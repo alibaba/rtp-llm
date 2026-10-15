@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.config.cuda_graph import (
@@ -12,13 +11,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    KvCacheDataType,
-    ParallelismConfig,
-    RopeStyle,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 from rtp_llm.utils.model_weight import W
@@ -360,12 +353,6 @@ def get_sparse_gqa_impl(
     )
     exact_decode_or_target_graph = (
         selection_mode == CudaGraphSelectionMode.DECODE_GRAPH
-        and (
-            not bool(attn_inputs.is_prefill)
-            or bool(attn_inputs.is_target_verify)
-            or os.environ.get("RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH", "0").lower()
-            in ("1", "true", "yes", "on")
-        )
         and bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
     )
     if (
@@ -380,7 +367,9 @@ def get_sparse_gqa_impl(
             f"exact_batch={getattr(attn_inputs, 'is_exact_cuda_graph_batch', False)})"
         )
     attn_inputs.is_cuda_graph = is_cuda_graph
-    from rtp_llm.models_py.modules.qwen4_exp.sparse_gqa_impl import SparseGqaFmhaImpl
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+        SparseGqaFmhaImpl,
+    )
 
     return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
 

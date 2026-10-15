@@ -2,11 +2,11 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
     write_decode_key_,
     write_decode_key_with_undo_,
     write_draft_window_with_undo_,
@@ -17,9 +17,7 @@ from rtp_llm.models_py.modules.qwen4_exp.indexer_decode_triton import (
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class IndexerDecodeTritonTest(unittest.TestCase):
     def test_ragged_draft_window_graph_replay_and_rollback(self):
-        raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case(
-            [7, 127]
-        )
+        raw, prefixes, cos, sin, gamma, kv, kt, state, st = self._target_case([7, 127])
         raw, cos, sin = raw[:5].contiguous(), cos[:5].contiguous(), sin[:5].contiguous()
         lengths = torch.tensor([1, 4], dtype=torch.int32, device=raw.device)
         cu = torch.tensor([0, 1, 5], dtype=torch.int32, device=raw.device)
@@ -27,16 +25,37 @@ class IndexerDecodeTritonTest(unittest.TestCase):
 
         def write():
             return write_draft_window_with_undo_(
-                raw, cu, prefixes, lengths, cos, sin, gamma, kv, kt, state, st,
+                raw,
+                cu,
+                prefixes,
+                lengths,
+                cos,
+                sin,
+                gamma,
+                kv,
+                kt,
+                state,
+                st,
                 norm_eps=1e-6,
             )
 
         write()
         reference_kv, reference_state = original_kv.clone(), original_state.clone()
         write_indexer_cache(
-            raw, cu, prefixes, cos, sin, gamma, reference_kv, kt,
-            reference_state, st, ratio=4, kv_tokens_per_block=128,
-            state_tokens_per_block=128, norm_eps=1e-6,
+            raw,
+            cu,
+            prefixes,
+            cos,
+            sin,
+            gamma,
+            reference_kv,
+            kt,
+            reference_state,
+            st,
+            ratio=4,
+            kv_tokens_per_block=128,
+            state_tokens_per_block=128,
+            norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
         torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
@@ -60,9 +79,20 @@ class IndexerDecodeTritonTest(unittest.TestCase):
 
         reference_kv, reference_state = original_kv.clone(), original_state.clone()
         write_indexer_cache(
-            raw, cu, prefixes, cos, sin, gamma, reference_kv, kt,
-            reference_state, st, ratio=4, kv_tokens_per_block=128,
-            state_tokens_per_block=128, norm_eps=1e-6,
+            raw,
+            cu,
+            prefixes,
+            cos,
+            sin,
+            gamma,
+            reference_kv,
+            kt,
+            reference_state,
+            st,
+            ratio=4,
+            kv_tokens_per_block=128,
+            state_tokens_per_block=128,
+            norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
         torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
@@ -85,12 +115,14 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             device=device,
         )
         pool_blocks = 2 * batch + 1
-        kv = torch.randn(
-            pool_blocks, 32, 128, device=device, dtype=torch.float32
-        ).to(torch.bfloat16)
-        state = torch.randn(
-            pool_blocks, 8, 128, device=device, dtype=torch.float32
-        ).to(torch.bfloat16).float()
+        kv = torch.randn(pool_blocks, 32, 128, device=device, dtype=torch.float32).to(
+            torch.bfloat16
+        )
+        state = (
+            torch.randn(pool_blocks, 8, 128, device=device, dtype=torch.float32)
+            .to(torch.bfloat16)
+            .float()
+        )
         return raw, starts, cosine, sine, gamma, kv, table, state, table.clone()
 
     def test_target_window_parity_and_rollback(self):
@@ -244,9 +276,7 @@ class IndexerDecodeTritonTest(unittest.TestCase):
             device=device,
         )
         pool_blocks = 2 * batch + 1
-        kv_pool = torch.zeros(
-            pool_blocks, 32, 128, device=device, dtype=torch.bfloat16
-        )
+        kv_pool = torch.zeros(pool_blocks, 32, 128, device=device, dtype=torch.bfloat16)
         state_pool = torch.zeros(
             pool_blocks, 8, 128, device=device, dtype=torch.float32
         )
@@ -256,7 +286,17 @@ class IndexerDecodeTritonTest(unittest.TestCase):
                     block = int(state_table[b, previous // 128])
                     key = torch.randn(128, device=device).to(torch.bfloat16)
                     state_pool[block, previous % 8] = key.float()
-        return raw, starts, cosine, sine, gamma, kv_pool, kv_table, state_pool, state_table
+        return (
+            raw,
+            starts,
+            cosine,
+            sine,
+            gamma,
+            kv_pool,
+            kv_table,
+            state_pool,
+            state_table,
+        )
 
     def _compare(self, tensors):
         raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = tensors
@@ -264,13 +304,32 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         reference_state = state.clone()
         cu = torch.arange(raw.shape[0] + 1, dtype=torch.int32, device=raw.device)
         write_indexer_cache(
-            raw, cu, starts, cosine, sine, gamma, reference_kv, kv_table,
-            reference_state, state_table, ratio=4, kv_tokens_per_block=128,
-            state_tokens_per_block=128, norm_eps=1e-6,
+            raw,
+            cu,
+            starts,
+            cosine,
+            sine,
+            gamma,
+            reference_kv,
+            kv_table,
+            reference_state,
+            state_table,
+            ratio=4,
+            kv_tokens_per_block=128,
+            state_tokens_per_block=128,
+            norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
         write_decode_key_(
-            raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table,
+            raw,
+            starts,
+            cosine,
+            sine,
+            gamma,
+            kv,
+            kv_table,
+            state,
+            state_table,
             norm_eps=1e-6,
         )
         torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
@@ -290,8 +349,16 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             write_decode_key_(
-                raw, starts, cosine, sine, gamma, kv, kv_table, state,
-                state_table, norm_eps=1e-6,
+                raw,
+                starts,
+                cosine,
+                sine,
+                gamma,
+                kv,
+                kv_table,
+                state,
+                state_table,
+                norm_eps=1e-6,
             )
         torch.cuda.current_stream().wait_stream(stream)
         kv.copy_(initial_kv)
@@ -299,8 +366,16 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             write_decode_key_(
-                raw, starts, cosine, sine, gamma, kv, kv_table, state,
-                state_table, norm_eps=1e-6,
+                raw,
+                starts,
+                cosine,
+                sine,
+                gamma,
+                kv,
+                kv_table,
+                state,
+                state_table,
+                norm_eps=1e-6,
             )
         kv.copy_(initial_kv)
         state.copy_(initial_state)
@@ -311,25 +386,44 @@ class IndexerDecodeTritonTest(unittest.TestCase):
         reference_kv = initial_kv.clone()
         reference_state = initial_state.clone()
         write_indexer_cache(
-            raw, cu, starts, cosine, sine, gamma, reference_kv, kv_table,
-            reference_state, state_table, ratio=4, kv_tokens_per_block=128,
-            state_tokens_per_block=128, norm_eps=1e-6,
+            raw,
+            cu,
+            starts,
+            cosine,
+            sine,
+            gamma,
+            reference_kv,
+            kv_table,
+            reference_state,
+            state_table,
+            ratio=4,
+            kv_tokens_per_block=128,
+            state_tokens_per_block=128,
+            norm_eps=1e-6,
             rope_is_token_aligned=True,
         )
         torch.testing.assert_close(state, reference_state, rtol=0, atol=0)
         torch.testing.assert_close(kv, reference_kv, rtol=0.01, atol=0.016)
 
     def test_transactional_graph_replay_restores_mutated_slots(self):
-        raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = (
-            self._case([7, 5])
+        raw, starts, cosine, sine, gamma, kv, kv_table, state, state_table = self._case(
+            [7, 5]
         )
         initial_kv = kv.clone()
         initial_state = state.clone()
 
         def write():
             return write_decode_key_with_undo_(
-                raw, starts, cosine, sine, gamma, kv, kv_table, state,
-                state_table, norm_eps=1e-6,
+                raw,
+                starts,
+                cosine,
+                sine,
+                gamma,
+                kv,
+                kv_table,
+                state,
+                state_table,
+                norm_eps=1e-6,
             )
 
         stream = torch.cuda.Stream()

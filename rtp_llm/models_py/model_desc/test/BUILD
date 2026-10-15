@@ -149,7 +149,7 @@ py_test(
 
 py_test(
     name = "qwen4_exp_layer_test",
-    srcs = ["qwen4_exp_layer_test.py"],
+    srcs = ["qwen4_exp_layer_test.py", "ple_page_reference.py"],
     deps = py_test_deps + [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:models",

@@ -1,11 +1,10 @@
 """Qwen4 fused Q/K norm parity and CUDA Graph replay tests."""
 
 import unittest
-from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
 
 
 class Qwen4FusedQKNormTest(unittest.TestCase):
@@ -30,10 +29,21 @@ class Qwen4FusedQKNormTest(unittest.TestCase):
         )
 
     def _run(self, value, fused):
-        with patch.dict(
-            "os.environ", {"RTP_LLM_QWEN4_FUSED_QK_NORM": "1" if fused else "0"}
-        ):
+        if fused:
             return self.norm(value.clone())
+        result = value.clone().reshape(-1, self.HEADS + 2 * self.KV_HEADS, self.DIM)
+        for start, stop, gamma in (
+            (0, self.HEADS, self.q_gamma),
+            (self.HEADS, self.HEADS + self.KV_HEADS, self.k_gamma),
+        ):
+            values = result[:, start:stop].float()
+            normalized = values * torch.rsqrt(
+                values.pow(2).mean(-1, keepdim=True) + self.norm.eps
+            )
+            result[:, start:stop].copy_(
+                (normalized * (1.0 + gamma.float())).to(value.dtype)
+            )
+        return result.reshape_as(value)
 
     def test_matches_torch_and_preserves_v(self):
         for rows in (1, 3, 7, 128):
@@ -59,21 +69,20 @@ class Qwen4FusedQKNormTest(unittest.TestCase):
 
     def test_replay_reads_new_inputs(self):
         static = self._input(4)
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_FUSED_QK_NORM": "1"}):
+        self.norm(static)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
             self.norm(static)
+        for _ in range(2):
+            source = self._input(4)
+            reference = self._run(source, False)
+            static.copy_(source)
+            graph.replay()
             torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                self.norm(static)
-            for _ in range(2):
-                source = self._input(4)
-                reference = self._run(source, False)
-                static.copy_(source)
-                graph.replay()
-                torch.cuda.synchronize()
-                torch.testing.assert_close(
-                    static.float(), reference.float(), atol=0.016, rtol=0.01
-                )
+            torch.testing.assert_close(
+                static.float(), reference.float(), atol=0.016, rtol=0.01
+            )
 
 
 if __name__ == "__main__":

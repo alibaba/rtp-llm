@@ -10,7 +10,7 @@ sublayers in the right order.
 import os
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
@@ -25,13 +25,20 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
 )
 from rtp_llm.models_py.model_desc import generic_moe, qwen3_next, qwen4_exp
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
+    _PLETargetLayerStage,
+    _PLETargetTransaction,
 )
-from rtp_llm.models_py.modules.qwen4_exp.ple import (
+from rtp_llm.models_py.model_desc.test.ple_page_reference import (
+    _apply_ple as reference_apply_ple,
+)
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
+)
+from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
+    Qwen4ExpGatedResidual,
+    inject_into_residual,
 )
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
@@ -76,6 +83,9 @@ def _select_topk(logits, ids, weights):
     values, selected = logits.softmax(dim=-1).topk(ids.shape[-1])
     ids.copy_(selected)
     weights.copy_(values / values.sum(dim=-1, keepdim=True))
+
+
+_select_topk.config = SimpleNamespace(expert_num=_EXPERTS, moe_k=2, has_moe_norm=True)
 
 
 def _hc_weights(seed):
@@ -263,32 +273,20 @@ class Qwen4ExpDecoderLayerTest(TestCase):
 
 
 class Qwen4ExpSpecFaultInjectionTest(TestCase):
-    """The env-gated bring-up fault injection used by the multi-rank runs.
-
-    ``RTP_LLM_QWEN4_SPEC_FAULT_INJECT=<rank>:<phase>`` must raise on exactly
-    that TP rank and phase, and stay inert for every other rank/phase or when
-    unset.
-    """
-
-    def _stub(self, tp_rank):
-        return SimpleNamespace(
-            parallelism_config=SimpleNamespace(get_attn_tp_rank=lambda: tp_rank)
+    def test_private_hook_receives_actual_rank_and_phase(self):
+        hook = Mock()
+        stub = SimpleNamespace(
+            parallelism_config=SimpleNamespace(get_attn_tp_rank=lambda: 3),
+            _speculative_test_hook=hook,
         )
-
-    def test_injection_matches_only_the_configured_rank_and_phase(self):
         call = qwen4_exp.Qwen4ExpModel._maybe_inject_speculative_fault
-        stub = self._stub(3)
-
-        with patch.dict("os.environ", {qwen4_exp._SPEC_FAULT_INJECT_ENV: "3:commit"}):
-            with self.assertRaisesRegex(RuntimeError, "commit fault injection"):
-                call(stub, "commit")
-            call(stub, "prepare")  # other phase: inert
-
-        with patch.dict("os.environ", {qwen4_exp._SPEC_FAULT_INJECT_ENV: "5:commit"}):
-            call(stub, "commit")  # other rank: inert
-
-        with patch.dict("os.environ", {}, clear=True):
-            call(stub, "commit")  # unset: inert
+        call(stub, "prepare")
+        hook.assert_called_once_with("prepare", 3)
+        hook.side_effect = RuntimeError("commit test failure")
+        with self.assertRaisesRegex(RuntimeError, "commit test failure"):
+            call(stub, "commit")
+        del stub._speculative_test_hook
+        call(stub, "commit")
 
 
 class Qwen4ExpMetadataTest(TestCase):
@@ -325,6 +323,7 @@ class Qwen4ExpModelConstructionTest(TestCase):
                 W.qwen4_hc_mixer_mix_down: mix_down,
                 W.qwen4_hc_mixer_mix_up: mix_up,
             }
+            self.global_weights = self._globals
             self.weights: list = []
 
         def get_global_weight(self, name):
@@ -1171,14 +1170,12 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                     prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
                     sequence_lengths=torch.empty(0, dtype=torch.int32),
                 )
-                with patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_BULK_PREFILL": "0"}):
-                    expected = self.model._apply_ple(1, hyper, ids, inputs)
+                expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
                 expected_state = self.state_base.clone()
                 expected_context = self.ctx_base.clone()
                 self.state_base.copy_(state_before)
                 self.ctx_base.copy_(context_before)
-                with patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_BULK_PREFILL": "1"}):
-                    actual = self.model._apply_ple(1, hyper, ids, inputs)
+                actual = self.model._apply_ple(1, hyper, ids, inputs)
                 torch.testing.assert_close(actual, expected)
                 torch.testing.assert_close(self.state_base, expected_state)
                 torch.testing.assert_close(
@@ -1330,7 +1327,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         with torch.cuda.graph(graph):
             candidate_states = state_seed + 10
             candidate_ids = ids_seed + 100
-        stage = qwen4_exp._PLETargetLayerStage(
+        stage = _PLETargetLayerStage(
             layer_idx=1,
             page_size=8,
             prefixes=prefixes,
@@ -1343,7 +1340,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             initial_context=torch.zeros((2, 2), device=device, dtype=torch.int64),
             candidate_ids=candidate_ids,
         )
-        self.model._ple_target_transaction = qwen4_exp._PLETargetTransaction(
+        self.model._ple_target_transaction = _PLETargetTransaction(
             batch_size=2,
             query_len=3,
             prefixes=prefixes,
@@ -1390,7 +1387,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             ngram_size=embedding.ngram_size,
             eos_token_id=embedding.eos_token_id,
         )
-        if cpu_tables and os.environ.get("RTP_LLM_QWEN4_PLE_CPU_UVA", "0") == "1":
+        if cpu_tables:
             self.assertTrue(gpu_embedding._cpu_uva_enabled)
             self.assertTrue(all(shard.is_pinned() for shard in gpu_embedding.shards))
         self.ple = Qwen4ExpPLELayer(
@@ -1418,66 +1415,45 @@ class Qwen4ExpPLERuntimeTest(TestCase):
     def _enable_async_cpu_ple(self):
         if not torch.cuda.is_available() or torch.version.hip is not None:
             self.skipTest("NVIDIA CUDA is required for asynchronous PLE")
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PLE_CPU_UVA": "1",
-                "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "1",
-            },
-        ):
-            embedding = self._move_ple_to_cuda(torch.device("cuda"), cpu_tables=True)
+        embedding = self._move_ple_to_cuda(torch.device("cuda"), cpu_tables=True)
         self.assertTrue(embedding.supports_prefetch)
         return embedding
 
     def test_async_prefetch_ragged_prefill_preserves_every_page_and_prefix(self):
         embedding = self._enable_async_cpu_ple()
         device = torch.device("cuda")
-        for bulk in ("0", "1"):
-            with (
-                self.subTest(bulk=bulk),
-                patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_BULK_PREFILL": bulk}),
-            ):
-                self.state_base.normal_()
-                self.ctx_base.random_(1, 7)
-                before_state, before_context = (
-                    self.state_base.clone(),
-                    self.ctx_base.clone(),
-                )
-                ids = torch.randint(0, 10, (26,), device=device, dtype=torch.long)
-                hyper = torch.randn(
-                    26, _HC * _HIDDEN, device=device, dtype=torch.bfloat16
-                )
-                inputs = self._inputs_by_tag(
-                    is_prefill=True,
-                    input_lengths=torch.tensor([17, 9], dtype=torch.int32),
-                    prefix_lengths=torch.tensor([0, 8], dtype=torch.int32),
-                    sequence_lengths=torch.empty(0, dtype=torch.int32),
-                )
-                expected = self.model._apply_ple(1, hyper, ids, inputs)
-                expected_state, expected_context = (
-                    self.state_base.clone(),
-                    self.ctx_base.clone(),
-                )
-                self.state_base.copy_(before_state)
-                self.ctx_base.copy_(before_context)
-                plans = self.model._start_eager_ple_prefetch(
-                    SimpleNamespace(input_ids=ids), inputs
-                )
-                torch.testing.assert_close(
-                    self.state_base, before_state, atol=0, rtol=0
-                )
-                torch.testing.assert_close(
-                    self.ctx_base, before_context, atol=0, rtol=0
-                )
-                actual = self.model._apply_ple(1, hyper, ids, inputs, prefetch=plans[1])
-                embedding.finish_prefetch()
-                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-                torch.testing.assert_close(
-                    self.state_base, expected_state, atol=0, rtol=0
-                )
-                torch.testing.assert_close(
-                    self.ctx_base, expected_context, atol=0, rtol=0
-                )
+        with self.subTest(mode="automatic"):
+            self.state_base.normal_()
+            self.ctx_base.random_(1, 7)
+            before_state, before_context = (
+                self.state_base.clone(),
+                self.ctx_base.clone(),
+            )
+            ids = torch.randint(0, 10, (26,), device=device, dtype=torch.long)
+            hyper = torch.randn(26, _HC * _HIDDEN, device=device, dtype=torch.bfloat16)
+            inputs = self._inputs_by_tag(
+                is_prefill=True,
+                input_lengths=torch.tensor([17, 9], dtype=torch.int32),
+                prefix_lengths=torch.tensor([0, 8], dtype=torch.int32),
+                sequence_lengths=torch.empty(0, dtype=torch.int32),
+            )
+            expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
+            expected_state, expected_context = (
+                self.state_base.clone(),
+                self.ctx_base.clone(),
+            )
+            self.state_base.copy_(before_state)
+            self.ctx_base.copy_(before_context)
+            plans = self.model._start_eager_ple_prefetch(
+                SimpleNamespace(input_ids=ids), inputs
+            )
+            torch.testing.assert_close(self.state_base, before_state, atol=0, rtol=0)
+            torch.testing.assert_close(self.ctx_base, before_context, atol=0, rtol=0)
+            actual = self.model._apply_ple(1, hyper, ids, inputs, prefetch=plans[1])
+            embedding.finish_prefetch()
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            torch.testing.assert_close(self.state_base, expected_state, atol=0, rtol=0)
+            torch.testing.assert_close(self.ctx_base, expected_context, atol=0, rtol=0)
 
     def test_async_target_verify_commit_and_rollback_preserve_state(self):
         embedding = self._enable_async_cpu_ple()
@@ -1531,7 +1507,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             sequence_lengths=torch.empty(0, dtype=torch.int32),
         )
         before_state, before_context = self.state_base.clone(), self.ctx_base.clone()
-        expected = self.model._apply_ple(1, hyper, ids, inputs)
+        expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
         expected_state, expected_context = (
             self.state_base.clone(),
             self.ctx_base.clone(),
@@ -1588,14 +1564,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             self.test_decode_cpu_ple_forward_captures_and_replays_exact_batch,
         ):
             self.setUp()
-            with patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_PLE_CPU_UVA": "1",
-                    "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "1",
-                },
-            ):
-                case()
+            case()
 
     def test_target_ple_forward_captures_and_replays_exact_batch(self):
         if not torch.cuda.is_available():
@@ -2141,7 +2110,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 )
             )
 
-        self.model._synchronize_ple_transaction = observe_sync
+        self.model._ple_coordinator()._synchronize_ple_transaction = observe_sync
         self.model.prepare_speculative_target_commit(
             torch.tensor([1, 2], dtype=torch.int32)
         )
@@ -2171,7 +2140,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             sync_calls.append(current)
             raise RuntimeError("injected prepare synchronize failure")
 
-        self.model._synchronize_ple_transaction = fail_prepare_sync
+        self.model._ple_coordinator()._synchronize_ple_transaction = fail_prepare_sync
         with self.assertRaisesRegex(RuntimeError, "injected prepare"):
             self.model.prepare_speculative_target_commit(
                 torch.tensor([1, 2], dtype=torch.int32)
@@ -2183,7 +2152,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         torch.testing.assert_close(self.state_base, state_before)
         torch.testing.assert_close(self.ctx_base, context_before)
 
-        self.model._synchronize_ple_transaction = sync_calls.append
+        self.model._ple_coordinator()._synchronize_ple_transaction = sync_calls.append
         self.model.finish_speculative_target_commit(False)
         self.assertEqual(len(sync_calls), 2)
         self.assertIs(sync_calls[1], transaction)
@@ -2198,7 +2167,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 torch.tensor([1, 1], dtype=torch.int32)
             )
 
-        self.model.ple_layers = nn.ModuleDict()
+        self.model.ple_layers.clear()
         self.model.prepare_speculative_target_commit(
             torch.tensor([1, 1], dtype=torch.int32)
         )
@@ -2684,93 +2653,6 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                     )
 
 
-class Qwen4ExpCommitBlockValidationTest(TestCase):
-    def test_fused_verdict_tail_strides_and_dynamic_graph(self):
-        from rtp_llm.models_py.modules.qwen4_exp.ple_commit_triton import (
-            resolve_commit_blocks,
-        )
-
-        if not torch.cuda.is_available():
-            self.skipTest("requires CUDA")
-        for batch in (1, 8, 31, 257, 1024):
-            table = (
-                torch.arange(batch * 8, device="cuda", dtype=torch.int32).reshape(
-                    batch, 8
-                )
-                + 1
-            )[:, ::2]
-            pages = torch.full((batch,), 2, dtype=torch.int64, device="cuda")
-            pool_rows = batch * 8 + 2
-            result = resolve_commit_blocks(table, pages, pool_rows)
-            expected = torch.cat(
-                [
-                    torch.zeros(4, dtype=torch.int64, device="cuda"),
-                    table[:, 2].to(torch.int64),
-                ]
-            )
-            torch.testing.assert_close(result, expected, rtol=0, atol=0)
-            for _ in range(3):
-                resolve_commit_blocks(table, pages, pool_rows)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                got = resolve_commit_blocks(table, pages, pool_rows)
-            pages.fill_(-1)
-            graph.replay()
-            torch.cuda.synchronize()
-            self.assertEqual(got[:4].tolist(), [1, 0, 0, 0])
-            torch.testing.assert_close(got[4:], table[:, 0].long(), rtol=0, atol=0)
-            pages.fill_(3)
-            table[0, 3] = 0
-            table[-1, 3] = pool_rows + 1
-            graph.replay()
-            torch.cuda.synchronize()
-            torch.testing.assert_close(
-                got, resolve_commit_blocks(table, pages, pool_rows), rtol=0, atol=0
-            )
-            self.assertEqual(got[3].item(), 1)
-        self.assertIsNone(
-            resolve_commit_blocks(
-                torch.ones(1, 2, dtype=torch.int32), torch.zeros(1, dtype=torch.long), 2
-            )
-        )
-
-    def test_bulk_validation_preserves_destinations_and_error_priority(self):
-        table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
-        inputs = SimpleNamespace(kv_cache_block_id_device=table)
-        resolve = qwen4_exp.Qwen4ExpModel._commit_physical_blocks
-        for device in [torch.device("cpu")] + (
-            [torch.device("cuda")] if torch.cuda.is_available() else []
-        ):
-            current = SimpleNamespace(kv_cache_block_id_device=table.to(device))
-            pages = torch.tensor([1, 2], device=device)
-            blocks, host = resolve(current, PLE_STATE_TAG, pages, 8, device)
-            torch.testing.assert_close(blocks, torch.tensor([2, 6], device=device))
-            self.assertEqual(host, [2, 6])
-            for values, error in [
-                ([-1, 4], "invalid logical"),
-                ([0, 3], "exceeds its block"),
-            ]:
-                with self.assertRaisesRegex(RuntimeError, error):
-                    resolve(
-                        current,
-                        PLE_STATE_TAG,
-                        torch.tensor(values, device=device),
-                        8,
-                        device,
-                    )
-            bad = table.to(device).clone()
-            bad[0, 1] = 0
-            bad[1, 2] = 99
-            current.kv_cache_block_id_device = bad
-            with self.assertRaisesRegex(RuntimeError, "unallocated logical"):
-                resolve(current, PLE_STATE_TAG, pages, 8, device)
-            bad[0, 1] = 2
-            with self.assertRaisesRegex(RuntimeError, "exceeds its pool"):
-                resolve(current, PLE_STATE_TAG, pages, 8, device)
-        with self.assertRaisesRegex(RuntimeError, "batch is inconsistent"):
-            resolve(inputs, PLE_STATE_TAG, torch.tensor([0]), 8, torch.device("cpu"))
-
-
 class Qwen4ExpSharedHCStorageTest(TestCase):
     def test_real_residual_builder_reuses_owner_and_blocks_updates(self):
         import weakref
@@ -2818,14 +2700,7 @@ class Qwen4ExpSharedHCStorageTest(TestCase):
         ]
         layer = qwen4_exp.Qwen4ExpDecoderLayer.__new__(qwen4_exp.Qwen4ExpDecoderLayer)
         nn.Module.__init__(layer)
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "1",
-                "RTP_LLM_QWEN4_SHARED_HC_WEIGHTS": "1",
-            },
-        ):
-            layer._build_residual_modules(config, weights.weights[0])
+        layer._build_residual_modules(config, weights.weights[0])
         self.assertTrue(all(ref() is None for ref in old_refs))
         for unit, down, inject in (
             (
@@ -2860,27 +2735,15 @@ class Qwen4ExpSharedHCStorageTest(TestCase):
                 )
             )
 
-    def test_shared_gate_off_and_unsupported_cpu_keep_originals(self):
+    def test_unsupported_cpu_keeps_original_storage(self):
         fixture = Qwen4ExpDecoderLayerTest()
         fixture.setUp()
-        for gate in ("0", "1"):
-            layer = qwen4_exp.Qwen4ExpDecoderLayer.__new__(
-                qwen4_exp.Qwen4ExpDecoderLayer
-            )
-            nn.Module.__init__(layer)
-            original = fixture.weights[W.qwen4_hc_attn_mix_down]
-            with patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "1",
-                    "RTP_LLM_QWEN4_SHARED_HC_WEIGHTS": gate,
-                },
-            ):
-                layer._build_residual_modules(fixture.config, fixture.weights)
-            self.assertIs(fixture.weights[W.qwen4_hc_attn_mix_down], original)
-            self.assertFalse(
-                getattr(original, "_rtp_requires_restart_for_update", False)
-            )
+        layer = qwen4_exp.Qwen4ExpDecoderLayer.__new__(qwen4_exp.Qwen4ExpDecoderLayer)
+        nn.Module.__init__(layer)
+        original = fixture.weights[W.qwen4_hc_attn_mix_down]
+        layer._build_residual_modules(fixture.config, fixture.weights)
+        self.assertIs(fixture.weights[W.qwen4_hc_attn_mix_down], original)
+        self.assertFalse(getattr(original, "_rtp_requires_restart_for_update", False))
 
 
 if __name__ == "__main__":

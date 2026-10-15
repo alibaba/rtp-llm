@@ -45,8 +45,8 @@ def is_supported(x, weight, scale):
         x.is_cuda
         and torch.version.hip is None
         and x.ndim == weight.ndim == 2
-        and 1 <= x.shape[0] <= 8
-        and (weight.shape[0], weight.shape[1]) in ((320, 10240), (10240, 320))
+        and 1 <= x.shape[0] <= 4
+        and tuple(weight.shape) == (10240, 320)
         and x.shape[1] == weight.shape[1]
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.float8_e4m3fn
@@ -56,7 +56,7 @@ def is_supported(x, weight, scale):
         and x.is_contiguous()
         and weight.is_contiguous()
         and scale.is_contiguous()
-        and torch.cuda.get_device_capability(x.device)[0] == 12
+        and torch.cuda.get_device_capability(x.device) == (12, 0)
     )
 
 

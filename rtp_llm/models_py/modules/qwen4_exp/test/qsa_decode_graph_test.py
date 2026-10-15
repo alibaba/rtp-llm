@@ -7,7 +7,9 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import Qwen4ExpQSARuntimeContext
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+    Qwen4ExpQSARuntimeContext,
+)
 from rtp_llm.ops import RopeStyle
 
 
@@ -95,9 +97,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             )
 
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
-        self.raw = torch.randn(
-            1, 256, dtype=torch.bfloat16, device="cuda"
-        )[:, ::2]
+        self.raw = torch.randn(1, 256, dtype=torch.bfloat16, device="cuda")[:, ::2]
         self.assertFalse(self.raw.is_contiguous())
         self.rope = SimpleNamespace(
             style=RopeStyle.Base,
@@ -245,7 +245,9 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         q.copy_(torch.randn_like(q.float()).bfloat16())
         raw.copy_(torch.randn_like(raw.float()).bfloat16())
         prefix[0] = 8
-        positions.copy_(torch.arange(8, 12, dtype=torch.int32, device="cuda").repeat_interleave(3))
+        positions.copy_(
+            torch.arange(8, 12, dtype=torch.int32, device="cuda").repeat_interleave(3)
+        )
         cu_kv[1] = 12
         graph.replay()
 

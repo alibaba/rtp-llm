@@ -11,11 +11,11 @@ from rtp_llm.models.qwen4_exp.full_fp8_weight import (
     FP8_STORAGE_SCALE_SUFFIX,
     Qwen4Fp8StorageWeight,
 )
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
-    Qwen4Fp8Linear,
-    compute_weight_view,
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+    prepare_compute_weights as compute_weight_view,
 )
-from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import Qwen4CpuVocabEmbedding
+from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
+from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import Qwen4Fp8VocabEmbedding
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 
@@ -77,6 +77,56 @@ class FullFp8StorageTest(unittest.TestCase):
             atol=0.5,
         )
 
+    def test_custom_residual_consumers_record_actual_compute_copies(self):
+        from torch import nn
+
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+            annotate_compute_inventory,
+        )
+
+        weights = ModelWeights(1, "cpu", torch.bfloat16)
+        projections = (
+            (W.qwen4_hc_attn_mix_down, (16, 128)),
+            (W.qwen4_hc_attn_mix_up, (128, 16)),
+            (W.qwen4_hc_attn_inject, (4, 128)),
+            (W.qwen4_hc_mlp_mix_down, (16, 128)),
+            (W.qwen4_hc_mlp_mix_up, (128, 16)),
+            (W.qwen4_hc_mlp_inject, (4, 128)),
+        )
+        for name, shape in projections:
+            value, scale = quantized(torch.randn(shape))
+            weights.weights[0][name] = value
+            weights.weights[0][name + FP8_STORAGE_SCALE_SUFFIX] = scale
+        for name in (W.qwen4_hc_attn_norm, W.qwen4_hc_mlp_norm):
+            weights.weights[0][name] = torch.zeros(128)
+        prepared = compute_weight_view(weights)
+        layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
+        nn.Module.__init__(layer)
+        layer._build_residual_modules(
+            SimpleNamespace(hc_mult=4, layernorm_eps=1e-6), prepared.weights[0]
+        )
+        inventory = annotate_compute_inventory(prepared)
+        entries = {entry.name: entry for entry in inventory.layers[0]}
+        for unit, names in (
+            (layer.attn_hyper_connection, [x[0] for x in projections[:3]]),
+            (layer.mlp_hyper_connection, [x[0] for x in projections[3:]]),
+        ):
+            for name, module in zip(
+                names,
+                (unit.down_projection, unit.up_projection, unit.inject_projection),
+            ):
+                entry = entries[name]
+                self.assertEqual(
+                    entry.storage.data_ptr(), weights.weights[0][name].data_ptr()
+                )
+                self.assertEqual(
+                    entry.compute.data_ptr(), module.compute_weight.data_ptr()
+                )
+                self.assertEqual(entry.compute.dtype, torch.bfloat16)
+                self.assertTrue(entry.update_requires_restart)
+                self.assertTrue(entry.compute._rtp_requires_restart_for_update)
+
     def test_compute_view_preserves_fp8_inventory_and_matrices(self):
         weights = ModelWeights(1, "cpu", torch.bfloat16)
         matrix, ms = quantized(torch.randn(32, 32))
@@ -118,6 +168,84 @@ class FullFp8CudaTest(unittest.TestCase):
         self.assertIsNone(module.compute_weight)
         self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
 
+    def test_ple_fp8_projection_scales_in_eager_and_graph(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
+            Qwen4ExpNGramEmbedding,
+            Qwen4ExpPLELayer,
+        )
+
+        torch.manual_seed(917)
+        device = "cuda"
+        key = torch.randint(-2, 3, (128, 64), device=device).to(torch.float8_e4m3fn)
+        value = torch.randint(-2, 3, (32, 64), device=device).to(torch.float8_e4m3fn)
+        key_scale = torch.tensor([0.25], device=device)
+        value_scale = torch.tensor([0.5], device=device)
+        conv = torch.zeros(128, 1, 2, device=device, dtype=torch.bfloat16)
+        norm = torch.zeros(128, device=device, dtype=torch.bfloat16)
+
+        def layer(k, v, scales):
+            return Qwen4ExpPLELayer(
+                Qwen4ExpNGramEmbedding(
+                    [torch.zeros(8, 32, device=device, dtype=torch.bfloat16)],
+                    torch.tensor([3, 4], device=device, dtype=torch.int64),
+                    torch.tensor([0, 4], device=device, dtype=torch.int64),
+                    torch.tensor([1, 3], device=device, dtype=torch.int64),
+                    ngram_size=2,
+                    eos_token_id=0,
+                ),
+                k,
+                v,
+                conv,
+                norm,
+                norm,
+                norm,
+                hc_mult=4,
+                hidden_size=32,
+                conv_kernel_size=2,
+                norm_eps=1e-6,
+                projection_scales=scales,
+            )
+
+        actual = layer(key, value, (key_scale, value_scale))
+        reference = layer(
+            (key.float() * key_scale).to(torch.bfloat16),
+            (value.float() * value_scale).to(torch.bfloat16),
+            None,
+        )
+        self.assertIsInstance(actual.key_projection, Qwen4Fp8Linear)
+        self.assertIsInstance(actual.value_projection, Qwen4Fp8Linear)
+        self.assertEqual(actual.key_projection.weight.data_ptr(), key.data_ptr())
+        torch.testing.assert_close(
+            actual.key_projection.scale, key_scale, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            actual.value_projection.scale, value_scale, rtol=0, atol=0
+        )
+        hidden = torch.randn(2, 4, 128, device=device, dtype=torch.bfloat16)
+        # Max magnitude seven makes the dynamic FP8 input scale exactly 1/64.
+        embeddings = torch.randint(-7, 8, (2, 4, 64), device=device).to(torch.bfloat16)
+        embeddings.flatten()[0] = 7
+        history = torch.zeros(2, 5, device=device, dtype=torch.long)
+        state = torch.zeros(2, 2, 128, device=device, dtype=torch.bfloat16)
+
+        def forward(module):
+            return module.decode_chunk(hidden, history, state, embeddings=embeddings)
+
+        for _ in range(3):
+            forward(actual)
+        expected = forward(reference)
+        eager = forward(actual)
+        for a, b in zip(eager, expected):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = forward(actual)
+        embeddings.neg_()
+        hidden.neg_()
+        graph.replay()
+        for a, b in zip(output, forward(reference)):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+
     def test_dense_quantization_handles_zero_activations(self):
         weight, scale = quantized(torch.randn(32, 256, device="cuda"))
         module = Qwen4Fp8Linear(weight, scale)
@@ -126,8 +254,6 @@ class FullFp8CudaTest(unittest.TestCase):
         self.assertEqual(result.count_nonzero().item(), 0)
 
     def test_ple_pinned_owner_replaces_pageable_storage_inventory(self):
-        import os
-        from unittest.mock import patch
 
         from torch import nn
 
@@ -178,36 +304,31 @@ class FullFp8CudaTest(unittest.TestCase):
         model.layers = nn.ModuleList([nn.Identity()])
         model.ple_layers = nn.ModuleDict()
         model.weight = compute_weight_view(storage)
-        with patch.dict(
-            os.environ,
-            {"RTP_LLM_QWEN4_PLE_CPU_UVA": "1", "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "0"},
-        ):
-            model._build_ple_layers()
+        model._build_ple_layers()
         owner = model.ple_layers["0"].ple_embedding.shards[0]
         self.assertTrue(owner.is_pinned())
         self.assertIs(storage.weights[0][name], owner)
         self.assertIs(model.weight.weights[0][name], owner)
         self.assertNotEqual(owner.data_ptr(), table.data_ptr())
 
-    def test_fp8_host_and_device_vocab_graph(self):
+    def test_fp8_device_vocab_graph(self):
         weight, scale = quantized(torch.randn(257, 320))
         ids = torch.tensor([0, 17, 256, -1], dtype=torch.int32, device="cuda")
-        for cpu in (True, False):
-            stored = weight.pin_memory() if cpu else weight.cuda()
-            module = Qwen4CpuVocabEmbedding(
-                stored, 1, torch.device("cuda", 0), weight_scale=scale
-            )
-            for _ in range(3):
-                module(ids)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                output = module(ids)
-            ids.copy_(torch.tensor([256, 3, 19, -1], dtype=torch.int32, device="cuda"))
-            graph.replay()
-            expected = (weight[[256, 3, 19]].float() * scale).to(torch.bfloat16).cuda()
-            torch.testing.assert_close(output[:3], expected, rtol=0.008, atol=0.02)
-            self.assertEqual(output[-1].count_nonzero().item(), 0)
-            self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
+        stored = weight.cuda()
+        module = Qwen4Fp8VocabEmbedding(
+            stored, 1, torch.device("cuda", 0), weight_scale=scale
+        )
+        for _ in range(3):
+            module(ids)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = module(ids)
+        ids.copy_(torch.tensor([256, 3, 19, -1], dtype=torch.int32, device="cuda"))
+        graph.replay()
+        expected = (weight[[256, 3, 19]].float() * scale).to(torch.bfloat16).cuda()
+        torch.testing.assert_close(output[:3], expected, rtol=0.008, atol=0.02)
+        self.assertEqual(output[-1].count_nonzero().item(), 0)
+        self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
 
 
 if __name__ == "__main__":

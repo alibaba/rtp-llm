@@ -52,8 +52,10 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
         self.config = config
         self.parallelism_config = parallelism_config
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
@@ -66,7 +68,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        self.gate = LinearFactory.create_linear_from_weights(
+        self.gate = self.linear_factory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(config=config)
@@ -103,11 +105,12 @@ class GenericMoeLayer(nn.Module):
                 weights,
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self.linear_factory,
             )
         else:
             self.shared_expert = None
         if weights.get(W.shared_expert_gate, None) is not None:
-            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+            self.shared_expert_gate = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.shared_expert_gate,
                 None,

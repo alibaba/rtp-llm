@@ -114,7 +114,7 @@ py_library(
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ], exclude = _DSV4_PPU_MODULES) + select({
+    ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_MODULES),
         "//conditions:default": [],
     }),
@@ -294,6 +294,7 @@ py_library(
     srcs = glob([
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
+        "model_desc/qwen4_exp_runtime/*.py",
         "speculative/*.py",
     ]) + select({
         "@//:using_ppu": glob(["model_desc/deepseek_v4_ppu/**/*.py"]),

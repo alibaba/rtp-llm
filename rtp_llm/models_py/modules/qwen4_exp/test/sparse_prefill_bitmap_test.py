@@ -5,11 +5,13 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_fmha import (
-    sparse_prefill_attn,
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import sparse_prefill_attn
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_prefill_bitmap import (
+    try_bitmap_prefill,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_fmha import (
     sparse_prefill_attn_torch_reference,
 )
-from rtp_llm.models_py.modules.qwen4_exp.sparse_prefill_bitmap import try_bitmap_prefill
 
 
 class SparsePrefillBitmapTest(unittest.TestCase):
@@ -63,24 +65,17 @@ class SparsePrefillBitmapTest(unittest.TestCase):
         tail = complete[:, None] * 4 + torch.arange(3, device="cuda")
         tail = torch.where(tail <= pos[:, None], tail, -1)
         selected = torch.cat((tokens.flatten(1), tail), -1)[None].int()
-        with patch.dict(
-            "os.environ",
-            {
-                "RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "0",
-                "RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1",
-            },
-        ):
-            expected = sparse_prefill_attn(q, k, v, selected)
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "1"}):
-            candidate = sparse_prefill_attn(q, k, v, selected)
+        expected = sparse_prefill_attn_torch_reference(
+            q.double(), k.double(), v.double(), selected
+        ).to(q.dtype)
+        candidate = sparse_prefill_attn(q, k, v, selected)
         torch.testing.assert_close(candidate, expected, atol=0.0078125, rtol=0.008)
 
     def test_repeated_indices_keep_multiplicity_via_fallback(self):
         q, k, v, selected = self.inputs()
         selected[:, 1, 1] = selected[:, 1, 0]
         self.assertIsNone(try_bitmap_prefill(q, k, v, selected))
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "1"}):
-            candidate = sparse_prefill_attn(q, k, v, selected)
+        candidate = sparse_prefill_attn(q, k, v, selected)
         expected = sparse_prefill_attn_torch_reference(q, k, v, selected)
         torch.testing.assert_close(candidate, expected, atol=0.0078125, rtol=0.008)
 
@@ -105,29 +100,20 @@ class SparsePrefillBitmapTest(unittest.TestCase):
         q, k, v, selected = self.inputs()
         selected[0, 0, 0] = k.shape[2]
         snapshot = k.clone()
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "1"}):
-            with self.assertRaisesRegex(ValueError, "outside KV sequence"):
-                sparse_prefill_attn(q, k, v, selected)
+        with self.assertRaisesRegex(ValueError, "outside KV sequence"):
+            sparse_prefill_attn(q, k, v, selected)
         self.assertTrue(torch.equal(k, snapshot))
 
 
 class SparsePrefillWordsTest(SparsePrefillBitmapTest):
-    def setUp(self):
-        setting = patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_WORDS": "1"})
-        setting.start()
-        self.addCleanup(setting.stop)
-
     def test_word_boundaries_and_repeated_bits(self):
         q, k, v, selected = self.inputs()
         selected.fill_(-1)
         selected[..., :6] = torch.tensor(
             [0, 31, 32, 63, 64, 130], device="cuda", dtype=torch.int32
         )
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_WORDS": "0"}):
-            expected = try_bitmap_prefill(q, k, v, selected)
         candidate = try_bitmap_prefill(q, k, v, selected)
         self.assertIsNotNone(candidate)
-        torch.testing.assert_close(candidate, expected, atol=0, rtol=0)
         # This six-key fixture exposes BF16 intermediate rounding in the Torch
         # gather reference. Check the unchanged attention math in FP64 as well.
         ids = selected[0, 0, :6].long()

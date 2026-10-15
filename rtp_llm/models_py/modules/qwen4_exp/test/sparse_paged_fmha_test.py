@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
     _validate_sparse_paged_indices,
     sparse_paged_gqa_attn,
 )
@@ -348,86 +348,58 @@ class SparsePagedOnlineSplitTest(unittest.TestCase):
     def test_all_split_counts_match_float_reference(self):
         inputs = self._inputs(257)
         expected = _reference(*inputs)
-        for splits in (1, 2, 4, 8, 16):
-            with (
-                self.subTest(splits=splits),
-                patch.dict(
-                    os.environ,
-                    {
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": str(splits),
-                    },
-                ),
-            ):
-                actual = sparse_paged_gqa_attn(*inputs, page_size=32)
-                torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
-                torch.testing.assert_close(
-                    actual[0, :, 3], torch.zeros_like(actual[0, :, 3])
-                )
+        with self.subTest(mode="automatic"):
+            actual = sparse_paged_gqa_attn(*inputs, page_size=32)
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+            torch.testing.assert_close(
+                actual[0, :, 3], torch.zeros_like(actual[0, :, 3])
+            )
 
     def test_wide_selection_and_padded_pool_match_original(self):
         inputs = self._inputs(2051, head_dim=256)
         q, cache, table, lengths, selected = inputs
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "0"}):
-            expected = sparse_paged_gqa_attn(*inputs, page_size=32)
+        expected = _reference(*inputs)
         width = cache[0].numel()
         packed = torch.empty(
             cache.shape[0], width + 37, device=_DEVICE, dtype=cache.dtype
         )
         packed[:, :width].copy_(cache.flatten(1))
-        for splits in (1, 2, 4, 8, 16):
-            with (
-                self.subTest(splits=splits),
-                patch.dict(
-                    os.environ,
-                    {
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": str(splits),
-                    },
-                ),
-            ):
-                actual = sparse_paged_gqa_attn(
-                    q, packed, table, lengths, selected, page_size=32, kv_head_num=2
-                )
-                torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+        with self.subTest(mode="automatic"):
+            actual = sparse_paged_gqa_attn(
+                q, packed, table, lengths, selected, page_size=32, kv_head_num=2
+            )
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
 
     def test_split_graph_replay_refreshes_all_inputs_and_masks_bad_pages(self):
         q, cache, table, lengths, selected = self._inputs(2051)
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-            },
-        ):
-            sparse_paged_gqa_attn(q, cache, table, lengths, selected, page_size=32)
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = sparse_paged_gqa_attn(
-                    q, cache, table, lengths, selected, page_size=32, graph_capture=True
-                )
-            q.normal_()
-            cache.normal_()
-            table.copy_(table.flip(1))
-            lengths.fill_(97)
-            selected.fill_(-1)
-            selected[:, :, :65].copy_(torch.arange(65, device=_DEVICE)[None, None, :])
-            graph.replay()
-            torch.testing.assert_close(
-                actual,
-                _reference(q, cache, table, lengths, selected),
-                atol=2e-3,
-                rtol=1e-2,
+        sparse_paged_gqa_attn(q, cache, table, lengths, selected, page_size=32)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = sparse_paged_gqa_attn(
+                q, cache, table, lengths, selected, page_size=32, graph_capture=True
             )
-            for invalid in (0, cache.shape[0] + 7):
-                table.fill_(invalid)
-                graph.replay()
-                torch.testing.assert_close(actual, torch.zeros_like(actual))
-            table.fill_(1)
-            selected.fill_(1000000)
+        q.normal_()
+        cache.normal_()
+        table.copy_(table.flip(1))
+        lengths.fill_(97)
+        selected.fill_(-1)
+        selected[:, :, :65].copy_(torch.arange(65, device=_DEVICE)[None, None, :])
+        graph.replay()
+        torch.testing.assert_close(
+            actual,
+            _reference(q, cache, table, lengths, selected),
+            atol=2e-3,
+            rtol=1e-2,
+        )
+        for invalid in (0, cache.shape[0] + 7):
+            table.fill_(invalid)
             graph.replay()
             torch.testing.assert_close(actual, torch.zeros_like(actual))
+        table.fill_(1)
+        selected.fill_(1000000)
+        graph.replay()
+        torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
 class GroupedSparsePagedAttentionTest(unittest.TestCase):
@@ -460,20 +432,13 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         return q, cache, table, lengths, selected
 
     def original(self, inputs):
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "0",
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-            },
-        ):
-            return sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+        q, cache, table, lengths, selected = inputs
+        if cache.ndim == 2:
+            cache = cache[:, : 2 * 128 * 256].reshape(cache.shape[0], 2, 1, 128, 256)
+        return _reference(q, cache, table, lengths, selected)
 
     def test_grouped_padded_hybrid_pool_and_graph(self):
-        from rtp_llm.models_py.modules.qwen4_exp import (
-            grouped_sparse_paged_fmha as candidate,
-        )
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
 
         q, cache, table, lengths, selected = self.inputs()
         width = cache[0].numel()
@@ -485,14 +450,35 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         )
         packed[:, :width].copy_(cache.flatten(1))
         inputs = (q, packed, table, lengths, selected)
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
-            },
-        ):
+        with patch.object(
+            candidate,
+            "grouped_sparse_paged_split",
+            wraps=candidate.grouped_sparse_paged_split,
+        ) as invoked:
+            actual = sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+            self.assertEqual(invoked.call_count, 1)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = sparse_paged_gqa_attn(
+                    *inputs, page_size=128, kv_head_num=1, graph_capture=True
+                )
+            self.assertEqual(invoked.call_count, 2)
+        graph.replay()
+        torch.testing.assert_close(actual, self.original(inputs), atol=2e-3, rtol=1e-2)
+        packed[:, :width].normal_()
+        q.normal_()
+        table.copy_(table.flip(1))
+        graph.replay()
+        torch.testing.assert_close(actual, self.original(inputs), atol=2e-3, rtol=1e-2)
+        self.assertTrue(torch.isnan(packed[:, width:]).all())
+
+    def test_grouped_live_graph_inputs_and_invalid_pages(self):
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
+
+        for query_len in (1, 2, 3, 4):
+            inputs = self.inputs(query_len)
+            q, cache, table, lengths, selected = inputs
+            expected = self.original(inputs)
             with patch.object(
                 candidate,
                 "grouped_sparse_paged_split",
@@ -500,115 +486,55 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
             ) as invoked:
                 actual = sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
                 self.assertEqual(invoked.call_count, 1)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    actual = sparse_paged_gqa_attn(
-                        *inputs, page_size=128, kv_head_num=1, graph_capture=True
-                    )
-                self.assertEqual(invoked.call_count, 2)
-            graph.replay()
-            torch.testing.assert_close(
-                actual, self.original(inputs), atol=2e-3, rtol=1e-2
-            )
-            packed[:, :width].normal_()
-            q.normal_()
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = sparse_paged_gqa_attn(
+                    *inputs, page_size=128, kv_head_num=1, graph_capture=True
+                )
+            for scale in (0.0, 1.0, 4.0):
+                q.normal_().mul_(scale)
+                cache.normal_()
+                graph.replay()
+                torch.testing.assert_close(
+                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
+                )
+            lengths.fill_(97)
+            selected.fill_(-1)
+            selected[:, :, :65].copy_(torch.arange(65, device="cuda")[None, None, :])
             table.copy_(table.flip(1))
             graph.replay()
             torch.testing.assert_close(
                 actual, self.original(inputs), atol=2e-3, rtol=1e-2
             )
-            self.assertTrue(torch.isnan(packed[:, width:]).all())
-
-    def test_grouped_live_graph_inputs_and_invalid_pages(self):
-        from rtp_llm.models_py.modules.qwen4_exp import (
-            grouped_sparse_paged_fmha as candidate,
-        )
-
-        for query_len in (1, 2, 3, 4):
-            inputs = self.inputs(query_len)
-            q, cache, table, lengths, selected = inputs
-            expected = self.original(inputs)
-            with patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                    "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-                    "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
-                },
-            ):
-                with patch.object(
-                    candidate,
-                    "grouped_sparse_paged_split",
-                    wraps=candidate.grouped_sparse_paged_split,
-                ) as invoked:
-                    actual = sparse_paged_gqa_attn(
-                        *inputs, page_size=128, kv_head_num=1
-                    )
-                    self.assertEqual(invoked.call_count, 1)
-                torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    actual = sparse_paged_gqa_attn(
-                        *inputs, page_size=128, kv_head_num=1, graph_capture=True
-                    )
-                for scale in (0.0, 1.0, 4.0):
-                    q.normal_().mul_(scale)
-                    cache.normal_()
-                    graph.replay()
-                    torch.testing.assert_close(
-                        actual, self.original(inputs), atol=2e-3, rtol=1e-2
-                    )
-                lengths.fill_(97)
-                selected.fill_(-1)
-                selected[:, :, :65].copy_(
-                    torch.arange(65, device="cuda")[None, None, :]
-                )
-                table.copy_(table.flip(1))
-                graph.replay()
-                torch.testing.assert_close(
-                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
-                )
-                for invalid in (0, cache.shape[0] + 7):
-                    table.fill_(invalid)
-                    graph.replay()
-                    torch.testing.assert_close(actual, torch.zeros_like(actual))
-                table.fill_(1)
-                selected.fill_(1000000)
+            for invalid in (0, cache.shape[0] + 7):
+                table.fill_(invalid)
                 graph.replay()
                 torch.testing.assert_close(actual, torch.zeros_like(actual))
+            table.fill_(1)
+            selected.fill_(1000000)
+            graph.replay()
+            torch.testing.assert_close(actual, torch.zeros_like(actual))
 
     def test_unsupported_geometry_uses_existing_kernel(self):
-        from rtp_llm.models_py.modules.qwen4_exp import (
-            grouped_sparse_paged_fmha as candidate,
-        )
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
 
         heads = list(self.inputs())
         heads[0] = heads[0].repeat(1, 2, 1, 1)
-        heads[1] = heads[1].repeat(1, 1, 2, 1, 1)
+        heads[1] = heads[1].repeat(1, 1, 3, 1, 1)
         width = list(self.inputs())
         width[-1] = torch.cat((width[-1], width[-1][:, :, :1]), dim=-1)
         cases = (
-            ("batch", self.inputs(batch=7), 1, 64, 8),
-            ("heads", heads, 2, 64, 8),
+            ("heads", heads, 3, 64, 8),
             ("block", self.inputs(), 1, 32, 8),
-            ("splits", self.inputs(), 1, 64, 4),
             ("query_len", self.inputs(query_len=5), 1, 64, 8),
             ("selection", width, 1, 64, 8),
         )
         for name, inputs, kv_heads, block, splits in cases:
-            with self.subTest(name=name), patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                    "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": str(splits),
-                    "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "0",
-                },
-            ):
+            with self.subTest(name=name):
                 options = dict(page_size=128, kv_head_num=kv_heads, block_k=block)
                 expected = sparse_paged_gqa_attn(*inputs, **options)
-                with patch.dict(
-                    os.environ, {"RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1"}
-                ), patch.object(
+                with patch.object(
                     candidate,
                     "grouped_sparse_paged_split",
                     side_effect=AssertionError("unsupported path launched"),
@@ -622,40 +548,32 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         lengths.fill_(3)
         selected.fill_(-1)
         selected[:, :, 2047] = 0
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1",
-                "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-                "RTP_LLM_QWEN4_GROUPED_SPARSE_DECODE": "1",
-            },
-        ):
-            sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = sparse_paged_gqa_attn(
-                    *inputs, page_size=128, kv_head_num=1, graph_capture=True
-                )
-            for slot in (2047, 2048, 2050):
-                selected.fill_(-1)
-                selected[:, :, slot] = 0
-                graph.replay()
-                torch.testing.assert_close(
-                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
-                )
+        sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = sparse_paged_gqa_attn(
+                *inputs, page_size=128, kv_head_num=1, graph_capture=True
+            )
+        for slot in (2047, 2048, 2050):
             selected.fill_(-1)
-            selected[:, :, 2048:].copy_(torch.arange(3, device="cuda")[None, None, :])
+            selected[:, :, slot] = 0
             graph.replay()
-            expected = self.original(inputs)
-            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
-            # Keep selected entries valid-looking while length changes. Replay
-            # must read the new device length and overwrite old split states.
-            lengths.zero_()
-            graph.replay()
-            torch.testing.assert_close(actual, torch.zeros_like(actual))
-            lengths.fill_(3)
-            graph.replay()
-            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+            torch.testing.assert_close(
+                actual, self.original(inputs), atol=2e-3, rtol=1e-2
+            )
+        selected.fill_(-1)
+        selected[:, :, 2048:].copy_(torch.arange(3, device="cuda")[None, None, :])
+        graph.replay()
+        expected = self.original(inputs)
+        torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+        # Keep selected entries valid-looking while length changes. Replay
+        # must read the new device length and overwrite old split states.
+        lengths.zero_()
+        graph.replay()
+        torch.testing.assert_close(actual, torch.zeros_like(actual))
+        lengths.fill_(3)
+        graph.replay()
+        torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
 
 
 if __name__ == "__main__":

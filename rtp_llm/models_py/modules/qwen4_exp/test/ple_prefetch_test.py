@@ -1,11 +1,9 @@
 import gc
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.ple import Qwen4ExpNGramEmbedding
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 
 
 @unittest.skipUnless(
@@ -17,25 +15,18 @@ class PLEPrefetchTest(unittest.TestCase):
             (torch.arange(5 * 160).reshape(5, 160) % 32 + i).to(torch.float8_e4m3fn)
             for i in range(2)
         ]
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PLE_CPU_UVA": "1",
-                "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "1",
-            },
-        ):
-            module = Qwen4ExpNGramEmbedding(
-                shards,
-                torch.tensor([8, 8], dtype=torch.int64, device="cuda"),
-                torch.tensor([0, 8], dtype=torch.int64, device="cuda"),
-                torch.tensor([3, 5], dtype=torch.int64, device="cuda"),
-                ngram_size=2,
-                eos_token_id=0,
-                shard_indices=[1, 3],
-                total_shards=4,
-                distributed_reduce=True,
-                weight_scale=torch.tensor([0.25]),
-            )
+        module = Qwen4ExpNGramEmbedding(
+            shards,
+            torch.tensor([8, 8], dtype=torch.int64, device="cuda"),
+            torch.tensor([0, 8], dtype=torch.int64, device="cuda"),
+            torch.tensor([3, 5], dtype=torch.int64, device="cuda"),
+            ngram_size=2,
+            eos_token_id=0,
+            shard_indices=[1, 3],
+            total_shards=4,
+            distributed_reduce=True,
+            weight_scale=torch.tensor([0.25]),
+        )
         self.assertTrue(module.supports_prefetch)
         self.assertTrue(all(t.dtype == torch.float8_e4m3fn for t in module.shards))
         ids = torch.tensor([5, 16, -1, 0], dtype=torch.int64, device="cuda")
@@ -62,24 +53,17 @@ class PLEPrefetchTest(unittest.TestCase):
             (torch.arange(5 * 160).reshape(5, 160) + i * 1000).to(dtype)
             for i in range(2)
         ]
-        with patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_PLE_CPU_UVA": "1",
-                "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "1",
-            },
-        ):
-            module = Qwen4ExpNGramEmbedding(
-                shards,
-                torch.tensor([8, 8], dtype=torch.int64, device="cuda"),
-                torch.tensor([0, 8], dtype=torch.int64, device="cuda"),
-                torch.tensor([3, 5], dtype=torch.int64, device="cuda"),
-                ngram_size=2,
-                eos_token_id=0,
-                shard_indices=[1, 3],
-                total_shards=4,
-                distributed_reduce=True,
-            )
+        module = Qwen4ExpNGramEmbedding(
+            shards,
+            torch.tensor([8, 8], dtype=torch.int64, device="cuda"),
+            torch.tensor([0, 8], dtype=torch.int64, device="cuda"),
+            torch.tensor([3, 5], dtype=torch.int64, device="cuda"),
+            ngram_size=2,
+            eos_token_id=0,
+            shard_indices=[1, 3],
+            total_shards=4,
+            distributed_reduce=True,
+        )
         self.assertTrue(module.supports_prefetch)
         self.assertTrue(
             all(t.device.type == "cpu" and t.is_pinned() for t in module.shards)
@@ -123,6 +107,27 @@ class PLEPrefetchTest(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(first_output, first_expected, atol=0, rtol=0)
         torch.testing.assert_close(second_output, second_expected, atol=0, rtol=0)
+
+    def test_close_drains_consumers_and_releases_lookup_buffers(self):
+        module = self._module()
+        ids = torch.tensor([5, 6, 16], device="cuda", dtype=torch.int64)
+        expected = module._gather_torch(ids.cpu()).to("cuda")
+        consumer = torch.cuda.Stream()
+        handle = module.start_prefetch(ids)
+        with torch.cuda.stream(consumer):
+            rows = module.consume_prefetch(handle)
+            torch.cuda._sleep(2_000_000)
+            output = rows.clone()
+            module.finish_prefetch()
+        prefetcher = module._prefetcher
+        module.close()
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        self.assertEqual(prefetcher.retained_eager_bytes, 0)
+        self.assertEqual(module.shards, [])
+        self.assertFalse(module.supports_prefetch)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            module.gather(ids)
+        module.close()
 
     def test_active_slot_and_foreign_handle_are_rejected(self):
         module = self._module()
@@ -180,7 +185,7 @@ class PLEPrefetchTest(unittest.TestCase):
         self.assertTrue(ready.query())
 
     def test_memory_budget_falls_back_without_extra_allocation(self):
-        from rtp_llm.models_py.modules.qwen4_exp.ple_prefetch import PLEPrefetcher
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_prefetch import PLEPrefetcher
 
         module = self._module()
         module._prefetcher = PLEPrefetcher(

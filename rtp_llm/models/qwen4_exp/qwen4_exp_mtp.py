@@ -42,7 +42,7 @@ class Qwen4ExpMTPWeight(Qwen4ExpWeight):
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:
         # The released draft layer always owns these tensors.  Declare them even
-        # while QSA execution is feature-gated so manifest validation cannot
+        # while QSA is derived from checkpoint geometry so manifest validation cannot
         # silently lose part of the checkpoint.
         if len(layer_weights) != 1:
             raise ValueError(
@@ -120,7 +120,7 @@ class Qwen4ExpMTP(Qwen4Exp):
         config = getattr(self, "model_config", None)
         if not bool(getattr(config, "enable_qwen4_qsa", False)):
             raise RuntimeError(
-                "qwen4_exp MTP requires RTP_LLM_ENABLE_QWEN4_EXP_QSA=true; "
+                "qwen4_exp MTP requires checkpoint QSA geometry; "
                 "dense draft fallback is forbidden"
             )
         return super().load(skip_python_model=skip_python_model)
@@ -187,6 +187,7 @@ class Qwen4ExpMTP(Qwen4Exp):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
+        config.model_type = "qwen4_exp_mtp"
         with open(os.path.join(ckpt_path, "config.json")) as reader:
             root_config = json.load(reader)
         text_config = root_config["text_config"]
@@ -230,7 +231,6 @@ class Qwen4ExpMTP(Qwen4Exp):
         ]
         config.attn_config.rope_config.style = RopeStyle.Base
         config.attn_config.rope_config.base = int(mtp_config["rope_theta"])
-        config.enable_qwen4_ple = False
         config._qwen4_ple_layer_ids = []
         # QSA is the released draft attention contract. Config construction may
         # keep it disabled for checkpoint-inspection tools, but load() refuses a

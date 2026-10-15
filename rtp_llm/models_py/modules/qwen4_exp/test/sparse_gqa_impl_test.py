@@ -15,12 +15,14 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _select_attention_impl_key,
 )
-from rtp_llm.models_py.modules.qwen4_exp import sparse_gqa_impl
-from rtp_llm.models_py.modules.qwen4_exp.sparse_fmha import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+    sparse_paged_gqa_attn,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_fmha import (
     sparse_prefill_attn_torch_reference,
 )
-from rtp_llm.models_py.modules.qwen4_exp.sparse_gqa_impl import SparseGqaFmhaImpl
-from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import sparse_paged_gqa_attn
 
 _H_Q, _H_KV, _D = 24, 2, 256
 _DEV = "cuda"
@@ -248,13 +250,10 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         )
         table = torch.tensor([[1, 2, 3], [4, 5, 6]], device=_DEV, dtype=torch.int32)
         inputs.kv_cache_kernel_block_id_device = table
-        with (
-            patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": "1"}),
-            patch.object(
-                sparse_gqa_impl,
-                "FusedRopeKVCachePrefillOpQKVOut",
-                self._IdentityRopeWriter,
-            ),
+        with patch.object(
+            sparse_gqa_impl,
+            "FusedRopeKVCachePrefillOpQKVOut",
+            self._IdentityRopeWriter,
         ):
             impl = SparseGqaFmhaImpl(configs, inputs)
         impl.set_mtp_draft_mode(True)
@@ -532,7 +531,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
                 "sparse_paged_gqa_attn",
                 side_effect=_paged,
             ),
@@ -757,39 +756,27 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 q, paged_cache, table, kv_lens, indices, **kwargs
             )
 
-        for batch_rows in ("0", "1"):
-            calls.clear()
-            with (
-                patch.dict(os.environ, {"RTP_LLM_QWEN4_BATCH_RAGGED_GQA": batch_rows}),
-                patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha."
-                    "sparse_prefill_attn",
-                    side_effect=AssertionError("local sparse prefill must not run"),
-                ),
-                patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
-                    "sparse_paged_gqa_attn",
-                    side_effect=_record_paged,
-                ),
-            ):
-                got = impl.forward(
-                    qkv,
-                    kv_cache=SimpleNamespace(kv_cache_base=cache),
-                    selected_indices=selected,
-                )
-
-            torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
-            self.assertEqual(
-                calls,
-                (
-                    [
-                        ((1, _H_Q, 3, _D), [[4, 5, 6]], (1, 3, 6)),
-                        ((1, _H_Q, 2, _D), [[8, 9]], (1, 2, 6)),
-                    ]
-                    if batch_rows == "0"
-                    else [((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))]
-                ),
+        calls.clear()
+        with (
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
+                "sparse_prefill_attn",
+                side_effect=AssertionError("local sparse prefill must not run"),
+            ),
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
+                "sparse_paged_gqa_attn",
+                side_effect=_record_paged,
+            ),
+        ):
+            got = impl.forward(
+                qkv,
+                kv_cache=SimpleNamespace(kv_cache_base=cache),
+                selected_indices=selected,
             )
+
+        torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
+        self.assertEqual(calls, [((2, _H_Q, 3, _D), [[4, 5, 6], [8, 9, 0]], (2, 3, 6))])
 
     def test_nonzero_prefix_requires_the_paged_bridge_not_local_prefill(self):
         events = []
@@ -823,7 +810,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha."
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
                 "sparse_prefill_attn",
                 side_effect=AssertionError("local sparse prefill must not run"),
             ),
@@ -853,12 +840,12 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
         with (
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha."
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
                 "sparse_prefill_attn",
                 side_effect=lambda q, k, v, indices: torch.zeros_like(q),
             ) as local_prefill,
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
                 "sparse_paged_gqa_attn",
                 side_effect=AssertionError("paged prefill must not run"),
             ),
@@ -948,7 +935,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha.sparse_prefill_attn",
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha.sparse_prefill_attn",
                 side_effect=_record_sparse,
             ),
         ):
@@ -1001,7 +988,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             return q
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
             "sparse_paged_gqa_attn",
             side_effect=_record_paged,
         ):

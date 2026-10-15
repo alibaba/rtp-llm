@@ -1,42 +1,54 @@
+py_library(
+    name = "math_references",
+    srcs = glob(["reference/*.py"]),
+    deps = ["//rtp_llm/models_py:modules"],
+)
+
+py_test(
+    name = "upstream_fixture_test",
+    srcs = ["upstream_fixture_test.py", "upstream_fixture.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_test(
     name = "gated_residual_test",
     srcs = ["gated_residual_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "residual_stream_test",
     srcs = ["residual_stream_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "ple_test",
     srcs = ["ple_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "ple_gather_triton_test",
     srcs = ["ple_gather_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "ple_prefetch_test",
     srcs = ["ple_prefetch_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
     name = "ple_decode_test",
     srcs = ["ple_decode_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
@@ -44,8 +56,8 @@ py_test(
 # modeling_qwen4_exp.py; see the module docstring.
 py_test(
     name = "upstream_parity_test",
-    srcs = ["upstream_parity_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
@@ -53,173 +65,173 @@ py_test(
 # QWEN4_EXP_UPSTREAM_SRC is set.
 py_test(
     name = "gdn_upstream_parity_test",
-    srcs = ["gdn_upstream_parity_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_score_test",
-    srcs = ["indexer_score_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["indexer_score_test.py", "reference/indexer_score.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_compressor_test",
     srcs = ["indexer_compressor_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
 )
 
 py_test(
     name = "indexer_decode_triton_test",
     srcs = ["indexer_decode_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_prefill_triton_test",
-    srcs = ["indexer_prefill_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["indexer_prefill_triton_test.py", "scalar_cache_reference.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "moe_align_triton_test",
     srcs = ["moe_align_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "moe_topk_triton_test",
     srcs = ["moe_topk_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_runtime_contract_test",
     srcs = ["indexer_runtime_contract_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
 )
 
 py_test(
     name = "qsa_runtime_test",
     srcs = ["qsa_runtime_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "qsa_topk_triton_test",
-    srcs = ["qsa_topk_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["qsa_topk_triton_test.py", "topk_reference.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "qsa_decode_graph_test",
     srcs = ["qsa_decode_graph_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_paged_score_test",
     srcs = ["indexer_paged_score_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "sparse_attention_test",
-    srcs = ["sparse_attention_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["sparse_attention_test.py", "reference/sparse_attention.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "sparse_fmha_test",
-    srcs = ["sparse_fmha_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["sparse_fmha_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "norm_triton_test",
     srcs = ["norm_triton_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "sparse_gqa_impl_test",
-    srcs = ["sparse_gqa_impl_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["sparse_gqa_impl_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "sparse_paged_fmha_test",
     srcs = ["sparse_paged_fmha_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "draft_prefill_graph_test",
     srcs = ["draft_prefill_graph_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "sparse_prefill_bitmap_test",
-    srcs = ["sparse_prefill_bitmap_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    srcs = ["sparse_prefill_bitmap_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "indexer_prefill_score_test",
     srcs = ["indexer_prefill_score_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "small_qk_norm_test",
     srcs = ["small_qk_norm_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
     name = "small_moe_gemv_test",
     srcs = ["small_moe_gemv_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {"gpu": "A10"},
 )
 
 py_test(
     name = "pd_cache_store_test",
     srcs = ["pd_cache_store_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
 )
 
 py_test(
-    name = "gdn_post_conv_test",
-    srcs = ["gdn_post_conv_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    name = "gdn_composition_test",
+    srcs = ["gdn_composition_test.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "fp8_kv_test",
     srcs = ["fp8_kv_test.py", "sparse_paged_fmha_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
 )
 
@@ -235,16 +247,41 @@ py_test(
 py_test(
     name = "vocab_embedding_test",
     srcs = ["vocab_embedding_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "upstream_parity_qualification",
+    srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
+    main = "upstream_parity_test.py",
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
+    tags = ["manual"],
+    exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20"}}),
+)
+
+py_test(
+    name = "gdn_upstream_parity_qualification",
+    srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
+    main = "gdn_upstream_parity_test.py",
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
+    tags = ["manual"],
+    exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20"}}),
 )
 
 py_test(
     name = "fp8_dense_gemv_test",
     srcs = ["fp8_dense_gemv_test.py"],
     deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    exec_properties = {"gpu": "SM12x"},
+)
+
+py_test(
+    name = "ple_commit_test",
+    srcs = ["ple_commit_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
 )

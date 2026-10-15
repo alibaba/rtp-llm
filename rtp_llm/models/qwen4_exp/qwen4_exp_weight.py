@@ -66,13 +66,9 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
     separate runtime tensor named ``<name>.<global shard index>`` so loading does
     not create a second table-sized stack/concat allocation.
 
-    Shards default to CPU memory; ``cpu_offload=False`` uses the loader's device.
-    Projections, convolution weights and hash metadata retain normal placement.
-
-    Hashed ids can target any rank, so the PLE consumer routes lookups and combines
-    results across the TP group. The descriptor remains behind
-    ``ModelConfig.enable_qwen4_ple`` (default false) because that correctness path
-    deliberately rejects unsupported production modes.
+    Shards always remain on the host. Projections, convolution weights and hash
+    metadata retain their ordinary execution-device placement. The PLE consumer
+    routes rank-local lookups and combines results across the TP group.
     """
 
     supports_fastsafetensors_iteration = False
@@ -82,14 +78,14 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         name: str,
         weights: List[CkptWeightInfo],
         *,
-        cpu_offload: bool = True,
         scale_weight: Optional[CkptWeightInfo] = None,
         preserve_fp8: bool = False,
         **kwargs: Any,
     ) -> None:
+        if "cpu_offload" in kwargs:
+            raise TypeError("Qwen4 PLE table residency is fixed to CPU")
         super().__init__(name, weights, **kwargs)
-        self.cpu_offload = cpu_offload
-        self.resident_device = "cpu" if cpu_offload else None
+        self.resident_device = "cpu"
         self.scale_weight = scale_weight
         self.preserve_fp8 = preserve_fp8
         self.resident_output_devices = (
@@ -102,8 +98,6 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         tp_rank = load_config.tp_rank
         if tp_size < 1:
             raise ValueError(f"qwen4_exp PLE requires positive TP, got {tp_size}")
-        if tp_size == 1 and not self.cpu_offload:
-            raise ValueError("qwen4_exp TP1 PLE requires CPU table residency")
         if tp_rank < 0 or tp_rank >= tp_size:
             raise ValueError(
                 f"qwen4_exp PLE tp_rank must be in [0, {tp_size}), got {tp_rank}"
@@ -231,27 +225,11 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._moe_only_fp8 = (
-            getattr(self.model_config, "_qwen4_moe_only_fp8", False) is True
-        )
-        self._moe_only_fp4 = (
-            getattr(self.model_config, "_qwen4_moe_only_fp4", False) is True
+        self._moe_only_fp4 = bool(
+            getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
         )
         if self._moe_only_fp4:
             self._align_size = 0
-        if self._moe_only_fp8:
-            if self.ffn_tp_size != 1:
-                raise ValueError(
-                    "Qwen4 expert FP8 requires FFN TP=1 (expert parallelism)"
-                )
-            # Shared expert and all non-expert projections remain BF16.
-            self._align_size = 0
-
-    def _get_moe_config(self):
-        config = super()._get_moe_config()
-        if self._moe_only_fp8:
-            config.align_size = 128
-        return config
 
     def _process_meta(self, meta_dict: Any, weight_keys: Collection[str]):
         for key in weight_keys:
@@ -334,32 +312,12 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         method set -- so the extras are appended per layer here.
         """
         info = super()._get_weight_info()
-        if getattr(self.model_config, "_qwen4_vocab_cpu_offload", False):
-            for weight in info.weights:
-                if weight.name == W.embedding:
-                    weight.resident_device = "cpu"
-                    weight.pinned_memory = True
-                    weight.supports_fastsafetensors_iteration = False
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
         if self._moe_only_fp4:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(
-                info.weights,
-                info.layer_weights,
-                attention_fp8=bool(
-                    getattr(self.model_config, "_qwen4_attention_fp8", False)
-                ),
-                gdn_fp8=not bool(getattr(self.model_config, "_qwen4_gdn_bf16", False)),
-                full_fp8=bool(
-                    getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
-                ),
-            )
-        if self._moe_only_fp8:
-            from rtp_llm.models.qwen4_exp.moe_fp8 import Qwen4MoeFp8WeightInfo
-
-            return Qwen4MoeFp8WeightInfo(info.weights, info.layer_weights)
+            return Qwen4MoeFp4WeightInfo(info.weights, info.layer_weights)
         return info
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:
@@ -381,12 +339,10 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
             )
 
     def _append_ple_weights(self, layer_weights: List[List[WeightModule]]) -> None:
-        """Add PLE weights only when its restricted correctness path is enabled.
+        """Map checkpoint PLE layers through the rank-local host-table loader.
 
-        Keeping this opt-in is a memory-safety requirement, not just a feature
-        switch: requesting the table with a plain descriptor materializes 102.4GB
-        per rank before TP splitting. ``Qwen4ExpPleNgramWeight`` performs source
-        selection first, and its consumer performs distributed rank-local lookups.
+        A plain descriptor would materialize the 102.4 GB table per rank before
+        TP splitting. The specialized loader selects source shards first.
         """
         ple_ids = getattr(self.model_config, "_qwen4_ple_layer_ids", [])
         if not ple_ids or not getattr(self.model_config, "enable_qwen4_ple", False):
@@ -419,16 +375,12 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         )
                         for shard in range(shard_count)
                     ],
-                    cpu_offload=getattr(
-                        self.model_config, "qwen4_ple_cpu_offload", True
-                    ),
                     scale_weight=(
                         CkptWeightInfo(
                             self.prefix
                             + "layers.{i}.ple.ple_embedding.ngram_embedding.weight_scale"
                         )
-                        if getattr(self, "_moe_only_fp8", False) is True
-                        or getattr(self.model_config, "_qwen4_fp8_source", False)
+                        if getattr(self.model_config, "_qwen4_fp8_source", False)
                         else None
                     ),
                     preserve_fp8=bool(

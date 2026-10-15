@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -26,6 +25,8 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     moe_align_block_size_torch,
 )
 from rtp_llm.utils.model_weight import W
+
+from .decode_capabilities import decode_capabilities
 
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
@@ -62,29 +63,10 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
-        self._qwen4_decode_alignment = (
-            os.environ.get("RTP_LLM_QWEN4_TRITON_MOE_ALIGN", "0") == "1"
-            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
-            and self.E == 512
-            and self.top_k == 10
-            and self.w1.dtype == torch.bfloat16
-            and torch.version.hip is None
-        )
-        self._qwen4_decode_tiles = (
-            os.environ.get("RTP_LLM_QWEN4_SM120_MOE_TILES", "0") == "1"
-            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
-            and (self.E, self.N, self.K, self.top_k) == (512, 160, 2560, 10)
-            and self.w1.dtype == torch.bfloat16
-            and self.w1.is_cuda
-            and torch.version.hip is None
-            and torch.cuda.get_device_capability(self.w1.device) == (12, 0)
-        )
-
-        self._qwen4_small_moe_gemv = (
-            os.environ.get("RTP_LLM_QWEN4_SMALL_MOE_GEMV", "0") == "1"
-            and bool(getattr(config.model_config, "enable_qwen4_qsa", False))
-            and self.ep_size == 1
-        )
+        capabilities = decode_capabilities(self.w1, self.top_k, self.ep_size)
+        self._decode_alignment = capabilities.alignment
+        self._decode_tiles = capabilities.tuned_tiles
+        self._small_moe_gemv = capabilities.small_gemv
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -107,14 +89,14 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_weights is not None
 
         if (
-            self._qwen4_small_moe_gemv
+            self._small_moe_gemv
             and activation in ("silu", "SiGLU")
             and expert_map is None
             and a2_scale is None
             and not apply_router_weight_on_input
             and not extra_expert_args
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv import (
+            from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
                 small_moe_gemv,
             )
 
@@ -139,8 +121,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Config selection for both GEMMs
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
-        if self._qwen4_decode_tiles:
-            from rtp_llm.models_py.modules.qwen4_exp.moe_align_triton import (
+        if self._decode_tiles:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
                 sm120_decode_gemm_configs,
             )
 
@@ -154,8 +136,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
-        if self._qwen4_decode_alignment and 0 < M <= 32:
-            from rtp_llm.models_py.modules.qwen4_exp.moe_align_triton import (
+        if self._decode_alignment and 0 < M <= 32:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
                 moe_align_decode,
             )
 

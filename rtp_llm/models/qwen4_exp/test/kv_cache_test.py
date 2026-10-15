@@ -1,7 +1,5 @@
-import os
 import pickle
 import unittest
-from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -48,53 +46,20 @@ def _config(num_layers=8, interval=4):
 
 
 class FixedLinearCapacityTest(unittest.TestCase):
-    def _build(self, interval=4):
-        return build_qwen4_exp_kv_cache_spec_descs(
-            _config(interval=interval), [1], _PLE_KERNEL, _NGRAM, 128, 4
+    def test_common_planner_owns_linear_capacity_and_native_pickle_preserves_budget(
+        self,
+    ):
+        layers = build_qwen4_exp_kv_cache_spec_descs(
+            _config(), [1], _PLE_KERNEL, _NGRAM, 128, 4
         )
-
-    def test_default_preserves_paged_capacities(self):
-        for value in (None, "0"):
-            with self.subTest(value=value), patch.dict(os.environ, clear=False):
-                os.environ.pop("RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS", None)
-                if value is not None:
-                    os.environ["RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS"] = value
-                self.assertTrue(
-                    all(d.capacity is None for layer in self._build() for d in layer)
-                )
-
-    def test_fixed_linear_pool_is_charged_and_survives_native_pickle(self):
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS": "65"}):
-            layers = self._build()
-        count = 0
         for layer in layers:
             for desc in layer:
                 restored = pickle.loads(pickle.dumps(desc))
                 if desc.cache_type == KVCacheSpecType.LINEAR:
-                    count += 1
-                    self.assertEqual(restored.capacity.explicit_block_num, 65)
+                    self.assertIsNone(restored.capacity.explicit_block_num)
                     self.assertTrue(restored.capacity.charge_to_paged_budget)
-                    self.assertIsNone(restored.capacity.reservable)
                 else:
                     self.assertIsNone(restored.capacity)
-        self.assertEqual(count, 6)
-
-    def test_mtp_full_only_pools_remain_paged(self):
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS": "65"}):
-            self.assertTrue(
-                all(
-                    d.capacity is None
-                    for layer in self._build(interval=1)
-                    for d in layer
-                )
-            )
-
-    def test_rejects_no_usable_blocks_and_invalid_uint32(self):
-        for value in ("1", "-1", "4294967296", "abc", "1.5"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS": value}
-            ), self.assertRaisesRegex(ValueError, "linear cache blocks"):
-                self._build()
 
 
 class PleStateDescTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Checkpoint contract for the selective Qwen4 expert FP8 path."""
+"""Official Qwen4 FP8 checkpoint header, scale and manifest validation."""
 
 import json
 import re
@@ -8,11 +8,6 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.model_loader.ffn_weight import MoeWeight
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
-from rtp_llm.utils.model_weight import W
 
 _EXPERT_WEIGHT = re.compile(
     r"(?:model\.language_model|mtp)\.layers\.\d+\.mlp\.experts\.\d+\."
@@ -142,32 +137,3 @@ def validate_moe_fp8_checkpoint(config_json: dict, weight_map: Mapping, root) ->
                     or metadata["shape"] != shape
                 ):
                     raise ValueError(f"Qwen4 FP8 tensor dtype/shape mismatch: {name}")
-
-
-class Qwen4MoeFp8WeightInfo(ModelWeightInfo):
-    """Keep attention, GDN, shared experts, PLE and HC in their BF16 descriptors."""
-
-    def to_quant_weight_info(self, quant_config):
-        if (
-            not isinstance(quant_config, Fp8BlockWiseQuantConfig)
-            or not quant_config.is_quanted()
-            or quant_config.group_size() != 128
-        ):
-            raise ValueError("Qwen4 expert FP8 requires prequantized 128x128 weights")
-        layers = []
-        for weights in self.layer_weights:
-            layer = []
-            for weight in weights:
-                if isinstance(weight, MoeWeight):
-                    children = [
-                        (
-                            child.create(child, quant_config)
-                            if child.name in (W.moe_w1, W.moe_w2)
-                            else child
-                        )
-                        for child in weight.sub_weights.values()
-                    ]
-                    weight = MoeWeight(sub_weights=children, config=weight.config)
-                layer.append(weight)
-            layers.append(layer)
-        return ModelWeightInfo(list(self.weights), layers)

@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,16 +86,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
     def setUp(self):
         self._temp_dir = tempfile.TemporaryDirectory()
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(self._config()))
-        with mock.patch.dict(
-            os.environ,
-            {
-                # PLE is target-only, while QSA is mandatory for a serviceable
-                # draft and must retain the explicit process opt-in.
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "true",
-            },
-        ):
-            self.config = Qwen4ExpMTP.create_config(self._temp_dir.name)
+        self.config = Qwen4ExpMTP.create_config(self._temp_dir.name)
 
     def tearDown(self):
         self._temp_dir.cleanup()
