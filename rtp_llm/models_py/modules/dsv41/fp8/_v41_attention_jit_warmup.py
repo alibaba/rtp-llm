@@ -334,17 +334,19 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                     offset:
                 ]
                 for replay in (False, True):
-                    _require_launch(
-                        meta.try_chunk_metadata(
-                            chunk_prefix,
-                            chunk_lengths,
-                            chunk_req,
-                            layout.ratio,
-                            attn.window_size,
-                            replay,
-                        ),
-                        "chunk metadata",
-                    )
+                    for compact_replay in (False, True):
+                        _require_launch(
+                            meta.try_chunk_metadata(
+                                chunk_prefix,
+                                chunk_lengths,
+                                chunk_req,
+                                layout.ratio,
+                                attn.window_size,
+                                replay,
+                                compact_replay=compact_replay,
+                            ),
+                            "chunk metadata",
+                        )
         for offset, table_offset in _slot_metadata_layouts():
             metadata_positions = _indexer_warmup_vector(
                 rows, torch.int64, device, 1, offset
@@ -695,6 +697,12 @@ def _warm_indexer(attn, max_seq_len, device):
             vector_stride=stride,
             vector_offset=offset,
         )
+
+
+def _warm_swa_refresh(device):
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_refresh_triton
+
+    _require_launch(_v41_swa_refresh_triton.warmup(device), "ragged SWA refresh")
 
 
 def _warm_candidate_topk(device):
@@ -1223,6 +1231,7 @@ def warmup_v41_attention_jit(
         _WARMED.add(key)
 
     with torch.inference_mode(), torch.cuda.device(device):
+        run(("swa_refresh",), partial(_warm_swa_refresh, device))
         for key, attn in attentions.items():
             run(("flash_mla", key), partial(_warm_flash_mla, attn, device))
             run(("q_norm_rope", key), partial(_warm_q_norm_rope, attn, device))

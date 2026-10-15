@@ -45,6 +45,27 @@ def inputs(batch=3, device="cuda"):
 
 
 class CPUFallbackTest(unittest.TestCase):
+    def test_ragged_descriptor_is_lazy_and_supports_padded_row_starts(self):
+        flat = torch.arange(70).view(14, 5)
+        rows = workspace.SwaRows(flat, (0, 3, 2), row_starts=(0, 4, 10))
+        self.assertIsNone(rows._views)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([t.shape[0] for t in rows], [0, 3, 2])
+        self.assertTrue(torch.equal(rows[1], flat[4:7]))
+        self.assertIs(rows[1], rows[1])
+        with self.assertRaises(ValueError):
+            workspace.SwaRows(flat, (3, 2))
+        with self.assertRaises(ValueError):
+            workspace.SwaRows(flat, (3,), row_starts=(13,))
+
+    def test_ragged_descriptor_cpu_fallback(self):
+        globals_by_req = [(torch.ones(3, 4), None), (torch.ones(5, 4) * 2, None)]
+        source = torch.arange(12).reshape(3, 4).float()
+        rows = workspace.SwaRows(source, (2, 1))
+        result = workspace.combine_kv({}, globals_by_req, rows)
+        self.assertTrue(torch.equal(result, reference(globals_by_req, rows)))
+        self.assertIsInstance(workspace.split_swa_rows(source, (2, 1)), list)
+
     def test_cpu_never_retains_batch_workspace(self):
         shared = {}
         globals_by_req = [(torch.ones(3, 4), None), (torch.ones(5, 4) * 2, None)]
@@ -65,6 +86,137 @@ class CPUFallbackTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class CUDAWorkspaceTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "swa_refresh",
+            Path(__file__).resolve().parents[1] / "_v41_swa_refresh_triton.py",
+        )
+        cls.refresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.refresh)
+        cls.refresh.warmup(torch.device("cuda"))
+        patcher = patch.object(workspace, "_refresh_backend", return_value=cls.refresh)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
+
+    def test_ragged_slab_bitwise_refresh_retention_and_padded_storage(self):
+        shared = {}
+        gs = [
+            (
+                torch.full(
+                    (8192 + i * 257, 512), i + 1, device="cuda", dtype=torch.bfloat16
+                ),
+                None,
+            )
+            for i in range(3)
+        ]
+        for sizes, starts in (((0, 127, 259), None), ((31, 0, 129), (0, 256, 512))):
+            total = (
+                sum(sizes)
+                if starts is None
+                else max(s + n for s, n in zip(starts, sizes))
+            )
+            flat = torch.empty(
+                (total, 1024 if starts else 512), device="cuda", dtype=torch.bfloat16
+            )[:, :512]
+            rows = workspace.split_swa_rows(flat, sizes, row_starts=starts)
+            output = workspace.combine_kv(shared, gs, rows)
+            old_source = weakref.ref(flat)
+            del rows, flat
+            self.assertIsNone(old_source())
+            flat = torch.empty(
+                (total, 1024 if starts else 512), device="cuda", dtype=torch.bfloat16
+            )[:, :512]
+            flat.view(torch.int16).random_(-32768, 32767)
+            rows = workspace.split_swa_rows(flat, sizes, row_starts=starts)
+            with patch.object(
+                torch, "_foreach_copy_", side_effect=AssertionError("ragged foreach")
+            ):
+                self.assertIs(workspace.combine_kv(shared, gs, rows), output)
+            self.assertIsNone(rows._views)
+            self.assertTrue(
+                torch.equal(
+                    output.view(torch.uint8), reference(gs, rows).view(torch.uint8)
+                )
+            )
+
+    def test_ragged_slab_reorder_source_and_request_domain_invalidate(self):
+        gs, _ = inputs(3)
+        shared = {}
+        flat = torch.ones((64 + 127 + 256, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (64, 127, 256))
+        output = workspace.combine_kv(shared, gs, rows)
+        for mutation in ("source", "reorder", "layout"):
+            old = weakref.ref(output)
+            del output
+            if mutation == "source":
+                gs[1] = (gs[1][0].clone(), None)
+            elif mutation == "reorder":
+                gs.reverse()
+            else:
+                rows = workspace.SwaRows(flat, (127, 256, 64))
+            output = workspace.combine_kv(shared, gs, rows)
+            self.assertIsNone(old())
+            self.assertTrue(torch.equal(output, reference(gs, rows)))
+        old = weakref.ref(output)
+        del output
+        shared.pop("prefill_kv_workspace")
+        self.assertIsNone(old())
+
+    def test_ragged_slab_graph_updates_and_stream_order(self):
+        gs, _ = inputs(3)
+        flat = torch.zeros((129 + 33 + 0, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (129, 33, 0))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        shared = {}
+        with torch.cuda.stream(stream):
+            output = workspace.combine_kv(shared, gs, rows)
+            workspace.combine_kv(shared, gs, rows)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            workspace.combine_kv(shared, gs, rows)
+        for value in (37, -18):
+            flat.fill_(value)
+            graph.replay()
+            self.assertTrue(torch.equal(output, reference(gs, rows)))
+
+    def test_ragged_copy_runtime_width_stride_empty_rows_and_skew(self):
+        # The startup kernel must handle different widths, noncontiguous rows,
+        # empty requests and a long final tail without compiling a new variant.
+        for width in (4, 68, 512):
+            sizes = (1, 0, 1, 8191)
+            total = sum(sizes)
+            source = torch.empty(
+                (total, width + 4), device="cuda", dtype=torch.bfloat16
+            )[:, :width]
+            source.view(torch.int16).random_(-32768, 32767)
+            output = torch.zeros(
+                (total + 4 * 3, width), device="cuda", dtype=torch.bfloat16
+            )
+            expected = output.clone()
+            layout, src, dst, tiles = [], 0, 0, 0
+            for size in sizes:
+                dst += 3
+                tiles += (
+                    size * (width // 4) + self.refresh._BLOCK - 1
+                ) // self.refresh._BLOCK
+                layout.append((src, dst, size, tiles))
+                expected[dst : dst + size].copy_(source[src : src + size])
+                src += size
+                dst += size
+            metadata = torch.tensor(layout, dtype=torch.int64, device="cuda")
+            with patch.object(
+                self.refresh._copy_swa_rows,
+                "warmup",
+                side_effect=AssertionError("request compiled a new SWA kernel"),
+            ):
+                self.refresh.copy_rows(source, output, metadata, tiles)
+            self.assertTrue(
+                torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+            )
+
     def test_small_mixed_batch_negative_cache_and_readmission(self):
         shared = {}
         globals_by_req = [

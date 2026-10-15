@@ -25,7 +25,7 @@ _INT32_MAX = 2**31 - 1
 
 @lru_cache(maxsize=16)
 def _device_supported(device):
-    return torch.cuda.get_device_capability(device) in ((10, 0), (10, 3))
+    return torch.cuda.get_device_capability(device)[0] == 10
 
 
 if triton is not None:
