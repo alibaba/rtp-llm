@@ -66,7 +66,7 @@ def _chunk_metadata_kernel(
 def try_chunk_metadata(
     prefixes, lengths, requests, ratio, window, replay, *, compact_replay=False
 ):
-    """Original long-arithmetic chunk offsets, counts and SWA starts in one launch."""
+    """Long-arithmetic chunk metadata; prefix/length integer dtypes may differ."""
     if not (
         isinstance(prefixes, torch.Tensor)
         and isinstance(lengths, torch.Tensor)
@@ -77,7 +77,6 @@ def try_chunk_metadata(
         and _integer_vector(prefixes, prefixes.numel(), prefixes.device)
         and _integer_vector(lengths, prefixes.numel(), prefixes.device)
         and _integer_vector(requests, requests.numel(), prefixes.device)
-        and prefixes.dtype == lengths.dtype
         and requests.dtype == torch.int64
         and ratio in (1, 2)
         and type(window) is int
