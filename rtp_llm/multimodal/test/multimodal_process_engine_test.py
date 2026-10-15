@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import concurrent.futures
 import io
 import json
@@ -1897,6 +1898,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.last_handle = None
         self.request_ids = []
         self.user_ids = []
+        self.input_urls = []
 
     def is_enabled(self) -> bool:
         return True
@@ -1905,6 +1907,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.calls += 1
         self.request_ids.append(str(request.id))
         self.user_ids.append(request.user_id)
+        self.input_urls.append([mi.url for mi in mm_inputs])
         if self._rewrite_suffix is not None:
             rewritten = [
                 MultimodalInput(
@@ -2097,7 +2100,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         finally:
             engine.stop()
 
-    def _make_engine(self, mm_part=None):
+    def _make_engine(self, mm_part=None, device="cuda:0"):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
@@ -2110,7 +2113,112 @@ class MMProcessEngineGreenNetTest(TestCase):
             model.model_config,
             vit_config,
             ProfilingDebugLoggingConfig(),
+            device=device,
         )
+
+    def _make_v41_engine_and_request(self):
+        from rtp_llm.config.dsv41_config import V41Config
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            image_token_types,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+        from rtp_llm.utils.grpc_util import trans_from_tensor
+
+        config = V41Config.from_dict(
+            {
+                "text_config": {
+                    "hidden_size": 8,
+                    "vocab_size": 129280,
+                    "max_position_embeddings": 128,
+                },
+                "vision_config": {
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_hidden_layers": 1,
+                    "patch_size": 14,
+                    "downsample_ratio": 3,
+                    "rope_theta": 10000.0,
+                    "max_image_tokens": 1024,
+                    "min_pixels": 0,
+                },
+                "quantization_config": {},
+                "dtype": "bfloat16",
+                "bos_token_id": 0,
+                "eos_token_id": 1,
+                "pad_token_id": 2,
+                "image_token_id": 129264,
+            }
+        )
+        adapter = DeepSeekV41VisionEmbedding(config, device="cpu").eval()
+        with torch.no_grad():
+            for parameter in adapter.parameters():
+                parameter.fill_(0.125)
+        request = MultimodalInputsPB(request_id=101, timeout_ms=30000)
+        request.v41_inputs.schema_version = 1
+        data = io.BytesIO()
+        Image.new("RGB", (42, 42)).save(data, format="PNG")
+        image = request.v41_inputs.images.add(
+            start=0,
+            n_vit_h=3,
+            n_vit_w=3,
+            content_sha256="a" * 64,
+            processor_identity=adapter.processor_config.identity,
+            source_bytes=data.getvalue(),
+        )
+        image.types.extend(image_token_types(1, 1).tolist())
+        image.patches.CopyFrom(
+            trans_from_tensor(torch.zeros(9, 3, 14, 14, dtype=torch.bfloat16))
+        )
+        return self._make_engine(adapter, device="cpu"), request
+
+    def test_v41_cache_hits_still_inspect_source_for_each_uid(self):
+        engine, request = self._make_v41_engine_and_request()
+        provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
+        engine._greennet_provider = provider
+        try:
+            with patch.object(
+                engine.mm_part,
+                "_encode_image_compute",
+                wraps=engine.mm_part._encode_image_compute,
+            ) as encode:
+                result = engine.mm_embedding_rpc(request, user_id="uid-allow")
+                self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
+                for code, expected in (
+                    (2, ExceptionType.UNSAFE_INPUT_CONTENT),
+                    (11, ExceptionType.MM_PROCESS_ERROR),
+                ):
+                    request.request_id += 1
+                    provider._verdict = GreenNetVerdict(
+                        passed=False, code=code, message="inspection refused"
+                    )
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        engine.mm_embedding_rpc(request, user_id=f"uid-{code}")
+                    self.assertEqual(raised.exception.exception_type, expected)
+                self.assertEqual(encode.call_count, 1)
+            self.assertEqual(provider.user_ids, ["uid-allow", "uid-2", "uid-11"])
+            self.assertEqual(provider.request_ids, ["101", "102", "103"])
+            for urls in provider.input_urls:
+                self.assertEqual(
+                    base64.b64decode(urls[0].split(",", 1)[1]),
+                    request.v41_inputs.images[0].source_bytes,
+                )
+        finally:
+            engine.stop()
+
+    def test_v41_disabled_inspection_needs_no_source_payload(self):
+        engine, request = self._make_v41_engine_and_request()
+        engine._greennet_provider = GreenNetProvider()
+        request.v41_inputs.images[0].ClearField("source_bytes")
+        try:
+            with patch.object(engine, "_begin_greennet") as inspect:
+                result = engine.mm_embedding_rpc(request)
+            inspect.assert_not_called()
+            self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
+        finally:
+            engine.stop()
 
     def _make_input(self, url):
         return MultimodalInput(

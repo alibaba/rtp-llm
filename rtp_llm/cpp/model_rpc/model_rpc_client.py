@@ -553,6 +553,7 @@ def trans_input(input_py: GenerateInput):
             target.patches.CopyFrom(trans_from_tensor(image.patches))
             target.content_sha256 = image.content_sha256
             target.processor_identity = image.processor_identity
+            target.source_bytes = image.source_bytes
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
