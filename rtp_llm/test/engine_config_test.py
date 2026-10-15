@@ -230,7 +230,7 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 30)
         config.p2p_kv_leak_exit_threshold_percent = 45
         state = config.__getstate__()
-        self.assertEqual(len(state), 25)
+        self.assertEqual(len(state), 27)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
@@ -251,6 +251,19 @@ class EngineConfigTest(TestCase):
 
         self.assertTrue(restored.p2p_rdma_enable_h2d_copy)
         self.assertEqual(restored.p2p_rdma_staging_total_bytes, 32 * 1024 * 1024)
+
+
+    def test_cache_store_config_preserves_writeback_fields(self):
+        config = CacheStoreConfig()
+        self.assertFalse(config.p2p_writeback_enable)
+        self.assertEqual(config.p2p_writeback_timeout_ms, 5000)
+        config.p2p_writeback_enable = True
+        config.p2p_writeback_timeout_ms = 1234
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(len(config.__getstate__()), 28)
+        self.assertTrue(restored.p2p_writeback_enable)
+        self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
 
 
 class SetupPdSepConfigTest(TestCase):

@@ -48,7 +48,8 @@ public:
 
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType&               cache_keys,
-                                     const std::function<bool(size_t)>& valid_prefix = {});
+                                     const std::function<bool(size_t)>& valid_prefix = {},
+                                     bool allow_storage_backend_lookup = true);
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -63,7 +64,8 @@ private:
                                                                                   int64_t access_time_us) const;
     BlockTreeMatchResult                                createMatchResult(std::vector<TreeNode*>&            path,
                                                                           const CacheKeysType&               cache_keys,
-                                                                          const std::function<bool(size_t)>& valid_prefix);
+                                                                          const std::function<bool(size_t)>& valid_prefix,
+                                                                          bool allow_storage_backend_lookup);
     StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool           commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void           abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

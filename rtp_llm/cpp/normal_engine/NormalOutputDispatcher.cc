@@ -523,6 +523,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
                                  batch_custom_output};
+    update_info.kv_ready_token_count = stream->seqLength();
     stream->update(update_info);
 }
 
