@@ -231,6 +231,28 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
 }
 
+TEST(ModelRpcProtoTest, RemoteCacheMetadataPreservesGdrStatusWireFormat) {
+    RemoteOperationResponsePB response;
+    // Existing GDR workers encode TIMEOUT as field 3 with enum value 3.
+    ASSERT_TRUE(response.ParseFromString(std::string("\x18\x03", 2)));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+
+    response.add_hosts()->set_host_ip_port("host:1");
+    response.add_backend_locations()->add_locations()->add_specs()->set_uri("cache_uri");
+    std::string serialized;
+    ASSERT_TRUE(response.SerializeToString(&serialized));
+
+    RemoteOperationResponsePB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(serialized));
+    EXPECT_EQ(parsed.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+    ASSERT_EQ(parsed.hosts_size(), 1);
+    EXPECT_EQ(parsed.hosts(0).host_ip_port(), "host:1");
+    ASSERT_EQ(parsed.backend_locations_size(), 1);
+    ASSERT_EQ(parsed.backend_locations(0).locations_size(), 1);
+    ASSERT_EQ(parsed.backend_locations(0).locations(0).specs_size(), 1);
+    EXPECT_EQ(parsed.backend_locations(0).locations(0).specs(0).uri(), "cache_uri");
+}
+
 TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
     auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(8, 4), 2u);

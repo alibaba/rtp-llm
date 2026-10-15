@@ -43,18 +43,23 @@ public:
                 MatchLocationLen,
                 (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t),
                 (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<std::vector<BackendLocation>>>),
+                GetCacheLocationsByBackend,
+                (const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const BlockMask&,
+                 const std::vector<std::string>&,
+                 StorageType,
+                 BackendSelectStrategy),
+                (override));
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
+                GetHostCacheState,
+                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
+                (override));
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
                 (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&, const BlockMask&),
-                (override));
-    MOCK_METHOD((std::pair<ClientErrorCode, BackendLocations>),
-                GetCacheLocationsByBackend,
-                (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&,
-                 const BlockMask&, const std::vector<std::string>&, StorageType, BackendSelectStrategy),
-                (override));
-    MOCK_METHOD((std::pair<ClientErrorCode, HostCacheState>),
-                GetHostCacheState,
-                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
                 (override));
     MOCK_METHOD(const std::string&, GetStorageConfig, (), (const, override));
 
@@ -105,6 +110,12 @@ public:
     MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
                 createTransferClient,
                 (const std::string&, const kv_cache_manager::InitParams&),
+                (const, override));
+    MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
+                createTransferClientWithMemory,
+                (const std::string&,
+                 const kv_cache_manager::InitParams&,
+                 const kv_cache_manager::ClientMemoryRegistrations&),
                 (const, override));
     MOCK_METHOD(std::unique_ptr<Subscriber>, createSubscriber, (bool), (const, override));
 };
