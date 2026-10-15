@@ -13,7 +13,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_weight import (
     Qwen4ExpPleNgramWeight,
     Qwen4ExpWeight,
 )
-from rtp_llm.models_py.modules.qwen4_exp.ple import Qwen4ExpNGramEmbedding
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 _SHARD_COUNT = 128
@@ -103,18 +103,22 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         loader._misc_weights_info = []
         model_weights = mock.Mock()
         scale = torch.tensor([0.25])
-        with mock.patch.object(
-            loader, "_create_model_weights", return_value=model_weights
-        ), mock.patch.object(
-            loader, "_choose_weight_convert_device", return_value="cpu"
-        ), mock.patch.object(
-            loader,
-            "prepare_weights",
-            return_value=iter(
-                [
-                    (0, W.qwen4_ple_ngram_scale, scale),
-                    (0, "auxiliary", torch.ones(1)),
-                ]
+        with (
+            mock.patch.object(
+                loader, "_create_model_weights", return_value=model_weights
+            ),
+            mock.patch.object(
+                loader, "_choose_weight_convert_device", return_value="cpu"
+            ),
+            mock.patch.object(
+                loader,
+                "prepare_weights",
+                return_value=iter(
+                    [
+                        (0, W.qwen4_ple_ngram_scale, scale),
+                        (0, "auxiliary", torch.ones(1)),
+                    ]
+                ),
             ),
         ):
             loader._load_from_scratch("meta")
@@ -123,7 +127,7 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         self.assertEqual(scale_call.args[2].device.type, "cpu")
         self.assertEqual(auxiliary_call.args[2].device.type, "meta")
 
-    def test_device_table_still_keeps_fp8_scale_on_cpu(self):
+    def test_fixed_host_table_keeps_fp8_scale_on_cpu(self):
         class Source(_RecordingTensorSource):
             def load_tensor(self, name, data_type=torch.float16):
                 if name == "scale":
@@ -131,12 +135,11 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
                 return super().load_tensor(name, data_type)
 
         loaded = _ngram_weight(
-            cpu_offload=False,
             preserve_fp8=True,
             scale_weight=CkptWeightInfo("scale"),
         ).load(Source(), 1, "meta", _load_config())
         self.assertEqual(loaded[W.qwen4_ple_ngram_scale].device.type, "cpu")
-        self.assertEqual(loaded[f"{W.qwen4_ple_ngram_shards}.0"].device.type, "meta")
+        self.assertEqual(loaded[f"{W.qwen4_ple_ngram_shards}.0"].device.type, "cpu")
 
     def test_default_offload_never_transfers_table_to_execution_device(self):
         source = _RecordingTensorSource()
@@ -152,13 +155,9 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
                 shard_id,
             )
 
-    def test_offload_can_be_disabled(self):
-        # The meta device verifies placement without allocating GPU memory.
-        loaded = _ngram_weight(cpu_offload=False).load(
-            _RecordingTensorSource(), 1, "meta", _load_config()
-        )
-
-        self.assertTrue(all(t.device.type == "meta" for t in loaded.values()))
+    def test_table_residency_cannot_be_disabled(self):
+        with self.assertRaisesRegex(TypeError, "residency is fixed to CPU"):
+            _ngram_weight(cpu_offload=False)
 
     def test_update_preserves_cpu_residency(self):
         shards = {f"{W.qwen4_ple_ngram_shards}.0": torch.ones(2, 1)}
@@ -175,15 +174,19 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         loader._misc_weights_info = []
         table_name = f"{W.qwen4_ple_ngram_shards}.0"
         model_weights = mock.Mock()
-        with mock.patch.object(
-            loader, "_create_model_weights", return_value=model_weights
-        ), mock.patch.object(
-            loader, "_choose_weight_convert_device", return_value="cpu"
-        ), mock.patch.object(
-            loader,
-            "prepare_weights",
-            return_value=iter(
-                [(0, table_name, torch.ones(2, 1)), (0, "auxiliary", torch.ones(1))]
+        with (
+            mock.patch.object(
+                loader, "_create_model_weights", return_value=model_weights
+            ),
+            mock.patch.object(
+                loader, "_choose_weight_convert_device", return_value="cpu"
+            ),
+            mock.patch.object(
+                loader,
+                "prepare_weights",
+                return_value=iter(
+                    [(0, table_name, torch.ones(2, 1)), (0, "auxiliary", torch.ones(1))]
+                ),
             ),
         ):
             loader._load_from_scratch("meta")
@@ -343,7 +346,7 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
 
     def test_tp_one_gpu_table_rejected_before_io(self):
         source = _RecordingTensorSource()
-        with self.assertRaisesRegex(ValueError, "requires CPU table residency"):
+        with self.assertRaisesRegex(TypeError, "residency is fixed to CPU"):
             _ngram_weight(cpu_offload=False).load(source, 1, "cpu", _load_config(1, 0))
         self.assertEqual(source.requests, [])
 
@@ -410,16 +413,14 @@ class Qwen4ExpPleWeightGateTest(unittest.TestCase):
         self.assertEqual(len(descriptors), 10)
         self.assertIsInstance(descriptors[-1], Qwen4ExpPleNgramWeight)
         self.assertEqual(len(descriptors[-1].weights), _SHARD_COUNT)
-        self.assertTrue(descriptors[-1].cpu_offload)
+        self.assertEqual(descriptors[-1].resident_device, "cpu")
 
-    def test_storage_selection_comes_from_model_config(self):
+    def test_production_tables_always_reside_in_host_memory(self):
         layer_weights = [[]]
 
-        self._weight(True, qwen4_ple_cpu_offload=False)._append_ple_weights(
-            layer_weights
-        )
+        self._weight(True)._append_ple_weights(layer_weights)
 
-        self.assertFalse(layer_weights[0][-1].cpu_offload)
+        self.assertEqual(layer_weights[0][-1].resident_device, "cpu")
 
     def test_hash_metadata_stays_int64_from_loader_to_hashed_ids(self):
         layer_weights = [[]]

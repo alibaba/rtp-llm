@@ -74,8 +74,22 @@ cc_library(
 
 cc_library(
     name = "linear_tp_cache_layout",
-    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h"],
+    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h", "TpCacheTransferPlan.h"],
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "registered_cache_staging",
+    srcs = ["RegisteredCacheStaging.cc"],
+    hdrs = ["RegisteredCacheStaging.h"],
+    copts = copts(),
+    deps = [
+        ":linear_tp_cache_layout",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/disaggregate/cache_store",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
 
@@ -88,6 +102,7 @@ cc_library(
             "MultimodalPbConverter.cc",
             "ResponseBuffer.cc",
             "PrefillRequestLogger.cc",
+            "RegisteredCacheStaging.cc",
         ],
     ),
     hdrs = glob(
@@ -105,6 +120,7 @@ cc_library(
         ":model_rpc_pool",
         ":response_buffer",
         ":prefill_request_logger",
+        ":registered_cache_staging",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -164,6 +180,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+        ":registered_cache_staging",
     ],
 )
 

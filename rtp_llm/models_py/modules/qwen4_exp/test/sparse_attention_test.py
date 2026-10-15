@@ -11,7 +11,9 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_attention import gather_and_attend
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_attention import (
+    gather_and_attend,
+)
 
 _H_Q, _H_KV, _D = 24, 2, 256  # qwen4 full-attention production geometry
 _DEV = "cuda"

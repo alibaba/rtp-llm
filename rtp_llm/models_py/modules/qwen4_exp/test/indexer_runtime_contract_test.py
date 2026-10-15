@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.indexer import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
     build_base_rope,
     build_interleaved_mrope,
@@ -117,9 +117,7 @@ class IndexerRuntimeContractTest(unittest.TestCase):
                 base=10000,
                 scale=2.0,
             ),
-            SimpleNamespace(
-                style="Base", index_factor=3, dim=8, base=10000, scale=2.0
-            ),
+            SimpleNamespace(style="Base", index_factor=3, dim=8, base=10000, scale=2.0),
         )
         for config in configs:
             with self.subTest(style=config.style):

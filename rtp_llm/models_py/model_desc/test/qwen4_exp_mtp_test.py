@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -117,8 +116,7 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         pointers = {
             tag: value.combo_position_ids.data_ptr() for tag, value in groups.items()
         }
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
-            normalize_mtp_prefill_positions(inputs, 3)
+        normalize_mtp_prefill_positions(inputs, 3)
         expected = torch.tensor(
             [128, 129, 130, 256], dtype=torch.int32
         ).repeat_interleave(3)
@@ -152,15 +150,10 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
                     shifted, torch.tensor([129, 130, 130], dtype=torch.int32)
                 )
 
-    def test_draft_prefill_graph_requires_explicit_opt_in(self):
-        for value, expected in (("0", False), ("1", True)):
-            with patch.dict(os.environ, {"RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH": value}):
-                self.assertEqual(
-                    Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(
-                        SimpleNamespace()
-                    ),
-                    expected,
-                )
+    def test_draft_prefill_graph_is_a_model_capability(self):
+        self.assertTrue(
+            Qwen4ExpMTPModel.supports_cuda_graph_draft_prefill(SimpleNamespace())
+        )
 
     def test_draft_graph_does_not_prepare_unused_gdn_metadata(self):
         model = SimpleNamespace(
@@ -190,7 +183,7 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         inputs.attention_inputs = PyAttentionInputs()
         embedding = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         wide = torch.cat((embedding, embedding + 10), dim=-1)
-        model = SimpleNamespace(
+        fields = dict(
             ple_layers={},
             layers=[],
             kv_cache=None,
@@ -201,6 +194,11 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
             _initial_hyper_states=lambda _: wide,
             hyper_connection_mixer=lambda value: (value[:, :4], None, None),
         )
+
+        model = Qwen4ExpModel.__new__(Qwen4ExpModel)
+        torch.nn.Module.__init__(model)
+        for name, value in fields.items():
+            setattr(model, name, value)
 
         outputs = Qwen4ExpModel.forward(model, inputs, object())
         torch.testing.assert_close(outputs.hidden_states, embedding)

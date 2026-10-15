@@ -1,6 +1,5 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
@@ -181,7 +180,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         model.moe_inter_size = 640
         model.hidden_size = 2560
         model.n_shared_experts = 1
-        model._qwen4_moe_only_fp4 = True
+        model._qwen4_full_fp8_nvfp4 = True
         model.quant_config = ModelOptFp4Config(
             bits=4, group_size=16, is_quanted=False, activation_amax=32.0
         )
@@ -198,20 +197,16 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         moe.use_all_gather = True
         moe.use_deepep_moe = False
         strategy = CudaNvfp4CutlassStrategy()
-        setting = "RTP_LLM_QWEN4_NVFP4_TP_EXPERIMENTAL"
-        with patch.dict("os.environ", {setting: "0"}):
-            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-        with patch.dict("os.environ", {setting: "1"}):
-            self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-            model._qwen4_moe_only_fp4 = False
-            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-            model._qwen4_moe_only_fp4 = True
-            pc.world_size = 4
-            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-            pc.world_size = 2
-            pc.ffn_sp_size = 2
-            set_parallelism_config(pc)
-            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model._qwen4_full_fp8_nvfp4 = False
+        self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model._qwen4_full_fp8_nvfp4 = True
+        pc.world_size = 4
+        self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        pc.world_size = 2
+        pc.ffn_sp_size = 2
+        set_parallelism_config(pc)
+        self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
 
     def test_selection_requires_matching_attention_tp_ep_and_online_weights(self):
         from rtp_llm.config.model_config import ModelConfig

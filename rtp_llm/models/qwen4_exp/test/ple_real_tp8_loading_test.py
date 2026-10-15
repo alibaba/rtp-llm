@@ -29,12 +29,11 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.modules.qwen4_exp.ple import Qwen4ExpNGramEmbedding
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 from rtp_llm.ops import HWKernelConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortsContext
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
-
 
 _CKPT_DIR = os.environ.get("QWEN4_EXP_CKPT_DIR", "")
 _INDEX_NAME = "model.safetensors.index.json"
@@ -110,8 +109,7 @@ class _IdentityExportedDevice:
 def _ple_descriptors(
     database: CkptDatabase, parallelism_config: ParallelismConfig
 ) -> tuple[Qwen4ExpPleNgramWeight, dict, LoadConfig]:
-    os.environ["RTP_LLM_ENABLE_QWEN4_EXP_PLE"] = "true"
-    os.environ["RTP_LLM_ENABLE_QWEN4_EXP_QSA"] = "false"
+
     model_config = Qwen4Exp.create_config(_CKPT_DIR)
     weight = Qwen4ExpWeight(
         model_config=model_config,
@@ -198,14 +196,11 @@ def _worker(rank: int, port: int) -> None:
     aggregation_error = AssertionError("PLE table loading must not aggregate shards")
     torch.cuda.reset_peak_memory_stats(device)
     allocated_before = torch.cuda.memory_allocated(device)
-    with mock.patch.object(
-        torch, "stack", side_effect=aggregation_error
-    ), mock.patch.object(
-        torch, "cat", side_effect=aggregation_error
-    ), mock.patch.object(
-        torch, "concat", side_effect=aggregation_error
-    ), mock.patch.object(
-        torch, "concatenate", side_effect=aggregation_error
+    with (
+        mock.patch.object(torch, "stack", side_effect=aggregation_error),
+        mock.patch.object(torch, "cat", side_effect=aggregation_error),
+        mock.patch.object(torch, "concat", side_effect=aggregation_error),
+        mock.patch.object(torch, "concatenate", side_effect=aggregation_error),
     ):
         loaded = ngram_descriptor.load(
             source, _PLE_LAYER_INDEX, str(device), load_config

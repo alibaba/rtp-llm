@@ -75,3 +75,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
 )
+
+py_test(
+    name = "runtime_snapshot_test",
+    srcs = ["runtime_snapshot_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)

@@ -1,4 +1,3 @@
-import os
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -9,18 +8,22 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
-from rtp_llm.models_py.modules.qwen4_exp.indexer import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    _same_tensor_metadata,
+    _validate_required_blocks,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+    Qwen4ExpQSARuntimeContext,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+    select_qsa_paged_tokens,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_interleaved_mrope,
     build_qsa_rope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
-from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import (
-    Qwen4ExpQSARuntimeContext,
-    _same_tensor_metadata,
-    _validate_required_blocks,
-    select_qsa_paged_tokens,
-)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
@@ -100,7 +103,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
 
     @skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_fused_required_block_validation_handles_strides_and_fallback(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa_validation_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
             is_supported,
             required_blocks_are_valid,
         )
@@ -111,25 +114,22 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         ]
         self.assertTrue(is_supported(table, required))
         self.assertTrue(required_blocks_are_valid(table, required, pool_blocks=4))
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_CACHE_VALIDATE": "1"}):
+        _validate_required_blocks(table, required, pool_blocks=4, tag=INDEXER_KV_TAG)
+        table[1, 1] = 4
+        self.assertFalse(required_blocks_are_valid(table, required, pool_blocks=4))
+        with self.assertRaisesRegex(RuntimeError, "out-of-range"):
             _validate_required_blocks(
                 table, required, pool_blocks=4, tag=INDEXER_KV_TAG
             )
-            table[1, 1] = 4
-            self.assertFalse(required_blocks_are_valid(table, required, pool_blocks=4))
-            with self.assertRaisesRegex(RuntimeError, "out-of-range"):
-                _validate_required_blocks(
-                    table, required, pool_blocks=4, tag=INDEXER_KV_TAG
-                )
 
-            wide_table = torch.ones(1, 4097, dtype=torch.int32, device="cuda")
-            self.assertFalse(is_supported(wide_table, required[:1]))
-            _validate_required_blocks(
-                wide_table,
-                required[:1],
-                pool_blocks=4,
-                tag=INDEXER_KV_TAG,
-            )
+        wide_table = torch.ones(1, 4097, dtype=torch.int32, device="cuda")
+        self.assertFalse(is_supported(wide_table, required[:1]))
+        _validate_required_blocks(
+            wide_table,
+            required[:1],
+            pool_blocks=4,
+            tag=INDEXER_KV_TAG,
+        )
 
     def setUp(self):
         torch.manual_seed(17)
@@ -528,7 +528,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 context = self._context()
                 self._set_position_ids(context, scalar_positions)
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime."
+                    "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context."
                     "write_indexer_cache"
                 ) as writer:
                     with self.assertRaisesRegex(
@@ -551,7 +551,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         self._set_position_ids(context, scalar_positions)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime.write_indexer_cache"
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
             with self.assertRaisesRegex(RuntimeError, "indexer_is_neox_style=true"):
                 context.write_prefill_indexer_cache(
@@ -604,7 +604,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         indexer = self._decode_indexer()
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime.write_indexer_cache"
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
             with self.assertRaisesRegex(RuntimeError, "gamma\\+1=.*<= compress_ratio"):
                 context.select_target_verify_tokens(
@@ -637,7 +637,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         q = torch.randn(1, 2, self.D, dtype=torch.bfloat16, device=self.kv_base.device)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime.write_indexer_cache"
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
             with self.assertRaisesRegex(RuntimeError, "does not cover"):
                 context.select_target_verify_tokens(
@@ -688,7 +688,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -747,7 +747,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 side_effect=original,
             ) as geometry,
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
                 "qsa_paged_indexer_score",
                 return_value=torch.zeros(q_len, 2, device="cuda"),
             ),
@@ -825,7 +825,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                 )
                 q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device=device)
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
                     "qsa_paged_indexer_score",
                     side_effect=_score,
                 ):
@@ -886,7 +886,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             ).view(rows, max_ctx_len)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -969,20 +969,10 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                             device=device,
                         )
 
-                    with (
-                        patch.dict(
-                            os.environ,
-                            {
-                                "RTP_LLM_QWEN4_DRAFT_WINDOW_WRITER": (
-                                    "1" if fused else "0"
-                                )
-                            },
-                        ),
-                        patch(
-                            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
-                            "qsa_paged_indexer_score",
-                            side_effect=score,
-                        ),
+                    with patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                        "qsa_paged_indexer_score",
+                        side_effect=score,
                     ):
                         selected = context.select_draft_incremental_prefill_tokens(
                             q, raw, indexer=indexer, rope_config=rope
@@ -1177,7 +1167,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             with (
                 self.subTest(expected=expected),
                 patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime."
+                    "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context."
                     "write_indexer_cache"
                 ) as writer,
             ):
@@ -1207,7 +1197,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             is_mtp_draft=False,
         )
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime.write_indexer_cache"
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
             with self.assertRaisesRegex(RuntimeError, "prefix reuse"):
                 context.write_prefill_indexer_cache(
@@ -1249,7 +1239,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -1340,7 +1330,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -1388,7 +1378,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         raw = torch.randn(8, self.D, dtype=torch.bfloat16, device=device)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.zeros(
                 q.shape[1], kwargs["max_ctx_len"], dtype=torch.float32, device=device
@@ -1411,7 +1401,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
             normalize_mtp_prefill_positions,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.indexer import build_base_rope
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_base_rope
 
         device = torch.device("cuda", torch.cuda.current_device())
         indexer = self._decode_indexer()
@@ -1453,16 +1443,15 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                     combo_position_ids=context.main_inputs.combo_position_ids,
                     attention_inputs=groups,
                 )
-                with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
-                    normalize_mtp_prefill_positions(inputs, 3)
-                    plan = context._draft_incremental_prefill_geometry(
-                        indexer=indexer,
-                        token_count=length,
-                        device=device,
-                        rope_config=config,
-                        draft=False,
-                        draft_prefix_reuse=True,
-                    )
+                normalize_mtp_prefill_positions(inputs, 3)
+                plan = context._draft_incremental_prefill_geometry(
+                    indexer=indexer,
+                    token_count=length,
+                    device=device,
+                    rope_config=config,
+                    draft=False,
+                    draft_prefix_reuse=True,
+                )
                 positions = torch.arange(
                     8, 8 + length, dtype=torch.int32, device=device
                 )
@@ -1473,8 +1462,8 @@ class Qwen4ExpQSARuntimeTest(TestCase):
                     dtype=torch.bfloat16,
                     device=device,
                 )
-                torch.testing.assert_close(plan["current_cos"], expected_cos)
-                torch.testing.assert_close(plan["current_sin"], expected_sin)
+                torch.testing.assert_close(plan.current_cos, expected_cos)
+                torch.testing.assert_close(plan.current_sin, expected_sin)
                 if length == 3:
                     for value in groups.values():
                         value.combo_position_ids.copy_(shifted)
@@ -1548,7 +1537,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             return torch.tensor([[0.25, 3.0]], dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -1601,7 +1590,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=RuntimeError("injected paged score failure"),
         ):
@@ -1649,7 +1638,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             return torch.zeros((1, max_ctx_len), dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -1748,7 +1737,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             return torch.zeros((1, 1), dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score."
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -1784,7 +1773,7 @@ class Qwen4ExpQSARuntimeTest(TestCase):
         )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa_runtime.write_indexer_cache"
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
             with self.assertRaisesRegex(RuntimeError, "logical cache positions"):
                 context.select_decode_tokens(

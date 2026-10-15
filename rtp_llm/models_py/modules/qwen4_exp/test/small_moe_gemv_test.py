@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
     TritonFusedMoeExecutor,
 )
-from rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv import (
+from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
     is_supported,
     small_moe_gemv,
 )
@@ -32,9 +32,9 @@ class SmallMoeGemvTest(unittest.TestCase):
             N=160,
             K=2560,
             inter_size=80,
-            _qwen4_decode_alignment=True,
-            _qwen4_decode_tiles=True,
-            _qwen4_small_moe_gemv=False,
+            _decode_alignment=True,
+            _decode_tiles=True,
+            _small_moe_gemv=False,
         ).items():
             setattr(cls.module, name, value)
         cls.module.w1 = (
@@ -127,14 +127,14 @@ class SmallMoeGemvTest(unittest.TestCase):
     def test_executor_dispatch_and_nondefault_semantics(self):
         p = self.payload(1)
         expected = self.ref(p)
-        with patch.object(self.module, "_qwen4_small_moe_gemv", True):
-            from rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv import (
+        with patch.object(self.module, "_small_moe_gemv", True):
+            from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
                 small_moe_gemv as candidate,
             )
 
             for activation in ("silu", "SiGLU"):
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv.small_moe_gemv",
+                    "rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv.small_moe_gemv",
                     wraps=candidate,
                 ) as mock:
                     self.module.execute(p, activation, None, None, False, None)
@@ -149,7 +149,7 @@ class SmallMoeGemvTest(unittest.TestCase):
                 ("silu", None, None, False, {"custom": True}),
             ):
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.small_moe_gemv.small_moe_gemv"
+                    "rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv.small_moe_gemv"
                 ) as mock:
                     self.module.execute(p, activation, expert_map, scale, apply, extra)
                     mock.assert_not_called()

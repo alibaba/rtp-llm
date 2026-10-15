@@ -1,14 +1,12 @@
 """FP8 QSA cache layout, independent attention reference and graph replay."""
 
-import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_gqa_impl import SparseGqaFmhaImpl
-from rtp_llm.models_py.modules.qwen4_exp.sparse_paged_fmha import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
     main_kv_scale_view,
     sparse_paged_gqa_attn,
 )
@@ -43,58 +41,50 @@ class Fp8MainKvTest(unittest.TestCase):
         packed[:, : quant[0].numel()].copy_(quant.reshape(7, -1))
         packed_scale = torch.empty(7, scale[0].numel() + 13, device="cuda")
         packed_scale[:, : scale[0].numel()].copy_(scale.reshape(7, -1))
-        for online in ("0", "1"):
-            for cache, scales in ((quant, scale), (packed, packed_scale)):
-                with self.subTest(online=online, packed=cache.ndim == 2), patch.dict(
-                    os.environ,
-                    {
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": online,
-                        "RTP_LLM_QWEN4_PAGED_ATTENTION_SPLITS": "8",
-                    },
-                ):
-                    actual = sparse_paged_gqa_attn(
-                        q,
-                        cache,
-                        table,
-                        lengths,
-                        selected,
-                        page_size=128,
-                        kv_head_num=2,
-                        kv_scale=scales,
-                    )
-                    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-    def test_graph_reads_updated_scales_lengths_and_pages(self):
-        q, quant, scale, table, lengths, selected = self._fixture()
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_PAGED_ATTENTION_ONLINE": "1"}):
-            for _ in range(2):
-                sparse_paged_gqa_attn(
-                    q, quant, table, lengths, selected, page_size=128, kv_scale=scale
-                )
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+        for cache, scales in ((quant, scale), (packed, packed_scale)):
+            with self.subTest(packed=cache.ndim == 2):
                 actual = sparse_paged_gqa_attn(
                     q,
-                    quant,
+                    cache,
                     table,
                     lengths,
                     selected,
                     page_size=128,
-                    kv_scale=scale,
-                    graph_capture=True,
-                )
-            for factor in (0.5, 2.0):
-                q.mul_(0.75)
-                scale.mul_(factor)
-                table.copy_(table.flip(1))
-                graph.replay()
-                expected = _reference(
-                    q, quant.float() * scale.unsqueeze(-1), table, lengths, selected
+                    kv_head_num=2,
+                    kv_scale=scales,
                 )
                 torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-            lengths.zero_()
+
+    def test_graph_reads_updated_scales_lengths_and_pages(self):
+        q, quant, scale, table, lengths, selected = self._fixture()
+        for _ in range(2):
+            sparse_paged_gqa_attn(
+                q, quant, table, lengths, selected, page_size=128, kv_scale=scale
+            )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = sparse_paged_gqa_attn(
+                q,
+                quant,
+                table,
+                lengths,
+                selected,
+                page_size=128,
+                kv_scale=scale,
+                graph_capture=True,
+            )
+        for factor in (0.5, 2.0):
+            q.mul_(0.75)
+            scale.mul_(factor)
+            table.copy_(table.flip(1))
             graph.replay()
-            torch.testing.assert_close(actual, torch.zeros_like(actual))
+            expected = _reference(
+                q, quant.float() * scale.unsqueeze(-1), table, lengths, selected
+            )
+            torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+        lengths.zero_()
+        graph.replay()
+        torch.testing.assert_close(actual, torch.zeros_like(actual))
 
     def test_native_prefill_and_decode_writers_with_graph_replay(self):
         from rtp_llm.ops.fused_rope_kvcache_op import _get_fused_rope_kvcache

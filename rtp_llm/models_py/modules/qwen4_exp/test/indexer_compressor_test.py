@@ -9,17 +9,17 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.indexer import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
     apply_partial_rope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.indexer_compressor import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     _write_indexer_cache_vectorized,
     compress_prefill,
     restore_indexer_cache,
     write_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 
 _H = 4
 _D = 128

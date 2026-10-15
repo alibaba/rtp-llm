@@ -5,8 +5,8 @@ upstream forward, which by construction cannot catch a transcription error. This
 one executes the upstream source itself, so it is a real truth anchor.
 
 Point ``QWEN4_EXP_UPSTREAM_SRC`` at transformers' ``modeling_qwen4_exp.py``
-(``src/transformers/models/qwen4_exp/``); the tests skip when it is absent, so CI
-stays green without it. The file is exec'd rather than imported because upstream
+(``src/transformers/models/qwen4_exp/``); optional component runs skip when it is absent; qualification requires its
+fixed commit/SHA manifest and rejects missing coverage. The file is exec'd rather than imported because upstream
 ``main`` carries a config framework released transformers cannot load -- only the
 leaf ``nn.Module`` definitions are taken, and those need nothing but torch.
 
@@ -29,21 +29,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
-)
-from rtp_llm.models_py.modules.qwen4_exp.indexer import (
-    Qwen4ExpQSAIndexer,
-    apply_partial_rope,
-)
-from rtp_llm.models_py.modules.qwen4_exp.norm import Qwen4ExpFusedQKRMSNorm
-from rtp_llm.models_py.modules.qwen4_exp.ple import (
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    Qwen4ExpQSAIndexer,
+    apply_partial_rope,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
+    Qwen4ExpGatedResidual,
+    inject_into_residual,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.upstream_fixture import (
+    uncovered_fixture,
+    upstream_source_path,
+)
 
-_UPSTREAM_SRC = os.environ.get("QWEN4_EXP_UPSTREAM_SRC", "")
+_UPSTREAM_SRC = upstream_source_path()
 _CKPT_DIR = os.environ.get("QWEN4_EXP_CKPT_DIR", "")
 
 _UPSTREAM_NAMES = (
@@ -410,7 +414,7 @@ class RealWeightGatedResidualParityTest(unittest.TestCase):
         shards = {weight_map[key] for key in keys}
         absent = [s for s in shards if not os.path.exists(os.path.join(_CKPT_DIR, s))]
         if absent:
-            raise unittest.SkipTest(f"shards not downloaded yet: {sorted(absent)}")
+            uncovered_fixture(f"shards not downloaded yet: {sorted(absent)}")
         cls.tensors = {}
         for shard in shards:
             loaded = load_file(os.path.join(_CKPT_DIR, shard))
@@ -471,7 +475,7 @@ class RealWeightGatedResidualParityTest(unittest.TestCase):
             pairs.setdefault(layer, {})[key.rsplit(".", 2)[-2]] = (key, shard)
         complete = {l: v for l, v in pairs.items() if {"q_norm", "k_norm"} <= v.keys()}
         if not complete:
-            raise unittest.SkipTest("no layer has both q_norm and k_norm downloaded")
+            uncovered_fixture("no layer has both q_norm and k_norm downloaded")
 
         layer, entry = sorted(complete.items())[0]
         gammas = {}

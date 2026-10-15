@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +6,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import (
+    QWEN4_FP8_NVFP4_RECIPE,
+    Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
+    init_quant_config,
+)
 from rtp_llm.model_factory_register import ModelDict, _model_factory
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
@@ -20,7 +26,6 @@ from rtp_llm.ops import (
     HWKernelConfig,
     HybridAttentionType,
     KvCacheDataType,
-    KVCacheSpecType,
     ParallelismConfig,
     RoleType,
     RopeStyle,
@@ -72,24 +77,235 @@ def _ckpt_keys(modules):
 
 class Qwen4ExpTest(unittest.TestCase):
     def setUp(self):
-        pd_gate = mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "0"})
-        pd_gate.start()
-        self.addCleanup(pd_gate.stop)
         self._temp_dir = tempfile.TemporaryDirectory()
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(self._config()))
-        # Feature gates are process-wide development switches. Keep this suite
-        # deterministic even when a developer exports them in the parent shell.
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "false",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-            },
+        self.config = Qwen4Exp.create_config(self._temp_dir.name)
+
+    def _loaded_model(self, **changes):
+        model = Qwen4Exp.__new__(Qwen4Exp)
+        config = dict(
+            hidden_size=2560,
+            hc_mult=4,
+            qwen4_ple_prefetch_mb=256,
+            _qwen4_ple_layer_ids=(1,),
+            _qwen4_indexer_head_dim=128,
+            _qwen4_indexer_budget=1024,
+            _qwen4_indexer_kv_heads=1,
+            enable_qwen4_qsa=True,
+            enable_qwen4_ple=True,
+            is_mtp=False,
+            data_type=DataType.TYPE_BF16,
+            quant_config=None,
+            gen_num_per_cycle=0,
+            _qwen4_indexer_compress_ratio=4,
+            _qwen4_split_ngram_parts=128,
+            attn_config=SimpleNamespace(
+                is_sparse=True,
+                use_sparse_gqa_fmha=True,
+                kv_cache_dtype=KvCacheDataType.BASE,
+            ),
+        )
+        config.update(changes)
+        model.model_config = SimpleNamespace(**config)
+        model.parallelism_config = SimpleNamespace(
+            role_type=RoleType.PDFUSION,
+            get_attn_tp_size=lambda: 1,
+            prefill_cp_config=SimpleNamespace(
+                is_enabled=lambda: False, is_prefill_enabled=lambda: False
+            ),
+        )
+        return model
+
+    def test_checkpoint_capabilities_are_required_and_read_only(self):
+        self.assertTrue(self.config.enable_qwen4_ple)
+        self.assertTrue(self.config.enable_qwen4_qsa)
+        self.assertTrue(self.config.attn_config.is_sparse)
+        self.assertTrue(self.config.attn_config.use_sparse_gqa_fmha)
+        for field in ("enable_qwen4_ple", "enable_qwen4_qsa", "qwen4_ple_cpu_offload"):
+            with self.assertRaises(AttributeError):
+                setattr(self.config, field, False)
+        self.assertTrue(self.config.getAttentionConfigs(8).use_sparse_gqa_fmha)
+
+    def test_incomplete_model_is_rejected_before_loading(self):
+        for changes in (dict(enable_qwen4_qsa=False), dict(enable_qwen4_ple=False)):
+            model = self._loaded_model(**changes)
+            with mock.patch.object(Qwen35Moe, "load") as parent:
+                with self.assertRaisesRegex(RuntimeError, "complete checkpoint"):
+                    model.load()
+            parent.assert_not_called()
+
+    def test_complete_model_and_pd_roles_need_no_model_permission(self):
+        for role in (RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE):
+            model = self._loaded_model()
+            model.parallelism_config.role_type = role
+            with mock.patch.object(Qwen35Moe, "load", return_value="loaded") as parent:
+                self.assertEqual(model.load(skip_python_model=True), "loaded")
+            parent.assert_called_once_with(skip_python_model=True)
+
+    def test_full_checkpoint_owns_all_side_regions(self):
+        self.assertTrue(
+            self.config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        for idx, regions in enumerate(self.config.kv_cache_spec_descs):
+            tags = {r.tag for r in regions}
+            self.assertEqual("indexer_kv" in tags, (idx + 1) % 4 == 0)
+            self.assertEqual("indexer_state" in tags, (idx + 1) % 4 == 0)
+            self.assertEqual("ple_conv_state" in tags, idx == 1)
+            self.assertEqual("ple_ngram_ctx" in tags, idx == 1)
+
+    def test_cpu_ple_residency_and_gpu_vocab_are_fixed(self):
+        info = self._weight()._get_weight_info()
+        for weight in info.weights:
+            self.assertIsNone(getattr(weight, "resident_device", None))
+        ple = next(
+            w for w in info.layer_weights[1] if w.name == W.qwen4_ple_ngram_shards
+        )
+        self.assertEqual(ple.resident_device, "cpu")
+        self.assertEqual(self.config._tp_sharded_extra_weight_bytes, 0)
+        self.assertGreater(self.config._replicated_extra_weight_bytes, 0)
+
+    def test_indexer_weights_only_belong_to_full_attention(self):
+        info = self._weight()._get_weight_info()
+        self.assertFalse(
+            [k for k in _ckpt_keys(info.layer_weights[0]) if ".indexer." in k]
+        )
+        self.assertEqual(
+            len([k for k in _ckpt_keys(info.layer_weights[3]) if ".indexer." in k]), 3
+        )
+
+    def test_scaled_fp8_kv_is_a_common_format_choice(self):
+        for kind in (KvCacheDataType.BASE, KvCacheDataType.FP8):
+            model = self._loaded_model()
+            model.model_config.attn_config.kv_cache_dtype = kind
+            with mock.patch.object(Qwen35Moe, "load", return_value="loaded"):
+                self.assertEqual(model.load(), "loaded")
+
+    def test_qsa_bounds_and_context_parallelism_still_fail_before_load(self):
+        model = self._loaded_model(gen_num_per_cycle=4)
+        with mock.patch.object(Qwen35Moe, "load") as parent:
+            with self.assertRaisesRegex(RuntimeError, "gen_num_per_cycle"):
+                model.load()
+        parent.assert_not_called()
+        model = self._loaded_model()
+        model.parallelism_config.prefill_cp_config.is_enabled = lambda: True
+        with mock.patch.object(Qwen35Moe, "load") as parent:
+            with self.assertRaisesRegex(RuntimeError, "parallelism"):
+                model.load()
+        parent.assert_not_called()
+
+    def test_ple_shard_topology_and_activation_dtype_still_fail_before_load(self):
+        for changes, pattern in (
+            (dict(data_type=DataType.TYPE_FP16), "BF16"),
+            (dict(_qwen4_split_ngram_parts=0), "shard split"),
         ):
-            self.config = Qwen4Exp.create_config(self._temp_dir.name)
+            model = self._loaded_model(**changes)
+            with mock.patch.object(Qwen35Moe, "load") as parent:
+                with self.assertRaisesRegex(RuntimeError, pattern):
+                    model.load()
+            parent.assert_not_called()
+
+    def test_graph_permission_is_common_and_model_has_capture_capability(self):
+        model = self._loaded_model()
+        self.assertTrue(model.support_cuda_graph())
+
+    def test_prefetch_budget_is_the_only_model_resource_override(self):
+        self.assertEqual(self.config.qwen4_ple_prefetch_mb, 256)
+        self.config.apply_override_args('{"qwen4_ple_prefetch_mb":64}')
+        self.assertEqual(self.config.qwen4_ple_prefetch_mb, 64)
+        for budget in (0, -1, True, 1.5, "256", None):
+            with (
+                self.subTest(budget=budget),
+                self.assertRaisesRegex(ValueError, "positive integer"),
+            ):
+                self.config.apply_override_args(
+                    json.dumps({"qwen4_ple_prefetch_mb": budget})
+                )
+
+    def test_bf16_checkpoint_rejects_partial_quantization_recipes(self):
+        for choice in ("MODELOPT_FP4", "FP8_PER_BLOCK", "QWEN4_FP8_NVFP4"):
+            self.config.quantization = choice
+            with (
+                self.subTest(choice=choice),
+                self.assertRaisesRegex(ValueError, "recipe"),
+            ):
+                Qwen4Exp._post_build_model_config(self.config)
+
+    def test_official_recipe_survives_source_precision_initialization_and_cache_override(
+        self,
+    ):
+        data = self._config()
+        data["quantization_config"] = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+        }
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        Path(self._temp_dir.name, "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}})
+        )
+        with mock.patch(
+            "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
+        ) as validate:
+            cfg = Qwen4Exp.create_config(self._temp_dir.name)
+        validate.assert_called_once()
+        cfg.quant_config = Fp8BlockWiseQuantConfig(is_quanted=True)
+        cfg.quantization = json.dumps(
+            {
+                "method": "modelopt_fp4",
+                "bits": 4,
+                "group_size": 16,
+                "is_quanted": False,
+                "model_recipe": QWEN4_FP8_NVFP4_RECIPE,
+                "online_cache_dir": "/tmp/qwen4-test-cache",
+            }
+        )
+        Qwen4Exp._post_build_model_config(cfg)
+        self.assertIsInstance(cfg.quant_config, ModelOptFp4Config)
+        self.assertEqual(cfg.quant_config.model_recipe, QWEN4_FP8_NVFP4_RECIPE)
+        self.assertEqual(cfg.quant_config.source_fp8_block_size, 128)
+        self.assertEqual(cfg.quant_config.online_cache_dir, "/tmp/qwen4-test-cache")
+        self.assertEqual(cfg.quant_config.group_size(), 16)
+        self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
+
+    def test_quantization_preset_carries_the_complete_recipe(self):
+        cfg = init_quant_config("QWEN4_FP8_NVFP4")
+        self.assertEqual(cfg.model_recipe, QWEN4_FP8_NVFP4_RECIPE)
+        self.assertEqual(cfg.activation_amax, 32.0)
+        self.assertTrue(cfg.require_contiguous_experts)
 
     def tearDown(self):
         self._temp_dir.cleanup()
+
+    def test_full_recipe_rejects_partial_or_incompatible_fields(self):
+        self.config._qwen4_fp8_source = True
+        base = dict(
+            method="modelopt_fp4",
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+            activation_amax=32.0,
+            source_fp8_block_size=128,
+            require_contiguous_experts=True,
+        )
+        for changes in (
+            dict(group_size=32),
+            dict(is_quanted=True),
+            dict(source_fp8_block_size=64),
+            dict(activation_amax=16),
+            dict(require_contiguous_experts=False),
+            dict(mixed_attention=True),
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.config.quantization = json.dumps(dict(base, **changes))
+                Qwen4Exp._configure_precision_recipe(self.config)
+
+    def test_qwen4_recipe_rejected_for_other_models(self):
+        config = ModelConfig()
+        config.model_type = "qwen3_moe"
+        config.quantization = "QWEN4_FP8_NVFP4"
+        with self.assertRaisesRegex(ValueError, "only valid for qwen4_exp"):
+            config.init_precision_config(None, "BF16")
 
     def test_registration(self):
         self.assertIs(_model_factory["qwen4_exp"], Qwen4Exp)
@@ -101,539 +317,6 @@ class Qwen4ExpTest(unittest.TestCase):
         )
         self.assertIs(Qwen4Exp.get_weight_cls(), Qwen4ExpWeight)
         self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen3_5MoeMixin)
-
-    def test_serving_fails_before_weight_loading_without_experimental_opt_in(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        with mock.patch.dict(
-            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "false"}
-        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "disabled by default"):
-                model.load()
-        parent_load.assert_not_called()
-
-    def test_experimental_opt_in_reaches_the_parent_loader(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-            },
-        ), mock.patch.object(Qwen35Moe, "load", return_value="loaded") as parent_load:
-            self.assertEqual(model.load(skip_python_model=True), "loaded")
-        parent_load.assert_called_once_with(skip_python_model=True)
-
-    @staticmethod
-    def _qsa_enabled_model(**config_overrides):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        config = dict(
-            enable_qwen4_qsa=True,
-            enable_qwen4_ple=False,
-            data_type=DataType.TYPE_BF16,
-            is_mtp=False,
-            quant_config=None,
-            attn_config=SimpleNamespace(
-                is_sparse=True,
-                use_sparse_gqa_fmha=True,
-                kv_cache_dtype=KvCacheDataType.BASE,
-            ),
-        )
-        config.update(config_overrides)
-        model.model_config = SimpleNamespace(**config)
-        model.parallelism_config = SimpleNamespace(
-            role_type=RoleType.PDFUSION,
-            prefill_cp_config=SimpleNamespace(
-                is_enabled=lambda: False,
-                is_prefill_enabled=lambda: False,
-            ),
-        )
-        return model
-
-    def test_experimental_qsa_opt_in_reaches_the_parent_loader(self):
-        model = self._qsa_enabled_model()
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
-                # The load guard consumes the parsed config, not a mutable env.
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-            },
-        ), mock.patch.object(Qwen35Moe, "load", return_value="loaded") as parent_load:
-            self.assertEqual(model.load(skip_python_model=True), "loaded")
-        parent_load.assert_called_once_with(skip_python_model=True)
-
-    def test_experimental_qsa_mtp_reaches_the_parent_loader(self):
-        model = self._qsa_enabled_model(is_mtp=True)
-        with mock.patch.dict(
-            os.environ,
-            {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"},
-        ), mock.patch.object(Qwen35Moe, "load", return_value="loaded") as parent_load:
-            self.assertEqual(model.load(skip_python_model=True), "loaded")
-        parent_load.assert_called_once_with(skip_python_model=True)
-
-    def test_gdn_bf16_override_is_explicit_and_keeps_attention_fp8(self):
-        flag = "RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL"
-        for value in (None, "0", "1", "true"):
-            with self.subTest(value=value), mock.patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": "1",
-                    "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
-                    "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": "1",
-                },
-            ):
-                if value is None:
-                    os.environ.pop(flag, None)
-                else:
-                    os.environ[flag] = value
-                cfg = Qwen4Exp.create_config(self._temp_dir.name)
-                self.assertEqual(cfg._qwen4_gdn_bf16, value in ("1", "true"))
-                self.assertTrue(cfg._qwen4_attention_fp8)
-                self.assertTrue(cfg._qwen4_moe_only_fp4)
-
-    def test_official_fp8_nvfp4_source_survives_post_build_config(self):
-        data = self._config()
-        data["quantization_config"] = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [128, 128],
-        }
-        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-        Path(self._temp_dir.name, "model.safetensors.index.json").write_text(
-            json.dumps({"weight_map": {}})
-        )
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_FULL_FP8_NVFP4_EXPERIMENTAL": "1",
-                "RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL": "0",
-                "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
-            },
-        ), mock.patch(
-            "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
-        ) as validate:
-            cfg = Qwen4Exp.create_config(self._temp_dir.name)
-        validate.assert_called_once()
-        self.assertTrue(cfg._qwen4_fp8_source)
-        self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
-        self.assertTrue(cfg._qwen4_attention_fp8)
-        self.assertEqual(cfg.quant_config.source_fp8_block_size, 128)
-        self.assertEqual(cfg.quant_config.group_size(), 16)
-
-    def test_attention_fp8_requires_bf16_source_and_online_moe_fp4(self):
-        for moe_enabled, attention_enabled in (("1", "1"), ("0", "1"), ("0", "0")):
-            with self.subTest(
-                moe=moe_enabled, attention=attention_enabled
-            ), mock.patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": moe_enabled,
-                    "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
-                    "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": attention_enabled,
-                },
-            ):
-                if moe_enabled == "0" and attention_enabled == "1":
-                    with self.assertRaisesRegex(ValueError, "requires online MoE FP4"):
-                        Qwen4Exp.create_config(self._temp_dir.name)
-                else:
-                    cfg = Qwen4Exp.create_config(self._temp_dir.name)
-                    self.assertEqual(cfg._qwen4_attention_fp8, attention_enabled == "1")
-                    self.assertEqual(cfg._qwen4_moe_only_fp4, moe_enabled == "1")
-                    if moe_enabled == "1":
-                        from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP
-
-                        data = self._config()
-                        data["text_config"]["mtp"] = {
-                            "hybrid": True,
-                            "num_hidden_layers": 1,
-                            "layer_types": ["full_attention"],
-                            "rope_theta": 1000000,
-                            "mtp_use_hidden_state_from_layer": None,
-                        }
-                        Path(self._temp_dir.name, "config.json").write_text(
-                            json.dumps(data)
-                        )
-                        draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
-                        self.assertTrue(draft._qwen4_attention_fp8)
-                        self.assertTrue(draft._qwen4_moe_only_fp4)
-                        self.assertTrue(draft.is_mtp)
-        data = self._config()
-        data["quantization_config"] = {
-            "quant_method": "fp8",
-            "activation_scheme": "dynamic",
-            "weight_block_size": [128, 128],
-        }
-        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": "1",
-                "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": "1",
-            },
-        ), self.assertRaisesRegex(ValueError, "unquantized BF16 source"):
-            Qwen4Exp.create_config(self._temp_dir.name)
-
-    def test_fp8_main_kv_requires_explicit_opt_in_before_loading(self):
-        for enabled in ("0", "1"):
-            model = self._qsa_enabled_model(
-                attn_config=SimpleNamespace(
-                    is_sparse=True,
-                    use_sparse_gqa_fmha=True,
-                    kv_cache_dtype=KvCacheDataType.FP8,
-                )
-            )
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
-                    "RTP_LLM_QWEN4_FP8_KV_EXPERIMENTAL": enabled,
-                },
-            ), mock.patch.object(
-                Qwen35Moe, "load", return_value="loaded"
-            ) as parent_load:
-                if enabled == "1":
-                    self.assertEqual(model.load(), "loaded")
-                    parent_load.assert_called_once()
-                else:
-                    with self.assertRaisesRegex(RuntimeError, "base BF16 KV cache"):
-                        model.load()
-                    parent_load.assert_not_called()
-
-    def test_qsa_mtp_draft_width_checked_before_weight_loading(self):
-        for gamma, valid in ((3, True), (4, False)):
-            with self.subTest(gamma=gamma):
-                model = self._qsa_enabled_model(
-                    gen_num_per_cycle=gamma, _qwen4_indexer_compress_ratio=4
-                )
-                with mock.patch.dict(
-                    os.environ,
-                    {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"},
-                ), mock.patch.object(
-                    Qwen35Moe, "load", return_value="loaded"
-                ) as parent_load:
-                    if valid:
-                        self.assertEqual(model.load(), "loaded")
-                        parent_load.assert_called_once()
-                    else:
-                        with self.assertRaisesRegex(
-                            RuntimeError, "gen_num_per_cycle.*indexer_compress_ratio"
-                        ):
-                            model.load()
-                        parent_load.assert_not_called()
-
-    def test_qsa_rejects_unsupported_modes_before_weight_loading(self):
-        cases = (
-            (
-                "act_type=BF16",
-                dict(data_type=DataType.TYPE_FP16),
-                {},
-            ),
-            (
-                "quantized indexer",
-                dict(quant_config=SimpleNamespace(is_quanted=lambda: True)),
-                {},
-            ),
-            (
-                "base BF16 KV cache",
-                dict(
-                    attn_config=SimpleNamespace(
-                        is_sparse=True,
-                        use_sparse_gqa_fmha=True,
-                        kv_cache_dtype=KvCacheDataType.FP8,
-                    )
-                ),
-                {},
-            ),
-            (
-                "routing flags are inconsistent",
-                dict(
-                    attn_config=SimpleNamespace(
-                        is_sparse=True,
-                        use_sparse_gqa_fmha=False,
-                        kv_cache_dtype=KvCacheDataType.BASE,
-                    )
-                ),
-                {},
-            ),
-            ("PD-separated", {}, dict(role_type=RoleType.DECODE)),
-            (
-                "context/prefill parallelism",
-                {},
-                dict(
-                    prefill_cp_config=SimpleNamespace(
-                        is_enabled=lambda: True,
-                        is_prefill_enabled=lambda: False,
-                    )
-                ),
-            ),
-        )
-        for expected, config_overrides, parallel_overrides in cases:
-            with self.subTest(expected=expected):
-                model = self._qsa_enabled_model(**config_overrides)
-                for name, value in parallel_overrides.items():
-                    setattr(model.parallelism_config, name, value)
-                with mock.patch.dict(
-                    os.environ,
-                    {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"},
-                ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-                    with self.assertRaisesRegex(RuntimeError, expected):
-                        model.load()
-                parent_load.assert_not_called()
-
-    def test_cuda_graph_requires_side_regions_disabled(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        self.assertFalse(model.support_cuda_graph())
-        model.model_config = mock.Mock(
-            enable_qwen4_ple=False, enable_qwen4_qsa=False, is_mtp=False
-        )
-        self.assertTrue(model.support_cuda_graph())
-
-        model.model_config.enable_qwen4_ple = True
-        self.assertFalse(model.support_cuda_graph())
-
-        model.model_config.enable_qwen4_ple = False
-        model.model_config.enable_qwen4_qsa = True
-        self.assertFalse(model.support_cuda_graph())
-
-        model.model_config.enable_qwen4_qsa = False
-        model.model_config.is_mtp = True
-        self.assertFalse(model.support_cuda_graph())
-
-    def test_ple_rejects_non_bf16_before_weight_loading(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = mock.Mock(
-            enable_qwen4_qsa=False,
-            enable_qwen4_ple=True,
-            data_type=DataType.TYPE_FP16,
-        )
-        with mock.patch.dict(
-            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
-        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "requires act_type=BF16"):
-                model.load()
-        parent_load.assert_not_called()
-
-    def test_ple_rejects_invalid_tp_split_before_weight_loading(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = mock.Mock(
-            enable_qwen4_qsa=False,
-            enable_qwen4_ple=True,
-            data_type=DataType.TYPE_BF16,
-            _qwen4_split_ngram_parts=128,
-        )
-        model.parallelism_config = SimpleNamespace(
-            get_attn_tp_size=lambda: 3,
-            prefill_cp_config=SimpleNamespace(
-                is_enabled=lambda: False,
-                is_prefill_enabled=lambda: False,
-            ),
-        )
-        with mock.patch.dict(
-            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
-        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "attention TP >= 1"):
-                model.load()
-        parent_load.assert_not_called()
-
-    def test_ple_tp_one_cpu_reaches_weight_loader(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = mock.Mock(
-            enable_qwen4_qsa=False,
-            enable_qwen4_ple=True,
-            data_type=DataType.TYPE_BF16,
-            _qwen4_split_ngram_parts=128,
-        )
-        model.parallelism_config = SimpleNamespace(
-            get_attn_tp_size=lambda: 1,
-            prefill_cp_config=SimpleNamespace(
-                is_enabled=lambda: False,
-                is_prefill_enabled=lambda: False,
-            ),
-        )
-        with mock.patch.dict(
-            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
-        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            model.load()
-        parent_load.assert_called_once()
-
-    def test_ple_rejects_cp_before_weight_loading(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = mock.Mock(
-            enable_qwen4_qsa=False,
-            enable_qwen4_ple=True,
-            data_type=DataType.TYPE_BF16,
-            _qwen4_split_ngram_parts=128,
-        )
-        model.parallelism_config = SimpleNamespace(
-            tp_size=8,
-            get_attn_tp_size=lambda: 1,
-            prefill_cp_config=SimpleNamespace(
-                is_enabled=lambda: True,
-                is_prefill_enabled=lambda: False,
-            ),
-        )
-        with mock.patch.dict(
-            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
-        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "does not support context"):
-                model.load()
-        parent_load.assert_not_called()
-
-    def test_ple_rejects_pd_roles_before_weight_loading(self):
-        for role_type in (RoleType.PREFILL, RoleType.DECODE):
-            with self.subTest(role_type=role_type):
-                model = Qwen4Exp.__new__(Qwen4Exp)
-                model.model_config = mock.Mock(
-                    enable_qwen4_qsa=False,
-                    enable_qwen4_ple=True,
-                    data_type=DataType.TYPE_BF16,
-                    _qwen4_split_ngram_parts=128,
-                )
-                model.parallelism_config = SimpleNamespace(
-                    role_type=role_type,
-                    get_attn_tp_size=lambda: 8,
-                    prefill_cp_config=SimpleNamespace(
-                        is_enabled=lambda: False,
-                        is_prefill_enabled=lambda: False,
-                    ),
-                )
-                with mock.patch.dict(
-                    os.environ,
-                    {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"},
-                ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-                    with self.assertRaisesRegex(RuntimeError, "PD-separated"):
-                        model.load()
-                parent_load.assert_not_called()
-
-    def test_full_side_cache_pd_opt_in_reaches_parent_loader(self):
-        for role_type in (RoleType.PREFILL, RoleType.DECODE):
-            with self.subTest(role=role_type):
-                model = self._qsa_enabled_model(
-                    enable_qwen4_ple=True,
-                    _qwen4_split_ngram_parts=128,
-                    _qwen4_indexer_compress_ratio=4,
-                    gen_num_per_cycle=3,
-                )
-                model.parallelism_config.role_type = role_type
-                model.parallelism_config.get_attn_tp_size = lambda: 8
-                with mock.patch.dict(
-                    os.environ,
-                    {
-                        "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
-                        "RTP_LLM_QWEN4_ENABLE_PD": "1",
-                    },
-                ), mock.patch.object(
-                    Qwen35Moe, "load", return_value="loaded"
-                ) as parent:
-                    self.assertEqual(model.load(skip_python_model=True), "loaded")
-                parent.assert_called_once_with(skip_python_model=True)
-
-    def test_pd_opt_in_does_not_enable_context_parallelism(self):
-        model = self._qsa_enabled_model()
-        model.parallelism_config.role_type = RoleType.PREFILL
-        model.parallelism_config.prefill_cp_config.is_enabled = lambda: True
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true",
-                "RTP_LLM_QWEN4_ENABLE_PD": "1",
-            },
-        ), mock.patch.object(Qwen35Moe, "load") as parent:
-            with self.assertRaisesRegex(RuntimeError, "context/prefill parallelism"):
-                model.load()
-        parent.assert_not_called()
-
-    def test_ple_weight_size_uses_attention_tp_not_ep(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-                "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "0",
-            },
-        ):
-            config = Qwen4Exp.create_config(self._temp_dir.name)
-        # Production injects this through build_model_config() before invoking
-        # the multimodal-aware size estimator. This focused parser test mirrors
-        # that lifecycle without constructing the full server configuration.
-        config.model_type = "qwen4_exp"
-
-        table = config._tp_sharded_extra_weight_bytes
-        replicated = config._replicated_extra_weight_bytes
-        # The nominal n-gram table alone is 20M * 2560 * BF16 = 102.4GB.
-        self.assertEqual(table, 102_400_000_000)
-        self.assertEqual(replicated, 65_679_640)
-        self.assertEqual(config._extra_weight_bytes, table + replicated)
-        # The temporary checkpoint deliberately contains no tokenizer/image
-        # processor assets. Isolate the PLE residency formula from the
-        # independently tested multimodal parameter estimator.
-        with mock.patch.object(Qwen3_5MoeMixin, "eval_mm_model_size", return_value=0):
-            total = config.eval_model_weight_size()
-            generic = total - config._extra_weight_bytes
-            self.assertAlmostEqual(
-                config.eval_model_weight_size_per_rank(tp_size=8, ep_size=16),
-                generic / 16 + table / 8 + replicated,
-            )
-
-    def test_ple_checkpoint_size_is_reported_when_runtime_gate_is_off(self):
-        self.assertFalse(self.config.enable_qwen4_ple)
-        self.assertEqual(self.config._tp_sharded_extra_weight_bytes, 0)
-        self.assertEqual(self.config._replicated_extra_weight_bytes, 0)
-        self.assertEqual(self.config._extra_weight_bytes, 102_465_679_640)
-        self.assertGreater(self.config._extra_weight_param_count, 51_200_000_000)
-
-    def test_ple_defaults_to_cpu_and_excludes_table_from_gpu_budget(self):
-        with mock.patch.dict(os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true"}):
-            os.environ.pop("RTP_LLM_QWEN4_PLE_CPU_OFFLOAD", None)
-            config = Qwen4Exp.create_config(self._temp_dir.name)
-
-        self.assertTrue(config.qwen4_ple_cpu_offload)
-        self.assertEqual(config._tp_sharded_extra_weight_bytes, 0)
-        self.assertEqual(config._replicated_extra_weight_bytes, 65_679_640)
-        self.assertEqual(config._extra_weight_bytes, 102_465_679_640)
-        config.model_type = "qwen4_exp"
-        with mock.patch.object(Qwen3_5MoeMixin, "eval_mm_model_size", return_value=0):
-            generic = config.eval_model_weight_size() - config._extra_weight_bytes
-            self.assertAlmostEqual(
-                config.eval_model_weight_size_per_rank(tp_size=8, ep_size=16),
-                generic / 16 + 65_679_640,
-            )
-
-    def test_ple_storage_selection_is_frozen_at_config_construction(self):
-        with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "0"}):
-            config = Qwen4Exp.create_config(self._temp_dir.name)
-        with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_OFFLOAD": "1"}):
-            weight = object.__new__(Qwen4ExpWeight)
-            weight.model_config = config
-            weight.model_config.enable_qwen4_ple = True
-            weight.prefix = "model."
-            layer_weights = [[] for _ in range(_NUM_LAYERS)]
-            weight._append_ple_weights(layer_weights)
-
-        self.assertFalse(config.qwen4_ple_cpu_offload)
-        self.assertFalse(layer_weights[1][-1].cpu_offload)
-
-    def test_cpu_ple_disables_graph_even_with_experimental_graph_gate(self):
-        model = Qwen4Exp.__new__(Qwen4Exp)
-        model.model_config = SimpleNamespace(
-            enable_qwen4_ple=True,
-            enable_qwen4_qsa=False,
-            is_mtp=False,
-            qwen4_ple_cpu_offload=True,
-        )
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "1",
-                "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL": "1",
-                "RTP_LLM_QWEN4_PLE_CPU_GRAPH": "0",
-            },
-        ):
-            self.assertFalse(model.support_cuda_graph())
-            with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_GRAPH": "1"}):
-                self.assertTrue(model.support_cuda_graph())
-            model.model_config.qwen4_ple_cpu_offload = False
-            self.assertTrue(model.support_cuda_graph())
 
     def test_basic_config(self):
         config = self.config
@@ -670,14 +353,7 @@ class Qwen4ExpTest(unittest.TestCase):
         config_json = self._config()
         config_json["text_config"]["output_gate_type"] = "sigmoid"
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(config_json))
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "false",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-            },
-        ):
-            config = Qwen4Exp.create_config(self._temp_dir.name)
+        config = Qwen4Exp.create_config(self._temp_dir.name)
         self.assertEqual(config.linear_attn_norm_activation, "sigmoid")
 
     def test_moe_config(self):
@@ -724,76 +400,6 @@ class Qwen4ExpTest(unittest.TestCase):
             self.config.mm_related_params.config["ckpt_path"], self._temp_dir.name
         )
 
-    def test_kv_cache_spec_descs(self):
-        descs = self.config.kv_cache_spec_descs
-        self.assertEqual(len(descs), _NUM_LAYERS)
-        tags = [layer_descs[0].tag for layer_descs in descs]
-        self.assertEqual(tags.count("full"), 12)
-        self.assertEqual({tags.count(f"linear{i}") for i in range(3)}, {12})
-        for tag, layer_descs in zip(tags, descs):
-            expected = KVCacheSpecType.MHA if tag == "full" else KVCacheSpecType.LINEAR
-            self.assertEqual(layer_descs[0].cache_type, expected)
-            self.assertEqual(len(layer_descs), 1)
-
-    def test_all_variants_use_the_independent_cache_pools(self):
-        # PLE/QSA-on already route through the pool path; the dense fallback
-        # (this default config) must too, or the shared hybrid pool rejects
-        # qwen4's linear-vs-attention block stride geometry.
-        self.assertTrue(
-            self.config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "true",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "false",
-            },
-        ):
-            ple_config = Qwen4Exp.create_config(self._temp_dir.name)
-        self.assertTrue(ple_config.enable_qwen4_ple)
-        self.assertTrue(
-            ple_config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
-
-    def test_unfinished_subsystems_are_disabled_by_default(self):
-        self.assertFalse(self.config.enable_qwen4_ple)
-        self.assertFalse(self.config.enable_qwen4_qsa)
-        self.assertFalse(self.config.attn_config.is_sparse)
-        self.assertFalse(self.config.attn_config.use_sparse_gqa_fmha)
-
-    def test_qsa_routing_flag_propagates_through_real_attention_config(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_ENABLE_QWEN4_EXP_PLE": "false",
-                "RTP_LLM_ENABLE_QWEN4_EXP_QSA": "true",
-            },
-        ):
-            config = Qwen4Exp.create_config(self._temp_dir.name)
-
-        self.assertTrue(config.enable_qwen4_qsa)
-        self.assertTrue(config.attn_config.is_sparse)
-        self.assertTrue(config.attn_config.use_sparse_gqa_fmha)
-        local_attn_config = config.getAttentionConfigs(8)
-        self.assertTrue(local_attn_config.use_sparse_gqa_fmha)
-
-    def test_disabled_qsa_does_not_request_indexer_weights(self):
-        info = self._weight()._get_weight_info()
-        requested = set()
-        for layer in info.layer_weights:
-            requested |= _ckpt_keys(layer)
-
-        self.assertFalse([key for key in requested if ".indexer." in key])
-
-    def test_enabled_qsa_requests_indexer_only_on_full_attention_layers(self):
-        self.config.enable_qwen4_qsa = True
-        info = self._weight()._get_weight_info()
-
-        linear_keys = _ckpt_keys(info.layer_weights[0])
-        full_keys = _ckpt_keys(info.layer_weights[3])
-        self.assertFalse([key for key in linear_keys if ".indexer." in key])
-        self.assertEqual(len([key for key in full_keys if ".indexer." in key]), 3)
-
     def test_hc_mult_is_plumbed_from_hc_count(self):
         self.assertEqual(self.config.hc_mult, 4)
         self.assertEqual(
@@ -819,22 +425,6 @@ class Qwen4ExpTest(unittest.TestCase):
         # The Qwen3.5 anchor (layers.0.input_layernorm.weight) does not exist here.
         self.assertEqual(self._weight().prefix, "model.language_model.")
         self.assertTrue(self._weight()._has_stacked_ckpt)
-
-    def test_vocab_cpu_residency_preserves_other_global_weights(self):
-        self.config._qwen4_vocab_cpu_offload = False
-        baseline = self._weight()._get_weight_info()
-        self.assertIsNone(
-            next(w for w in baseline.weights if w.name == W.embedding).resident_device
-        )
-        self.config._qwen4_vocab_cpu_offload = True
-        info = self._weight()._get_weight_info()
-        self.assertEqual(
-            next(w for w in info.weights if w.name == W.embedding).resident_device,
-            "cpu",
-        )
-        for weight in info.weights:
-            if weight.name != W.embedding:
-                self.assertIsNone(weight.resident_device)
 
     def test_prefix_detection_rejects_a_checkpoint_without_the_anchor(self):
         weight = Qwen4ExpWeight(

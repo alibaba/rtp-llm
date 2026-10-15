@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -6,20 +5,17 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     SIDE_TAGS,
     prepare_side_cache_store_writers,
     publish_layer_side_caches,
     validate_pd_cache_inputs,
 )
+from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 
 
 class Qwen4PDCacheStoreTest(unittest.TestCase):
     def setUp(self):
-        env = patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "0"})
-        env.start()
-        self.addCleanup(env.stop)
         self.events = []
         self.native_writer = SimpleNamespace(write=self.write)
 
@@ -48,37 +44,33 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
         )
         return kv_cache, {tag: self.inputs(tag) for tag in ["full", *tags]}, caches
 
-    def test_default_off_and_incomplete_plan_fail_before_publication(self):
+    def test_incomplete_plan_fails_before_publication(self):
         kv, inputs, caches = self.pools()
-        with self.assertRaisesRegex(RuntimeError, "RTP_LLM_QWEN4_ENABLE_PD"):
+        inputs[sorted(SIDE_TAGS)[0]].cache_store_inputs = None
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
             prepare_side_cache_store_writers(inputs, kv, layer_count=2)
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
-            inputs[sorted(SIDE_TAGS)[0]].cache_store_inputs = None
-            with self.assertRaisesRegex(RuntimeError, "incomplete"):
-                prepare_side_cache_store_writers(inputs, kv, layer_count=2)
         self.assertEqual(self.events, [])
         self.assertTrue(all(not cache.payload.any() for cache in caches))
 
     def test_missing_writer_graph_and_verify_are_rejected(self):
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
-            for values, expected in (
-                ({"cache_store_writer": None}, "writer is missing"),
-                ({"is_cuda_graph": True}, "eager prefill"),
-                ({"is_target_verify": True}, "target-verify"),
-                ({"is_prefill": False}, "prefill inputs"),
+        for values, expected in (
+            ({"cache_store_writer": None}, "writer is missing"),
+            ({"is_cuda_graph": True}, "eager prefill"),
+            ({"is_target_verify": True}, "target-verify"),
+            ({"is_prefill": False}, "prefill inputs"),
+        ):
+            with (
+                self.subTest(values=values),
+                self.assertRaisesRegex(RuntimeError, expected),
             ):
-                with self.subTest(values=values), self.assertRaisesRegex(
-                    RuntimeError, expected
-                ):
-                    validate_pd_cache_inputs((self.inputs("full", **values),))
+                validate_pd_cache_inputs((self.inputs("full", **values),))
         self.assertEqual(self.events, [])
 
     def test_missing_tag_fails_before_layer_mutation(self):
         kv, inputs, _ = self.pools()
         del inputs[sorted(SIDE_TAGS)[0]]
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}):
-            with self.assertRaisesRegex(RuntimeError, "inputs are missing"):
-                prepare_side_cache_store_writers(inputs, kv, layer_count=2)
+        with self.assertRaisesRegex(RuntimeError, "inputs are missing"):
+            prepare_side_cache_store_writers(inputs, kv, layer_count=2)
         self.assertEqual(self.events, [])
 
     def test_tag_local_writers_observe_completed_layer_state(self):
@@ -87,7 +79,7 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
         def factory(value, cache):
             return WriteCacheStoreOp(value.cache_store_writer, value.cache_store_inputs)
 
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}), patch(
+        with patch(
             "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
             side_effect=factory,
         ):
@@ -170,16 +162,20 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
         model._initial_hyper_states = lambda hidden: hidden
         model._build_attn_meta = lambda *args: None
         model._ple_input_ids = lambda inputs: inputs.input_ids
+        model._start_eager_ple_prefetch = lambda *args: {}
         model._apply_ple = lambda layer, hidden, *args: hidden
         model._attention_tag = lambda layer: "full"
         model._layer_fmha_impl = lambda *args: None
         inputs = SimpleNamespace(
             input_ids=torch.zeros(1, dtype=torch.long), attention_inputs=inputs_by_tag
         )
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_ENABLE_PD": "1"}), patch(
-            "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
-            side_effect=factory,
-        ), patch.object(qwen4_exp, "_is_cuda_graph_forward", return_value=False):
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
+                side_effect=factory,
+            ),
+            patch.object(qwen4_exp, "_is_cuda_graph_forward", return_value=False),
+        ):
             model.forward(inputs, fmha_impl=object())
         self.assertEqual(order, ["layer_completed", "published", "published"])
 

@@ -20,7 +20,6 @@ only the newly generated token, and no attention input carries token history.
 They therefore get a second, tiny int64 region of their own.
 """
 
-import os
 from typing import List
 
 from rtp_llm.config.model_config import ModelConfig
@@ -41,16 +40,6 @@ PLE_STATE_TAG = "ple_conv_state"
 PLE_NGRAM_CTX_TAG = "ple_ngram_ctx"
 INDEXER_KV_TAG = "indexer_kv"
 INDEXER_STATE_TAG = "indexer_state"
-
-
-def qwen4_pd_enabled() -> bool:
-    """Opt in to the tagged PLE/QSA cache-store handoff."""
-    return os.environ.get("RTP_LLM_QWEN4_ENABLE_PD", "0").lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:
@@ -224,21 +213,14 @@ def build_qwen4_exp_kv_cache_spec_descs(
     )
     # The fixed state pools still occupy GPU memory and must reserve their full
     # allocation before sizing paged pools. Block zero is the dummy slot.
-    blocks_env = os.environ.get("RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS", "0")
-    try:
-        fixed_blocks = int(blocks_env)
-    except ValueError as error:
-        raise ValueError("Qwen linear cache blocks must be an integer") from error
-    if fixed_blocks != 0 and not 2 <= fixed_blocks <= 2**32 - 1:
-        raise ValueError("Qwen linear cache blocks must be 0 or in [2, 2**32 - 1]")
-    if fixed_blocks:
-        for layer in layer_descs:
-            for desc in layer:
-                if desc.cache_type == KVCacheSpecType.LINEAR:
-                    capacity = CacheCapacityPolicyDesc()
-                    capacity.explicit_block_num = fixed_blocks
-                    capacity.charge_to_paged_budget = True
-                    desc.capacity = capacity
+    # Use the common independent-pool memory planner, including all state
+    # snapshots, tails and reusable checkpoints. No model-local block cap.
+    for layer in layer_descs:
+        for desc in layer:
+            if desc.cache_type == KVCacheSpecType.LINEAR:
+                capacity = CacheCapacityPolicyDesc()
+                capacity.charge_to_paged_budget = True
+                desc.capacity = capacity
     hc_hidden = config.hidden_size * config.hc_mult
     for layer_idx in ple_layer_indices:
         if not 0 <= layer_idx < len(layer_descs):

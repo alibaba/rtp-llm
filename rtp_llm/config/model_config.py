@@ -78,13 +78,32 @@ def resolve_ssm_state_dtype(
 
 
 class ModelConfig(CppModelConfig):
-    # Defaults for Python-only feature flags. Some config helpers construct a
-    # bare ModelConfig before model-specific parsing; those objects must keep
-    # the legacy, feature-disabled behavior instead of raising AttributeError.
-    enable_qwen4_ple: bool = False
-    # Like vLLM EngramConfig.cpu_offload, PLE tables default to host memory.
-    qwen4_ple_cpu_offload: bool = True
-    enable_qwen4_qsa: bool = False
+    # Checkpoint capabilities are read-only; they are not model options.
+    @property
+    def enable_qwen4_ple(self) -> bool:
+        return bool(getattr(self, "_qwen4_ple_layer_ids", ()))
+
+    @property
+    def enable_qwen4_qsa(self) -> bool:
+        return int(getattr(self, "_qwen4_indexer_head_dim", 0)) > 0
+
+    @property
+    def qwen4_ple_prefetch_mb(self) -> int:
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None:
+            return snapshot.options.ple_prefetch_mb
+        return getattr(self, "_qwen4_ple_prefetch_mb", 256)
+
+    @qwen4_ple_prefetch_mb.setter
+    def qwen4_ple_prefetch_mb(self, value: int) -> None:
+        if type(value) is not int or value <= 0:
+            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None and value != snapshot.options.ple_prefetch_mb:
+            raise RuntimeError(
+                "qwen4_exp resource options are frozen after model loading"
+            )
+        self._qwen4_ple_prefetch_mb = value
 
     # Model-specific weight estimators add to these fields when needed. Class
     # defaults keep the generic estimator statically visible and zero-cost for
@@ -123,6 +142,7 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
+        "qwen4_ple_prefetch_mb",
         "n_shared_experts",
         "dsv4_fixed_pool_use_memory",
         "generate_env_config",
@@ -130,9 +150,6 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
-        "enable_qwen4_ple",
-        "qwen4_ple_cpu_offload",
-        "enable_qwen4_qsa",
         "linear_attn_norm_activation",
     }
 
@@ -766,6 +783,11 @@ class ModelConfig(CppModelConfig):
             self.hidden_state_capture_layer_ids = layer_ids
         if capture_dtype is not None:
             self.hidden_state_capture_dtype = capture_dtype
+        if "qwen4_ple_prefetch_mb" in model_override_args:
+            budget = model_override_args["qwen4_ple_prefetch_mb"]
+            if type(budget) is not int or budget <= 0:
+                raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+            self.qwen4_ple_prefetch_mb = budget
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
@@ -784,6 +806,14 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
+        if self.quantization:
+            requested = init_quant_config(self.quantization)
+            recipe = getattr(requested, "model_recipe", None)
+            if recipe is not None and (
+                recipe != "qwen4_fp8_nvfp4"
+                or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
+            ):
+                raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         if not quant_config:

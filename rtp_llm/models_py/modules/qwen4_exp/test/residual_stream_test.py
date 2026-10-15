@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
+from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
     Qwen4ExpGatedResidual,
     inject_into_residual,
 )
