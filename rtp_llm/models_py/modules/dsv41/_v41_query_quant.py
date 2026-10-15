@@ -82,7 +82,7 @@ def query_norm_quant(x: torch.Tensor, weight: torch.Tensor, eps: float):
     return normalized, (quantized, scales)
 
 
-def try_project_quantized_qkv(attn, x):
+def try_project_quantized_qkv(attn, x, quantized_input=None):
     """Decode-only projection with an explicit, forward-local quantized Q."""
     if os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1":
         return None
@@ -102,7 +102,11 @@ def try_project_quantized_qkv(attn, x):
         quant_kernel == "auto" and elements >= 4 * 1024 * 1024
     ):
         return None
-    projected = linear(x)
+    projected = (
+        linear(x)
+        if quantized_input is None
+        else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
+    )
     qr, quantized = query_norm_quant(
         projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps
     )

@@ -2,7 +2,8 @@
 
 This seam is internal to one block, so Engram injection, auxiliary hidden
 capture and the final delayed readout keep their existing boundaries. Both
-flat prefill and batched decode layouts use the same BF16-only operation.
+flat prefill and batched decode layouts retain BF16 outputs. Cross-layer
+decode can additionally request native FP8 output for the next projection.
 
 DeepGEMM initializes persistent split barriers per CUDA stream. Warm up on
 the capture stream before recording a graph; an unwarmed capture stream
@@ -19,6 +20,12 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
+
+QuantizedInput = tuple[torch.Tensor, torch.Tensor]
+MHCOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+MHCQuantizedOutput = tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, QuantizedInput
+]
 
 _WARMED_STREAMS: set[tuple[int, int]] = set()
 
@@ -225,7 +232,8 @@ def try_fused_post_pre(
     *,
     original_tokens: int | None = None,
     reuse_residual: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    output_fp8: bool = False,
+) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
     A successful call also publishes the FFN pre-mix for the next sublayer's
@@ -236,6 +244,10 @@ def try_fused_post_pre(
     ``original_tokens`` preserves the installed backend's pre-compaction
     split heuristic using at most 512 execution rows when padding is needed.
     Returned leading-row views retain that bounded padded storage.
+    ``output_fp8`` appends an (FP8, packed GEMM scales) pair using native
+    DeepGEMM quantization and TMA-aligned GEMM scales. Its minimum scale
+    is 2**-22 (legacy/v3: 2**-33), so tiny inputs may underflow to zero
+    and are not bitwise equivalent to the legacy quantization path.
     """
     if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
         return None
@@ -269,13 +281,23 @@ def try_fused_post_pre(
     new_post = torch.empty_like(post)
     new_comb = torch.empty_like(comb)
     normalized = torch.empty_like(attn_out)
+    quantized = None
+    if output_fp8:
+        q = torch.empty_like(normalized, dtype=torch.float8_e4m3fn)
+        # DeepGEMM requires column-major packed scales with 16-byte alignment.
+        sf = torch.empty(
+            (40, (execution_tokens + 3) // 4 * 4),
+            device=attn_out.device,
+            dtype=torch.int32,
+        ).T[:execution_tokens]
+        quantized = (q, sf)
     # Both the small-token DeepGEMM prenorm and the large-prefill TileLang
     # fallback use the same biased TF32 weight rounding. Cache that boundary
     # instead of feeding raw FP32 weights to TMA's TF32 conversion.
     weight = prepare_tf32_weight(next_hc.fn)
     with torch.cuda.device(attn_out.device):
         capturing = torch.cuda.is_current_stream_capturing()
-        operation(
+        arguments = dict(
             x=attn_out,
             residual=residual,
             shifted_prev_mix=previous_pre,
@@ -299,15 +321,22 @@ def try_fused_post_pre(
             new_comb_res_mix=new_comb,
             y_bf16=normalized,
         )
+        if quantized is not None:
+            arguments.update(y_fp8=q, y_gemm_sf=sf)
+        operation(**arguments)
+        if quantized is not None:
+            quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])
         if not capturing:
             _WARMED_STREAMS.add(_stream_key(attn_out.device))
     next_hc.pre_mix_out = new_pre[:tokens].view(*leading, 4)
-    return (
+    result = (
         new_residual[:tokens].view(*leading, 4, 5120),
         normalized[:tokens].view(*leading, 5120),
         new_post[:tokens].view(*leading, 4, 1),
         new_comb[:tokens].view(*leading, 4, 4),
     )
+
+    return (*result, quantized) if output_fp8 else result
 
 
 __all__ = ["can_preserve_compact_mhc", "is_supported", "try_fused_post_pre"]

@@ -239,6 +239,9 @@ def _launch_mega(pair, tokens, device):
         is None
     ):
         raise RuntimeError("V4.1 HC warmup mega_mhc rejected a reachable shape")
+    v41_mega_mhc.try_fused_post_pre(
+        hidden, residual, post, comb, previous, next_hc, norm, output_fp8=True
+    )
 
 
 @torch.inference_mode()

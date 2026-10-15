@@ -53,6 +53,18 @@ def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
     return previous is not None and previous() is layer.ffn_hc
 
 
+def _can_quantize_attention_input(layer, x, attn_fn) -> bool:
+    if attn_fn is not None:
+        return False
+    from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
+    from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+    attn = layer.attn
+    return type(attn) is AttentionV41FP8 and is_supported(
+        getattr(attn, "wq_a_wkv", None), x, attn.q_norm, attn.q_lora_rank
+    )
+
+
 def forward_decode_layer(
     layer,
     hidden: torch.Tensor | PendingDecodePost,
@@ -82,6 +94,7 @@ def forward_decode_layer(
                 hidden.previous,
                 layer.attn_hc,
                 layer.attn_norm,
+                output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]
     defer_post = can_defer_decode_post(layer, next_layer, preserve_output)
