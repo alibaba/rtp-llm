@@ -117,11 +117,11 @@ struct MallocResult {
 
     // Lower-tier reuse is published only after async_context completes.
 
-    int64_t match_end_time_us          = 0;
-    int64_t malloc_begin_time_us       = 0;
-    int64_t load_prepare_latency_us    = 0;
-    int64_t block_aligned_input_length = 0;
-    bool    load_attempted             = false;
+    int64_t match_end_time_us       = 0;
+    int64_t malloc_begin_time_us    = 0;
+    int64_t load_prepare_latency_us = 0;
+    int64_t device_input_length     = 0;
+    bool    load_attempted          = false;
 };
 
 struct FreeInfo {

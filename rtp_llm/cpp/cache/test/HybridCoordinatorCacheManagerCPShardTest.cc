@@ -94,10 +94,10 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
     auto       allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
-    const auto linear_pool = allocator->groupBlockPools()[0];
-    const auto pool = allocator->groupBlockPools()[1];
-    auto       resource = makeBatchRes(1, config, {100, 101, 102, 103});
-    auto linear_blocks = linear_pool->malloc(2);
+    const auto linear_pool   = allocator->groupBlockPools()[0];
+    const auto pool          = allocator->groupBlockPools()[1];
+    auto       resource      = makeBatchRes(1, config, {100, 101, 102, 103});
+    auto       linear_blocks = linear_pool->malloc(2);
     ASSERT_TRUE(linear_blocks.has_value());
     linear_pool->incRef(*linear_blocks);
     linear_pool->incTreeRef(*linear_blocks, BlockTreeRefType::CACHE);
@@ -106,7 +106,8 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
     pool->incRef(*blocks);
     pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
     // An eight-token ready prefix occupies two LINEAR slots but one CP FULL slot.
-    resource->mutableBlockIds(0, "linear").assign({NULL_BLOCK_IDX, (*linear_blocks)[0], NULL_BLOCK_IDX, (*linear_blocks)[1]});
+    resource->mutableBlockIds(0, "linear")
+        .assign({NULL_BLOCK_IDX, (*linear_blocks)[0], NULL_BLOCK_IDX, (*linear_blocks)[1]});
     resource->mutableBlockIds(0, "full").assign({(*blocks)[0], (*blocks)[1]});
 
     // Exhaust FULL capacity after LINEAR replacements have been reserved.
@@ -157,7 +158,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, NullMapperIsPassthrough) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, "full"), 4);
-    EXPECT_EQ(result.block_aligned_input_length, 16);
+    EXPECT_EQ(result.device_input_length, 16);
 }
 
 // 2) With cp_slot_mapper(cp_rank=0, cp_size=2, block_size=4): a 4-block request allocates ceil(4/2)=2
@@ -179,7 +180,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, ShardedAllocHalvesFullGroup) {
     EXPECT_EQ(batch_res->blocksNum(0, "full"), 2)
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
     EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101, 102, 103}));
-    EXPECT_EQ(result.block_aligned_input_length, 16);
+    EXPECT_EQ(result.device_input_length, 16);
 }
 
 // 3) Reuse path with CP canonical keys: reuse_len must stay in whole logical blocks
@@ -209,7 +210,7 @@ void expectCpCanonicalReuse(int                  seq_len,
 
     EXPECT_EQ(result.reuse_len, expected_reuse_len) << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->cacheKeys(0), request_keys);
-    EXPECT_EQ(result.block_aligned_input_length, expected_input_length) << "seq_len=" << seq_len;
+    EXPECT_EQ(result.device_input_length, expected_input_length) << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), static_cast<size_t>(expected_reuse_len / 8))
         << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->blocksNum(0, "full"), expected_local_blocks) << "seq_len=" << seq_len;
