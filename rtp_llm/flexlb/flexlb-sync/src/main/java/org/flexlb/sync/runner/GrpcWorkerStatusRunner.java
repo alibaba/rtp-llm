@@ -127,6 +127,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
 
             pollTrace.recordRpcStarted(syncRequestTimeoutMs);
+            pollLease.statusRpcStarted(syncRequestTimeoutMs);
             CompletableFuture<EngineRpcService.WorkerStatusPB> rpc;
             try {
                 rpc =
@@ -150,7 +151,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     // Readiness precedes executor handoff; it is not an internal gRPC queue
                     // timestamp.
                     .whenComplete(
-                            (response, failure) -> pollTrace.record(Stage.CALLBACK_READY, failure))
+                            (response, failure) -> {
+                                pollLease.statusRpcCompleted(
+                                        failure == null
+                                                && response != null
+                                                && response.alive()
+                                                && response.role() == roleType
+                                                && response.statusVersion() != null
+                                                && response.statusVersion() > 0L
+                                                && response.statusVersion()
+                                                        >= workerStatus
+                                                                .appliedStatusCursor()
+                                                                .statusVersion());
+                                pollTrace.record(Stage.CALLBACK_READY, failure);
+                            })
                     .handleAsync(
                             (response, failure) -> {
                                 pollTrace.record(Stage.CALLBACK_STARTED);
@@ -289,7 +303,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         generationRetiring = true;
                         throw new IllegalStateException(
                                 "Endpoint generation cannot be recreated for committed WorkerStatus"
-                                    + " "
+                                        + " "
                                         + ipPort
                                         + "#"
                                         + workerStatus.getGenerationId());

@@ -51,6 +51,7 @@ public final class MasterEngineSynchronizer {
     private final long statusStaleAfterUs;
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor cacheStatusExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
     public MasterEngineSynchronizer(
@@ -83,6 +84,17 @@ public final class MasterEngineSynchronizer {
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        // Cache overload must not run cache work on a health/discovery caller.
+        int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
+        cacheStatusExecutor =
+                new ThreadPoolExecutor(
+                        cacheThreads,
+                        cacheThreads,
+                        60L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(15_000),
+                        new NamedThreadFactory("cache-status-executor"),
+                        new ThreadPoolExecutor.AbortPolicy());
         this.scheduler =
                 new ScheduledThreadPoolExecutor(
                         5,
@@ -110,6 +122,8 @@ public final class MasterEngineSynchronizer {
                     ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "cacheStatusExecutor", cacheStatusExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }
@@ -126,6 +140,7 @@ public final class MasterEngineSynchronizer {
                                 workerDirectory,
                                 workerAddressService,
                                 statusCheckExecutor,
+                                cacheStatusExecutor,
                                 engineHealthReporter,
                                 engineGrpcService,
                                 roleType,
@@ -139,7 +154,12 @@ public final class MasterEngineSynchronizer {
                                         .getWorkerRegistry()
                                         .getCacheStatus()
                                         .isFullSnapshotDebugMode(),
-                                statusStaleAfterUs));
+                                statusStaleAfterUs,
+                                flexlbConfig
+                                                .getWorkerRegistry()
+                                                .getHealth()
+                                                .getStatusCommitGraceMs()
+                                        * 1000L));
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
@@ -155,5 +175,6 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        cacheStatusExecutor.shutdown();
     }
 }

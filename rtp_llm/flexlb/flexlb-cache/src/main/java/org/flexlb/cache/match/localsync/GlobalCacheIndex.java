@@ -140,13 +140,17 @@ public class GlobalCacheIndex {
      *
      * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
      */
-    public void removeAllCacheBlockOfEngine(String engineIp, EndpointTrace trace) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(
+            String engineIp, Set<Long> blockCacheKeys, EndpointTrace trace) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
 
         long scannedKeys = 0L;
         long removedMappings = 0L;
+        // Only this generation's owned keys are visited. Cache maintenance is
+        // isolated from health polling; periodic unlock/relock is not needed
+        // for heartbeat progress and a non-fair lock cannot guarantee handoff.
         if (trace != null) {
             trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
         }
@@ -155,18 +159,14 @@ public class GlobalCacheIndex {
             if (trace != null) {
                 trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
             }
-            var engineSets = blockToEnginesMap.values().iterator();
-            while (engineSets.hasNext()) {
+            for (Long key : blockCacheKeys) {
                 scannedKeys++;
-                Set<String> engines = engineSets.next();
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
+                Set<String> engines = blockToEnginesMap.get(key);
+                if (engines != null && engines.remove(engineIp)) {
                     removedMappings++;
                     totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
                     if (engines.isEmpty()) {
-                        engineSets.remove();
+                        blockToEnginesMap.remove(key);
                     }
                 }
             }

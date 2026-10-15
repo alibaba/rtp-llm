@@ -4,12 +4,12 @@ import lombok.extern.slf4j.Slf4j;
 
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
-import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -102,10 +102,15 @@ public class KvCacheManager implements EngineCacheInvalidator {
         return globalCacheIndex.batchCalculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
     }
 
-    public void updateEngineCache(WorkerStatus worker, String role, Set<Long> keys) { updateEngineCache(worker, role, keys, null); }
+    public void updateEngineCache(WorkerStatus worker, String role, Set<Long> keys) {
+        updateEngineCache(worker, role, keys, null);
+    }
 
     public void updateEngineCache(
-            WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
+            WorkerStatus workerStatus,
+            String role,
+            Set<Long> newCacheBlocks,
+            EndpointTrace.Poll pollTrace) {
         if (workerStatus == null) {
             return;
         }
@@ -113,11 +118,16 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 workerStatus.getWorkerIdentity(),
                 workerStatus.getMetricIpPort(),
                 role,
-                newCacheBlocks, pollTrace);
+                newCacheBlocks,
+                pollTrace);
     }
 
     private void updateEngineCache(
-            WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
+            WorkerIdentity identity,
+            String metricIpPort,
+            String role,
+            Set<Long> newCacheBlocks,
+            EndpointTrace.Poll pollTrace) {
         String engineIPort = identity == null ? null : identity.getLogicalIpPort();
         if (engineIPort == null || newCacheBlocks == null) {
             return;
@@ -163,14 +173,16 @@ public class KvCacheManager implements EngineCacheInvalidator {
     }
 
     /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) { removeEngineCache(engineIpPort, null); }
+    public void removeEngineCache(String engineIpPort) {
+        removeEngineCache(engineIpPort, null);
+    }
 
     public void removeEngineCache(String engineIpPort, EndpointTrace trace) {
         if (engineIpPort == null) {
             return;
         }
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, trace);
+        Set<Long> removedBlocks = engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         physicalIpPortByLogicalIpPort.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());

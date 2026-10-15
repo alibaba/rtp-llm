@@ -177,6 +177,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         engineWorkerStatus,
                         workerAddressService,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         healthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -186,13 +187,15 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        STATUS_STALE_AFTER_US,
+                        60_000_000L);
 
         EngineSyncRunner decodeSyncRunner =
                 new EngineSyncRunner(
                         MODEL_NAME,
                         engineWorkerStatus,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         healthReporter,
                         engineGrpcService,
@@ -203,7 +206,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        STATUS_STALE_AFTER_US,
+                        60_000_000L);
 
         syncScheduler =
                 Executors.newSingleThreadScheduledExecutor(
@@ -347,7 +351,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
         System.out.printf(
                 "FileDiscoveryDynamicScaleEndToEndTest convergence: initial=%dms, add=%dms,"
-                    + " remove=%dms%n",
+                        + " remove=%dms%n",
                 initialConvergenceMs, addConvergenceMs, removeConvergenceMs);
     }
 

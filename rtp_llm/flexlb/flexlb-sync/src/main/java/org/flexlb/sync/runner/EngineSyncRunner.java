@@ -38,6 +38,7 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private final ExecutorService cacheStatusExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -60,12 +61,14 @@ public class EngineSyncRunner implements Runnable {
     private final boolean cacheFullSnapshotDebugMode;
 
     private final long statusStaleAfterUs;
+    private final long statusCommitGraceUs;
 
     public EngineSyncRunner(
             String modelName,
             WorkerDirectory workerDirectory,
             WorkerAddressService workerAddressService,
             ExecutorService statusCheckExecutor,
+            ExecutorService cacheStatusExecutor,
             EngineHealthReporter engineHealthReporter,
             EngineGrpcService engineGrpcService,
             RoleType roleType,
@@ -75,7 +78,7 @@ public class EngineSyncRunner implements Runnable {
             long syncCycleId,
             Long syncEngineStatusInterval,
             boolean cacheFullSnapshotDebugMode,
-            long statusStaleAfterUs) {
+            long statusStaleAfterUs, long statusCommitGraceUs) {
         this(
                 modelName,
                 workerDirectory,
@@ -91,7 +94,7 @@ public class EngineSyncRunner implements Runnable {
                 syncEngineStatusInterval,
                 false,
                 cacheFullSnapshotDebugMode,
-                statusStaleAfterUs);
+                statusStaleAfterUs, statusCommitGraceUs);
     }
 
     public EngineSyncRunner(
@@ -109,12 +112,14 @@ public class EngineSyncRunner implements Runnable {
             Long syncEngineStatusInterval,
             boolean kvcmEnabled,
             boolean cacheFullSnapshotDebugMode,
-            long statusStaleAfterUs) {
+            long statusStaleAfterUs, long statusCommitGraceUs) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.cacheStatusExecutor =
+                Objects.requireNonNull(cacheStatusExecutor, "cacheStatusExecutor");
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
@@ -130,6 +135,10 @@ public class EngineSyncRunner implements Runnable {
             throw new IllegalArgumentException("statusStaleAfterUs must be positive");
         }
         this.statusStaleAfterUs = statusStaleAfterUs;
+        if (statusCommitGraceUs <= 0L) {
+            throw new IllegalArgumentException("statusCommitGraceUs must be positive");
+        }
+        this.statusCommitGraceUs = statusCommitGraceUs;
     }
 
     @Override
@@ -287,9 +296,9 @@ public class EngineSyncRunner implements Runnable {
                                         syncCycleId,
                                         syncEngineStatusInterval,
                                         cacheFullSnapshotDebugMode,
-                                        statusCheckExecutor);
+                                        cacheStatusExecutor);
                         cachePollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                        cacheStatusExecutor.submit(grpcCacheStatusCheckRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
                         cachePollLease.pollTrace().record(Stage.RUNNER_REJECTED, e);
@@ -305,7 +314,7 @@ public class EngineSyncRunner implements Runnable {
             }
             logger.debug(
                     "Finished submitting status check tasks for model: {}, role: {}, worker count:"
-                        + " {}",
+                            + " {}",
                     modelName,
                     roleType,
                     latestEngineWorkerList.size());
@@ -470,7 +479,7 @@ public class EngineSyncRunner implements Runnable {
                     logger);
             logger.info(
                     "[replace] retiring worker topology generation, model={}, role={}, ipPort={},"
-                        + " generation={}, newGroup={}",
+                            + " generation={}, newGroup={}",
                     modelName,
                     roleType,
                     workerIpPort,
@@ -523,7 +532,9 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000 - health.lastSuccessfulPollUs() <= statusStaleAfterUs) {
+            if (System.nanoTime() / 1000 - health.lastSuccessfulPollUs() <= statusStaleAfterUs
+                    || workerStatus.isStatusPollProtected(
+                            System.nanoTime() / 1000, statusCommitGraceUs)) {
                 return;
             }
 
