@@ -1,6 +1,17 @@
 {
   "schema_version": 1,
   "features": {
+    "cache_status_fixture": {
+      "fidelity": "harness",
+      "scope": "Explicit synthetic ring cache-status payload and controlled churn; independent from inference KV capacity and not a production cache correctness model",
+      "implementation": [
+        "CacheSyncFixture.java"
+      ],
+      "tests": [
+        "CacheSyncFixtureTest.java"
+      ],
+      "real": {}
+    },
     "rpc_execution": {
       "fidelity": "harness",
       "scope": "Cluster-owned shared bounded RPC execution off Netty I/O threads; cache and status compete in one pool; no per-Pod CPU, GC or queue timing simulation claim",
