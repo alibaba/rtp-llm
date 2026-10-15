@@ -90,6 +90,10 @@ torch::Tensor getRopeCache(const RopeConfig& rope_config, const int max_position
 
     switch (rope_config.style) {
         case RopeStyle::Base:
+        case RopeStyle::Mrope:
+            // Interleaved MRoPE (Qwen3.5) shares the Base per-pair spectrum: pair j
+            // always uses base^(-2j/dim); the axes only select which position id
+            // indexes the cache row, so the Base cache is exact for MRoPE.
             rope_cache =
                 genBaseCache(rope_config.dim, rope_config.base, rope_config.scale, max_position_embeddings, interleave);
             break;
@@ -143,8 +147,9 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config,
         // Use interleaved cache
         std::call_once(rope_cache_flag_interleaved, [&]() {
             rope_cache_interleaved.used =
-                is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn :
-                          rope_config.style == RopeStyle::Base;
+                is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn
+                        || rope_config.style == RopeStyle::Mrope :
+                          rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Mrope;
             if (rope_cache_interleaved.used) {
                 rope_cache_interleaved.base = rope_config.base;
                 rope_cache_interleaved.dim  = rope_config.dim;
@@ -156,8 +161,9 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config,
         // Use non-interleaved cache
         std::call_once(rope_cache_flag_non_interleaved, [&]() {
             rope_cache_non_interleaved.used =
-                is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn :
-                          rope_config.style == RopeStyle::Base;
+                is_cuda ? rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn
+                        || rope_config.style == RopeStyle::Mrope :
+                          rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Mrope;
             if (rope_cache_non_interleaved.used) {
                 rope_cache_non_interleaved.base = rope_config.base;
                 rope_cache_non_interleaved.dim  = rope_config.dim;

@@ -101,8 +101,12 @@ def _validate_dynamic_fp8_config(
         raise ValueError("FP8 KV cache mode 2 supports CUDA graph for decode only")
     if attn_configs.use_mla:
         raise ValueError("FP8 KV cache mode 2 supports MHA only; MLA is not supported")
-    if attn_configs.rope_config.style == RopeStyle.Mrope:
-        raise ValueError("FP8 KV cache mode 2 does not support MRoPE")
+    if attn_configs.rope_config.style == RopeStyle.Mrope and (
+        attn_inputs is None or getattr(attn_inputs, "is_prefill", True)
+    ):
+        # Decode goes through the fused MRoPE write kernel; prefill needs the
+        # separate-rope path (mode-2 paged prefill) and is gated separately.
+        raise ValueError("FP8 KV cache mode 2 does not support MRoPE prefill")
     if attn_configs.use_logn_attn:
         raise ValueError("FP8 KV cache mode 2 does not support use_logn_attn")
     if getattr(attn_configs, "gen_num_per_cycle", 1) > 1:

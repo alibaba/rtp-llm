@@ -81,7 +81,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("num_kv_heads"),
                   py::arg("kernel_page_size"),
                   py::arg("rope_config"),
-                  py::arg("cos_sin_cache") = std::nullopt);
+                  py::arg("cos_sin_cache") = std::nullopt,
+                  py::arg("mrope_positions") = std::nullopt);
 
     rtp_ops_m.def("quantize_and_write_fp8_kv_cache",
                   &quantize_and_write_fp8_kv_cache,

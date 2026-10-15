@@ -344,7 +344,7 @@ def per_token_group_quant_int8(input: torch.Tensor, output_q: torch.Tensor, outp
     """
 def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor) -> None:
     ...
-def fused_rope_quantize_and_write_fp8_kv_cache(qkv: torch.Tensor, kv_cache: torch.Tensor, kv_scales: torch.Tensor, batch_indices: torch.Tensor, positions: torch.Tensor, page_indptr: torch.Tensor, page_indices: torch.Tensor, num_q_heads: int, num_kv_heads: int, kernel_page_size: int, rope_config: libth_transformer_config.RopeConfig, cos_sin_cache: torch.Tensor | None = None) -> torch.Tensor:
+def fused_rope_quantize_and_write_fp8_kv_cache(qkv: torch.Tensor, kv_cache: torch.Tensor, kv_scales: torch.Tensor, batch_indices: torch.Tensor, positions: torch.Tensor, page_indptr: torch.Tensor, page_indices: torch.Tensor, num_q_heads: int, num_kv_heads: int, kernel_page_size: int, rope_config: libth_transformer_config.RopeConfig, cos_sin_cache: torch.Tensor | None = None, mrope_positions: torch.Tensor | None = None) -> torch.Tensor:
     """Apply RoPE to packed QKV and dynamically quantize/write paged FP8 K/V."""
 def quantize_and_write_fp8_kv_cache(k: torch.Tensor, v: torch.Tensor, kv_cache: torch.Tensor, kv_scales: torch.Tensor, target_physical_page_ids: torch.Tensor, token_offsets: torch.Tensor, physical_page_size: int, kernel_page_size: int, subdivision: int) -> None:
     """

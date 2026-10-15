@@ -2104,6 +2104,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl.set_params(self.fmha_params)
         self.fmha_impl.prepare(attn_inputs)
 
+        self.mrope_positions = None
         if self.dynamic_fp8:
             _, self.kernel_page_size, _ = _page_geometry(attn_configs)
             self.dynamic_rope_config = attn_configs.rope_config
@@ -2111,7 +2112,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
                 self.dynamic_rope_config = RopeConfig()
                 self.dynamic_rope_config.style = RopeStyle.No
             self.dynamic_rope_cache = None
-            if self.dynamic_rope_config.style in (RopeStyle.Base, RopeStyle.Yarn):
+            if self.dynamic_rope_config.style in (RopeStyle.Base, RopeStyle.Yarn, RopeStyle.Mrope):
                 rope_cache = get_rope_cache_once(
                     self.dynamic_rope_config,
                     attn_configs.max_seq_len,
@@ -2120,6 +2121,11 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
                 )
                 if check_rope_cache(self.dynamic_rope_config, rope_cache):
                     self.dynamic_rope_cache = rope_cache.data
+            self.mrope_positions = (
+                self._prepare_mrope_positions(attn_inputs)
+                if self.dynamic_rope_config.style == RopeStyle.Mrope
+                else None
+            )
         else:
             self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
             self.rope_params = self.rope_impl.prepare(attn_inputs)
@@ -2127,10 +2133,48 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+    @staticmethod
+    def _prepare_mrope_positions(attn_inputs: PyAttentionInputs) -> Optional[torch.Tensor]:
+        """Return per-axis MRoPE position ids for the fused dynamic FP8 decode write.
+
+        ``combo_position_ids`` carries the flat [N, index_factor] per-axis positions
+        (identical to what FusedRopeKVCacheDecodeOp consumes) and is a stable
+        graph buffer, so the same tensor can be captured by CUDA graphs.
+        """
+        combo = getattr(attn_inputs, "combo_position_ids", None)
+        if not isinstance(combo, torch.Tensor):
+            raise ValueError(
+                "FP8 KV cache mode 2 with MRoPE requires combo_position_ids on attention inputs"
+            )
+        if not combo.is_cuda or combo.dtype != torch.int32 or not combo.is_contiguous():
+            raise ValueError(
+                "FP8 KV cache mode 2 with MRoPE requires contiguous CUDA int32 combo_position_ids, "
+                f"got device={combo.device} dtype={combo.dtype} contiguous={combo.is_contiguous()}"
+            )
+        if combo.dim() == 1:
+            if combo.numel() % 3 != 0:
+                raise ValueError(
+                    f"FP8 KV cache mode 2 with MRoPE requires 3 positions per token, got {combo.numel()} elements"
+                )
+        elif combo.dim() == 2:
+            if combo.size(1) != 3:
+                raise ValueError(
+                    f"FP8 KV cache mode 2 with MRoPE requires combo_position_ids of shape [N, 3], got {tuple(combo.shape)}"
+                )
+        else:
+            raise ValueError(
+                f"FP8 KV cache mode 2 with MRoPE requires 1D or 2D combo_position_ids, got shape {tuple(combo.shape)}"
+            )
+        return combo
+
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
         if self.dynamic_fp8:
+            if self.dynamic_rope_config.style == RopeStyle.Mrope:
+                # Rebind to the graph's stable combo_position_ids buffer so the
+                # captured kernel reads positions updated in place on replay.
+                self.mrope_positions = self._prepare_mrope_positions(attn_inputs)
             return
         if self.need_rope_kv_cache:
             # Update rope params for correct position encoding during replay.
@@ -2188,6 +2232,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
                 self.kernel_page_size,
                 self.dynamic_rope_config,
                 self.dynamic_rope_cache,
+                self.mrope_positions,
             )
         elif self.need_rope_kv_cache:
             qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)

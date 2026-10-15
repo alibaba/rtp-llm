@@ -156,6 +156,64 @@ struct FusedVec<__nv_bfloat16> {
 };
 #endif
 
+// Interleaved MRoPE (Qwen3.5) axis assignment: rotary pair j is rotated with the
+// position id of its mrope axis. Pairs round-robin across the three T/H/W
+// sections: j % 3 == 1 belongs to axis 1 (first rope_config.mrope_dim2 such
+// pairs), j % 3 == 2 to axis 2 (first rope_config.mrope_dim3 pairs), and every
+// remaining pair stays on the temporal axis 0. The host validates that the three
+// section counts are positive and sum to rope_config.dim / 2 before launching.
+__device__ __forceinline__ int mrope_axis_of_pair(const int pair, const int axis1_pairs, const int axis2_pairs) {
+    if (axis1_pairs > 0 && pair >= 1 && pair < 3 * axis1_pairs && (pair % 3) == 1) {
+        return 1;
+    }
+    if (axis2_pairs > 0 && pair >= 2 && pair < 3 * axis2_pairs && (pair % 3) == 2) {
+        return 2;
+    }
+    return 0;
+}
+
+// MRoPE counterpart of apply_rope for the fused decode kernel. FusedVec<T> holds
+// exactly one rotary pair (size == 2), so after the RotaryHalfRead staging each
+// thread owns a single pair whose coefficient is looked up at the row of its
+// axis position. Requires rope_config.mrope_interleaved with index_factor == 3.
+template<typename T, typename Vec>
+__device__ __forceinline__ void apply_mrope_rope(RopeConfig     rope_config,
+                                                Vec&          x,
+                                                T*            smem,
+                                                int           tidx,
+                                                const int32_t* pos3,
+                                                const float2* cos_sin_cache) {
+    static_assert(FusedVec<T>::size == 2, "interleaved MRoPE path expects one rotary pair per thread");
+    const int  dim      = rope_config.dim;
+    const int  rope_idx = tidx * 2;
+    const bool work     = (rope_idx >= 0 && rope_idx < dim);
+    const int  pair     = rope_idx / 2;
+
+    if (work) {
+        reinterpret_cast<Vec*>(smem)[pair] = x;
+    }
+    __syncthreads();
+    if (work) {
+        RotaryHalfRead(x, smem, pair, dim / 2);
+        const int axis = mrope_axis_of_pair(pair, rope_config.mrope_dim2, rope_config.mrope_dim3);
+        const int position = pos3[axis];
+        float2    coef;
+        if (cos_sin_cache != nullptr) {
+            coef = cos_sin_cache[static_cast<int64_t>(position) * (dim / 2) + pair];
+        } else {
+            coef = rotary_embedding_coefficient(
+                2 * pair, dim, static_cast<float>(position), rope_config.base, LinearScaleRope{rope_config.scale});
+        }
+        x = rotary_embedding_transform(x, coef);
+        RotaryHalfWrite(x, smem, pair, dim / 2);
+    }
+    __syncthreads();
+    if (work) {
+        x = reinterpret_cast<Vec*>(smem)[pair];
+    }
+}
+
+
 template<typename T, RopeStyle ROPE_STYLE>
 __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __restrict__ qkv,
                                                                   T* __restrict__ q_output,
@@ -163,6 +221,7 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
                                                                   float* __restrict__ kv_scales,
                                                                   const int32_t* __restrict__ batch_indices,
                                                                   const int32_t* __restrict__ positions,
+                                                                  const int32_t* __restrict__ mrope_positions,
                                                                   const int32_t* __restrict__ page_indptr,
                                                                   const int32_t* __restrict__ page_indices,
                                                                   int64_t       num_tokens,
@@ -212,11 +271,33 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
     if (!valid_position) {
         return;
     }
-    apply_rope<T, Vec, ROPE_STYLE>(
-        rope_config, q, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
-    if (owns_kv) {
+    if (ROPE_STYLE == RopeStyle::Mrope) {
+        int32_t pos3[3];
+        pos3[0] = mrope_positions[3 * token_idx + 0];
+        pos3[1] = mrope_positions[3 * token_idx + 1];
+        pos3[2] = mrope_positions[3 * token_idx + 2];
+        bool valid_mrope = true;
+#pragma unroll
+        for (int axis = 0; axis < 3; ++axis) {
+            valid_mrope = valid_mrope && pos3[axis] >= 0 && (cos_sin_cache == nullptr || pos3[axis] < cos_sin_rows);
+        }
+        CUDA_KERNEL_ASSERT_MSG(valid_mrope, "fused FP8 KV cache MRoPE position is out of bounds");
+        if (!valid_mrope) {
+            return;
+        }
+        apply_mrope_rope<T, Vec>(
+            rope_config, q, reinterpret_cast<T*>(rope_smem), threadIdx.x, pos3, cos_sin_cache);
+        if (owns_kv) {
+            apply_mrope_rope<T, Vec>(
+                rope_config, k, reinterpret_cast<T*>(rope_smem), threadIdx.x, pos3, cos_sin_cache);
+        }
+    } else {
         apply_rope<T, Vec, ROPE_STYLE>(
-            rope_config, k, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
+            rope_config, q, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
+        if (owns_kv) {
+            apply_rope<T, Vec, ROPE_STYLE>(
+                rope_config, k, reinterpret_cast<T*>(rope_smem), threadIdx.x, position, position + 1, cos_sin_cache);
+        }
     }
 
     if (in_head) {
@@ -325,6 +406,7 @@ void launch_fused_rope_quantize_and_write(const at::Tensor&    qkv,
                                           at::Tensor&          kv_scales,
                                           const at::Tensor&    batch_indices,
                                           const at::Tensor&    positions,
+                                          const at::Tensor&    mrope_positions,
                                           const at::Tensor&    page_indptr,
                                           const at::Tensor&    page_indices,
                                           int64_t              num_q_heads,
@@ -352,6 +434,9 @@ void launch_fused_rope_quantize_and_write(const at::Tensor&    qkv,
                                                kv_scales.data_ptr<float>(),
                                                batch_indices.data_ptr<int32_t>(),
                                                positions.data_ptr<int32_t>(),
+                                               ROPE_STYLE == RopeStyle::Mrope && mrope_positions.defined()
+                                                   ? mrope_positions.data_ptr<int32_t>()
+                                                   : nullptr,
                                                page_indptr.data_ptr<int32_t>(),
                                                page_indices.data_ptr<int32_t>(),
                                                qkv.size(0),
@@ -588,7 +673,8 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                       int64_t                          num_kv_heads,
                                                       int64_t                          kernel_page_size,
                                                       const RopeConfig&                rope_config,
-                                                      const std::optional<at::Tensor>& cos_sin_cache) {
+                                                      const std::optional<at::Tensor>& cos_sin_cache,
+                                                      const std::optional<at::Tensor>& mrope_positions) {
 #ifndef ENABLE_FP8
     TORCH_CHECK(false, "FP8 support is not enabled in this CUDA build");
 #else
@@ -621,7 +707,26 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                     && page_indptr.scalar_type() == at::ScalarType::Int
                     && page_indices.scalar_type() == at::ScalarType::Int,
                 "batch_indices, positions, page_indptr, and page_indices must have dtype torch.int32");
-    TORCH_CHECK(rope_config.style != RopeStyle::Mrope, "fused dynamic FP8 decode does not support MRoPE");
+    at::Tensor mrope_positions_tensor;
+    if (rope_config.style == RopeStyle::Mrope) {
+        TORCH_CHECK(mrope_positions.has_value() && mrope_positions->defined() && mrope_positions->numel() > 0,
+                    "MRoPE requires mrope_positions with shape [N, 3] per-axis position ids");
+        mrope_positions_tensor = *mrope_positions;
+        check_cuda_contiguous(mrope_positions_tensor, "mrope_positions");
+        TORCH_CHECK(mrope_positions_tensor.dim() <= 2 && mrope_positions_tensor.numel() >= 3 * qkv.size(0),
+                    "mrope_positions must contain at least 3 * N elements");
+        TORCH_CHECK(mrope_positions_tensor.scalar_type() == at::ScalarType::Int,
+                    "mrope_positions must have dtype torch.int32");
+        TORCH_CHECK(rope_config.mrope_interleaved && rope_config.index_factor == 3,
+                    "fused dynamic FP8 MRoPE requires interleaved MRoPE with index_factor == 3");
+        const int64_t axis_pairs = static_cast<int64_t>(rope_config.mrope_dim1) + rope_config.mrope_dim2 + rope_config.mrope_dim3;
+        TORCH_CHECK(rope_config.mrope_dim1 > 0 && rope_config.mrope_dim2 > 0 && rope_config.mrope_dim3 > 0
+                        && 2 * axis_pairs == rope_config.dim,
+                    "MRoPE section counts must be positive and satisfy 2 * (dim1 + dim2 + dim3) == rope dim");
+    } else {
+        TORCH_CHECK(!mrope_positions.has_value() || !mrope_positions->defined(),
+                    "mrope_positions is only valid with MRoPE rope_config");
+    }
     if (rope_config.style != RopeStyle::No) {
         TORCH_CHECK(rope_config.dim > 0 && rope_config.dim <= head_dim && rope_config.dim % 2 == 0,
                     "rope_config.dim must be positive, even, and no larger than head_dim");
@@ -633,6 +738,9 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
     check_same_device(kv_cache, positions, "positions");
     check_same_device(kv_cache, page_indptr, "page_indptr");
     check_same_device(kv_cache, page_indices, "page_indices");
+    if (mrope_positions_tensor.defined()) {
+        check_same_device(kv_cache, mrope_positions_tensor, "mrope_positions");
+    }
     const CacheGeometry geometry =
         validate_cache_geometry(kv_cache, kv_scales, num_kv_heads, head_dim, kernel_page_size, kernel_page_size, 1);
 
@@ -645,8 +753,9 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                     "cos_sin_cache must have dtype torch.float32");
         TORCH_CHECK(cos_sin_cache->dim() == 2 && cos_sin_cache->size(1) == rope_config.dim,
                     "cos_sin_cache must have shape [max_positions, rope_config.dim]");
-        TORCH_CHECK(rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn,
-                    "cos_sin_cache is only supported for Base and Yarn RoPE");
+        TORCH_CHECK(rope_config.style == RopeStyle::Base || rope_config.style == RopeStyle::Yarn
+                        || rope_config.style == RopeStyle::Mrope,
+                    "cos_sin_cache is only supported for Base, Yarn, and MRoPE RoPE");
         cos_sin_ptr  = reinterpret_cast<const float2*>(cos_sin_cache->data_ptr<float>());
         cos_sin_rows = cos_sin_cache->size(0);
     }
@@ -662,6 +771,7 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                                      kv_scales,                                        \
                                                                      batch_indices,                                    \
                                                                      positions,                                        \
+                                                                     mrope_positions_tensor,                           \
                                                                      page_indptr,                                      \
                                                                      page_indices,                                     \
                                                                      num_q_heads,                                      \

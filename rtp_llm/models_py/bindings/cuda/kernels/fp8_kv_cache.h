@@ -18,7 +18,12 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                       int64_t                          num_kv_heads,
                                                       int64_t                          kernel_page_size,
                                                       const RopeConfig&                rope_config,
-                                                      const std::optional<at::Tensor>& cos_sin_cache = std::nullopt);
+                                                      const std::optional<at::Tensor>& cos_sin_cache = std::nullopt,
+                                                      // Interleaved MRoPE (Qwen3.5): flat [N, 3] int32 per-axis
+                                                      // position ids; required when rope_config.style is Mrope.
+                                                      // `positions` above still carries the 1D sequence positions
+                                                      // used for the KV slot math.
+                                                      const std::optional<at::Tensor>& mrope_positions = std::nullopt);
 
 // Quantize post-RoPE K/V one [H, D] row at a time and write it into a
 // persistent paged FP8 cache. target_physical_page_ids and token_offsets are

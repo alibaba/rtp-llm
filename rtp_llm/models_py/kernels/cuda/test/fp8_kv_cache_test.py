@@ -353,6 +353,175 @@ class Fp8KvCacheTest(unittest.TestCase):
                             scales, oracle_scales, rtol=1e-6, atol=1e-7
                         )
 
+    @staticmethod
+    def _mrope_reference(
+        tensor: torch.Tensor, position_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Qwen3.5 interleaved MRoPE oracle: rope_dim 64, sections (11, 11, 10)."""
+        rope_dim = 64
+        rotary_pairs = rope_dim // 2
+        sections = (11, 11, 10)
+        axes = torch.zeros(rotary_pairs, dtype=torch.long, device=tensor.device)
+        axes[1 : 3 * sections[1] : 3] = 1
+        axes[2 : 3 * sections[2] : 3] = 2
+        positions = position_ids[:, axes].to(torch.float32)
+        inv_freq = 10000.0 ** (
+            -2.0
+            * torch.arange(rotary_pairs, dtype=torch.float32, device=tensor.device)
+            / rope_dim
+        )
+        angles = positions * inv_freq.unsqueeze(0)
+        cos = angles.cos().unsqueeze(1)
+        sin = angles.sin().unsqueeze(1)
+        values = tensor.float()
+        low = values[..., :rotary_pairs]
+        high = values[..., rotary_pairs:rope_dim]
+        tail = values[..., rope_dim:]
+        return torch.cat(
+            [low * cos - high * sin, high * cos + low * sin, tail], dim=-1
+        ).to(tensor.dtype)
+
+    def test_fused_decode_prepare_mrope_matches_reference(self) -> None:
+        for dtype in (torch.float16, torch.bfloat16):
+            for use_cache in (False, True):
+                with self.subTest(dtype=dtype, use_cache=use_cache):
+                    torch.manual_seed(31)
+                    num_tokens, q_heads, kv_heads, page_size = 3, 4, 2, 4
+                    head_dim, rope_dim = 128, 64
+                    qkv = torch.randn(
+                        num_tokens,
+                        (q_heads + 2 * kv_heads) * head_dim,
+                        device="cuda",
+                        dtype=dtype,
+                    )
+                    q_raw, k_raw, v_raw = torch.split(
+                        qkv,
+                        [
+                            q_heads * head_dim,
+                            kv_heads * head_dim,
+                            kv_heads * head_dim,
+                        ],
+                        dim=-1,
+                    )
+                    q_raw = q_raw.reshape(num_tokens, q_heads, head_dim)
+                    k_raw = k_raw.reshape(num_tokens, kv_heads, head_dim)
+                    v_raw = v_raw.reshape(num_tokens, kv_heads, head_dim)
+                    k_raw[0, 0].zero_()
+                    v_raw[1, 1] *= 32
+                    qkv = torch.cat(
+                        [q_raw.flatten(1), k_raw.flatten(1), v_raw.flatten(1)],
+                        dim=-1,
+                    )
+                    batch_indices = torch.tensor(
+                        [0, 1, 1], device="cuda", dtype=torch.int32
+                    )
+                    positions = torch.tensor(
+                        [0, 2, 11], device="cuda", dtype=torch.int32
+                    )
+                    # Per-axis MRoPE positions, deliberately unequal per axis so the
+                    # oracle proves the per-pair axis lookup rather than a text-only
+                    # fallback to equal positions.
+                    mrope_positions = torch.tensor(
+                        [[5, 9, 13], [1, 30, 2], [7, 7, 21]],
+                        device="cuda",
+                        dtype=torch.int32,
+                    )
+                    page_indptr = torch.tensor(
+                        [0, 2, 5], device="cuda", dtype=torch.int32
+                    )
+                    page_indices = torch.tensor(
+                        [6, 1, 5, 2, 6], device="cuda", dtype=torch.int32
+                    )
+                    cache = torch.full(
+                        (7, 2, kv_heads, page_size, head_dim),
+                        3.0,
+                        device="cuda",
+                        dtype=torch.float8_e4m3fn,
+                    )
+                    scales = torch.full(
+                        (7, 2 * kv_heads * page_size),
+                        13.0,
+                        device="cuda",
+                        dtype=torch.float32,
+                    )
+                    rope_config = RopeConfig()
+                    rope_config.style = RopeStyle.Mrope
+                    rope_config.dim = rope_dim
+                    rope_config.base = 10000
+                    rope_config.index_factor = 3
+                    rope_config.mrope_dim1 = 11
+                    rope_config.mrope_dim2 = 11
+                    rope_config.mrope_dim3 = 10
+                    rope_config.mrope_interleaved = True
+                    cos_sin_cache = None
+                    if use_cache:
+                        max_positions = 64
+                        inv_freq = 10000.0 ** (
+                            -2.0
+                            * torch.arange(
+                                rope_dim // 2,
+                                dtype=torch.float32,
+                                device="cuda",
+                            )
+                            / rope_dim
+                        )
+                        angles = (
+                            torch.arange(
+                                max_positions, device="cuda", dtype=torch.float32
+                            )[:, None]
+                            * inv_freq[None, :]
+                        )
+                        # Interleaved (cos, sin) pairs, matching genBaseCache.
+                        cos_sin_cache = (
+                            torch.stack([angles.cos(), angles.sin()], dim=-1)
+                            .reshape(max_positions, rope_dim)
+                            .contiguous()
+                        )
+                    q = rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                        qkv,
+                        cache,
+                        scales,
+                        batch_indices,
+                        positions,
+                        page_indptr,
+                        page_indices,
+                        q_heads,
+                        kv_heads,
+                        page_size,
+                        rope_config,
+                        cos_sin_cache,
+                        mrope_positions,
+                    )
+                    expected_q = self._mrope_reference(q_raw, mrope_positions)
+                    expected_k = self._mrope_reference(k_raw, mrope_positions)
+                    torch.testing.assert_close(q, expected_q, rtol=2e-3, atol=2e-3)
+
+                    target_pages = torch.tensor(
+                        [6, 5, 6], device="cuda", dtype=torch.int32
+                    )
+                    target_offsets = torch.tensor(
+                        [0, 2, 3], device="cuda", dtype=torch.int32
+                    )
+                    oracle_cache = torch.full_like(cache, 3.0)
+                    oracle_scales = torch.full_like(scales, 13.0)
+                    quantize_and_write_fp8_kv_cache(
+                        expected_k.contiguous(),
+                        v_raw.contiguous(),
+                        oracle_cache,
+                        oracle_scales,
+                        target_pages,
+                        target_offsets,
+                        page_size,
+                        page_size,
+                        1,
+                    )
+                    torch.testing.assert_close(
+                        cache.float(), oracle_cache.float(), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        scales, oracle_scales, rtol=1e-6, atol=1e-7
+                    )
+
     def test_fused_decode_prepare_sanitizes_nonfinite_kv(self) -> None:
         qkv = torch.tensor(
             [
