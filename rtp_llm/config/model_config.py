@@ -892,7 +892,8 @@ class ModelConfig(CppModelConfig):
         # This uses ModelConfig's __setattr__ which handles string-to-enum conversion
         self.data_type = data_type.to_str()
         # Store quant_config as instance attribute for later use
-        if self.enable_nvfp4_dense_ffn:
+        # (getattr: partial config stubs used by some tests omit the flag.)
+        if getattr(self, "enable_nvfp4_dense_ffn", False):
             if quant_config is None:
                 raise ValueError(
                     "enable_nvfp4_dense_ffn requires a base quantization "
@@ -903,7 +904,7 @@ class ModelConfig(CppModelConfig):
                     "enable_nvfp4_dense_ffn is redundant with a modelopt_fp4 "
                     "base quantization"
                 )
-            if self.enable_w4a16_sm120_dense_ffn:
+            if getattr(self, "enable_w4a16_sm120_dense_ffn", False):
                 raise ValueError(
                     "enable_nvfp4_dense_ffn and enable_w4a16_sm120_dense_ffn "
                     "are mutually exclusive"

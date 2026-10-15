@@ -1146,7 +1146,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             )
 
             plan_mock.reset_mock()
-            run_seq_lens = [100, 200, 300, 400, 64, 128, 256, 512]
+            # Replay must stay within the captured graph batch (4 slots); use fresh
+            # lengths so the tensor-core replay replans and the metadata refreshes.
+            run_seq_lens = [100, 200, 300, 400]
             run_inputs = self._create_cuda_graph_inputs(
                 capture_bs,
                 run_seq_lens,
