@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <limits>
+#include <mutex>
+#include <unordered_set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,10 +18,12 @@
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
@@ -49,19 +55,27 @@ class KVCMStorageBackend::Impl {
 public:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
 
-    Impl(const CacheConfig&                   cache_config,
-         const KVCacheConfig&                 kv_cache_config,
-         const RuntimeConfig&                 runtime_config,
-         const ParallelismConfig&             parallelism_config,
-         const SpeculativeExecutionConfig&    sp_config,
-         std::shared_ptr<BroadcastManager>    broadcast_manager,
-         std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
+    enum class TransferResult {
+        SUCCESS,
+        FAILED,
+        TIMEOUT
+    };
+
+    Impl(const CacheConfig&                         cache_config,
+         const KVCacheConfig&                       kv_cache_config,
+         const RuntimeConfig&                       runtime_config,
+         const ParallelismConfig&                   parallelism_config,
+         const SpeculativeExecutionConfig&          sp_config,
+         std::shared_ptr<BroadcastManager>          broadcast_manager,
+         std::shared_ptr<kvcm::ClientWrapper>       client_wrapper,
+         std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
         parallelism_config_(parallelism_config),
         sp_config_(sp_config),
         broadcast_manager_(std::move(broadcast_manager)),
+        metrics_reporter_(std::move(metrics_reporter)),
         client_wrapper_(std::move(client_wrapper)),
         sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
 
@@ -69,6 +83,12 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
+        const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
+        if (!quarantine_abort_ratio.has_value()) {
+            RTP_LLM_LOG_ERROR("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO must be a finite number in [0, 1]");
+            return false;
+        }
+        quarantine_abort_ratio_ = *quarantine_abort_ratio;
         if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
                               parallelism_config_.tp_size);
@@ -140,6 +160,11 @@ public:
                          tp_rank,
                          parallelism_config_.tp_size,
                          group_policy_->debugString().c_str());
+        RTP_LLM_LOG_INFO("BlockTree KVCM quarantine guard, tp_rank=%ld abort_ratio=%.6f total_device_blocks=%zu",
+                         tp_rank,
+                         quarantine_abort_ratio_,
+                         total_device_block_count_);
+        reportQuarantineMetrics(/*generation=*/0, /*lease_count=*/0, /*block_count=*/0);
         return true;
     }
 
@@ -229,10 +254,6 @@ public:
         auto [success, write_location] = client_wrapper_->getWriteLocation(
             "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600);
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
-        if (write_location.locations.empty()) {
-            return;
-        }
-
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
         try {
@@ -244,6 +265,27 @@ public:
                                     "KVCM write mask/location mismatch: keys=%zu locations=%zu",
                                     key_indices.size(),
                                     write_location.locations.size());
+            if (write_location.locations.empty()) {
+                if (!write_location.write_session_id.empty()) {
+                    // The server can create an empty, short-lived session when
+                    // every key already has enough replicas. Close it normally.
+                    finish_attempted = true;
+                    try {
+                        if (!client_wrapper_->finishWrite("",
+                                                          nextTraceId("finish_write", finish_write_trace_sequence_),
+                                                          write_location.write_session_id,
+                                                          kv_cache_manager::BlockMaskOffset{0},
+                                                          empty_locations)) {
+                            RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
+                                                write_location.write_session_id.c_str());
+                        }
+                    } catch (...) {
+                        RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
+                                            write_location.write_session_id.c_str());
+                    }
+                }
+                return;
+            }
             const auto& spec_info = group_policy_->spec_info_map();
             for (size_t location_idx = 0; location_idx < write_location.locations.size(); ++location_idx) {
                 const size_t key_idx = key_indices[location_idx];
@@ -269,9 +311,10 @@ public:
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
                 const auto& actual_uris = responses[rank].remote_response().actual_uris();
-                RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(actual_uris.size()) <= actual_uri_gather[rank].size(),
-                                        "KVCM write returned too many actual URIs for rank=%zu",
-                                        rank);
+                RTP_LLM_CHECK_WITH_INFO(
+                    actual_uris.empty() || static_cast<size_t>(actual_uris.size()) == actual_uri_gather[rank].size(),
+                    "KVCM write returned a partial actual URI vector for rank=%zu",
+                    rank);
                 for (int uri_idx = 0; uri_idx < actual_uris.size(); ++uri_idx) {
                     if (!actual_uris[uri_idx].empty()) {
                         has_actual_uri                                             = true;
@@ -309,24 +352,66 @@ public:
     }
 
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+        if (request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            return false;
+        }
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
         const kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
         if (tags.size() != blocks.size() || blocks.size() != uris.size()) {
             RTP_LLM_LOG_WARNING("KVCM transfer tag/block/URI count mismatch");
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
+        }
+        if (tags.empty()) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+            return true;
+        }
+        // Validate the complete route before resolving any block into an IOV.
+        // Requests arrive over RPC, so an unknown tag is a request failure and
+        // must not escape as an assertion or allow a valid prefix to start I/O.
+        for (const auto& tag : tags) {
+            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
+                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+                return false;
+            }
         }
         setCudaDevice();
         kv_cache_manager::BlockBuffers buffers;
         if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             return false;
         }
-        return executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
+        const auto result = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
+        response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                     result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                         REMOTE_TRANSFER_STATUS_FAILED);
+        return result == TransferResult::SUCCESS;
     }
 
     void shutdown() noexcept {
         if (client_wrapper_) {
             client_wrapper_->shutdown();
+        }
+    }
+
+
+    void reportQuarantineState(uint64_t generation, size_t task_count, size_t block_count) noexcept {
+        reportQuarantineMetrics(generation, task_count, block_count);
+        if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
+            const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
+            if (static_cast<long double>(block_count) > threshold) {
+                RTP_LLM_LOG_ERROR("KVCM quarantined block capacity exceeded on rank 0; aborting process: "
+                                  "quarantined_blocks=%zu total_device_blocks=%zu abort_ratio=%.6f "
+                                  "threshold_blocks=%.3Lf",
+                                  block_count,
+                                  total_device_block_count_,
+                                  quarantine_abort_ratio_,
+                                  threshold);
+                std::abort();
+            }
         }
     }
 
@@ -422,6 +507,9 @@ private:
             return std::make_pair(!lhs.is_full, lhs.group_name) < std::make_pair(!rhs.is_full, rhs.group_name);
         });
         registration_tags_.clear();
+        pools_by_tag_.clear();
+        total_device_block_count_ = 0;
+        std::unordered_set<const DeviceBlockPool*>         unique_pools;
         std::vector<kvcm::ClientWrapper::PoolRegistration> registrations;
         for (int32_t group_id : ordered_groups) {
             const auto& tag  = groups.at(group_id).tag;
@@ -430,6 +518,15 @@ private:
                 RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
                 return {};
             }
+            if (unique_pools.emplace(pool.get()).second) {
+                const size_t block_count = pool->totalBlocksNum();
+                if (block_count > std::numeric_limits<size_t>::max() - total_device_block_count_) {
+                    RTP_LLM_LOG_ERROR("KVCM total device block capacity overflow");
+                    return {};
+                }
+                total_device_block_count_ += block_count;
+            }
+            pools_by_tag_.emplace(tag, pool);
             registration_tags_.push_back(tag);
             registrations.push_back({{pool->getBaseAddress(), pool->getTotalSizeBytes()},
                                      kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
@@ -438,20 +535,22 @@ private:
         return registrations;
     }
 
-    bool executeTagTransfers(RemoteOpType                       operation,
-                             const std::vector<std::string>&    tags,
-                             const std::vector<int32_t>&        blocks,
-                             const kv_cache_manager::UriStrVec& uris,
-                             kv_cache_manager::BlockBuffers&    buffers,
-                             RemoteOperationResponsePB&         response) {
+    TransferResult executeTagTransfers(RemoteOpType                       operation,
+                                       const std::vector<std::string>&    tags,
+                                       const std::vector<int32_t>&        blocks,
+                                       const kv_cache_manager::UriStrVec& uris,
+                                       kv_cache_manager::BlockBuffers&    buffers,
+                                       RemoteOperationResponsePB&         response) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
-            return false;
+            return TransferResult::FAILED;
         }
         std::unordered_map<std::string, std::vector<size_t>> indices_by_tag;
         for (size_t index = 0; index < tags.size(); ++index) {
             indices_by_tag[tags[index]].push_back(index);
         }
+        // Keep replacements local until every tag completes. A timeout or
+        // failure is an all-or-nothing response and leaves response.actual_uris empty.
         auto actual_uris = uris;
         for (const auto& tag : registration_tags_) {
             const auto found = indices_by_tag.find(tag);
@@ -469,26 +568,79 @@ private:
             }
             const auto trace_info = makeTransferTraceInfo(batch_blocks);
             if (operation == REMOTE_OPERATION_READ) {
-                if (!client_wrapper_->loadKvCachesForTag(tag, batch_uris, batch_buffers, trace_info)) {
-                    return false;
+                const auto ec =
+                    client_wrapper_->loadKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
+                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                    return TransferResult::TIMEOUT;
+                }
+                if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                    return TransferResult::FAILED;
                 }
             } else {
-                auto [success, result] =
-                    client_wrapper_->saveKvCachesForTag(tag, batch_uris, batch_buffers, trace_info);
-                if (!success || (!result.empty() && result.size() != batch_uris.size())) {
-                    return false;
+                auto [ec, result] =
+                    client_wrapper_->saveKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
+                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                    return TransferResult::TIMEOUT;
+                }
+                if (ec != kv_cache_manager::ClientErrorCode::ER_OK
+                    || (!result.empty() && result.size() != batch_uris.size())) {
+                    return TransferResult::FAILED;
                 }
                 for (size_t index = 0; index < result.size(); ++index) {
                     actual_uris[indices[index]] = std::move(result[index]);
                 }
             }
+            indices_by_tag.erase(found);
         }
+        RTP_LLM_CHECK(indices_by_tag.empty());
         if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
             for (auto& uri : actual_uris) {
                 *response.add_actual_uris() = std::move(uri);
             }
         }
-        return true;
+        return TransferResult::SUCCESS;
+    }
+
+    void reportQuarantineMetrics(uint64_t generation, size_t lease_count, size_t block_count) const noexcept {
+        if (!metrics_reporter_) {
+            return;
+        }
+        // Reporting may call into external metric backends. Serialize it
+        // independently from quarantine state updates, and discard snapshots
+        // superseded by a later state transition.
+        std::lock_guard<std::mutex> lock(quarantine_metrics_mutex_);
+        if (quarantine_metrics_reported_ && generation <= last_quarantine_metrics_generation_) {
+            return;
+        }
+        try {
+            RtpLLMRemoteCacheQuarantineMetricsCollector collector;
+            collector.quarantined_lease_count = static_cast<int64_t>(lease_count);
+            collector.quarantined_block_count = static_cast<int64_t>(block_count);
+            if (parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
+                collector.quarantined_block_ratio =
+                    static_cast<double>(block_count) / static_cast<double>(total_device_block_count_);
+            }
+            metrics_reporter_->report<RtpLLMRemoteCacheQuarantineMetrics, RtpLLMRemoteCacheQuarantineMetricsCollector>(
+                nullptr, &collector);
+            quarantine_metrics_reported_        = true;
+            last_quarantine_metrics_generation_ = generation;
+        } catch (...) {
+            // Keep the same generation eligible for a later retry.
+            quarantine_metrics_reported_ = false;
+            RTP_LLM_LOG_ERROR("failed to report KVCM quarantine metrics");
+        }
+    }
+
+    template<typename Metrics, typename Collector>
+    void reportRemoteMetrics(Collector& collector) const noexcept {
+        if (!metrics_reporter_) {
+            return;
+        }
+        try {
+            metrics_reporter_->report<Metrics, Collector>(nullptr, &collector);
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to report KVCM remote metrics");
+        }
     }
 
     void initializeRequests(std::vector<FunctionRequestPB>& requests,
@@ -524,26 +676,73 @@ private:
     }
 
     std::vector<FunctionResponsePB> dispatchRequests(const std::vector<FunctionRequestPB>& requests, int timeout_ms) {
+        std::vector<FunctionResponsePB> responses;
         if (!broadcast_manager_) {
             RTP_LLM_CHECK_WITH_INFO(
                 requests.size() == 1, "KVCM local transfer requires exactly one request, got %zu", requests.size());
             FunctionResponsePB response;
-            RTP_LLM_CHECK_WITH_INFO(execute(requests.front().remote_request(), *response.mutable_remote_response()),
-                                    "KVCM local transfer failed");
-            return {std::move(response)};
+            execute(requests.front().remote_request(), *response.mutable_remote_response());
+            responses.push_back(std::move(response));
+        } else {
+            auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                               const std::shared_ptr<grpc::ClientContext>& context,
+                               const FunctionRequestPB&                    request,
+                               grpc::CompletionQueue*                      queue) {
+                return stub->AsyncExecuteFunction(context.get(), request, queue);
+            };
+            auto result =
+                broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
+            // BroadcastManager rejects before dispatching any rank. No worker
+            // can access these buffers when admission fails.
+            RTP_LLM_CHECK_WITH_INFO(result != nullptr, "KVCM broadcast dispatch failed");
+            try {
+                result->waitDone();
+            } catch (const std::exception& exception) {
+                if (result->deadlineExceeded()) {
+                    throw StorageOperationTimeout(std::string("KVCM broadcast timed out: ") + exception.what());
+                }
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown: "
+                                                        + std::string(exception.what()));
+            } catch (...) {
+                if (result->deadlineExceeded()) {
+                    throw StorageOperationTimeout("KVCM broadcast timed out");
+                }
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown");
+            }
+            if (!result->success()) {
+                if (result->deadlineExceeded()) {
+                    throw StorageOperationTimeout("KVCM broadcast timed out");
+                }
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown");
+            }
+            responses = result->responses();
         }
-        auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
-                           const std::shared_ptr<grpc::ClientContext>& context,
-                           const FunctionRequestPB&                    request,
-                           grpc::CompletionQueue*                      queue) {
-            return stub->AsyncExecuteFunction(context.get(), request, queue);
-        };
-        auto result =
-            broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
-        RTP_LLM_CHECK_WITH_INFO(result != nullptr, "KVCM broadcast dispatch failed");
-        result->waitDone();
-        RTP_LLM_CHECK_WITH_INFO(result->success(), "KVCM broadcast transfer failed");
-        return result->responses();
+
+        if (responses.size() != requests.size()) {
+            throw StorageOperationCompletionUnknown("KVCM worker response count mismatch");
+        }
+        bool failed = false;
+        for (const auto& response : responses) {
+            if (!response.has_remote_response()) {
+                throw StorageOperationCompletionUnknown("KVCM worker returned no transfer response");
+            }
+            switch (response.remote_response().transfer_status()) {
+                case REMOTE_TRANSFER_STATUS_UNSPECIFIED:  // successful legacy worker
+                case REMOTE_TRANSFER_STATUS_SUCCESS:
+                    break;
+                case REMOTE_TRANSFER_STATUS_FAILED:
+                    failed = true;
+                    break;
+                case REMOTE_TRANSFER_STATUS_TIMEOUT:
+                    throw StorageOperationTimeout("KVCM transfer timed out");
+                default:
+                    throw StorageOperationCompletionUnknown("KVCM transfer completion is unknown");
+            }
+        }
+        if (failed) {
+            throw std::runtime_error("KVCM transfer failed");
+        }
+        return responses;
     }
 
     void setCudaDevice() const {
@@ -576,9 +775,16 @@ private:
     ParallelismConfig                    parallelism_config_;
     SpeculativeExecutionConfig           sp_config_;
     std::shared_ptr<BroadcastManager>    broadcast_manager_;
+    std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
     std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
     std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
     std::vector<std::string>             registration_tags_;
+    std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
+    size_t                                              total_device_block_count_{0};
+    double                                              quarantine_abort_ratio_{0.0};
+    mutable std::mutex                                  quarantine_metrics_mutex_;
+    mutable bool                                        quarantine_metrics_reported_{false};
+    mutable uint64_t                                    last_quarantine_metrics_generation_{0};
     // Preserve KVCM's operation-local, one-based request
     // order. Abort and finish share a sequence because both call FinishWrite.
     std::atomic<uint64_t> match_trace_sequence_{1};
@@ -588,13 +794,14 @@ private:
     const bool            sdk_check_enabled_;
 };
 
-KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cache_config,
-                                       const KVCacheConfig&                 kv_cache_config,
-                                       const RuntimeConfig&                 runtime_config,
-                                       const ParallelismConfig&             parallelism_config,
-                                       const SpeculativeExecutionConfig&    sp_config,
-                                       std::shared_ptr<BroadcastManager>    broadcast_manager,
-                                       std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
+KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                         cache_config,
+                                       const KVCacheConfig&                       kv_cache_config,
+                                       const RuntimeConfig&                       runtime_config,
+                                       const ParallelismConfig&                   parallelism_config,
+                                       const SpeculativeExecutionConfig&          sp_config,
+                                       std::shared_ptr<BroadcastManager>          broadcast_manager,
+                                       std::shared_ptr<kvcm::ClientWrapper>       client_wrapper,
+                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
     StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
                                               kv_cache_config.kvcm_asyncwrapper_queue_size)),
     impl_(std::make_unique<Impl>(cache_config,
@@ -603,7 +810,8 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cach
                                  parallelism_config,
                                  sp_config,
                                  std::move(broadcast_manager),
-                                 std::move(client_wrapper))) {}
+                                 std::move(client_wrapper),
+                                 std::move(metrics_reporter))) {}
 
 KVCMStorageBackend::~KVCMStorageBackend() = default;
 
@@ -631,6 +839,11 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
     impl_->shutdown();
+}
+
+
+void KVCMStorageBackend::onQuarantineChanged(uint64_t generation, size_t task_count, size_t block_count) noexcept {
+    impl_->reportQuarantineState(generation, task_count, block_count);
 }
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {

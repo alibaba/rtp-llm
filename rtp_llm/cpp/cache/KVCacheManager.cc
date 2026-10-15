@@ -322,8 +322,14 @@ bool KVCacheManager::init() {
     std::shared_ptr<StorageBackend> storage_backend;
     if (kv_cache_config_.enable_remote_cache) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        storage_backend = std::make_shared<KVCMStorageBackend>(
-            config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, broadcast_manager);
+        storage_backend = std::make_shared<KVCMStorageBackend>(config_,
+                                                               kv_cache_config_,
+                                                               runtime_config_,
+                                                               parallelism_config_,
+                                                               sp_config_,
+                                                               broadcast_manager,
+                                                               nullptr,
+                                                               metrics_reporter_);
 #else
         RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
         return false;
@@ -718,7 +724,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
             return false;
         }
-        return backend->execute(request.remote_request(), *response.mutable_remote_response());
+        const bool success   = backend->execute(request.remote_request(), *response.mutable_remote_response());
+        const auto operation = request.remote_request().op();
+        // Read/write results are application state and must reach rank 0 even
+        // when the SDK failed or timed out. Metadata handlers retain their contract.
+        return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE ? true : success;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;

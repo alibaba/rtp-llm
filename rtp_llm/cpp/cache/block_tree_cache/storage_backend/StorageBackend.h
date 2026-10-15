@@ -3,9 +3,11 @@
 #include <unordered_map>
 
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +17,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -25,6 +28,22 @@ struct StorageBlockHandle {
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+};
+
+// The backend accepted an operation but cannot prove that DMA/RDMA has
+// stopped touching its buffers. StorageBackend replaces request pins with
+// permanent FROZEN references for the lifetime of the block pool.
+class StorageOperationCompletionUnknown: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// The transport reported an explicit timeout. Buffer ownership is still
+// unknown, so this remains a completion-unknown failure for quarantine while
+// allowing callers to preserve the timeout error code.
+class StorageOperationTimeout: public StorageOperationCompletionUnknown {
+public:
+    using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
 };
 
 struct StorageMatchResult {
@@ -79,7 +98,7 @@ class StorageBackend {
 public:
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
-    using Done           = std::function<void(bool success)>;
+    using Done           = std::function<void(ErrorInfo error)>;
     using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
 
@@ -115,6 +134,7 @@ protected:
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
+    virtual void               onQuarantineChanged(uint64_t, size_t, size_t) noexcept {}
 
 private:
     enum class Lifecycle {
@@ -142,6 +162,11 @@ private:
     std::condition_variable lifecycle_cv_;
     Lifecycle               lifecycle_{Lifecycle::CREATED};
     size_t                  in_flight_{0};
+
+    std::mutex quarantine_mutex_;
+    // Count quarantined operations; frozen capacity is read from the pools.
+    size_t   quarantined_task_count_{0};
+    uint64_t quarantine_generation_{0};
 
     friend class LoadAsyncContext;
 };

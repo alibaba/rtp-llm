@@ -252,7 +252,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
@@ -519,7 +521,7 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsSparseBlockMask) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
-TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
+TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCloseSessionWithoutPayload) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_empty_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -534,7 +536,7 @@ TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, finishWrite(_, _, "empty_session", _, _)).WillOnce(Return(true));
 
     auto request = makeStorageRequest(environment, /*keys=*/{101, 102, 103});
     backend->write(backend->prepareWrite(std::move(request)));

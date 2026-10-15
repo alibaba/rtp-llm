@@ -1,11 +1,15 @@
 #include <chrono>
+#include <csignal>
+#include <cstdio>
 #include <future>
 #include <stdexcept>
+#include <sys/resource.h>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm::test {
@@ -599,6 +603,54 @@ TEST_F(BroadcastManagerTest, DeadlineFailsBroadcastAndThrowsOnWait) {
     EXPECT_TRUE(result.done());
     EXPECT_FALSE(result.success());
     EXPECT_THROW(result.waitDone(), RTPException);
+}
+
+TEST(BroadcastResultTest, FatalWaitHonorsCoreDumpOnException) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    EXPECT_EXIT(
+        {
+            rlimit no_core;
+            no_core.rlim_cur = 0;
+            no_core.rlim_max = 0;
+            (void)setrlimit(RLIMIT_CORE, &no_core);
+            StaticConfig::user_ft_core_dump_on_exception = true;
+            auto ctx                                     = makeIdleContext();
+            ctx->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+            FunctionBroadcastResult result({ctx});
+            result.finishRank(0, true);
+            std::fputs("fatal broadcast wait reached\n", stderr);
+            std::fflush(stderr);
+            result.waitDone();
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "fatal broadcast wait reached");
+}
+
+TEST_F(BroadcastManagerTest, DeadlineSurvivesOtherRankFailuresInEitherArrivalOrder) {
+    for (bool timeout_first : {false, true}) {
+        for (bool cq_ok : {false, true}) {
+            auto timeout    = makeIdleContext();
+            auto other      = makeIdleContext();
+            timeout->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
+            other->status   = grpc::Status(grpc::StatusCode::INTERNAL, "other failure");
+            FunctionBroadcastResult result({timeout, other});
+            int                     callbacks = 0;
+            result.onDone([&] { ++callbacks; });
+            EXPECT_FALSE(result.deadlineExceeded());
+            result.finishRank(timeout_first ? 0 : 1, timeout_first || cq_ok);
+            EXPECT_FALSE(result.done());
+            EXPECT_EQ(result.deadlineExceeded(), timeout_first);
+            result.finishRank(timeout_first ? 1 : 0, !timeout_first || cq_ok);
+            EXPECT_THROW(result.waitDone(), RTPException);
+            EXPECT_FALSE(result.success());
+            EXPECT_TRUE(result.deadlineExceeded());
+            EXPECT_EQ(callbacks, 1);
+            result.finishRank(0, true);
+            result.finishRank(1, true);
+            EXPECT_EQ(callbacks, 1);
+            EXPECT_TRUE(result.deadlineExceeded());
+        }
+    }
 }
 
 TEST_F(BroadcastManagerTest, RejectedBroadcastNeverDispatchesAnyRank) {

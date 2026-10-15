@@ -1376,6 +1376,31 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, testPrefillLoadTimeoutDetachesFrozenSuffixAndRecomputes) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto original = resource.kvCache().blocks(0, "default");
+    ASSERT_EQ(original.size(), 3u);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    pool->freezeBlock(original[1]);
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    stream_->setLocalReuseLength(2);
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+    EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_NE(resource.kvCache().blocks(0, "default")[1], original[1]);
+    EXPECT_TRUE(pool->isFrozen(original[1]));
+    EXPECT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachesSharedSuffix) {
     for (bool cache_owned : {false, true}) {
         SCOPED_TRACE(cache_owned);
@@ -1629,6 +1654,36 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
     EXPECT_EQ(stream_->initialReuseLength(), 0);
     EXPECT_EQ(stream_->localReuseLength(), 0);
     EXPECT_EQ(stream_->deviceReuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, testAllocatorLoadTimeoutPreservesDeadlineStatus) {
+    for (const auto role : {RoleType::DECODE, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        prepareResource(/*reuse_cache=*/true, role);
+        auto& resource = stream_->streamCacheResource();
+        resource.allocator_load_context_ =
+            std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+        const auto status = resource.waitForAllocatorLoad();
+        EXPECT_TRUE(absl::IsDeadlineExceeded(status));
+        EXPECT_NE(std::string(status.message()).find("KVCM read timed out"), std::string::npos);
+        EXPECT_EQ(resource.allocator_load_context_, nullptr);
+        EXPECT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+        EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDoneTimeoutReportsLoadCacheTimeout) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    resource.allocator_load_context_ =
+        std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "KVCM read timed out"));
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+    EXPECT_NE(stream_->statusInfo().ToString().find("KVCM read timed out"), std::string::npos);
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
 }
 
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
