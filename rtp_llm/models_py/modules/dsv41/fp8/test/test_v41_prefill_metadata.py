@@ -94,11 +94,23 @@ class PrefillMetadataTest(unittest.TestCase):
                             offsets[2] :: stride
                         ][:257]
                         req.remainder_(13).sub_(13)
-                        for ratio, replay, compact in itertools.product(
-                            (1, 2), (False, True), (False, True)
+                        physical = torch.arange(14, dtype=torch.int64, device="cuda")
+                        physical.mul_(100003).add_(2**33)
+                        for ratio, replay, compact, origins in itertools.product(
+                            (1, 2),
+                            (False, True),
+                            (False, True),
+                            (None, physical[:13], physical[1:]),
                         ):
                             actual = fused.try_chunk_metadata(
-                                p, n, req, ratio, 128, replay, compact_replay=compact
+                                p,
+                                n,
+                                req,
+                                ratio,
+                                128,
+                                replay,
+                                compact_replay=compact,
+                                physical_offsets=origins,
                             )
                             prefix, length = p.long(), n.long()
                             tail = (
@@ -115,13 +127,72 @@ class PrefillMetadataTest(unittest.TestCase):
                                 else prefix - tail
                             )
                             expected = (
-                                (chunks.cumsum(0) - chunks)[req, None],
+                                (
+                                    chunks.cumsum(0) - chunks
+                                    if origins is None
+                                    else origins
+                                )[req, None],
                                 sizes[req, None],
                                 start[req, None],
                             )
                             self.assertIsNotNone(actual)
                             for got, want in zip(actual, expected):
                                 torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+    def test_physical_origins_graph_updates_preserve_logical_replay(self):
+        p = torch.tensor([0, 513, 31744], device="cuda", dtype=torch.int32)
+        n = torch.tensor([1, 127, 1025], device="cuda", dtype=torch.int64)
+        req = torch.tensor([2, 0, -2, -1], device="cuda", dtype=torch.int64)
+        origins = torch.tensor(
+            [9, 4096, 65536, 999999], device="cuda", dtype=torch.int64
+        )[1:]
+
+        def run():
+            return fused.try_chunk_metadata(
+                p, n, req, 2, 128, True, compact_replay=True, physical_offsets=origins
+            )
+
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = run()
+        p.add_(17)
+        n.add_(3)
+        origins.add_(8191)
+        req.copy_(req.flip(0))
+        graph.replay()
+        expected = (
+            origins[req, None],
+            ((p.long() + n) // 2)[req, None],
+            (p.long() + n - n.clamp(max=128))[req, None],
+        )
+        for got, want in zip(captured, expected):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
+        empty = fused.try_chunk_metadata(
+            p, n, req[:0], 2, 128, True, physical_offsets=origins
+        )
+        self.assertTrue(all(t.shape == (0, 1) for t in empty))
+
+    def test_unsupported_physical_origins_reject_before_allocation(self):
+        p = torch.zeros(3, dtype=torch.int64, device="cuda")
+        n = torch.ones_like(p)
+        req = torch.zeros(5, dtype=torch.int64, device="cuda")
+        invalid = (
+            torch.zeros(3, dtype=torch.int64),
+            torch.zeros(3, dtype=torch.int32, device="cuda"),
+            torch.zeros(4, dtype=torch.int64, device="cuda"),
+            torch.zeros(6, dtype=torch.int64, device="cuda")[::2],
+            object(),
+        )
+        for origins in invalid:
+            with self.subTest(origins=type(origins)), patch.object(
+                torch, "empty", side_effect=AssertionError("unexpected allocation")
+            ):
+                self.assertIsNone(
+                    fused.try_chunk_metadata(
+                        p, n, req, 2, 128, True, physical_offsets=origins
+                    )
+                )
 
     def test_chunk_metadata_preserves_long_arithmetic(self):
         for batch in (2, 32, 128):

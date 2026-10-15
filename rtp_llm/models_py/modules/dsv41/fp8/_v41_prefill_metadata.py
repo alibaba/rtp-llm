@@ -22,11 +22,15 @@ def _integer_vector(value, rows, device):
     )
 
 
-@triton.jit(do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"])
+@triton.jit(
+    do_not_specialize=["ROWS", "BATCH", "PS", "LS", "RS"],
+    do_not_specialize_on_alignment=["physical_offsets"],
+)
 def _chunk_metadata_kernel(
     prefixes,
     lengths,
     requests,
+    physical_offsets,
     output,
     ROWS,
     BATCH,
@@ -37,6 +41,7 @@ def _chunk_metadata_kernel(
     WINDOW: tl.constexpr,
     REPLAY: tl.constexpr,
     COMPACT_REPLAY: tl.constexpr,
+    PHYSICAL_OFFSETS: tl.constexpr,
 ):
     index = tl.arange(0, 128)
     prefix = tl.load(prefixes + index * PS, index < BATCH, other=0).to(tl.int64)
@@ -46,9 +51,14 @@ def _chunk_metadata_kernel(
     if RATIO == 2:
         size = size >> 1
     swa_length = tl.minimum(length, WINDOW) if COMPACT_REPLAY else length
-    chunk = size + swa_length + tail
     start = prefix + length - swa_length if COMPACT_REPLAY else prefix - tail
-    offset = tl.cumsum(chunk) - chunk
+    if PHYSICAL_OFFSETS:
+        # CED may shrink SWA while retaining the producer's larger allocation.
+        # Only physical origins change; logical counts and replay starts do not.
+        offset = tl.load(physical_offsets + index, index < BATCH, other=0)
+    else:
+        chunk = size + swa_length + tail
+        offset = tl.cumsum(chunk) - chunk
     row = tl.program_id(0) * 128 + index
     request = tl.load(requests + row * RS, row < ROWS, other=0).to(tl.int64)
     request = tl.where(request < 0, request + BATCH, request)
@@ -64,9 +74,22 @@ def _chunk_metadata_kernel(
 
 
 def try_chunk_metadata(
-    prefixes, lengths, requests, ratio, window, replay, *, compact_replay=False
+    prefixes,
+    lengths,
+    requests,
+    ratio,
+    window,
+    replay,
+    *,
+    compact_replay=False,
+    physical_offsets=None,
 ):
-    """Long-arithmetic chunk metadata; prefix/length integer dtypes may differ."""
+    """Logical lengths plus packed or explicitly retained physical origins.
+
+    Prefix/length integer dtypes may differ. Internal ``physical_offsets`` is
+    a contiguous int64 request vector whose owner has verified KV capacity;
+    this helper only changes offsets, never the logical global/SWA lengths.
+    """
     if not (
         isinstance(prefixes, torch.Tensor)
         and isinstance(lengths, torch.Tensor)
@@ -85,6 +108,14 @@ def try_chunk_metadata(
         and type(compact_replay) is bool
     ):
         return None
+    if physical_offsets is not None and not (
+        isinstance(physical_offsets, torch.Tensor)
+        and physical_offsets.device == prefixes.device
+        and physical_offsets.dtype == torch.int64
+        and physical_offsets.shape == prefixes.shape
+        and physical_offsets.is_contiguous()
+    ):
+        return None
     rows = requests.numel()
     output = torch.empty((3, rows, 1), dtype=torch.int64, device=prefixes.device)
     if rows:
@@ -92,6 +123,7 @@ def try_chunk_metadata(
             prefixes,
             lengths,
             requests,
+            physical_offsets,
             output,
             rows,
             prefixes.numel(),
@@ -102,6 +134,7 @@ def try_chunk_metadata(
             window,
             replay,
             compact_replay,
+            physical_offsets is not None,
             num_warps=4,
         )
     return output.unbind(0)
