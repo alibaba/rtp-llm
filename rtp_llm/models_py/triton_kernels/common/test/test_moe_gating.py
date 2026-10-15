@@ -38,7 +38,7 @@ WARMUP = 10
 REPEAT = 50
 
 # ---------------------------------------------------------------------------
-# Reference implementation (fp32 arithmetic — used for correctness checks)
+# Reference implementation — the module's cross-platform contract
 # ---------------------------------------------------------------------------
 
 
@@ -47,9 +47,14 @@ def _ref_SigmoidGateScaleAdd(
     shared: torch.Tensor,  # [T, H]
     experts: torch.Tensor,  # [T, H]
 ) -> torch.Tensor:
-    """Pure-PyTorch reference using fp32 arithmetic."""
-    result = torch.sigmoid(gate.float()) * shared.float() + experts.float()
-    return result.to(shared.dtype)
+    """The aten chain the module contract prescribes (same as the ROCm impl).
+
+    ``torch.sigmoid(gate) * shared + experts`` with each op materializing in
+    the storage dtype — the numerics every golden-pinned consumer expects.
+    The former fp32-end-to-end reference matched the retired fused kernel's
+    accidental single-rounding semantics, not the production chain.
+    """
+    return torch.sigmoid(gate) * shared + experts
 
 
 # ---------------------------------------------------------------------------

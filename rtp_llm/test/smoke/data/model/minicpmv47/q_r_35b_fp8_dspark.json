@@ -1,0 +1,92 @@
+{
+    "model_type": "minicpmv4_7",
+    "model_path": "/data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-FP8-BLK",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello, who are you? Answer in one short sentence."
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "I am an AI assistant designed to help you with information and tasks.",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 22,
+                    "total_tokens": 37,
+                    "completion_tokens": 15,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image in one short sentence."
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 48,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "So, let me analyze the image. There's a woman sitting on the beach, and a dog (maybe a Labrador) is sitting next to her. The dog is giving the woman a high-five or paw touch. The setting is a",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 599,
+                    "total_tokens": 647,
+                    "completion_tokens": 48,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": null,
+                        "image_tokens": 574,
+                        "video_tokens": null
+                    }
+                }
+            }
+        }
+    ]
+}

@@ -31,6 +31,33 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
 
+try:
+    from rtp_llm.models_py.triton_kernels.common.moe_combine import (
+        topk_sum_supported,
+        topk_sum_triton,
+    )
+except Exception:  # pragma: no cover - triton unavailable in this environment
+
+    def topk_sum_supported(output: torch.Tensor) -> bool:  # noqa: F811
+        return False
+
+    topk_sum_triton = None
+
+
+def _fold_deferred_topk(output: torch.Tensor) -> torch.Tensor:
+    """Fold a deferred [M, topk, K] routed output back to [M, K].
+
+    Prefers the bit-exact Triton combine kernel (torch.equal to
+    ``output.sum(dim=1)``, aten's ILP-4 fp32 stream order): it replaces the
+    aten reduce_kernel launch measured at 913us/layer for [53140, 8, 2048]
+    bf16 on the 64K TP2 prefill trace with a single streaming kernel
+    (measured 534us at 3.67 TB/s on H20). Falls back to aten when Triton is
+    unavailable or the layout/top-k is outside the verified range.
+    """
+    if topk_sum_triton is not None and topk_sum_supported(output):
+        return topk_sum_triton(output)
+    return output.sum(dim=1)
+
 
 class PureTpRouterBase(FusedMoeDataRouter):
     """Base class for Pure TP routers.
@@ -45,6 +72,12 @@ class PureTpRouterBase(FusedMoeDataRouter):
 
     @property
     def supports_skip_tp_allreduce(self) -> bool:
+        return True
+
+    @property
+    def consumes_unsummed_topk(self) -> bool:
+        """Pure-TP finalize can pass a deferred [M, topk, K] payload through."""
+
         return True
 
     def _maybe_all_reduce_tp(
@@ -133,9 +166,17 @@ class PureTpRouterBase(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        return self._maybe_all_reduce_tp(
-            payload.fused_expert_output, extra_finalize_args
-        )
+        output = payload.fused_expert_output
+        if (
+            payload.unsummed_topk is not None
+            and self.tp_size > 1
+            and not should_skip_tp_allreduce(extra_finalize_args)
+        ):
+            # The TP collective payload must stay [M, K]: fold the deferred
+            # top-k sum before the all-reduce.  The skip_tp_allreduce path
+            # leaves the merge (and the fused top-k sum) to GenericMoeLayer.
+            output = _fold_deferred_topk(output)
+        return self._maybe_all_reduce_tp(output, extra_finalize_args)
 
 
 class PureTpRouterNoQuant(PureTpRouterBase):

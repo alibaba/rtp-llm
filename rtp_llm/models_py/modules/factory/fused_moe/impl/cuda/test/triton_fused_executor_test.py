@@ -153,7 +153,10 @@ class TritonFusedMoeExecutorTest(TestCase):
         # Reference
         ref = torch_reference_moe(hidden, w1, w2, topk_weights, topk_ids)
 
-        # Compare
+        # Compare (top_k > 1 returns the deferred [M, top_k, K] payload per
+        # the CombineForwardPayload contract; the fold is the consumer's job).
+        if output.dim() == 3:
+            output = output.sum(dim=1)
         self.assertEqual(output.shape, ref.shape)
         max_diff = (output.float() - ref.float()).abs().max().item()
         rel_err = max_diff / (ref.float().abs().max().item() + 1e-6)

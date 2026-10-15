@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -658,7 +658,135 @@ def h20_oss_suites():
                 gpu_type = ["H20_CU13"],
                 data = native.glob(["data/model/qwen_vl/*.jpeg"]),
             ),
+            # MiniCPM-V-4.7 family (hybrid GDN + full attention, canvas M-RoPE,
+            # SigLIP tower with in-tower window merger).  Single-role llm first;
+            # span-interior slice markers are replaced by concatenated crop
+            # features (see runs/minicpmv47_h20_20261013/adaptation-plan.md).
+            smoke_test(
+                name = "minicpmv4_7_1b",
+                task_info = "data/model/minicpmv47/q_r_1b.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # Decode CUDA graph path: hybrid LINEAR cache requires the large
+            # seq_size_per_block (kimi_linear kimi_cudagraph precedent).  Graph
+            # replay pads decode batches, whose numerics flip the text query's
+            # 0.125-margin tie to the other equally-valid greedy branch, so the
+            # graph case pins its own golden (kimi q_r_cuda_graph precedent);
+            # the image query matches the eager golden exactly.
+            smoke_test(
+                name = "minicpmv4_7_1b_graph",
+                task_info = "data/model/minicpmv47/q_r_1b_graph.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            smoke_test(
+                name = "minicpmv4_7_35b",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # 35B decode CUDA graph (basic perf optimization: ~17.5ms/step vs
+            # 61.7ms eager on H20).  Graph replay uses its own golden (kimi
+            # kimi_cudagraph precedent): padded-batch decode numerics flip the
+            # text query's eos-vs-newline tie at margin 0.375, so only the
+            # graph-path output is pinned here; the image query matches the
+            # eager golden exactly.
+            smoke_test(
+                name = "minicpmv4_7_35b_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b_graph.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # MiniCPM-V-4.7-35B-A3B-FP8 (compressed-tensors W8 per-channel).
+            smoke_test(
+                name = "minicpmv4_7_35b_fp8",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b_fp8.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # MiniCPM-V-4.7-35B-A3B + DSpark speculative decoding (block 15,
+            # target hidden at layers [3,11,19,27,35]).
+            smoke_test(
+                name = "minicpmv4_7_35b_dspark",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b_dspark.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # DSpark + decode CUDA graph + async stream pipeline combined: the
+            # MtpExecutor draft-commit graph wrapper and the async env stack
+            # (stream-async / drop-broad-sync / device-input, async-prepare off)
+            # follow the dspark pd_cprr_async precedent in suites_cuda13.bzl.
+            # Graph replay may flip the text query's 0.000-margin greedy tie,
+            # so this case pins its own golden like minicpmv4_7_35b_graph.
+            smoke_test(
+                name = "minicpmv4_7_35b_dspark_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b_dspark_graph.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
+                envs = [
+                    "RTP_LLM_STREAM_ASYNC=1",
+                    "RTP_LLM_DROP_BROAD_SYNC=1",
+                    "RTP_LLM_DEVICE_INPUT=1",
+                    "RTP_LLM_MTP_ASYNC_PREPARE=0",
+                ],
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # Full stack: FP8-BLK target + DSpark draft + decode CUDA graph +
+            # async stream pipeline. Draft borrows the target's bf16
+            # embed/lm_head (excluded from quantization), so the alias check
+            # covers the FP8 target data_type contract.  On SM90 the
+            # auto-selected fp8_per_block_no_dp strategy's DeepGemmHybridExecutor
+            # refuses CUDA graph (SM12-only gate), so graph mode needs the
+            # masked executor via an explicit --moe_strategy (same pattern as
+            # the qwen3_moe moe_generation_prefill_cuda_graph case above).
+            smoke_test(
+                name = "minicpmv4_7_35b_fp8_dspark_graph",
+                # Local-only checkpoint (staging blocked): excluded from CI lanes
+                # via the -local_ckpt lane filter; see the PR description.
+                tags = ["local_ckpt"],
+                task_info = "data/model/minicpmv47/q_r_35b_fp8_dspark.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
+                envs = [
+                    "RTP_LLM_STREAM_ASYNC=1",
+                    "RTP_LLM_DROP_BROAD_SYNC=1",
+                    "RTP_LLM_DEVICE_INPUT=1",
+                    "RTP_LLM_MTP_ASYNC_PREPARE=0",
+                ],
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
         ],
+    )
+
+    custom_smoke_test(
+        name = "minicpmv4_7_reuse_cache",
+        main = "minicpmv47_reuse_cache_test.py",
+        smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192 --reuse_cache 1",
+        data = ["//rtp_llm:sdk"] + native.glob(["data/model/qwen_vl/*.jpeg"]),
+        deps = ["//rtp_llm:transformers"],
+        gpu_type = ["H20_CU13"],
     )
 
     native.test_suite(

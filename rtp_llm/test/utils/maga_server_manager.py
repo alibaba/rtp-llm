@@ -165,6 +165,24 @@ class MagaServerManager(object):
 
         role_log_name = self._role_name + "_logs"
         current_env: Dict[str, str] = os.environ.copy()
+        # Shadow flashinfer_cubin for the server tree, opt-in per case via
+        # RTP_LLM_SHADOW_FLASHINFER_CUBIN=1: with the package importable from
+        # the bazel runfiles, flashinfer resolves its cubin dir into this
+        # action's runfiles, so JIT ops generated into the shared workspace
+        # cache embed include paths that dangle for later consumers (the
+        # fmha_gen flashInferMetaInfo.h class on the SM103 pool). Unfindable,
+        # flashinfer uses the stable workspace cache and downloads land there.
+        # Opt-in: other pools/cases (SM120 smokes, unit tests) rely on the
+        # package's pre-shipped cubins or mock it directly.
+        if (
+            os.environ.get("RTP_LLM_SHADOW_FLASHINFER_CUBIN") == "1"
+            and "PYTHONPATH" in current_env
+        ):
+            current_env["PYTHONPATH"] = os.pathsep.join(
+                p
+                for p in current_env["PYTHONPATH"].split(os.pathsep)
+                if "flashinfer_cubin" not in p
+            )
         for k, v in self._env_args.items():
             if v is not None:
                 current_env[k] = v

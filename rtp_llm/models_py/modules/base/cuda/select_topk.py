@@ -17,7 +17,10 @@ class SelectTopk(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        self.select_topk_op.forward(router_logits.float(), topk_ids, topk_weights)
+        # fp32 and bf16 router logits are both accepted; the kernel widens bf16
+        # to fp32 at load (bit-exact with the .float() path), so the per-layer
+        # cast kernel is skipped for bf16 gates.
+        self.select_topk_op.forward(router_logits, topk_ids, topk_weights)
 
 
 class GroupTopK(nn.Module):

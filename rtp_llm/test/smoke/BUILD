@@ -204,3 +204,14 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+# TEMPORARY B300 diagnostic: runs in the smoke-sm10x lane to dump the shared
+# flashinfer fmha_gen op state on the SM103 pool worker.
+py_test(
+    name = "flashinfer_b300_cache_probe_test",
+    srcs = ["flashinfer_b300_cache_probe_test.py"],
+    deps = [
+        "//rtp_llm/test/utils:jit_sys_path_setup",
+    ],
+    tags = ["SM103_CU13", "manual"],
+)

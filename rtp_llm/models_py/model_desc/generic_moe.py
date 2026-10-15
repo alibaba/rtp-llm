@@ -25,7 +25,6 @@ from rtp_llm.models_py.modules import (
     LinearFactory,
     MlaAttention,
     MultimodalEmbeddingInjector,
-    RMSNorm,
     RMSResNorm,
     SelectTopk,
     SigmoidGateScaleAdd,
@@ -33,9 +32,24 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+try:
+    from rtp_llm.models_py.triton_kernels.common.moe_combine import (
+        sigmoid_mul_supported,
+        sigmoid_mul_triton,
+    )
+except Exception:  # pragma: no cover - triton unavailable in this environment
+
+    def sigmoid_mul_supported(
+        gate: torch.Tensor, shared: torch.Tensor
+    ) -> bool:  # noqa: F811
+        return False
+
+    sigmoid_mul_triton = None
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +140,10 @@ class GenericMoeLayer(nn.Module):
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
         )
+        # EP-shared gate broadcast: the Triton fused sigmoid-mul is
+        # torch.equal to the aten ``sigmoid(gate) * shared`` chain; keep the
+        # aten chain on non-CUDA devices or when Triton is unavailable.
+        self.use_triton_gate_mul = sigmoid_mul_triton is not None and is_cuda()
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
@@ -147,32 +165,79 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
+    @staticmethod
+    def _deferred_topk(experts_output: torch.Tensor) -> Optional[int]:
+        """Top-k of an unsummed [T, topk, K] routed output; None if reduced.
+
+        Executors may defer the routed experts' top-k reduction (payload's
+        ``unsummed_topk``) so it can be folded into the gate combine kernel
+        here instead of a separate aten reduce launch inside the executor.
+        """
+        if experts_output.dim() == 3:
+            return experts_output.size(1)
+        return None
+
+    @staticmethod
+    def _reduce_deferred_experts(experts_output: torch.Tensor) -> torch.Tensor:
+        """Fold a deferred [T, topk, K] routed output back to [T, K]."""
+        if experts_output.dim() == 3:
+            return experts_output.sum(dim=1)
+        return experts_output
+
     def _merge_shared_expert_output(
         self,
         hidden_states: torch.Tensor,
         experts_output: torch.Tensor,
         shared_expert_output: torch.Tensor,
+        shared_gate_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
-            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-            self.sigmoid_gate_scale_add(
-                gate_output, shared_expert_output, experts_output
+            if shared_gate_output is None:
+                shared_gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            # Fold the deferred top-k sum into the fused gate combine kernel
+            # (one launch replaces sum + gate-scale-add, and skips the [T, K]
+            # intermediate round-trip); fp32 accumulation over ascending k
+            # matches torch.sum's reduce order.
+            return self.sigmoid_gate_scale_add(
+                shared_gate_output,
+                shared_expert_output,
+                experts_output,
+                topk_sum=self._deferred_topk(experts_output),
             )
-            return experts_output
-        return experts_output + shared_expert_output
+        # No gate: plain torch.sum fallback for a deferred output.
+        return self._reduce_deferred_experts(experts_output) + shared_expert_output
 
     def _gate_shared_expert_output(
         self,
         hidden_states: torch.Tensor,
         shared_expert_output: torch.Tensor,
+        shared_gate_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
-            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-            return torch.sigmoid(gate_output) * shared_expert_output
+            if shared_gate_output is None:
+                shared_gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            if (
+                sigmoid_mul_triton is not None
+                and self.use_triton_gate_mul
+                and sigmoid_mul_supported(shared_gate_output, shared_expert_output)
+            ):
+                # Fused sigmoid + broadcast multiply (one kernel replaces the
+                # strided [T, 1] x [T, H] aten broadcast chain; bit-exact, and
+                # the TP all-reduce below consumes the contiguous result).
+                return sigmoid_mul_triton(shared_gate_output, shared_expert_output)
+            return torch.sigmoid(shared_gate_output) * shared_expert_output
         return shared_expert_output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
+        shared_gate_output: Optional[torch.Tensor] = None
+        # Separate router GEMM; the shared gate column is computed lazily by
+        # the merge helpers.  The former merged [hidden, E + 1] GEMV was
+        # measured NOT bit-identical to the separate [hidden, E] router GEMM
+        # (element-level router-logit diffs up to ~1.0 at T=2048 shapes,
+        # runs/minicpmv47_h20_20261013/build_logs/ab_router_concat.py), which
+        # flips top-k expert selection and shifts the golden-pinned numerics
+        # of every generic-MoE consumer, so the merge is retired.
         router_logits = self.gate(hidden_states)
 
         topk_weights = torch.empty(
@@ -238,7 +303,10 @@ class GenericMoeLayer(nn.Module):
                 # TP ranks, so it is safe to apply it before the single
                 # all-reduce.
                 experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
+                    hidden_states,
+                    experts_output,
+                    shared_expert_output,
+                    shared_gate_output=shared_gate_output,
                 )
                 experts_output = all_reduce(experts_output, group=Group.TP)
             elif self.use_ep_shared_allreduce:
@@ -246,17 +314,25 @@ class GenericMoeLayer(nn.Module):
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
                 shared_expert_output = self._gate_shared_expert_output(
-                    hidden_states, shared_expert_output
+                    hidden_states, shared_expert_output, shared_gate_output
                 )
                 shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
-                experts_output = experts_output + shared_expert_output
+                experts_output = self._reduce_deferred_experts(
+                    experts_output
+                ) + shared_expert_output
             else:
                 # Fallback path: each path is already complete independently.
                 # This includes ffn_tp_size == 1 and routers that retain their
                 # own finalize reduction, so only local merging remains.
                 experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
+                    hidden_states,
+                    experts_output,
+                    shared_expert_output,
+                    shared_gate_output=shared_gate_output,
                 )
+        else:
+            # No shared expert: fold any deferred top-k sum locally.
+            experts_output = self._reduce_deferred_experts(experts_output)
 
         return experts_output
 

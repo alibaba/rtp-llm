@@ -1,8 +1,34 @@
 """Fused MoE Triton kernel, adapted from SGLang/vLLM.
 
 Supports the BF16/FP16 path and dynamic-activation, 128x128 block-scaled FP8.
+
+Launch-config contract
+----------------------
+A: [M, K] bf16/fp16 (or fp8e4m3 + scales when block_shape is set);
+B: [E, N, K] expert weights, same dtype family; C: [M * top_k, N].
+get_default_config(M, E, N, K, top_k) resolves the Triton launch config in
+three tiers:
+  1. checked-in per-(E, N, K, top_k) tuned configs from the shared Triton
+     autotune cache directory
+     (autotune_cache/configs/{GPU}/fused_moe_kernel.json, "shape_configs"
+     block), active when TRITON_AUTOTUNE_CACHE_MODE=cached — the same opt-in
+     gate the CachedAutotuner uses;
+  2. the compiled-in _TUNED_MOE_CONFIGS table below (identical values, always
+     active so behavior does not depend on data-file packaging);
+  3. the original avg_tokens_per_expert heuristic for geometries that were
+     not swept.
+The MoE GEMMs of one model are separated by (N, K): w1 is [E, 2*inter, hidden]
+and w2 is [E, hidden, inter], so an (E, N, K, top_k) key picks per-GEMM
+configs without any executor change. Tuned on NVIDIA H20 (SM90, Triton 3.6.0,
+bf16, torch 2.11) with CUDA-graph-replay timing for decode shapes and
+L2-scrubbed eager timing for prefill shapes; see
+configs/NVIDIA_H20/fused_moe_kernel.json for the recorded sweep context
+(top_k, MUL_ROUTED_WEIGHT, use_fp8_w8a8).
 """
 
+import json
+import os
+from functools import lru_cache
 from typing import Any, Dict
 
 import torch
@@ -375,6 +401,256 @@ moe_align_block_size_compiled = torch.compile(
 )
 
 
+# (E, N, K, top_k) -> [(max_avg_tokens_per_expert, config), ...] buckets, first
+# match wins; a missing/None threshold is the unbounded last bucket.
+#
+# Swept on NVIDIA H20 (SM90, Triton 3.6.0, bf16) for the E=256/top_k=8 MiniCPM
+# MoE geometry over BM={16,32,64}, BN={64,128,256}, BK={64,128},
+# num_warps={4,8}, num_stages={2..5}, GROUP_SIZE_M={1,8,16} (shared-memory
+# oversubscribed candidates skipped). Decode shapes (M <= 64) were selected by
+# CUDA-graph-replay timing (the production decode regime); prefill shapes by
+# L2-scrubbed eager timing (each layer's expert weights are DRAM-cold in
+# production prefill). Entries are (E, N, K, top_k)-scoped so other models
+# (or different top_k) keep the generic heuristic below. top_k here is the
+# model top_k that the executor passes to get_default_config for both GEMMs.
+#
+# GEMM1 (N=2*inter=1024, K=hidden=2048): decode/small keeps BN64/BK128 (more
+# N-parallel CTAs at low occupancy, deeper K pipeline); medium switches to
+# BN128/BK64; large keeps BM64 (BM16/BM32 read expert weights 2-3x).
+# GEMM2 (N=hidden=2048, K=inter=512): short K wants BK64 everywhere; small
+# shapes prefer BN64, medium BN128.
+#
+# Batch-1 decode sub-bucket (max_avg_tokens_per_expert <= 0.05, i.e. exactly
+# tokens <= 1: the executor passes the token count as M so avg = tokens/32;
+# tokens=2 is 0.0625 and stays on the next bucket): the same tile shape as the
+# <=16 bucket with num_stages 3 -> 4. Selected by 6-round interleaved
+# CUDA-graph-replay A/B on idle H20 (DRAM-cold 8-variant routing cycle, the
+# production decode regime): M_routed=8 medians 0.95/0.98 across three
+# independent runs with every round on the winning side. num_stages=4 is a
+# LOSS at tokens>=2 (1.15x at tokens=2, 1.09x at tokens=3) so the 0.05 head
+# bucket deliberately excludes it; only software-pipeline depth changes
+# (scheduling), the tl.dot k-ascending fp32 accumulation is invariant, and
+# outputs are measured bit-identical (torch.equal True; max-rel-diff vs the
+# per-expert fp32 reference unchanged at ~3.9e-3, one bf16 output ulp).
+# The checked-in JSON sweep context recorded s3 for the M=1 cells under
+# (probably L2-warm) eager timing; the DRAM-cold graph-replay A/B is the
+# arbiter here. See bench_moe_decode_ab.json / bench_moe_ab_and_ceiling.json
+# under runs/minicpmv47_h20_20261013/build_logs/.
+_TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] = {
+    # w1 GEMM: A [M, hidden] x B [E, 2*inter, hidden] -> [M*top_k, 2*inter]
+    (256, 1024, 2048, 8): [
+        (
+            0.05,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
+        (
+            16.0,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+                # tokens=599 (avg 18.7) bucket between 16 and 24: BM32 measured 6-round
+        # all-rounds win vs BM16 (gemm1 495->473us, gemm2 260->231us,
+        # bit-identical; see bench_bm32_ab.json cells 4-5). Bucket order is
+        # first-match ascending; this entry must stay between 16.0 and 24.0.
+        (
+            20.0,
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 8,
+                "num_stages": 4,
+            },
+        ),
+(
+            24.0,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 8,
+                "num_stages": 4,
+            },
+        ),
+        (
+            None,
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+    ],
+    # w2 GEMM: A [M*top_k, inter] x B [E, hidden, inter] -> [M*top_k, hidden]
+    (256, 2048, 512, 8): [
+        (
+            0.05,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
+        (
+            16.0,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+                # tokens=599 (avg 18.7) BM32 bucket, same evidence as the w1 twin.
+        (
+            20.0,
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+(
+            24.0,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+        (
+            None,
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            },
+        ),
+    ],
+}
+
+_MOE_CONFIG_JSON = "fused_moe_kernel.json"
+_MOE_CONFIG_REQUIRED_KEYS = (
+    "BLOCK_SIZE_M",
+    "BLOCK_SIZE_N",
+    "BLOCK_SIZE_K",
+    "GROUP_SIZE_M",
+    "num_warps",
+    "num_stages",
+)
+
+
+def _parse_bucket(bucket: Any) -> tuple[float | None, Dict[str, Any]] | None:
+    """Validate one {"max_avg_tokens_per_expert": x, "config": {...}} bucket."""
+    if not isinstance(bucket, dict):
+        return None
+    config = bucket.get("config")
+    if not isinstance(config, dict) or any(k not in config for k in _MOE_CONFIG_REQUIRED_KEYS):
+        return None
+    if not all(isinstance(config[k], int) for k in _MOE_CONFIG_REQUIRED_KEYS):
+        return None
+    max_avg = bucket.get("max_avg_tokens_per_expert")
+    if max_avg is not None and not isinstance(max_avg, (int, float)):
+        return None
+    return max_avg, dict(config)
+
+
+def _parse_shape_configs(
+    entries: Any,
+) -> Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] | None:
+    """Validate the "shape_configs" block of fused_moe_kernel.json.
+
+    Returns None on any malformed entry so callers fall back to the
+    compiled-in table; per-entry context fields (dtype, MUL_ROUTED_WEIGHT,
+    use_fp8_w8a8) are provenance for the sweep that produced the configs and
+    are not matched at runtime.
+    """
+    if not isinstance(entries, list):
+        return None
+    table: Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        try:
+            key = (int(entry["E"]), int(entry["N"]), int(entry["K"]), int(entry["top_k"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        buckets_raw = entry.get("buckets")
+        if not isinstance(buckets_raw, list) or not buckets_raw:
+            return None
+        buckets = []
+        for bucket in buckets_raw:
+            parsed = _parse_bucket(bucket)
+            if parsed is None:
+                return None
+            buckets.append(parsed)
+        table[key] = buckets
+    return table or None
+
+
+@lru_cache(maxsize=1)
+def _load_tuned_moe_json() -> Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] | None:
+    """Load checked-in per-(E, N, K, top_k) tuned configs from the shared Triton
+    autotune cache directory (autotune_cache/configs/{GPU}/fused_moe_kernel.json).
+
+    Opt-in, mirroring the CachedAutotuner lookup: only consulted when
+    TRITON_AUTOTUNE_CACHE_MODE=cached. Returns None (compile-time table stays
+    authoritative) when the mode is off, the package import fails, or the file
+    is missing/malformed, so a broken JSON can never degrade the launch path.
+    """
+    mode = os.environ.get("TRITON_AUTOTUNE_CACHE_MODE")
+    if mode is None or mode == "disabled":
+        # Fast path: skip the package import in the default configuration.
+        # Other values fall through to CacheMode.from_env(), which validates.
+        return None
+    try:
+        from rtp_llm.models_py.triton_kernels.autotune_cache.cache import (
+            CacheMode,
+            get_config_dir,
+        )
+
+        if CacheMode.from_env() is not CacheMode.CACHED:
+            return None
+        with open(get_config_dir() / _MOE_CONFIG_JSON) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _parse_shape_configs(data.get("shape_configs"))
+
+
 def get_default_config(
     M: int,
     E: int,
@@ -382,12 +658,28 @@ def get_default_config(
     K: int,
     top_k: int,
 ) -> Dict[str, Any]:
-    """Select default block sizes based on problem dimensions.
+    """Select the Triton launch config for the fused MoE GEMM.
 
-    Tuned on H20 (SM90) with Triton 3.4.0. num_warps and num_stages are
+    Resolution order: checked-in autotune-cache JSON (TRITON_AUTOTUNE_CACHE_MODE=cached)
+    -> compiled-in H20 sweep table (exact (E, N, K, top_k) match) -> heuristic.
+    The executor calls this once per GEMM with the two distinct (N, K) shapes
+    of w1/w2, so per-(E, N, K, top_k) entries give per-GEMM configs without
+    changing the executor interface.
+
+    Tuned on H20 (SM90) with Triton 3.6.0. num_warps and num_stages are
     critical for performance — triton defaults are suboptimal on SM90.
     """
     avg_tokens_per_expert = M * top_k / max(E, 1)
+
+    for table in (_load_tuned_moe_json(), _TUNED_MOE_CONFIGS):
+        if not table:
+            continue
+        buckets = table.get((E, N, K, top_k))
+        if not buckets:
+            continue
+        for max_avg, config in buckets:
+            if max_avg is None or avg_tokens_per_expert <= max_avg:
+                return dict(config)
 
     if avg_tokens_per_expert <= 2:
         # Decode / very small batch: maximize N-parallelism

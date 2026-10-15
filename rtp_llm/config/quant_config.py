@@ -430,6 +430,21 @@ class QuantizationConfig(ABC):
         )
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
+        # Compressed-tensors checkpoints list their non-quantized modules under
+        # "ignore" (e.g. MiniCPM-V-4.7-35B-A3B-FP8 keeps the GDN projections,
+        # routers, shared experts and the whole vision tower in BF16), while
+        # vLLM-style fp8 configs use "modules_to_not_convert" (Qwen3.5-FP8).
+        # The dedicated compressed INT8/W4A8 branches consume these before
+        # reaching this tail; schemes that fall through here (FP8 per-channel /
+        # FP8 per-block) need the same exclude set so WeightModule.support()
+        # keeps ignored modules on the plain BF16 path instead of looking up
+        # missing weight_scale tensors.
+        if quant_config and "ignore" in quant_config:
+            result.exclude_modules.update(set(quant_config["ignore"] or []))
+        if quant_config and "modules_to_not_convert" in quant_config:
+            result.exclude_modules.update(
+                set(quant_config["modules_to_not_convert"] or [])
+            )
         return result
 
 

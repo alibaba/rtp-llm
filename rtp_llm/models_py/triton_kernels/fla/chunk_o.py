@@ -210,7 +210,13 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = torch.zeros_like(v)
+    # The kernel stores every (token, head, v) element of o — the grid covers
+    # all chunks / heads / v-blocks and the row masks only trim the
+    # out-of-range tail of the last chunk — so an uninitialized buffer is
+    # safe and saves the full [B, T, H, V] zero fill (measured 65us x 30 GDN
+    # layers on the 64K TP2 prefill trace).  chunk_fwd_o_head_major_vk below
+    # already allocates empty for the same reason.
+    o = torch.empty_like(v)
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)

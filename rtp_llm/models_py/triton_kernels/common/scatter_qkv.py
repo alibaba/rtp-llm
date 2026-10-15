@@ -3,6 +3,7 @@
 # (1, M, n_heads, head_dim), avoiding the .view() -> .contiguous() copy that
 # torch.split + view triggers when the slice stride doesn't match the target
 # contig stride.
+#
 
 from typing import Tuple
 
@@ -97,3 +98,4 @@ def scatter_qkv(
         num_warps=4,
     )
     return q, k, v
+

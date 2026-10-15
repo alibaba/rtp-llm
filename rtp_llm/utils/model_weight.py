@@ -1491,6 +1491,8 @@ class W:
     # Model-agnostic DSpARK globals.
     dspark_fc_w = "dspark_fc.weight"
     dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
+    dspark_confidence_w = "dspark_confidence.weight"
+    dspark_confidence_b = "dspark_confidence.bias"
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
 
@@ -1684,6 +1686,8 @@ class W:
         v4_dspark_main_proj_s: sp_id,
         dspark_fc_w: sp_id,
         dspark_hidden_norm_gamma: sp_id,
+        dspark_confidence_w: sp_id,
+        dspark_confidence_b: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
     }

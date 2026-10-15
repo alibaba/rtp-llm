@@ -24,6 +24,9 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     invoke_fused_moe_kernel,
     moe_align_block_size_torch,
 )
+from rtp_llm.models_py.triton_kernels.moe.moe_align_triton import (
+    moe_align_block_size_triton,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -66,6 +69,22 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int32
 
+    def _moe_align_block_size(
+        self, topk_ids: torch.Tensor, block_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route token-expert alignment to the Triton implementation.
+
+        The Triton path collapses the eager reference's ~25 aten micro kernels
+        (68% of decode kernel launches) into 1 launch for decode (numel <= 64)
+        or 4 for the general path, and keeps num_tokens_post_padded on the GPU
+        (CUDA-graph safe, no host sync).  Falls back to the eager reference for
+        layouts the Triton kernels do not own (non-int32 or non-contiguous
+        routing ids, e.g. DeepEP recv buffers).
+        """
+        if topk_ids.dtype == torch.int32 and topk_ids.is_contiguous():
+            return moe_align_block_size_triton(topk_ids, block_size, self.E)
+        return moe_align_block_size_torch(topk_ids, block_size, self.E)
+
     def execute(
         self,
         payload: ExpertForwardPayload,
@@ -105,8 +124,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Token-expert alignment: compute once if block sizes match, else twice
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size_torch(topk_ids, block_m1, self.E)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = self._moe_align_block_size(
+            topk_ids, block_m1
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -115,8 +134,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
                 num_tokens_post_padded,
             )
         else:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                moe_align_block_size_torch(topk_ids, block_m2, self.E)
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = self._moe_align_block_size(
+                topk_ids, block_m2
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
@@ -159,7 +178,13 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
-
-        return CombineForwardPayload(fused_expert_output=output)
+        # Defer the top-k sum to the consumer: GenericMoeLayer folds it into
+        # the shared-expert gate combine kernel (SigmoidGateScaleAdd), saving
+        # the separate aten reduce launch and the [M, K] intermediate
+        # write/read here.  Routers whose finalize needs a fully reduced
+        # [M, K] output fold the sum themselves (see FusedMoe._execute_payload).
+        if top_k > 1:
+            return CombineForwardPayload(
+                fused_expert_output=out.view(M, top_k, K), unsummed_topk=top_k
+            )
+        return CombineForwardPayload(fused_expert_output=out)

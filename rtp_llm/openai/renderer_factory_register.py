@@ -155,6 +155,10 @@ def _register_builtin_lazy_renderers() -> None:
         ],
         "rtp_llm.openai.renderers.qwen_vl_renderer",
     )
+    register_lazy_renderer(
+        ["minicpmv4_7"],
+        "rtp_llm.openai.renderers.minicpmv47_renderer",
+    )
 
 
 _register_builtin_lazy_renderers()

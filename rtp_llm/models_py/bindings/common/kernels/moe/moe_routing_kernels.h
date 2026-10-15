@@ -106,9 +106,13 @@ private:
 
 // ========================== Function declarations ==========================
 
-template<typename TOPK_T>
-void invokeSelectExpertsForTokens(float const*                    input,
-                                  float const*                    input_with_bias,
+// TOPK_T: indices dtype (int32/int64). IN_T: router-logits storage dtype
+// (fp32 default; __nv_bfloat16 instantiations read bf16 logits and widen to
+// fp32 at load, so results are bit-exact with the fp32 path on the .float()
+// cast). All outputs (softmax scratch, expert scales) stay fp32.
+template<typename TOPK_T, typename IN_T = float>
+void invokeSelectExpertsForTokens(IN_T const*                     input,
+                                  IN_T const*                     input_with_bias,
                                   float*                          output,
                                   float*                          mixer_temp_output,
                                   float*                          softmax_temp_output,
