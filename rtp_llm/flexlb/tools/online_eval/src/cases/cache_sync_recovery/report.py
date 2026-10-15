@@ -61,16 +61,16 @@ def compact_report_spec(data, original):
         pauses = [g for g in data['gc'] if g['full'] and zero <= g['epoch_s'] <= end]
         add('gc', 'Full GC 暂停', 'ms', points(pauses, 'duration_ms'),
             '仅画 Full GC，以暂停结束时刻定位。次数、频率和全部 GC 暂停占比见分阶段表。')
-        add('allocation', 'Master 分配速率', 'GiB/s', points(derivative(rows, 'process_allocated_bytes'), 'value', 1/2**30),
+        add('allocation', 'Master 堆内存分配速率', 'GiB/s', points(derivative(rows, 'process_allocated_bytes'), 'value', 1/2**30),
             '进程累计线程分配量差分；缺失保留空值。CPU、内存、同步强度和 diff 扫描量见汇总表。')
     else:
-        add('age', '其他 Worker 最长未更新时长', 's', points(rows, 'healthy_max_status_age_ms', .001),
-            '其他 Worker 指未被选中撤出的 Worker。按最近一次成功轮询时间计算；超过10秒表示状态更新超时。')
+        add('age', '未参与撤出的 Worker 最长未更新时长', 's', points(rows, 'healthy_max_status_age_ms', .001),
+            '未参与撤出的 Worker 指本次未被选中执行撤出、恢复的 Worker。按最近一次成功轮询时间计算；超过10秒表示状态更新超时。')
         env = data.get('environment', {})
         total = env.get('n_prefill', 0)+env.get('n_decode', 0)-len(data.get('victims', []))
         visible = [dict(epoch_s=r['epoch_s'], value=total-r['missing_workers']
                         if total and r.get('missing_workers') is not None else None) for r in rows]
-        add('workers', '其他 Worker 数量（Master 可见）', '个', points(visible, 'value'),
+        add('workers', '未参与撤出的 Worker 数量（Master 可见）', '个', points(visible, 'value'),
             '不包含本次选中撤出的 Worker。统计 Master 中可见的调度端点，不等于实际存活的引擎进程数。')
     anchor = [dict(id='cache_only_started', name='观察起点', t=e['epoch_s']-zero)
               for e in data['events'] if e['id']=='cache_only_started']
@@ -165,8 +165,8 @@ def report(instance, output, identity):
             environment=raw['environment'], evidence=dict(source=str(source))),
         kpis=[dict(label='功能判定',value=data['outcome']['gate']),dict(label='实验有效性（含同步强度）',value=data['outcome']['validity']),
               dict(label='Full GC次数',value=sum(g['full'] for g in gc)),
-              dict(label='其他 Worker 受影响数',value=len(raw.get('affected_workers',[])))],
-        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态轮询成功/s','条目/s','MiB/s','分配GiB/s','diff百万key/s','FullGC次/分','GC暂停占比','CPU核','其他 Worker 最长未更新ms'],
+              dict(label='未参与撤出的 Worker 受影响数',value=len(raw.get('affected_workers',[])))],
+        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态轮询成功/s','条目/s','MiB/s','分配GiB/s','diff百万key/s','FullGC次/分','GC暂停占比','CPU核','未参与撤出的 Worker 最长未更新ms'],
             [[phase, round(v['actual_rpc']['responses'],3), v['cache_success_s'], v['worker_status_success_s'], round(v['actual_rpc']['entries']),
               round(v['actual_rpc']['key_payload_bytes']/2**20,3),v['allocation_gib_s'],v['diff_million_keys_s'],
               v['full_gc_per_min'],v['gc_pause_fraction'],v['cpu_cores'],v['max_healthy_age_ms']]
