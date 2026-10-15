@@ -98,6 +98,12 @@ DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     status_code=400,
     status_name="InvalidParameter",
 )
+DASH_ERROR_DATA_INSPECTION = DashErrorSpec(
+    error_no=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=400,
+    status_name="DataInspectionFailed",
+)
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
     finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,

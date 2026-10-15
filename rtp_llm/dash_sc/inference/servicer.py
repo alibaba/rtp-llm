@@ -64,6 +64,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
+    DASH_ERROR_DATA_INSPECTION,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_RESOURCE_EXHAUSTED,
@@ -330,9 +331,7 @@ def _dash_error_mapping_for_ft_exception(
         ExceptionType.UNSAFE_INPUT_CONTENT,
         ExceptionType.UNSAFE_OUTPUT_CONTENT,
     ):
-        return _DashFtErrorMapping(
-            DASH_ERROR_BAD_REQUEST, f"DataInspectionFailed: {exc.message}"
-        )
+        return _DashFtErrorMapping(DASH_ERROR_DATA_INSPECTION, exc.message)
     raw_reason = getattr(
         exc,
         "admission_reject_reason",
