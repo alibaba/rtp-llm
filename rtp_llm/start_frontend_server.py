@@ -33,27 +33,27 @@ def _install_hot_hook_runtime(role: str) -> None:
 
 
 def start_frontend_server(
-    rank_id: int,
+    world_rank: int,
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
 ):
-    _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
-    # Set rank_id and server_id on the passed config so port properties match this rank
+    local_rank = world_rank % py_env_configs.parallelism_config.local_world_size
+    _install_hot_hook_runtime(f"frontend_rank_{local_rank}_server_{server_id}")
     logging.info(
-        f"[PROCESS_START]Start frontend server process rank_{rank_id}_server_{server_id}"
+        f"[PROCESS_START]Start frontend server process rank_{local_rank}_server_{server_id}"
     )
     start_time = time.time()
     from rtp_llm.frontend.frontend_app import FrontendApp
 
-    if rank_id == 0 and server_id == 0:
+    if local_rank == 0 and server_id == 0:
         logging.info(f"import FrontendApp took {time.time() - start_time:.2f}s")
 
     py_env_configs.server_config.frontend_server_id = server_id
-    # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
+    # Topology uses the global rank; listening ports use the derived local rank.
     set_parallelism_config(
         py_env_configs.parallelism_config,
-        rank_id,
+        world_rank,
         py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
@@ -63,7 +63,7 @@ def start_frontend_server(
     py_env_configs.distribute_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
-    setproctitle(f"rtp_llm_frontend_server_rank_{rank_id}_server_{server_id}")
+    setproctitle(f"rtp_llm_frontend_server_rank_{local_rank}_server_{server_id}")
 
     try:
         set_global_controller(global_controller)

@@ -18,11 +18,7 @@ from pydantic import BaseModel
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.distribute.distributed_server import (
-    WorldInfo,
-    get_dp_addrs_from_world_info,
-    get_world_info,
-)
+from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -85,18 +81,7 @@ class FrontendWorker:
         # Create engine_config from config (ports from server_config/distribute_config)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
 
-        # Get world_info from config
-        world_info = get_world_info(
-            server_config=py_env_configs.server_config,
-            distribute_config=py_env_configs.distribute_config,
-            parallelism_config=py_env_configs.parallelism_config,
-        )
-
-        # Get addresses from distribute_info
-        addresses = get_dp_addrs_from_world_info(
-            world_info=world_info,
-            parallelism_config=engine_config.parallelism_config,
-        )
+        addresses = get_dp_rpc_addresses(py_env_configs)
 
         vit_separation = None
         if py_env_configs.vit_config:

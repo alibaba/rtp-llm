@@ -163,6 +163,12 @@ py_test(
 )
 
 py_test(
+    name = "start_frontend_rank_test",
+    srcs = ["start_frontend_rank_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "prompt_scoring_test",
     srcs = [
         "prompt_scoring_test.py",

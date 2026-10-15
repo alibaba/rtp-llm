@@ -252,7 +252,7 @@ def start_dash_sc_server_impl(
         process = multiprocessing.Process(
             target=start_dash_sc_server,
             args=(
-                rank,
+                py_env_configs.parallelism_config.world_rank + rank,
                 server_id,
                 global_controller,
                 py_env_configs,
@@ -511,7 +511,7 @@ def start_frontend_server_impl(
                 process = multiprocessing.Process(
                     target=start_frontend_server,
                     args=(
-                        rank,
+                        pc.world_rank + rank,
                         i,
                         global_controller,
                         py_env_configs,
@@ -791,20 +791,12 @@ def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
 
 
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
-    from rtp_llm.distribute.distributed_server import (
-        get_dp_addrs_from_world_info,
-        get_world_info,
-    )
+    from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 
     parallelism_config = py_env_configs.parallelism_config
     resolve_trace = None
     try:
-        world_info = get_world_info(
-            server_config=py_env_configs.server_config,
-            distribute_config=py_env_configs.distribute_config,
-            parallelism_config=parallelism_config,
-        )
-        addrs = get_dp_addrs_from_world_info(world_info, parallelism_config)
+        addrs = get_dp_rpc_addresses(py_env_configs)
         if addrs:
             return addrs
     except Exception:
@@ -814,7 +806,7 @@ def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
     if world_size > 1:
         if resolve_trace:
             logging.warning(
-                "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
+                "failed to resolve DSV4 startup real warmup grpc addrs, "
                 "trace=%s",
                 resolve_trace,
             )
@@ -824,7 +816,7 @@ def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
         )
     if resolve_trace:
         logging.warning(
-            "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
+            "failed to resolve DSV4 startup real warmup grpc addrs, "
             "fallback to local rpc_server_port, trace=%s",
             resolve_trace,
         )

@@ -89,12 +89,10 @@ def get_world_info(
 def get_dp_addrs_from_world_info(
     world_info: WorldInfo, parallelism_config: ParallelismConfig
 ) -> list[str]:
-    """RPC addresses for DP fan-out: one per DP group (tp_rank==0 per group), or a
-    single serving rank when FFN disaggregate is enabled.
+    """Select serving RPC addresses from the supplied members only.
 
-    Pure function over WorldInfo / ParallelismConfig — shared by FrontendWorker and
-    any other caller that needs to address the backend model_rpc servers (e.g.
-    DashScApp building its own BackendRPCServerVisitor).
+    This does not discover remote ranks. Frontends should use get_dp_rpc_addresses
+    to resolve stage 0 when it is on another node.
     """
     ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
     logging.info(
@@ -127,6 +125,32 @@ def get_dp_addrs_from_world_info(
     return addresses
 
 
+def get_dp_rpc_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Resolve request-admitting backends, including remote stage 0 under PP.
+
+    Without PP, preserve the existing local DP / FFN-disaggregate routing.
+    With PP, every frontend needs the TP=0 rank of each DP lane in stage 0.
+    """
+    pc = py_env_configs.parallelism_config
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    layout = RankLayout.from_parallelism_config(pc)
+    if layout.pp_size == 1:
+        return get_dp_addrs_from_world_info(world_info, pc)
+
+    serving_ranks = [layout.world_rank_of(Coord(dp=dp)) for dp in range(layout.dp_size)]
+    # Frontends and backends start concurrently. Allow the same bootstrap timeout
+    # as the backend, rather than the short timeout used for runtime control calls.
+    timeout_s = py_env_configs.distribute_config.dist_comm_timeout
+    timeout = timedelta(seconds=timeout_s) if timeout_s is not None else None
+    addresses = _resolve_rank_rpc_addresses(
+        py_env_configs, world_info, serving_ranks, timeout
+    )
+    logging.info("[world_rank: %s] stage 0 RPC addresses: %s", pc.world_rank, addresses)
+    return addresses
+
+
 def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
     """Resolve one control root (DP=0, TP=0) per stage, including remote nodes.
 
@@ -142,12 +166,25 @@ def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
     world_info = get_world_info(
         py_env_configs.server_config, py_env_configs.distribute_config, pc
     )
-    roots = {
+    return _resolve_rank_rpc_addresses(
+        py_env_configs, world_info, root_ranks, timedelta(seconds=3)
+    )
+
+
+def _resolve_rank_rpc_addresses(
+    py_env_configs: PyEnvConfigs,
+    world_info: WorldInfo,
+    ranks: list[int],
+    timeout: Optional[timedelta],
+) -> list[str]:
+    """Read missing ranks from the backend registry without joining bootstrap."""
+    pc = py_env_configs.parallelism_config
+    addresses = {
         member.world_rank: f"{member.ip}:{member.rpc_server_port}"
         for member in world_info.members
-        if member.world_rank in root_ranks
+        if member.world_rank in ranks
     }
-    missing = [rank for rank in root_ranks if rank not in roots]
+    missing = [rank for rank in ranks if rank not in addresses]
     if missing:
         master_ip, master_port = get_master(py_env_configs.distribute_config, pc)
         master_port = int(master_port or py_env_configs.server_config.start_port)
@@ -156,7 +193,7 @@ def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
             port=master_port - 1,
             is_master=False,
             wait_for_workers=False,
-            timeout=timedelta(seconds=3),
+            timeout=timeout,
         )
         for rank in missing:
             address = store.get(
@@ -171,8 +208,8 @@ def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
                 server_port=server_port,
                 worker_info_port_num=0,  # Registered port already includes the local-rank offset.
             )
-            roots[rank] = f"{member.ip}:{member.rpc_server_port}"
-    return [roots[rank] for rank in root_ranks]
+            addresses[rank] = f"{member.ip}:{member.rpc_server_port}"
+    return [addresses[rank] for rank in ranks]
 
 
 def get_local_world_info(
