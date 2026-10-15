@@ -230,3 +230,30 @@ groupRows[2].onclick();assert.equal(groupDot.hidden,false);assert.equal(groupDot
 groupToolbar.children.find(e=>e.textContent==='全选').onclick();assert.equal(groupDot.hidden,true);
 
 assert.equal(FlexMultiCurve.presetColor(['unknown'],[{name:'unknown',metric_id:'unknown'}]),null);
+
+// Dense events retain every original position while their display labels never overlap.
+const measure=text=>text.length*7;
+function checkEventLayout(events,left=0,right=300,pixel=t=>t) {
+  const labels=FlexMultiCurve.eventLabels(events,pixel,measure,left,right);
+  labels.forEach((label,i)=>{
+    assert.ok(label.left>=left&&label.left+label.width<=right);
+    if(i)assert.ok(labels[i-1].left+labels[i-1].width+6<=label.left);
+  });
+  const visible=events.map((event,index)=>({event,index,px:pixel(event.t)})).filter(i=>i.px>=left&&i.px<=right);
+  assert.deepEqual(labels.flatMap(label=>label.items).sort((a,b)=>a.index-b.index),visible);
+  return labels;
+}
+const sparseEvents=[{t:10,name:'start'},{t:200,name:'end'}];
+assert.ok(checkEventLayout(sparseEvents)[0].label.includes('start'));
+const crowdedEvents=Array.from({length:24},(_,i)=>({t:i<12?220+i/100:299+i/1000,name:'run A · long event '+i}));
+const savedEvents=JSON.stringify(crowdedEvents);
+assert.ok(checkEventLayout(crowdedEvents).some(label=>label.items.length>1));
+assert.equal(JSON.stringify(crowdedEvents),savedEvents);
+checkEventLayout(crowdedEvents,0,90,t=>t/4); // Small screens.
+checkEventLayout(crowdedEvents,0,300,t=>(t-220)*100); // Zoom changes grouping, not numbering.
+checkEventLayout([{t:0,name:'first'},{t:0,name:'second'},{t:300,name:'last'}]);
+assert.deepEqual(FlexMultiCurve.eventLabels([],t=>t,measure,0,300),[]);
+assert.deepEqual(FlexMultiCurve.eventLabels(sparseEvents,t=>t,measure,0,0),[]);
+
+const unordered=checkEventLayout([{t:100,name:'one'},{t:300,name:'two'},{t:100,name:'three'}]);
+assert.equal(unordered[0].label,'E1 +1'); // Do not imply intervening event E2 belongs to this label.
