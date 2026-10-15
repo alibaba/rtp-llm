@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#include <c10/cuda/CUDACachingAllocator.h>
 #endif
 #include <algorithm>
 #include <atomic>
@@ -486,7 +487,7 @@ void holdRoundHeadSources(const std::vector<torch::Tensor>& sources, TensorHolde
         // Publication replaces per-stream handles later in the round. Keep the
         // actual allocations, and register use if allocated on another stream.
         holder.hold(tensor);
-        tensor.record_stream(stream);
+        c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(), stream);
     }
 }
 
@@ -852,7 +853,8 @@ torch::Tensor MtpBatchStreamProcessor::expandDSparkPositionIds(const torch::Tens
     if (position_bases.is_cuda() && position_bases.scalar_type() == torch::kInt32 && position_bases.stride(1) == 1
         && position_bases.get_device() == at::cuda::current_device()) {
         auto result = emptyInt32OnCuda({position_bases.numel() * width});
-        position_bases.record_stream(cuda_graph::graphGetCurrentStream());
+        c10::cuda::CUDACachingAllocator::recordStream(position_bases.storage().data_ptr(),
+                                                      cuda_graph::graphGetCurrentStream());
         invokeMtpPositionExpand(position_bases, result, width, at::cuda::getCurrentCUDAStream().stream());
         return result;
     }
