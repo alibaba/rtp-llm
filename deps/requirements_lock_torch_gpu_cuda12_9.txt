@@ -783,8 +783,8 @@ flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/f
 flash-attn-3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl \
     --hash=sha256:a3cab4f2ae9c27b229631e5fe06fe23807201dd29020df60d947593746a7eb04
     # via -r requirements_torch_gpu_cuda12_9.txt
-flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:960fecb602f90f0f882b6e460f9ddebaec0c3cedca3b01594330445c90afaa5e
+flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B49e2000.cu129-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:7f940bd1931772d5e173562648b8c6b7e82793bfd1c72d8524d187de9b1019de
     # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_cubin-0.6.9-py3-none-any.whl \
     --hash=sha256:d4adf132ef0d0f7a85433c438466d0855abeddb7ed18fff86c30f992b7fcfffd
