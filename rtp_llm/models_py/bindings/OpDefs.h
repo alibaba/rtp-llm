@@ -5,6 +5,9 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
@@ -250,7 +253,8 @@ struct PyCacheStoreInputs {
     torch::Tensor            kv_cache_layer_to_group;
     torch::Tensor            kv_cache_layer_region_to_group;
     torch::Tensor            kv_cache_group_types;
-    std::vector<std::string> cache_keys;  // [context_batch_size]
+    // Shared by all layer write tasks; laid out [context_batch_size, global_max_blocks].
+    std::shared_ptr<const std::vector<std::string>> cache_keys = std::make_shared<const std::vector<std::string>>();
     // Pinned-host mirrors of device length tensors for cache store consumption.
     // Populated via non-blocking D2H in prepareWriteCacheParams so that
     // background cache-store threads never issue a synchronous .cpu() copy.

@@ -203,7 +203,8 @@ struct CacheStoreInputs {
 
     torch::Tensor            request_id;             // [context_batch_size]
     torch::Tensor            request_pd_separation;  // [context_batch_size]
-    std::vector<std::string> cache_keys;             // [context_batch_size]
+    std::shared_ptr<const std::vector<std::string>> cache_keys =
+        std::make_shared<const std::vector<std::string>>();  // [context_batch_size, global_max_blocks]
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes = 0;
     size_t                   kv_scale_stride_bytes = 0;

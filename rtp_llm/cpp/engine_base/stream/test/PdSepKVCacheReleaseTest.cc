@@ -221,7 +221,7 @@ CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
     inputs.decoder_batch_size        = 0;
     inputs.request_id                = torch::tensor({(int64_t)request_id_val}, torch::kInt64);
     inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
-    inputs.cache_keys                = {cache_key_string};
+    inputs.cache_keys = std::make_shared<const std::vector<std::string>>(std::vector<std::string>{cache_key_string});
     inputs.tokens_per_block          = tokens_per_block;
     inputs.kv_block_stride_bytes     = kv_stride;
     inputs.kv_scale_stride_bytes     = kv_scale_stride;
@@ -1285,7 +1285,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             inputs.decoder_batch_size                  = 0;
             inputs.request_id                          = torch::tensor({request_id}, torch::kInt64);
             inputs.request_pd_separation               = torch::tensor({true}, torch::kBool);
-            inputs.cache_keys                          = cache_key_strings;
+            inputs.cache_keys = std::make_shared<const std::vector<std::string>>(cache_key_strings);
             inputs.tokens_per_block                    = spb;
             inputs.kv_block_stride_bytes               = config.group_kv_block_stride_bytes[gid];
             inputs.kv_scale_stride_bytes               = 0;
@@ -1464,7 +1464,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             inputs.kv_cache_layer_to_group        = layer_to_group_tensor;
             inputs.kv_cache_layer_region_to_group = layer_region_to_group_tensor;
             inputs.kv_cache_group_types           = group_types_tensor;
-            inputs.cache_keys                     = cache_key_strings;
+            inputs.cache_keys                     = std::make_shared<const std::vector<std::string>>(cache_key_strings);
             inputs.input_lengths_host             = torch::tensor({block_num * spb}, torch::kInt32);
             inputs.prefix_lengths_host            = torch::tensor({0}, torch::kInt32);
             inputs.tokens_per_block               = spb;
@@ -1659,7 +1659,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             inputs.decoder_batch_size                  = 0;
             inputs.request_id                          = torch::tensor({request_id}, torch::kInt64);
             inputs.request_pd_separation               = torch::tensor({true}, torch::kBool);
-            inputs.cache_keys                          = cache_key_strings;
+            inputs.cache_keys = std::make_shared<const std::vector<std::string>>(cache_key_strings);
             inputs.tokens_per_block                    = spb;
             inputs.kv_block_stride_bytes               = config.group_kv_block_stride_bytes[gid];
             inputs.kv_scale_stride_bytes               = 0;
@@ -1819,7 +1819,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         inputs.decoder_batch_size        = 0;
         inputs.request_id                = torch::tensor({(int64_t)request_id_val}, torch::kInt64);
         inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
-        inputs.cache_keys                = cache_key_strings;
+        inputs.cache_keys                = std::make_shared<const std::vector<std::string>>(cache_key_strings);
         inputs.tokens_per_block          = spb;
         inputs.kv_block_stride_bytes     = config.kv_block_stride_bytes;
         inputs.kv_scale_stride_bytes     = 0;

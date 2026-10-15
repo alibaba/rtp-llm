@@ -565,10 +565,14 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     if (!inputs.warmup && inputs.pd_separation) {
         const size_t         decoder_batch_size = inputs.sequence_lengths.size(0);
         const size_t         context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
-        std::vector<int64_t> cache_keys_vec;
+        std::vector<std::string> cache_keys;
         if (inputs.cache_keys.defined()) {
-            auto ck        = inputs.cache_keys.contiguous();
-            cache_keys_vec = std::vector<int64_t>(ck.data_ptr<int64_t>(), ck.data_ptr<int64_t>() + ck.numel());
+            auto           ck   = inputs.cache_keys.contiguous();
+            const int64_t* data = ck.data_ptr<int64_t>();
+            cache_keys.reserve(static_cast<size_t>(ck.numel()));
+            for (int64_t i = 0; i < ck.numel(); ++i) {
+                cache_keys.emplace_back(std::to_string(data[i]));
+            }
         }
         // Async-copy device length tensors to pinned host for cache store.
         // The copy is enqueued on the current CUDA stream; the event recorded
@@ -601,7 +605,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             kv_cache_layer_to_group,
             kv_cache_layer_region_to_group,
             kv_cache_group_types,
-            transVectorToString(cache_keys_vec),
+            std::make_shared<const std::vector<std::string>>(std::move(cache_keys)),
             input_lengths_host,
             prefix_lengths_host,
             inputs.seq_size_per_block,
@@ -617,7 +621,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
-        params = cache_store_inputs;
+        params = std::move(cache_store_inputs);
     }
     return params;
 }
