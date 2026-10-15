@@ -103,9 +103,17 @@ protected:
         // Keep the manager, allocator reference handling, connector, planner and
         // scheduler real. Only remote worker/Prefill responses are test services;
         // no transfer backend is needed to inspect the emitted RPC payloads.
-        manager_ = std::make_unique<KVCacheManager>(config);
-        manager_->allocator_ = allocator_;
-        manager_->pd_sep_config_.role_type = RoleType::DECODE;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = RoleType::DECODE;
+        manager_ = std::make_unique<KVCacheManager>(config,
+                                                   false,
+                                                   nullptr,
+                                                   KVCacheConfig{},
+                                                   ParallelismConfig{},
+                                                   RuntimeConfig{},
+                                                   SpeculativeExecutionConfig{},
+                                                   pd_sep_config);
+        manager_->coordinator_manager_ = allocator_;
         manager_->p2p_connector_ = std::move(connector);
 
         auto input = std::make_shared<GenerateInput>();
@@ -193,7 +201,7 @@ TEST_P(KVCacheManagerP2PReadTest, TreePrefixDeterminesWireRoutes) {
     std::set<int> layers;
     for (const auto& layer : route.layer_blocks()) {
         layers.insert(layer.layer_id());
-        EXPECT_EQ(layer.cache_tag(), manager_->cacheConfig().tagForGroup(0));
+        EXPECT_EQ(layer.cache_tag(), resource_->groupTags().at(0));
         ASSERT_EQ(layer.cache_keys_size(), static_cast<int>(scenario.expected_count));
         ASSERT_EQ(layer.block_ids_size(), static_cast<int>(scenario.expected_count));
         std::map<int64_t, int> actual;
