@@ -148,7 +148,7 @@ class WhaleIndependentProcessTest {
         assertTrue(terminal.getFlattenOutput().getFinished(0));
         assertEquals(1, terminal.getFlattenOutput().getOutputIds().getShape(2));
         assertFalse(frames.hasNext());
-        var state = new ObjectMapper().readTree(get("127.0.0.3", base + 20, "/snapshot")).elements().next();
+        var state = new ObjectMapper().readTree(get("127.0.0.3", base + 20, "/snapshot")).path("engines").get(0);
         assertTrue(state.has("busy_ms"));
         assertEquals(0, state.path("busy_ms").asLong());
         assertEquals(0, state.path("held_blocks").asLong());
