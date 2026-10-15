@@ -153,6 +153,8 @@ class EnvSpec:
     master_pv_log: Optional[bool] = None
     event_loop_threads: int = DEFAULT_MOCK_EVENT_LOOP_THREADS
     completion_threads: int = DEFAULT_MOCK_COMPLETION_THREADS
+    rpc_threads: int = 2
+    rpc_max_calls: int = 32768
     mock_auto_fetch: bool = False
     mock_fetch_attach_timeout_ms: int = 600_000
     # Seconds the freshly started master must hold "alive == discovered" for

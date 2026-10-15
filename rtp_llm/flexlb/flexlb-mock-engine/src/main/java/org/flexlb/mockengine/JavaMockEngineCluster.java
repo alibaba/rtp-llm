@@ -176,7 +176,7 @@ public final class JavaMockEngineCluster {
         } catch (Throwable error) {
             scheduler.shutdownNow();
             for (FastRpcService s : services.values()) s.shutdown();
-            shutdown(serversByPort, bossGroup, workerGroup);
+            shutdown(serversByPort, bossGroup, workerGroup, config);
             throw error;
         }
 
@@ -222,7 +222,7 @@ public final class JavaMockEngineCluster {
             for (FastRpcService service : services.values()) close.add(service::drainAndShutdown);
             close.add(scheduler::shutdownNow);
             for (FastRpcService service : services.values()) close.add(service::shutdown);
-            close.add(() -> shutdown(serversByPort, bossGroup, workerGroup));
+            close.add(() -> shutdown(serversByPort, bossGroup, workerGroup, config));
             if (whaleMonitor != null) close.add(whaleMonitor::close);
             if (engineEventLog != null) close.add(engineEventLog::close);
             ShutdownTasks.runAll(close);
@@ -364,6 +364,9 @@ public final class JavaMockEngineCluster {
         if (config.engineInitializer != null) config.engineInitializer.accept(service);
         services.put(grpcPort, service);
         try {
+            MockRpcExecutors runtime = config.rpcExecutors(workerGroup);
+            MockRpcExecutors.Engine rpcEngine = runtime.engine();
+            service.rpcEngine = rpcEngine;
             Server server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress(config.bindHost, grpcPort))
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
@@ -375,7 +378,9 @@ public final class JavaMockEngineCluster {
                     .withOption(ChannelOption.SO_REUSEADDR, true)
                     // SO_REUSEADDR on accepted (child) sockets — defense in depth.
                     .withChildOption(ChannelOption.SO_REUSEADDR, true)
-                    .executor(config.rpcExecutors(workerGroup).executor())
+                    .executor(runtime.controlExecutor())
+                    .callExecutor(rpcEngine)
+                    .intercept(rpcEngine)
                     .maxInboundMessageSize(16 * 1024 * 1024)
                     .addService(service)
                     .build()
@@ -394,12 +399,29 @@ public final class JavaMockEngineCluster {
 
     private static void shutdown(Map<Integer, Server> serversByPort,
                                  EventLoopGroup bossGroup,
-                                 EventLoopGroup workerGroup) {
-        for (Server server : serversByPort.values()) {
-            server.shutdownNow();
-        }
-        bossGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
-        workerGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
+                                 EventLoopGroup workerGroup, Config config) {
+        List<Runnable> close = new ArrayList<>();
+        serversByPort.values().forEach(server -> close.add(server::shutdownNow));
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        serversByPort.values().forEach(server -> close.add(() -> {
+            try {
+                if (!server.awaitTermination(Math.max(0, end - System.nanoTime()), TimeUnit.NANOSECONDS))
+                    throw new IllegalStateException("mock RPC server did not terminate");
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted stopping mock RPC server", error);
+            }
+        }));
+        close.add(() -> {
+            if (!bossGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(3, TimeUnit.SECONDS))
+                throw new IllegalStateException("mock RPC boss transport did not terminate");
+        });
+        close.add(() -> {
+            if (!workerGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(3, TimeUnit.SECONDS))
+                throw new IllegalStateException("mock RPC worker transport did not terminate");
+        });
+        close.add(() -> { if (config.rpcExecutors != null) config.rpcExecutors.close(); });
+        ShutdownTasks.runAll(close);
     }
 
     /**
@@ -1393,6 +1415,7 @@ public final class JavaMockEngineCluster {
         // every pool for in-place continuation, a crash wipes them (recovery
         // == a reboot from zero).
         private volatile Server grpcServer;
+        private MockRpcExecutors.Engine rpcEngine;
         // Set once by drainAndShutdown(): rejects new admissions and disables
         // checkLeakDrain so shutdown-time in-flight requests are not misreported
         // as leaks. Never reset (the process is exiting).
@@ -6039,6 +6062,7 @@ public final class JavaMockEngineCluster {
         void shutdown() {
             long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             List<Runnable> close = new ArrayList<>();
+            if (rpcEngine != null) close.add(rpcEngine::stop);
             remotePrefillOwners.forEach((id, owner) -> close.add(() -> {
                 owner.close();
                 remotePrefillOwners.remove(id, owner);
@@ -6801,6 +6825,7 @@ public final class JavaMockEngineCluster {
             snap.put("worker_status_qps", prometheusWorkerStatus.last());
             snap.put("worker_status_rt_us", workerStatusRtUs.get());
             snap.put("worker_status_rpcs_total", workerStatusRates.snapshot().tokens());
+            if (rpcEngine != null) snap.put("rpc_runtime", rpcEngine.snapshot());
             snap.put("decode_wall_tps", prometheusDecodeTps.last());
             snap.put("hit_tokens_total", hitTokensTotal.get());
             snap.put("inflight", getInflightCount());
@@ -7074,10 +7099,8 @@ public final class JavaMockEngineCluster {
         private EventLoopGroup rpcTransport;
         synchronized MockRpcExecutors rpcExecutors(EventLoopGroup transport) {
             if (rpcExecutors == null || rpcTransport.isTerminated()) {
-                rpcExecutors = new MockRpcExecutors(eventLoopThreads);
+                rpcExecutors = new MockRpcExecutors(rpcThreads, rpcMaxCalls);
                 rpcTransport = transport;
-                MockRpcExecutors owned = rpcExecutors;
-                transport.terminationFuture().addListener(ignored -> owned.close());
             }
             if (rpcTransport != transport) throw new IllegalStateException("RPC runtime belongs to another transport");
             return rpcExecutors;
@@ -7091,6 +7114,8 @@ public final class JavaMockEngineCluster {
         int nDecode = 4;
         int baseGrpcPort = 61_000;
         int eventLoopThreads = 32;
+        int rpcThreads = 2;
+        int rpcMaxCalls = 32768;
         int completionThreads = 8;
         /**
          * Block-count pool overrides (capacity model v2): 0 = derive the pool
@@ -7177,6 +7202,8 @@ public final class JavaMockEngineCluster {
                     case "--n-decode" -> config.nDecode = Integer.parseInt(value);
                     case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
                     case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
+                    case "--rpc-threads" -> config.rpcThreads = Integer.parseInt(value);
+                    case "--rpc-max-calls" -> config.rpcMaxCalls = Integer.parseInt(value);
                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
                     case "--auto-fetch" -> config.autoFetch = parseBooleanFlag(value, key);
                     case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
@@ -7247,7 +7274,7 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException(
                         "n-prefill/n-decode must be >= 0 with at least one engine in total");
             }
-            if (config.eventLoopThreads < 1 || config.completionThreads < 1) {
+            if (config.eventLoopThreads < 1 || config.completionThreads < 1 || config.rpcThreads < 1 || config.rpcMaxCalls < 1) {
                 throw new IllegalArgumentException("thread counts must be positive");
             }
             if (config.fetchAttachTimeoutMs < 1) {

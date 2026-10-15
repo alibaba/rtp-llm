@@ -52,6 +52,19 @@ class ClusterConfigParamTest {
                 with(baseArgs(), "--fetch-attach-timeout-ms", "0")));
     }
 
+    @Test
+    void rpcQuotasAreIndependentOfTransportThreads() {
+        var config = JavaMockEngineCluster.Config.parse(with(baseArgs(), "--event-loop-threads", "7",
+                "--rpc-threads", "3", "--rpc-max-calls", "19"));
+        assertEquals(7, config.eventLoopThreads);
+        assertEquals(3, config.rpcThreads);
+        assertEquals(19, config.rpcMaxCalls);
+        var defaults = JavaMockEngineCluster.Config.parse(with(baseArgs(), "--event-loop-threads", "1"));
+        assertEquals(2, defaults.rpcThreads);
+        for (String flag : new String[]{"--rpc-threads", "--rpc-max-calls"})
+            assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(with(baseArgs(), flag, "0")));
+    }
+
     // ──────────── Single-role validation relaxation ────────────
 
     @Test

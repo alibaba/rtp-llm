@@ -24,6 +24,17 @@ def spec(raw):
 
 
 class StartupOptionsTest(unittest.TestCase):
+    def test_rpc_limits_cross_declaration_startup_and_reuse_contract(self):
+        actual = spec({"event_loop_threads": 7, "rpc_threads": 3, "rpc_max_calls": 19})
+        self.assertEqual((actual.event_loop_threads, actual.rpc_threads, actual.rpc_max_calls), (7, 3, 19))
+        from dataclasses import replace
+        self.assertNotEqual(actual.fingerprint(), replace(actual, rpc_threads=4).fingerprint())
+        self.assertNotEqual(actual.fingerprint(), replace(actual, rpc_max_calls=20).fingerprint())
+        for name in ("rpc_threads", "rpc_max_calls"):
+            for invalid in (0, -1, True, 1.5):
+                with self.assertRaises(ValueError):
+                    spec({name: invalid})
+
     def test_capture_record_supplies_topology_and_rejects_untracked_edits(self):
         for name, expected in (
             ("glm_5_3_l20d", (125, 536, 31218, 46157)),
