@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -35,6 +36,28 @@ public:
 
     const BlockTreeCachePtr& blockTreeCacheOwner() const {
         return this->block_tree_cache_;
+    }
+
+    size_t devicePrefixBlocksForTest(const CacheKeysType& keys) const {
+        const auto& cache = *blockTreeCacheOwner();
+        std::lock_guard<std::mutex> lock(cache.mutex_);
+        size_t count = 0;
+        for (const auto* node : cache.tree()->findNode(keys)) {
+            for (size_t gid = 0; gid < cache.groupSets().size(); ++gid) {
+                const auto& resource = node->group_set_resources[gid];
+                if (!resource.isValidSteadyState() || resource.transfer_detached || !resource.hasCompleteDeviceValue()
+                    || resource.device_blocks.size() != cache.groupSets()[gid]->devicePools().size()) {
+                    return count;
+                }
+            }
+            ++count;
+        }
+        return count;
+    }
+
+    ErrorInfo populateMatchedBlocksForTest(const BlockTreeMatchResult& match_result,
+                                           KVCacheResource&            resource) const {
+        return this->populateMatchedBlocks(match_result, resource);
     }
 
     void setBlockTreeCacheConfigForTest(KVCacheConfig config) {

@@ -66,7 +66,7 @@ public:
         return already_done_.load(std::memory_order_acquire);
     }
 
-    bool waitDone(int timeout_ms) {
+    bool waitDone(int timeout_ms, bool fail_on_rpc_error = true) {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
         const auto                   completed = [this] { return already_done_.load(std::memory_order_acquire); };
         if (timeout_ms > 0) {
@@ -78,7 +78,7 @@ public:
         }
         const std::string fatal_error = fatal_error_.empty() ? std::string{} : failureSummaryNoLock();
         lock.unlock();
-        if (!fatal_error.empty()) {
+        if (fail_on_rpc_error && !fatal_error.empty()) {
             RTP_LLM_FAIL("%s", fatal_error.c_str());
         }
         return true;
@@ -149,6 +149,19 @@ public:
             responses.push_back(worker_rpc_context->response);
         }
         return responses;
+    }
+
+    bool rpcSuccess() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!already_done_.load(std::memory_order_acquire) || !fatal_error_.empty()) {
+            return false;
+        }
+        for (const auto& context : worker_contexts_) {
+            if (!context || !context->status.ok()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void finishRank(size_t rank, bool cq_event_ok) {
@@ -229,6 +242,13 @@ public:
                             error                = ErrorInfo(transRPCErrorCode(response.error_code()),
                                               location + ": " + response.error_message());
                         }
+                    }
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteResponsePB>) {
+                    if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
+                        error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
+                                          "StartWrite peer=" + ctx->server_addr + " key=" + ctx->request.unique_key()
+                                              + ": " + ctx->response.error_message());
                     }
                 }
                 if (error_info_.ok() && error.hasError()) {

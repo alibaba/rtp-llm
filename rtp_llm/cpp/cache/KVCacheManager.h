@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 
 #include <atomic>
 #include <cassert>
@@ -179,6 +180,22 @@ public:
         return cp_slot_mapper_;
     }
 
+    bool writebackEnabled() const;
+
+    std::shared_ptr<AsyncContext> asyncWriteBack(const BatchKVCacheResourcePtr& resource,
+                                                 const CompleteTokenIdsPtr&     tokens,
+                                                 int                            input_length,
+                                                 int                            kv_ready_token_count,
+                                                 const Meta&                    meta) noexcept;
+
+    void handleWrite(const P2PConnectorStartWriteRequestPB& request,
+                     P2PConnectorStartWriteResponsePB&      response,
+                     std::function<bool()>                  is_cancelled = nullptr);
+
+    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
+    void cancelP2PWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+
+    void stopWriteback();
 private:
     std::function<void()>             allocationChangeCallback() const;
     void                              reportMetricsLoop();

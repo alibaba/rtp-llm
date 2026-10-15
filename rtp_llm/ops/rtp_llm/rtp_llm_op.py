@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from rtp_llm.config.engine_config import EngineConfig
@@ -50,5 +50,8 @@ class RtpLLMOp:
             trace_config,
         )
 
-    def stop(self):
-        self.ft_op.stop()  # type: ignore
+    def stop(self, before_rpc_shutdown: Optional[Callable[[], None]] = None):
+        if before_rpc_shutdown is None:
+            self.ft_op.stop()  # type: ignore
+        else:
+            self.ft_op.stop(before_rpc_shutdown)  # type: ignore

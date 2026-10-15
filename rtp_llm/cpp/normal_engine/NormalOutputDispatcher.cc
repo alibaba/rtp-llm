@@ -792,6 +792,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  top_logprobs,
                                  -1,
                                  logprobs_offset};
+    update_info.kv_ready_token_count = stream->seqLength();
     stream->update(update_info);
 }
 

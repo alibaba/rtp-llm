@@ -2384,6 +2384,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         update_info.top_logprob_token_ids = std::move(compact_target_logprobs.top_logprob_token_ids);
         update_info.top_logprobs          = std::move(compact_target_logprobs.top_logprobs);
         update_info.logprobs_offset       = static_cast<int32_t>(logprobs_offset);
+        update_info.kv_ready_token_count  = stream->seqLength();
         spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
@@ -2498,6 +2499,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         spec_update_info.top_logprob_token_ids = std::move(compact_target_logprobs.top_logprob_token_ids);
         spec_update_info.top_logprobs          = std::move(compact_target_logprobs.top_logprobs);
         spec_update_info.logprobs_offset       = static_cast<int32_t>(logprobs_offset);
+        spec_update_info.kv_ready_token_count = stream->seqLength() + cur_accept_len - 1;
         spec_update_infos.push_back(std::move(spec_update_info));
 
         // Draft hidden layout differs per mode: the device-state path keeps a

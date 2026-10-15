@@ -150,7 +150,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                                                         std::optional<int64_t>             request_id) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && (!storage_backend_ || !enable_storage_backend)) {
         return result;
     }
     const int64_t  access_time_us = currentTimeUs();

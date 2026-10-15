@@ -1,0 +1,74 @@
+{
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "Write a detailed analogy between mathematics and a lighthouse.",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_host_cache": false,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": " Mathematics is like a lighthouse, a beacon of",
+                "input_ids": [[7985, 264, 11682, 55103, 1948, 37596, 323, 264, 326, 57909, 13]],
+                "output_ids": [[49795, 374, 1075, 264, 326, 57909, 11, 264, 51302, 315]],
+                "aux_info": {
+                    "input_len": 11,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "output_len": 10,
+                    "iter_count": 10
+                }
+            }
+        },
+        {
+            "server_role": "prefill",
+            "endpoint": "/rtp_llm/cache_status",
+            "query": {"latest_cache_version": -1},
+            "wait_for_cache": {"min_cached_blocks": 2, "timeout_seconds": 35},
+            "result": {"block_size": 8}
+        },
+        {
+            "query": {
+                "prompt": "Write a detailed analogy between mathematics and a lighthouse. Mathematics is like a lighthouse",
+                "generate_config": {
+                    "max_new_tokens": 4,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_host_cache": false,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": ", a beacon of",
+                "input_ids": [[7985, 264, 11682, 55103, 1948, 37596, 323, 264, 326, 57909, 13, 49795, 374, 1075, 264, 326, 57909]],
+                "output_ids": [[11, 264, 51302, 315]],
+                "aux_info": {
+                    "input_len": 17,
+                    "reuse_len": 16,
+                    "local_reuse_len": 16,
+                    "prefill_total_reuse_len": 16,
+                    "prefill_local_reuse_len": 16,
+                    "decode_total_reuse_len": 16,
+                    "decode_local_reuse_len": 16,
+                    "output_len": 4,
+                    "iter_count": 4
+                }
+            }
+        }
+    ]
+}

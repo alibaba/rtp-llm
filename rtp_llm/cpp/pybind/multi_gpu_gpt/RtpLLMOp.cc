@@ -2,6 +2,7 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <pybind11/functional.h>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -462,7 +463,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
-void RtpLLMOp::stop() {
+void RtpLLMOp::stop(const std::function<void()>& before_rpc_shutdown) {
     // Python forwards (including CUDA graph replay) still need the GIL while
     // requests drain. Release it before waiting, including on another stop().
     pybind11::gil_scoped_release release;
@@ -477,6 +478,11 @@ void RtpLLMOp::stop() {
             RTP_LLM_LOG_WARNING("RPC drain deadline expired; cancelling remaining requests");
             deadline = std::chrono::system_clock::now();
         }
+    }
+    stopWriteback();
+    if (before_rpc_shutdown) {
+        pybind11::gil_scoped_acquire acquire;
+        before_rpc_shutdown();
     }
     if (grpc_server_) {
         // Use the remaining drain budget; a synchronous Shutdown() without a
@@ -535,7 +541,17 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop, py::arg("before_rpc_shutdown") = py::none());
+}
+
+void RtpLLMOp::stopWriteback() {
+    if (model_rpc_service_) {
+        if (auto engine = model_rpc_service_->getEngine()) {
+            if (auto cache_manager = engine->getCacheManager()) {
+                cache_manager->stopWriteback();
+            }
+        }
+    }
 }
 
 }  // namespace rtp_llm
