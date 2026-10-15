@@ -28,6 +28,9 @@ public final class EndpointTrace {
         CACHE_LOCK_ACQUIRED,
         CACHE_LOCK_ATTEMPT,
         CACHE_LOCK_RELEASED,
+        CACHE_MUTATION_LOCK_ACQUIRED,
+        CACHE_MUTATION_LOCK_ATTEMPT,
+        CACHE_MUTATION_LOCK_RELEASED,
         CACHE_POLL_SKIPPED,
         CACHE_RESPONSE_FAILED,
         CACHE_VERSION_UNCHANGED,
@@ -59,6 +62,9 @@ public final class EndpointTrace {
         RESPONSE_DISCARDED,
         RETIREMENT_CLEANUP_BEGIN(true),
         RETIREMENT_CLEANUP_END(true),
+        RETIREMENT_CACHE_LOCK_ACQUIRED(true),
+        RETIREMENT_CACHE_LOCK_ATTEMPT(true),
+        RETIREMENT_CACHE_LOCK_RELEASED(true),
         RPC_COMPLETED,
         RPC_INITIATION_FAILED,
         RPC_STARTED,
@@ -92,7 +98,8 @@ public final class EndpointTrace {
                             long workerAttemptMs, long workerAcquiredMs, long healthMs,
                             long commitMs, long workerReleasedMs, long leaseEndMs,
                             long callbackEndMs,
-                            long runnerSubmitMs, long runnerStartMs) {
+                            long runnerSubmitMs, long runnerStartMs,
+                            long cacheAttemptMs, long cacheAcquiredMs, long cacheReleasedMs) {
         private void append(StringBuilder text) {
             text.append("{rpc:");
             value(text, rpcStartMs);
@@ -124,6 +131,12 @@ public final class EndpointTrace {
             value(text, runnerSubmitMs);
             text.append('/');
             value(text, runnerStartMs);
+            text.append(",cacheLock:");
+            value(text, cacheAttemptMs);
+            text.append('/');
+            value(text, cacheAcquiredMs);
+            text.append('/');
+            value(text, cacheReleasedMs);
             text.append('}');
         }
 
@@ -214,9 +227,10 @@ public final class EndpointTrace {
             case CACHE_INDEX_LOCK_ATTEMPT -> cleanupAttemptNanos = System.nanoTime();
             case CACHE_INDEX_LOCK_ACQUIRED -> {
                 cleanupAcquiredNanos = System.nanoTime();
-                cleanupWaitUs = elapsedUs(cleanupAttemptNanos, cleanupAcquiredNanos);
+                cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(cleanupAttemptNanos, cleanupAcquiredNanos);
             }
-            case CACHE_INDEX_LOCK_RELEASED -> cleanupHoldUs = elapsedUs(cleanupAcquiredNanos, System.nanoTime());
+            case CACHE_INDEX_LOCK_RELEASED -> cleanupHoldUs = Math.max(0L, cleanupHoldUs)
+                    + elapsedUs(cleanupAcquiredNanos, System.nanoTime());
             default -> { }
         }
     }
@@ -283,6 +297,9 @@ public final class EndpointTrace {
         private volatile long healthUpdatedNanos;
         private volatile long statusCommittedNanos;
         private volatile long leaseReleasedNanos;
+        private volatile long cacheLockAttemptNanos;
+        private volatile long cacheLockAcquiredNanos;
+        private volatile long cacheLockReleasedNanos;
 
         // These counters have one writer: this poll's cache callback.
         private volatile long indexWaitStartedNanos;
@@ -316,12 +333,19 @@ public final class EndpointTrace {
                 }
                 case CALLBACK_STARTED -> callbackStartedNanos = now;
                 case CALLBACK_ENDED -> callbackEndedNanos = now;
-                case STATUS_LOCK_ATTEMPT, CACHE_LOCK_ATTEMPT, FAILURE_LOCK_ATTEMPT -> workerLockAttemptNanos = now;
+                case STATUS_LOCK_ATTEMPT, CACHE_LOCK_ATTEMPT, FAILURE_LOCK_ATTEMPT -> {
+                    workerLockAcquiredNanos = 0L;
+                    workerLockReleasedNanos = 0L;
+                    workerLockAttemptNanos = now;
+                }
                 case STATUS_LOCK_ACQUIRED, CACHE_LOCK_ACQUIRED, FAILURE_LOCK_ACQUIRED -> workerLockAcquiredNanos = now;
                 case STATUS_LOCK_RELEASED, CACHE_LOCK_RELEASED, FAILURE_LOCK_RELEASED -> workerLockReleasedNanos = now;
                 case STATUS_HEALTH_UPDATED -> healthUpdatedNanos = now;
                 case STATUS_COMMITTED, CACHE_INDEX_UPDATE_END -> statusCommittedNanos = now;
                 case LEASE_RELEASED -> leaseReleasedNanos = now;
+                case CACHE_MUTATION_LOCK_ATTEMPT -> cacheLockAttemptNanos = now;
+                case CACHE_MUTATION_LOCK_ACQUIRED -> cacheLockAcquiredNanos = now;
+                case CACHE_MUTATION_LOCK_RELEASED -> cacheLockReleasedNanos = now;
                 case CACHE_INDEX_LOCK_ATTEMPT -> {
                     indexWaitStartedNanos = now;
                     indexCount++;
@@ -365,7 +389,9 @@ public final class EndpointTrace {
                     sinceStartMs(healthUpdatedNanos), sinceStartMs(statusCommittedNanos),
                     sinceStartMs(workerLockReleasedNanos), sinceStartMs(leaseReleasedNanos),
                     sinceStartMs(callbackEndedNanos),
-                    sinceStartMs(runnerSubmittedNanos), sinceStartMs(runnerStartedNanos));
+                    sinceStartMs(runnerSubmittedNanos), sinceStartMs(runnerStartedNanos),
+                    sinceStartMs(cacheLockAttemptNanos), sinceStartMs(cacheLockAcquiredNanos),
+                    sinceStartMs(cacheLockReleasedNanos));
             IndexWait wait = new IndexWait(waitStarted == 0L ? 0L : elapsedUs(waitStarted, now),
                     indexTotalWaitUs, indexContendedHoldUs, indexCount);
             return new PollSnapshot(kind + "-" + id, syncCycleId, kind, startedAtMs,

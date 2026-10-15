@@ -189,41 +189,57 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             long successfulIntervalUs;
-            pollLease.pollTrace().record(Stage.CACHE_LOCK_ATTEMPT);
-            workerStatus.lock.lock();
+            pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
+            workerStatus.cacheMutationLock.lock();
             try {
-                pollLease.pollTrace().record(Stage.CACHE_LOCK_ACQUIRED);
-                if (!workerDirectory.isCurrentStatus(
-                        roleType, ipPort, workerStatus)
-                        || !workerStatus.isActiveGeneration()) {
-                    pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
-                    logger.debug(
-                            "Ignore stale cache callback for {}#{}, role:{}",
-                            ipPort, generationId, roleType);
-                    return;
-                }
-                if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
-                    workerStatus.publishCacheStatus(newCacheStatus);
-                    if (roleType.requiresCacheKeys()) {
-                        // CacheAwareService is keyed by address, not generation.
-                        // Keep the generation lock through this in-memory index
-                        // update so retirement cannot publish a replacement or
-                        // clear the address between validation and publication.
-                        WorkerCacheUpdateResult updateResult = updateLocalKvCache();
-                        if (updateResult != null && updateResult.isSuccess()) {
-                            workerStatus.publishCacheIndexedVersion(
-                                    newCacheStatus.getVersion());
-                        }
+                pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ACQUIRED);
+                boolean updateRequired;
+                pollLease.pollTrace().record(Stage.CACHE_LOCK_ATTEMPT);
+                workerStatus.lock.lock();
+                try {
+                    pollLease.pollTrace().record(Stage.CACHE_LOCK_ACQUIRED);
+                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                            || !workerStatus.isActiveGeneration()) {
+                        pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
+                        return;
                     }
+                    updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
+                    if (updateRequired) {
+                        workerStatus.publishCacheStatus(newCacheStatus);
+                    }
+                } finally {
+                    workerStatus.lock.unlock();
+                    pollLease.pollTrace().record(Stage.CACHE_LOCK_RELEASED);
+                }
+
+                // Address-scoped index writes keep the cache lock, never the health lock.
+                WorkerCacheUpdateResult result = updateRequired && roleType.requiresCacheKeys()
+                        ? updateLocalKvCache() : null;
+                pollLease.pollTrace().record(Stage.CACHE_LOCK_ATTEMPT);
+                workerStatus.lock.lock();
+                try {
+                    pollLease.pollTrace().record(Stage.CACHE_LOCK_ACQUIRED);
+                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                            || !workerStatus.isActiveGeneration()) {
+                        pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
+                        return;
+                    }
+                    if (result != null && result.isSuccess()) {
+                        workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
+                    }
+                    successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
+                } finally {
+                    workerStatus.lock.unlock();
+                    pollLease.pollTrace().record(Stage.CACHE_LOCK_RELEASED);
+                }
+                if (updateRequired) {
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 } else {
                     pollLease.pollTrace().record(Stage.CACHE_VERSION_UNCHANGED);
                 }
-                successfulIntervalUs =
-                        workerStatus.recordSuccessfulCachePoll();
             } finally {
-                workerStatus.lock.unlock();
-                pollLease.pollTrace().record(Stage.CACHE_LOCK_RELEASED);
+                workerStatus.cacheMutationLock.unlock();
+                pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_RELEASED);
             }
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(

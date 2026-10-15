@@ -91,6 +91,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     .latestFinishedTaskVersion();
 
             pollTrace.recordRpcStarted(syncRequestTimeoutMs);
+            pollLease.statusRpcStarted(syncRequestTimeoutMs);
             CompletableFuture<EngineRpcService.WorkerStatusPB> rpc;
             try {
                 rpc = engineGrpcService.getWorkerStatusAsync(
@@ -106,7 +107,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         return EngineStatusConverter.convertToStatusObservation(workerStatus, response);
                     })
                     // Readiness precedes executor handoff; it is not an internal gRPC queue timestamp.
-                    .whenComplete((response, failure) -> pollTrace.record(Stage.CALLBACK_READY, failure))
+                    .whenComplete((response, failure) -> {
+                        pollLease.statusRpcCompleted(failure == null && response != null && response.alive()
+                                && response.role() == roleType && response.statusVersion() != null
+                                && response.statusVersion() > 0L
+                                && response.statusVersion() >= workerStatus.appliedStatusCursor().statusVersion());
+                        pollTrace.record(Stage.CALLBACK_READY, failure);
+                    })
                     .handleAsync((response, failure) -> {
                         pollTrace.record(Stage.CALLBACK_STARTED);
                         try {

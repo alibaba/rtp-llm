@@ -25,6 +25,7 @@ public final class InternalRuntimeSettings {
     private final int httpRequestExecutorQueueCapacity = 10_000;
     private final int engineSyncExecutorThreads = 32;
     private final int statusCheckExecutorThreads = 32;
+    private final int cacheStatusExecutorThreads = 32;
     private final int serviceDiscoveryMaxThreads = 32;
     private final int batchDispatchThreads = 64;
     private final int batchDispatchQueueCapacity = 256;
