@@ -262,3 +262,14 @@ cc_test(
     tags = ["manual"],
     timeout = "long",
 )
+
+cc_test(
+    name = "response_buffer_test",
+    srcs = ["ResponseBufferTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:response_buffer",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
