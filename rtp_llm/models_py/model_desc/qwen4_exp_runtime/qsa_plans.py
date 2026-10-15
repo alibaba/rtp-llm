@@ -49,3 +49,5 @@ class TargetVerifyPlan:
     kv_table: torch.Tensor
     state_table: torch.Tensor
     indexer_id: int
+    query_positions: torch.Tensor | None = None
+    block_starts: torch.Tensor | None = None

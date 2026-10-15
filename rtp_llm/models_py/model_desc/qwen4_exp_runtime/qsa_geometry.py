@@ -446,23 +446,31 @@ def _target_verify_geometry(
         cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != device
         or tuple(cu_seqlens.shape) != (batch_size + 1,)
-        or (not graph_target and not bool(torch.equal(cu_seqlens, expected_cu)))
     ):
         raise RuntimeError(
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
         )
-    expected_cu_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    expected_cu_kv[1:] = (prefixes_device + query_len).cumsum(0)
+    if not graph_target:
+        if not bool(torch.equal(cu_seqlens, expected_cu)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
+            )
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
         cu_kv_seqlens.dtype != torch.int32
         or cu_kv_seqlens.device != device
         or tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
-        or (not graph_target and not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)))
     ):
         raise RuntimeError(
             "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
         )
+    if not graph_target:
+        expected_cu_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        expected_cu_kv[1:] = (prefixes_device + query_len).cumsum(0)
+        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
+            )
 
     positions = self.main_inputs.combo_position_ids
     if positions is None or int(positions.numel()) != token_count * 3:
@@ -471,17 +479,19 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify requires three MRoPE positions per "
             f"token, got {actual} for {token_count} tokens"
         )
-    positions = positions.to(
-        device=device, dtype=torch.int32, non_blocking=True
-    ).reshape(batch_size, query_len, 3)
-    offsets = torch.arange(query_len, dtype=torch.int32, device=device)
-    expected_positions = prefixes_device[:, None, None] + offsets[None, :, None]
-    expected_positions = expected_positions.expand(-1, -1, 3)
-    if not graph_target and not bool(torch.equal(positions, expected_positions)):
-        raise RuntimeError(
-            "qwen4_exp QSA target-verify only supports contiguous text-only "
-            "MRoPE whose three axes equal prefix+j"
-        )
+    offsets = None
+    if not graph_target:
+        offsets = torch.arange(query_len, dtype=torch.int32, device=device)
+        positions = positions.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        ).reshape(batch_size, query_len, 3)
+        expected_positions = prefixes_device[:, None, None] + offsets[None, :, None]
+        expected_positions = expected_positions.expand(-1, -1, 3)
+        if not bool(torch.equal(positions, expected_positions)):
+            raise RuntimeError(
+                "qwen4_exp QSA target-verify only supports contiguous text-only "
+                "MRoPE whose three axes equal prefix+j"
+            )
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)
@@ -528,16 +538,24 @@ def _target_verify_geometry(
         device=device,
     )
 
-    visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
-    compressed_lengths = visible_lengths // ratio
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.target_metadata_triton import (
+        try_target_metadata,
+    )
+
+    metadata = try_target_metadata(prefixes_device, query_len, ratio)
+    query_positions = block_starts = None
+    if metadata is None:
+        if offsets is None:
+            offsets = torch.arange(query_len, dtype=torch.int32, device=device)
+        visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
+        compressed_lengths = visible_lengths // ratio
+    else:
+        visible_lengths, compressed_lengths, query_positions, block_starts = metadata
     max_ctx_len = (
         (int(prefixes.max().item()) + query_len) // ratio
         if prefixes.device.type == "cpu"
         else int(compressed_lengths.max().item())
     )
-    required_kv_columns = (
-        compressed_lengths[:, -1] + kv_entries_per_block - 1
-    ) // kv_entries_per_block
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
         if required_host > int(kv_table.shape[1]):
@@ -545,6 +563,9 @@ def _target_verify_geometry(
                 "QSA cache 'indexer_kv' block table does not cover target verification"
             )
     else:
+        required_kv_columns = (
+            compressed_lengths[:, -1] + kv_entries_per_block - 1
+        ) // kv_entries_per_block
         _validate_required_blocks(
             kv_table,
             required_kv_columns,
@@ -587,6 +608,8 @@ def _target_verify_geometry(
             "visible_lengths": visible_lengths,
             "compressed_lengths": compressed_lengths,
             "max_ctx_len": max_ctx_len,
+            "query_positions": query_positions,
+            "block_starts": block_starts,
             "kv_tokens_per_block": kv_tokens_per_block,
             "kv_entries_per_block": kv_entries_per_block,
             "state_tokens_per_block": state_tokens_per_block,
