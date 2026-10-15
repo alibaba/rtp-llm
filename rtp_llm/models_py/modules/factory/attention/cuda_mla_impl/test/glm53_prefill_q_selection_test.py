@@ -31,6 +31,7 @@ def _minimal_op(ids, identity=False):
     op = cp.SparseMlaFp8CPOp.__new__(cp.SparseMlaFp8CPOp)
     op.total_local_ids = ids
     op.total_local_ids_is_identity = identity
+    op.scatter_reverse_indices = None
     op.use_cuda_graph = False
     op.kv_restore_unpad_indices = torch.arange(3, device=ids.device)
     op.kv_cache_write_op = SimpleNamespace(forward=Mock())

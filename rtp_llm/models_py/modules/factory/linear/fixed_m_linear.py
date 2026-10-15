@@ -1,5 +1,6 @@
 """Batch-shape-stable execution for row-independent linear layers."""
 
+import os
 from typing import Callable
 
 import torch
@@ -32,10 +33,18 @@ def fixed_m_linear(
         chunk = input[begin:end]
         valid_rows = end - begin
         if valid_rows != chunk_rows:
-            padded = torch.zeros(
-                (chunk_rows, hidden_size), dtype=input.dtype, device=input.device
-            )
-            padded[:valid_rows].copy_(chunk)
+            padded = None
+            if os.environ.get("RTP_LLM_FUSED_ROUTER_PAD", "0") == "1" and chunk.is_cuda:
+                from rtp_llm.models_py.modules.factory.linear.fixed_m_pad_triton import (
+                    try_pad_rows,
+                )
+
+                padded = try_pad_rows(chunk, chunk_rows)
+            if padded is None:
+                padded = torch.zeros(
+                    (chunk_rows, hidden_size), dtype=input.dtype, device=input.device
+                )
+                padded[:valid_rows].copy_(chunk)
             chunk = padded
         output_chunks.append(linear(chunk)[:valid_rows])
     if len(output_chunks) == 1:

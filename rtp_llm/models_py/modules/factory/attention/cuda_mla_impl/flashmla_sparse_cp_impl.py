@@ -38,11 +38,13 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_q_indices,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
+    prepare_kv_scatter_indices,
     triton_kv_scatter,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
+from .cp_topk_offsets_triton import offset_cp_topk
 from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
     SparseMlaFp8Op,
@@ -383,6 +385,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_global_ids: Optional[torch.Tensor] = None
         self.total_local_ids: Optional[torch.Tensor] = None
         self.total_local_ids_is_identity: bool = False
+        self.scatter_reverse_indices: Optional[torch.Tensor] = None
         self.cu_kv_seqlens_global: Optional[torch.Tensor] = None
         self.total_kv_len: int = 0
         self.precomputed_req_ids: Optional[torch.Tensor] = None
@@ -510,6 +513,21 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             local_tokens,
         )
         self.cu_kv_seqlens_global = mla_params.cp_cu_kv_seqlens_global
+        reverse_indices = (
+            prepare_kv_scatter_indices(self.total_local_ids, local_tokens)
+            if (
+                os.environ.get("RTP_CP_PREPARED_SCATTER", "0") == "1"
+                and not self.total_local_ids_is_identity
+                and self.total_local_ids.is_cuda
+            )
+            else None
+        )
+        self.scatter_reverse_indices = _copy_or_replace_graph_tensor(
+            self.scatter_reverse_indices,
+            reverse_indices,
+            "CP sparse MLA scatter_reverse_indices",
+            self.use_cuda_graph,
+        )
         self.total_kv_len = mla_params.cp_total_kv_len
 
         if self.kv_cache_sharded:
@@ -851,8 +869,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         if use_identity_q:
             return out0
+        reverse_indices = self.scatter_reverse_indices
+        if reverse_indices is not None and reverse_indices.numel() != total_q_len:
+            reverse_indices = None
         out = triton_kv_scatter(
-            out0, self.total_local_ids, total_q_len, out=scatter_out
+            out0,
+            self.total_local_ids,
+            total_q_len,
+            out=scatter_out,
+            reverse_indices=reverse_indices,
         )
         return out
 
@@ -1005,9 +1030,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # points into another request's KV region in fused_kv, causing
         # cross-request KV pollution → gibberish / repeat output.
         # Preserve -1 so flash_mla_sparse_fwd skips these positions.
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = offset_cp_topk(topk_2d, offsets).unsqueeze(1)
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             fused_kv.unsqueeze(1),

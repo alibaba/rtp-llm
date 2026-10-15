@@ -12,10 +12,8 @@ At total_q=32768/N=16384: torch 1458us → triton 252us (5.8x, -1206 us).
 Algorithm:
 - One fused kernel writes the entire `out` in a single pass: for each dst row,
   either copy src[n] (target) or write zeros (non-target).
-- Target/non-target lookup uses a small `rev[total_q]` int32 buffer indexed by
-  dst row. To avoid a memset of rev on every call, entries are tagged with a
-  per-call generation counter; stale entries from older calls fail the tag
-  check and fall into the zero-write branch.
+- A prepared request-owned `rev[total_q]` int32 buffer can be reused across
+  layers. Unprepared calls retain the generation-tagged lookup buffer.
 """
 
 import torch
@@ -24,17 +22,17 @@ import triton.language as tl
 
 
 @triton.jit
-def _populate_rev_kernel(ids_ptr, rev_ptr, gen, N, BLOCK: tl.constexpr):
+def _populate_rev_kernel(
+    ids_ptr, rev_ptr, gen, N, TAGGED: tl.constexpr, BLOCK: tl.constexpr
+):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     mask = offs < N
     n_vals = offs.to(tl.int32)
     ids_vals = tl.load(ids_ptr + offs, mask=mask)
-    # Layout: high 8 bits = gen, low 24 bits = n.
-    # gen in [1, 255]. Tag is read back signed but we mask `& 0xFF` after the
-    # arithmetic right-shift so the sign extension doesn't change the comparison.
-    tagged = (gen << 24) | (n_vals & 0xFFFFFF)
-    tl.store(rev_ptr + ids_vals, tagged, mask=mask)
+    if TAGGED:
+        n_vals = (gen << 24) | (n_vals & 0xFFFFFF)
+    tl.store(rev_ptr + ids_vals, n_vals, mask=mask)
 
 
 @triton.jit
@@ -42,8 +40,8 @@ def _fused_scatter_kernel(
     out_ptr,
     src_ptr,
     rev_ptr,
-    total_q,
     gen,
+    TAGGED: tl.constexpr,
     HD: tl.constexpr,
     BLOCK_HD: tl.constexpr,
 ):
@@ -55,9 +53,13 @@ def _fused_scatter_kernel(
     # total_q approaching 131k (e.g. long-prefill / large CP shards), the
     # int32 product overflows silently and writes to garbage addresses.
     row_off = row * HD
-    tagged = tl.load(rev_ptr + row)
-    if ((tagged >> 24) & 0xFF) == gen:
-        src_idx = tagged & 0xFFFFFF
+    src_idx = tl.load(rev_ptr + row)
+    if TAGGED:
+        valid = ((src_idx >> 24) & 0xFF) == gen
+        src_idx = src_idx & 0xFFFFFF
+    else:
+        valid = src_idx >= 0
+    if valid:
         d = tl.load(src_ptr + src_idx.to(tl.int64) * HD + offs, mask=mask)
         tl.store(out_ptr + row_off + offs, d, mask=mask)
     else:
@@ -76,11 +78,33 @@ def _next_gen(total_q: int, device: torch.device):
         st = {"gen": 0, "rev": rev}
         _state[key] = st
     st["gen"] += 1
-    # gen lives in the low byte of the tag; wrap at 255 (0 reserved for "stale")
     if st["gen"] >= 256:
         st["rev"].zero_()
         st["gen"] = 1
     return st["gen"], st["rev"]
+
+
+def prepare_kv_scatter_indices(ids: torch.Tensor, total_q: int) -> torch.Tensor:
+    """Prepare a reverse map for unique ids in [0, total_q), with -1 for holes.
+
+    The caller owns this tensor and must rebuild it whenever ids change. Graph
+    callers copy a newly prepared map into their capture-stable plan buffer.
+    Preparation and consumption follow normal PyTorch stream ordering rules.
+    """
+    assert ids.is_cuda and ids.dim() == 1
+    assert ids.dtype in (torch.int32, torch.int64)
+    reverse_indices = torch.full((total_q,), -1, dtype=torch.int32, device=ids.device)
+    if ids.numel():
+        _populate_rev_kernel[(triton.cdiv(ids.numel(), 1024),)](
+            ids.contiguous(),
+            reverse_indices,
+            0,
+            ids.numel(),
+            TAGGED=False,
+            BLOCK=1024,
+            num_warps=4,
+        )
+    return reverse_indices
 
 
 def triton_kv_scatter(
@@ -88,19 +112,25 @@ def triton_kv_scatter(
     ids: torch.Tensor,  # [N], indices into [0, total_q)
     total_q: int,
     out: torch.Tensor | None = None,
+    *,
+    reverse_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Equivalent to:
     out = torch.zeros(total_q, *src.shape[1:], dtype=src.dtype, device=src.device)
     out[ids] = src
     return out
+
+    A supplied reverse_indices must describe these ids and remain unchanged
+    until all consuming scatters finish. Without one, use the original shared
+    generation-tagged workspace and its same-stream, fixed-graph-ids contract.
     """
     assert src.is_cuda and ids.is_cuda
+    assert src.device == ids.device
     assert src.dim() == 3
     N, H, D = src.shape
     assert ids.shape[0] == N
     HD = H * D
     src_c = src.contiguous()
-    ids_i64 = ids if ids.dtype == torch.int64 else ids.to(torch.int64)
 
     expected_shape = (total_q, H, D)
     if out is None:
@@ -117,16 +147,29 @@ def triton_kv_scatter(
             f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
             f"contiguous={out.is_contiguous()}"
         )
-    gen, rev = _next_gen(total_q, src.device)
+    tagged = reverse_indices is None
+    if reverse_indices is None:
+        gen, reverse_indices = _next_gen(total_q, src.device)
+        ids_i64 = ids if ids.dtype == torch.int64 else ids.to(torch.int64)
+        if N:
+            _populate_rev_kernel[(triton.cdiv(N, 1024),)](
+                ids_i64,
+                reverse_indices,
+                gen,
+                N,
+                TAGGED=True,
+                BLOCK=1024,
+                num_warps=4,
+            )
+    else:
+        gen = 0
+        assert reverse_indices.shape == (total_q,)
+        assert reverse_indices.dtype == torch.int32
+        assert reverse_indices.device == src.device
+        assert reverse_indices.is_contiguous()
 
-    _populate_rev_kernel[(triton.cdiv(N, 1024),)](
-        ids_i64,
-        rev,
-        gen,
-        N,
-        BLOCK=1024,
-        num_warps=4,
-    )
+    if total_q == 0 or HD == 0:
+        return out
 
     BLOCK_HD = triton.next_power_of_2(HD)
     if BLOCK_HD > 16384:
@@ -137,9 +180,9 @@ def triton_kv_scatter(
     _fused_scatter_kernel[(total_q, n_hd)](
         out.view(total_q, HD),
         src_c.view(N, HD),
-        rev,
-        total_q,
+        reverse_indices,
         gen,
+        TAGGED=tagged,
         HD=HD,
         BLOCK_HD=BLOCK_HD,
         num_warps=num_warps,

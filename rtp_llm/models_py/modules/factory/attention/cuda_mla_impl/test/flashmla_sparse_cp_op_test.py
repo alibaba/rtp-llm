@@ -438,6 +438,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             )
         )
 
+    @patch.dict(os.environ, {"RTP_CP_PREPARED_SCATTER": "1", "USE_GATHER_PATH": "0"})
     def test_cp_op_forward_shape_and_match_non_cp(self):
         """
         With tp_size=1, CP path all_gather is identity.
@@ -454,6 +455,10 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
             MlaKVCacheWriteOp,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
+            prepare_kv_scatter_indices,
+            triton_kv_scatter,
         )
         from rtp_llm.ops import CPRotateMethod, ParallelismConfig, PrefillCPConfig
 
@@ -565,8 +570,15 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.kv_cache_write_op = MlaKVCacheWriteOp(kv_cache_dtype=KvCacheDataType.FP8)
         cp_op.write_cache_store_impl = None
 
-        cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.prepare_kv_scatter_indices",
+            wraps=prepare_kv_scatter_indices,
+        ) as prepare_scatter:
+            cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+        self.assertEqual(prepare_scatter.call_count, 1)
         self.assertFalse(cp_op.total_local_ids_is_identity)
+        self.assertIsNotNone(cp_op.scatter_reverse_indices)
+        self.assertEqual(cp_op.scatter_reverse_indices.shape, (total_q_len,))
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
         def _identity_all_gather(tensor, group=None, **_kwargs):
@@ -587,7 +599,13 @@ class SparseMlaFp8CPOpTest(TestCase):
         with patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
             side_effect=_identity_all_gather,
-        ):
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter.prepare_kv_scatter_indices",
+            side_effect=AssertionError("forward must reuse the prepared reverse map"),
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.triton_kv_scatter",
+            wraps=triton_kv_scatter,
+        ) as scatter:
             out_cp = cp_op.forward(
                 q,
                 compressed_kv,
@@ -611,12 +629,29 @@ class SparseMlaFp8CPOpTest(TestCase):
                 scatter_out=selected_out,
                 original_q_len=total_q_len,
             )
+        self.assertEqual(scatter.call_count, 2)
+        for call in scatter.call_args_list:
+            self.assertIs(call.kwargs["reverse_indices"], cp_op.scatter_reverse_indices)
         torch.cuda.synchronize()
 
         torch.testing.assert_close(out_preselected, out_cp, rtol=0, atol=0)
         self.assertEqual(out_preselected.data_ptr(), selected_out.data_ptr())
         self.assertEqual(out_cp.shape, (total_q_len, num_heads, kv_lora_rank))
         self.assertEqual(out_cp.data_ptr(), scatter_out.data_ptr())
+
+        prepared_map = cp_op.scatter_reverse_indices
+        cp_op.scatter_reverse_indices = None
+        try:
+            with patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+                side_effect=_identity_all_gather,
+            ):
+                fallback_out = cp_op.forward(
+                    q, compressed_kv, k_pe, topk_cat, batch_indice_d, kv_cache
+                )
+        finally:
+            cp_op.scatter_reverse_indices = prepared_map
+        self.assertTrue(torch.equal(out_cp, fallback_out))
 
         kv_cache_flat = kv_cache_base.view(-1, 1, kv_cache_base.size(-1))
         if kv_cache_flat.ndim == 3:
@@ -638,6 +673,76 @@ class SparseMlaFp8CPOpTest(TestCase):
             torch.allclose(out_cp, out_non_cp, atol=1e-2, rtol=1e-2),
             "CP output should match non-CP when tp_size=1 (all_gather identity)",
         )
+
+        original_reverse = cp_op.scatter_reverse_indices.clone()
+        reverse_address = cp_op.scatter_reverse_indices.data_ptr()
+        cp_op.use_cuda_graph = True
+        cp_params.prefill_cp_chunk_lengths.copy_(
+            torch.tensor([2, 6], dtype=torch.int32, device=device)
+        )
+        cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+        self.assertFalse(cp_op.total_local_ids_is_identity)
+        self.assertEqual(cp_op.scatter_reverse_indices.data_ptr(), reverse_address)
+        self.assertFalse(torch.equal(cp_op.scatter_reverse_indices, original_reverse))
+        expected_reverse = torch.full(
+            (total_q_len,), -1, dtype=torch.int32, device=device
+        )
+        expected_reverse[cp_op.total_local_ids] = torch.arange(
+            cp_op.total_local_ids.numel(), dtype=torch.int32, device=device
+        )
+        torch.testing.assert_close(cp_op.scatter_reverse_indices, expected_reverse)
+
+        def full_cp_forward():
+            return cp_op.forward(
+                q,
+                compressed_kv,
+                k_pe,
+                topk_cat,
+                batch_indice_d,
+                kv_cache,
+                scatter_out=scatter_out,
+            )
+
+        local_ids_address = cp_op.total_local_ids.data_ptr()
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=_identity_all_gather,
+        ):
+            with torch.cuda.stream(capture_stream):
+                full_cp_forward()
+            torch.cuda.current_stream().wait_stream(capture_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=capture_stream):
+                replay_out = full_cp_forward()
+            for chunks in ([4, 4], [2, 6]):
+                with self.subTest(replay_chunks=chunks):
+                    q.copy_(torch.randn_like(q) * 0.1)
+                    compressed_kv.copy_(torch.randn_like(compressed_kv) * 0.1)
+                    k_pe.copy_(torch.randn_like(k_pe) * 0.1)
+                    topk_cat.copy_(torch.randint_like(topk_cat, 0, n_restore))
+                    cp_params.prefill_cp_chunk_lengths.copy_(
+                        torch.tensor(chunks, dtype=torch.int32, device=device)
+                    )
+                    cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
+                    self.assertFalse(cp_op.total_local_ids_is_identity)
+                    self.assertEqual(
+                        cp_op.total_local_ids.data_ptr(), local_ids_address
+                    )
+                    self.assertEqual(
+                        cp_op.scatter_reverse_indices.data_ptr(), reverse_address
+                    )
+                    graph.replay()
+                    prepared_map = cp_op.scatter_reverse_indices
+                    cp_op.scatter_reverse_indices = None
+                    try:
+                        eager_out = cp_op.forward(
+                            q, compressed_kv, k_pe, topk_cat, batch_indice_d, kv_cache
+                        )
+                    finally:
+                        cp_op.scatter_reverse_indices = prepared_map
+                    self.assertTrue(torch.equal(replay_out, eager_out))
 
     def test_cp_op_forward_output_shape(self):
         """CP op forward returns correct shape [total_q_len, num_heads, kv_lora_rank]."""

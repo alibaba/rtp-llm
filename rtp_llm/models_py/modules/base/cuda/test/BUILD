@@ -3,6 +3,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "router_launch_fusion_test",
+    srcs = ["router_launch_fusion_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],
