@@ -81,10 +81,10 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
         )
 
         if not use_fast_path and not impl.support_parallelism_config(

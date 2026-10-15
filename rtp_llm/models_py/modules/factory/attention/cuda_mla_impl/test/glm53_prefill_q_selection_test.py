@@ -348,6 +348,7 @@ class QPreselectionCudaTest(unittest.TestCase):
             ),
             seq_lens=torch.tensor(data.lengths, dtype=torch.int32, device=self.device),
         )
+        op.precomputed_kv_offsets = op._gather.workspace_starts[op.precomputed_req_ids]
         op._gather_sharded_kv_cache = lambda cache, dst: dst.copy_(data.fused)
         impl = cp.SparseMlaCpImpl.__new__(cp.SparseMlaCpImpl)
         impl.num_heads, impl.nope_head_dim = self.HEADS, self.NOPE

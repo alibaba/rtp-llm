@@ -389,6 +389,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.cu_kv_seqlens_global: Optional[torch.Tensor] = None
         self.total_kv_len: int = 0
         self.precomputed_req_ids: Optional[torch.Tensor] = None
+        self.precomputed_kv_offsets: Optional[torch.Tensor] = None
         self.full_rope_pos_ids: Optional[torch.Tensor] = None
         self.sharded_slot_mapping: Optional[torch.Tensor] = None
         self.sharded_local_kv_lens: Optional[torch.Tensor] = None
@@ -741,6 +742,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             and (not self.use_cuda_graph or self.kv_cache_sharded)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
+        new_offsets = (
+            self._gather.workspace_starts[self.precomputed_req_ids]
+            if self._gather is not None and self.precomputed_req_ids is not None
+            else None
+        )
+        self.precomputed_kv_offsets = _copy_or_replace_graph_tensor(
+            self.precomputed_kv_offsets,
+            new_offsets,
+            "CP sparse MLA precomputed_kv_offsets",
+            self.use_cuda_graph,
+        )
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Record the gather layout from prefill_ragged_kv_len_indptr_d.
@@ -1003,10 +1015,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         topk: torch.Tensor,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
-        cache has the full per-request KV; the only CP-specific bit is using
-        precomputed_req_ids (req id per global q token) for the offset lookup."""
+        cache has the full per-request KV; the CP plan supplies the per-q-token
+        workspace offset for the sparse attention indices."""
         ws = self._gather
-        assert ws is not None and self.precomputed_req_ids is not None
+        assert ws is not None and self.precomputed_kv_offsets is not None
         fused_kv = self._allocate_fused_kv()
         if self.kv_cache_sharded:
             self._gather_sharded_kv_cache(kv_cache, fused_kv)
@@ -1023,7 +1035,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 ws.batch_size,
                 ws.total_kv_len,
             )
-        offsets = ws.workspace_starts[self.precomputed_req_ids]
+        offsets = self.precomputed_kv_offsets
         topk_2d = _topk_2d(topk)
         # FIX: topk_2d contains -1 as padding (invalid KV position).
         # Adding offsets to -1 turns it into a large positive index that
