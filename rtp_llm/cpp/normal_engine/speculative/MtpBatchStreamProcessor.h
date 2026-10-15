@@ -110,6 +110,9 @@ public:
         torch::Tensor committed_ends;
         torch::Tensor position_bases;
         torch::Tensor engram_windows;
+        // Filled together with anchors/lengths by the CUDA round-head kernel.
+        // Each round owns its buffer, including when the batch shrinks/reorders.
+        torch::Tensor proposal_tokens;
     };
     DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
                                            const GptModelInputs& model_input,

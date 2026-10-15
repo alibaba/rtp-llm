@@ -1347,6 +1347,47 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{30,  40,  50,  31,  41,  51,  32,  42,  52,  33,  43,  53,
                                     122, 122, 122, 123, 123, 123, 124, 124, 124, 125, 125, 125}),
               toVec<int32_t>(model_input.combo_position_ids));
+
+    // Scheduling can reorder independently published rows. A fresh request's
+    // committed end comes from this input, even if it is already on CUDA.
+    StreamGroups   reordered({fresh_stream, steady_stream});
+    GptModelInputs reordered_input;
+    reordered_input.sequence_lengths = torch::tensor({77, 88}, torch::kInt32).to(torch::kCUDA);
+    auto reordered_state             = processor.buildDSparkRoundState(reordered, reordered_input, host_holder);
+    processor.prepareDSparkProposeModelInput(reordered_state, reordered_input, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{22, 102}), toVec<int32_t>(reordered_state.anchors));
+    EXPECT_EQ((std::vector<int32_t>{77, 9}), toVec<int32_t>(reordered_state.committed_ends));
+    EXPECT_EQ((std::vector<int32_t>{22, 255, 255, 102, 255, 255}), toVec<int32_t>(reordered_input.combo_tokens));
+    // The previous round remains immutable after a reorder or a smaller batch.
+#if USING_CUDA
+    EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(proposal_input.combo_tokens));
+#endif
+
+    // Anchor and sequence sources are independent, and token columns may have
+    // non-unit strides. Neither row may fall back wholesale to stale host data.
+    GenerateStream::MtpAsyncDeviceState anchor_only;
+    anchor_only.accept_len_gpu    = torch::tensor({3}, torch::kInt32).to(torch::kCUDA);
+    auto strided_tokens           = torch::tensor({{200, -1, 201, -1, 202, -1}}, torch::kInt32).to(torch::kCUDA);
+    anchor_only.accept_tokens_gpu = strided_tokens.slice(1, 0, 6, 2);
+    steady_stream->setMtpAsyncDeviceState(std::move(anchor_only));
+    GenerateStream::MtpAsyncDeviceState length_only;
+    length_only.next_seq_len_gpu = torch::tensor({70}, torch::kInt32).to(torch::kCUDA);
+    fresh_stream->setMtpAsyncDeviceState(std::move(length_only));
+    reordered_input.sequence_lengths = torch::tensor({37, 99}, torch::kInt32).to(torch::kCUDA);
+    auto partial_state               = processor.buildDSparkRoundState(reordered, reordered_input, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{22, 202}), toVec<int32_t>(partial_state.anchors));
+    EXPECT_EQ((std::vector<int32_t>{69, 99}), toVec<int32_t>(partial_state.committed_ends));
+
+    StreamGroups   smaller({steady_stream});
+    GptModelInputs smaller_input;
+    smaller_input.sequence_lengths = torch::tensor({19}, torch::kInt32);
+    auto smaller_state             = processor.buildDSparkRoundState(smaller, smaller_input, host_holder);
+    processor.prepareDSparkProposeModelInput(smaller_state, smaller_input, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{202, 255, 255}), toVec<int32_t>(smaller_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{19}), toVec<int32_t>(smaller_state.committed_ends));
+#if USING_CUDA
+    EXPECT_EQ((std::vector<int32_t>{22, 255, 255, 102, 255, 255}), toVec<int32_t>(reordered_input.combo_tokens));
+#endif
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {

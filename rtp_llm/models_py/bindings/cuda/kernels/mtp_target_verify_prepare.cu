@@ -2,11 +2,102 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/macros/Macros.h>
+
 #include <algorithm>
+#include <limits>
+#include <type_traits>
 
 namespace rtp_llm {
 
 namespace {
+
+constexpr int kRowsPerLaunch    = 64;
+constexpr int kPrepareBlockSize = 256;
+
+template<typename Row>
+struct PrepareRows {
+    Row rows[kRowsPerLaunch];
+};
+
+static_assert(std::is_trivially_copyable<MtpRoundHeadRow>::value, "CUDA launch rows must be trivially copyable");
+static_assert(sizeof(PrepareRows<MtpRoundHeadRow>) + 64 <= 4096, "Keep launch parameters below the CUDA 4 KiB limit");
+
+int prepareGridSize(int64_t work_items) {
+    return static_cast<int>(std::min<int64_t>((work_items + kPrepareBlockSize - 1) / kPrepareBlockSize, 65535));
+}
+
+__global__ void mtpDSparkRoundHeadPrepareKernel(PrepareRows<MtpRoundHeadRow> rows,
+                                                int32_t* __restrict__ anchors,
+                                                int32_t* __restrict__ committed_ends,
+                                                int32_t* __restrict__ combo_tokens,
+                                                int32_t batch_size,
+                                                int32_t width,
+                                                int32_t mask_token) {
+    const int64_t count = static_cast<int64_t>(batch_size) * width;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < count;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        const int32_t row_idx = static_cast<int32_t>(idx / width);
+        if (idx % width != 0) {
+            combo_tokens[idx] = mask_token;
+            continue;
+        }
+        const auto row    = rows.rows[row_idx];
+        int32_t    anchor = row.anchor;
+        if (row.tokens != nullptr) {
+            const int64_t token_idx = static_cast<int64_t>(*row.accept_len) - 1;
+            CUDA_KERNEL_ASSERT(token_idx >= 0 && token_idx < row.token_count);
+            anchor = row.tokens[token_idx * row.token_stride];
+        }
+        const int32_t end       = row.sequence != nullptr ? *row.sequence + row.sequence_bias : row.sequence_value;
+        anchors[row_idx]        = anchor;
+        committed_ends[row_idx] = end;
+        combo_tokens[idx]       = anchor;
+    }
+}
+
+__global__ void mtpDispatchStatePrepareRowsKernel(PrepareRows<MtpSequenceRow> rows,
+                                                  const int32_t* __restrict__ accept_len,
+                                                  int32_t* __restrict__ prev_seq_len,
+                                                  int32_t* __restrict__ next_seq_len,
+                                                  int64_t* __restrict__ hidden_idx,
+                                                  int32_t batch_size) {
+    const int32_t idx = threadIdx.x;
+    if (idx < batch_size) {
+        const auto    row      = rows.rows[idx];
+        const int32_t previous = row.sequence_length != nullptr ? *row.sequence_length : row.host_sequence_length;
+        const int32_t accepted = accept_len[idx];
+        prev_seq_len[idx]      = previous;
+        next_seq_len[idx]      = previous + accepted;
+        hidden_idx[idx]        = static_cast<int64_t>(accepted) - 1;
+    }
+}
+
+__global__ void mtpPositionGatherKernel(PrepareRows<const int32_t*> rows,
+                                        int32_t* __restrict__ bases,
+                                        int32_t batch_size,
+                                        int64_t factor) {
+    const int64_t count = batch_size * factor;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < count;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        bases[idx] = rows.rows[idx / factor][idx % factor];
+    }
+}
+
+__global__ void mtpPositionExpandKernel(const int32_t* __restrict__ bases,
+                                        int32_t* __restrict__ output,
+                                        int64_t count,
+                                        int64_t factor,
+                                        int64_t width,
+                                        int64_t row_stride) {
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < count;
+         idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+        const int64_t row_step = idx / factor;
+        output[idx] = bases[(row_step / width) * row_stride + idx % factor] + static_cast<int32_t>(row_step % width);
+    }
+}
 
 __global__ void mtpTargetVerifyPrepareKernel(const int32_t* __restrict__ sequence_lengths,
                                              int32_t* __restrict__ input_lengths,
@@ -104,7 +195,140 @@ void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t b
         tensor.numel() >= batch_size, "%s numel %ld is smaller than batch_size %ld", name, tensor.numel(), batch_size);
 }
 
+void checkCudaVector(const torch::Tensor& tensor, const char* name, int64_t batch_size, torch::ScalarType dtype) {
+    RTP_LLM_CHECK_WITH_INFO(tensor.defined() && tensor.is_cuda(), "%s must be a CUDA tensor", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype, "%s has an unexpected dtype", name);
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == 1 && tensor.numel() == batch_size && tensor.is_contiguous(),
+                            "%s must be a contiguous vector of length %ld",
+                            name,
+                            batch_size);
+}
+
 }  // namespace
+
+void invokeMtpDSparkRoundHeadPrepare(const std::vector<MtpRoundHeadRow>& rows,
+                                     torch::Tensor&                      anchors,
+                                     torch::Tensor&                      committed_ends,
+                                     torch::Tensor&                      combo_tokens,
+                                     int32_t                             tokens_per_batch,
+                                     int32_t                             mask_token,
+                                     cudaStream_t                        stream) {
+    const int64_t batch_size = static_cast<int64_t>(rows.size());
+    RTP_LLM_CHECK_WITH_INFO(tokens_per_batch > 0, "tokens_per_batch must be positive");
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= std::numeric_limits<int64_t>::max() / tokens_per_batch,
+                            "DSpARK combo size overflows int64");
+    checkCudaVector(anchors, "anchors", batch_size, torch::kInt32);
+    checkCudaVector(committed_ends, "committed_ends", batch_size, torch::kInt32);
+    checkCudaI32Vector(combo_tokens, "combo_tokens", batch_size * tokens_per_batch);
+    RTP_LLM_CHECK_WITH_INFO(combo_tokens.numel() == batch_size * tokens_per_batch
+                                && (combo_tokens.dim() == 1
+                                    || (combo_tokens.dim() == 2 && combo_tokens.size(0) == batch_size
+                                        && combo_tokens.size(1) == tokens_per_batch)),
+                            "combo_tokens must be [B * W] or [B, W]");
+    RTP_LLM_CHECK_WITH_INFO(anchors.device() == committed_ends.device() && anchors.device() == combo_tokens.device(),
+                            "DSpARK outputs must be on the same CUDA device");
+    for (const auto& row : rows) {
+        RTP_LLM_CHECK_WITH_INFO((row.tokens == nullptr) == (row.accept_len == nullptr),
+                                "tokens and accept_len must both be present or both absent");
+        RTP_LLM_CHECK_WITH_INFO(row.tokens == nullptr || (row.token_stride >= 0 && row.token_count > 0),
+                                "device token row requires a nonnegative stride and positive token_count");
+    }
+    if (batch_size == 0) {
+        return;
+    }
+    const c10::cuda::CUDAGuard guard(anchors.device());
+    for (int64_t offset = 0; offset < batch_size; offset += kRowsPerLaunch) {
+        const int32_t count = static_cast<int32_t>(std::min<int64_t>(kRowsPerLaunch, batch_size - offset));
+        PrepareRows<MtpRoundHeadRow> params{};
+        std::copy_n(rows.data() + offset, count, params.rows);
+        mtpDSparkRoundHeadPrepareKernel<<<prepareGridSize(static_cast<int64_t>(count) * tokens_per_batch),
+                                          kPrepareBlockSize,
+                                          0,
+                                          stream>>>(params,
+                                                    anchors.data_ptr<int32_t>() + offset,
+                                                    committed_ends.data_ptr<int32_t>() + offset,
+                                                    combo_tokens.data_ptr<int32_t>() + offset * tokens_per_batch,
+                                                    count,
+                                                    tokens_per_batch,
+                                                    mask_token);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+}
+
+void invokeMtpDispatchStatePrepareRows(const std::vector<MtpSequenceRow>& rows,
+                                       const torch::Tensor&               accept_len,
+                                       torch::Tensor&                     prev_seq_len,
+                                       torch::Tensor&                     next_seq_len,
+                                       torch::Tensor&                     hidden_idx,
+                                       cudaStream_t                       stream) {
+    const int64_t batch_size = static_cast<int64_t>(rows.size());
+    checkCudaVector(accept_len, "accept_len", batch_size, torch::kInt32);
+    checkCudaVector(prev_seq_len, "prev_seq_len", batch_size, torch::kInt32);
+    checkCudaVector(next_seq_len, "next_seq_len", batch_size, torch::kInt32);
+    checkCudaVector(hidden_idx, "hidden_idx", batch_size, torch::kInt64);
+    RTP_LLM_CHECK_WITH_INFO(accept_len.device() == prev_seq_len.device() && accept_len.device() == next_seq_len.device()
+                                && accept_len.device() == hidden_idx.device(),
+                            "dispatch tensors must be on the same CUDA device");
+    if (batch_size == 0) {
+        return;
+    }
+    const c10::cuda::CUDAGuard guard(accept_len.device());
+    for (int64_t offset = 0; offset < batch_size; offset += kRowsPerLaunch) {
+        const int32_t count = static_cast<int32_t>(std::min<int64_t>(kRowsPerLaunch, batch_size - offset));
+        PrepareRows<MtpSequenceRow> params{};
+        std::copy_n(rows.data() + offset, count, params.rows);
+        mtpDispatchStatePrepareRowsKernel<<<1, kRowsPerLaunch, 0, stream>>>(params,
+                                                                            accept_len.data_ptr<int32_t>() + offset,
+                                                                            prev_seq_len.data_ptr<int32_t>() + offset,
+                                                                            next_seq_len.data_ptr<int32_t>() + offset,
+                                                                            hidden_idx.data_ptr<int64_t>() + offset,
+                                                                            count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+}
+
+void invokeMtpPositionGather(const std::vector<const int32_t*>& rows, torch::Tensor& bases, cudaStream_t stream) {
+    const int64_t batch_size = static_cast<int64_t>(rows.size());
+    checkCudaI32Vector(bases, "position bases", 0);
+    RTP_LLM_CHECK_WITH_INFO(bases.dim() == 2 && bases.size(0) == batch_size && bases.size(1) > 0,
+                            "position bases must be [B, F] with F > 0");
+    for (const auto* row : rows) {
+        RTP_LLM_CHECK_WITH_INFO(row != nullptr, "position source row must be present");
+    }
+    if (batch_size == 0) {
+        return;
+    }
+    const c10::cuda::CUDAGuard guard(bases.device());
+    const int64_t              factor = bases.size(1);
+    for (int64_t offset = 0; offset < batch_size; offset += kRowsPerLaunch) {
+        const int32_t count = static_cast<int32_t>(std::min<int64_t>(kRowsPerLaunch, batch_size - offset));
+        PrepareRows<const int32_t*> params{};
+        std::copy_n(rows.data() + offset, count, params.rows);
+        mtpPositionGatherKernel<<<prepareGridSize(count * factor), kPrepareBlockSize, 0, stream>>>(
+            params, bases.data_ptr<int32_t>() + offset * factor, count, factor);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+}
+
+void invokeMtpPositionExpand(const torch::Tensor& bases, torch::Tensor& output, int64_t width, cudaStream_t stream) {
+    RTP_LLM_CHECK_WITH_INFO(bases.defined() && bases.is_cuda() && bases.scalar_type() == torch::kInt32,
+                            "position bases must be CUDA int32");
+    RTP_LLM_CHECK_WITH_INFO(bases.dim() == 2 && bases.size(1) > 0 && bases.stride(1) == 1 && bases.stride(0) >= 0,
+                            "position bases must be [B, F] with contiguous factors");
+    RTP_LLM_CHECK_WITH_INFO(width > 0 && width <= std::numeric_limits<int32_t>::max(),
+                            "position width must be positive and fit int32");
+    RTP_LLM_CHECK_WITH_INFO(bases.numel() <= std::numeric_limits<int64_t>::max() / width,
+                            "expanded position size overflows int64");
+    checkCudaVector(output, "expanded positions", bases.numel() * width, torch::kInt32);
+    RTP_LLM_CHECK_WITH_INFO(output.device() == bases.device(), "position tensors must be on the same CUDA device");
+    if (output.numel() == 0) {
+        return;
+    }
+    const c10::cuda::CUDAGuard guard(bases.device());
+    mtpPositionExpandKernel<<<prepareGridSize(output.numel()), kPrepareBlockSize, 0, stream>>>(
+        bases.data_ptr<int32_t>(), output.data_ptr<int32_t>(), output.numel(), bases.size(1), width, bases.stride(0));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,
@@ -214,9 +438,9 @@ __global__ void mtpDispatchStatePrepareKernel(const int32_t* __restrict__ accept
     if (idx >= batch_size) {
         return;
     }
-    const int32_t al   = accept_len[idx];
-    next_seq_len[idx]  = prev_seq_len[idx] + al;
-    hidden_idx[idx]    = static_cast<int64_t>(al - 1);
+    const int32_t al  = accept_len[idx];
+    next_seq_len[idx] = prev_seq_len[idx] + al;
+    hidden_idx[idx]   = static_cast<int64_t>(al - 1);
 }
 
 void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
@@ -234,10 +458,8 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.defined() && hidden_idx.is_cuda(), "hidden_idx must be CUDA");
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.scalar_type() == torch::kInt64, "hidden_idx must be int64");
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.is_contiguous(), "hidden_idx must be contiguous");
-    RTP_LLM_CHECK_WITH_INFO(hidden_idx.numel() >= batch_size,
-                            "hidden_idx numel %ld < batch_size %ld",
-                            hidden_idx.numel(),
-                            batch_size);
+    RTP_LLM_CHECK_WITH_INFO(
+        hidden_idx.numel() >= batch_size, "hidden_idx numel %ld < batch_size %ld", hidden_idx.numel(), batch_size);
 
     constexpr int block_size = 256;
     const int     grid_size  = static_cast<int>((batch_size + block_size - 1) / block_size);

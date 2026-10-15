@@ -3071,6 +3071,97 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
                                                         << expected_idx;
 }
 
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testDispatchStatePrepareRowsMixedAndReordered) {
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i64 = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    for (const int64_t batch_size : {1, 16, 32, 64, 65, 129}) {
+        SCOPED_TRACE(batch_size);
+        std::vector<int32_t> source_values(batch_size * 2);
+        std::vector<int32_t> accepted_values(batch_size);
+        std::vector<int32_t> expected_prev(batch_size);
+        std::vector<int32_t> expected_next(batch_size);
+        std::vector<int64_t> expected_hidden(batch_size);
+        for (int64_t i = 0; i < batch_size * 2; ++i) {
+            source_values[i] = static_cast<int32_t>(1000 + i);
+        }
+        auto                        source = torch::tensor(source_values, cuda_i32);
+        std::vector<MtpSequenceRow> rows;
+        rows.reserve(batch_size);
+        for (int64_t i = 0; i < batch_size; ++i) {
+            accepted_values[i] = static_cast<int32_t>(i % 6 + 1);
+            if (i % 3 == 0) {
+                expected_prev[i] = static_cast<int32_t>(200 + i);
+                rows.push_back({nullptr, expected_prev[i]});
+            } else {
+                // Simulate compaction/reordering from a strided previous batch.
+                const int64_t source_index = 2 * (batch_size - i) - 1;
+                expected_prev[i]           = source_values[source_index];
+                rows.push_back({source.data_ptr<int32_t>() + source_index, -1});
+            }
+            expected_next[i]   = expected_prev[i] + accepted_values[i];
+            expected_hidden[i] = accepted_values[i] - 1;
+        }
+
+        auto accepted = torch::tensor(accepted_values, cuda_i32);
+        auto prev     = torch::empty({batch_size}, cuda_i32);
+        auto next     = torch::empty({batch_size}, cuda_i32);
+        auto hidden   = torch::empty({batch_size}, cuda_i64);
+        invokeMtpDispatchStatePrepareRows(
+            rows, accepted, prev, next, hidden, at::cuda::getCurrentCUDAStream().stream());
+
+        EXPECT_EQ(expected_prev, toVec<int32_t>(prev));
+        EXPECT_EQ(expected_next, toVec<int32_t>(next));
+        EXPECT_EQ(expected_hidden, toVec<int64_t>(hidden));
+    }
+}
+
+TEST_F(MtpExecutorTest, testDispatchStatePrepareRowsGraphOwnsLaunchArguments) {
+    constexpr int64_t           batch_size = 65;
+    const auto                  cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto                  cuda_i64   = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    auto                        source     = torch::full({batch_size}, 900, cuda_i32);
+    auto                        accepted   = torch::full({batch_size}, 3, cuda_i32);
+    auto                        prev       = torch::empty({batch_size}, cuda_i32);
+    auto                        next       = torch::empty({batch_size}, cuda_i32);
+    auto                        hidden     = torch::empty({batch_size}, cuda_i64);
+    std::vector<MtpSequenceRow> rows(batch_size);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        rows[i] = i % 2 == 0 ? MtpSequenceRow{nullptr, 700} : MtpSequenceRow{source.data_ptr<int32_t>() + i, 0};
+    }
+
+    cudaStream_t capture_stream;
+    ASSERT_EQ(cudaSuccess, cudaStreamCreateWithFlags(&capture_stream, cudaStreamNonBlocking));
+    // Prime the module before capture and order the setup against this stream.
+    ASSERT_EQ(cudaSuccess, cudaDeviceSynchronize());
+    invokeMtpDispatchStatePrepareRows(rows, accepted, prev, next, hidden, capture_stream);
+    ASSERT_EQ(cudaSuccess, cudaStreamSynchronize(capture_stream));
+    ASSERT_EQ(cudaSuccess, cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeGlobal));
+    invokeMtpDispatchStatePrepareRows(rows, accepted, prev, next, hidden, capture_stream);
+    cudaGraph_t graph;
+    ASSERT_EQ(cudaSuccess, cudaStreamEndCapture(capture_stream, &graph));
+    cudaGraphExec_t graph_exec;
+    ASSERT_EQ(cudaSuccess, cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+
+    // Captured nodes must own both descriptor chunks, including host fallbacks.
+    rows.assign(batch_size, MtpSequenceRow{nullptr, -12345});
+    ASSERT_EQ(cudaSuccess, cudaGraphLaunch(graph_exec, capture_stream));
+    ASSERT_EQ(cudaSuccess, cudaStreamSynchronize(capture_stream));
+    std::vector<int32_t> expected_prev(batch_size);
+    std::vector<int32_t> expected_next(batch_size);
+    for (int64_t i = 0; i < batch_size; ++i) {
+        expected_prev[i] = i % 2 == 0 ? 700 : 900;
+        expected_next[i] = expected_prev[i] + 3;
+    }
+    EXPECT_EQ(expected_prev, toVec<int32_t>(prev));
+    EXPECT_EQ(expected_next, toVec<int32_t>(next));
+    EXPECT_EQ(std::vector<int64_t>(batch_size, 2), toVec<int64_t>(hidden));
+    EXPECT_EQ(cudaSuccess, cudaGraphExecDestroy(graph_exec));
+    EXPECT_EQ(cudaSuccess, cudaGraphDestroy(graph));
+    EXPECT_EQ(cudaSuccess, cudaStreamDestroy(capture_stream));
+}
+#endif
+
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     // Micro-benchmark: compare per-stream scalar ops vs batched approach
     const int64_t batch_size = 128;
