@@ -156,24 +156,121 @@ class CUDAWorkspaceTest(unittest.TestCase):
             plan.publish(gs[:-1])
         shared = {}
         first = workspace.combine_kv(shared, gs, rows)
-        # CED clears shared caches and shortens every SWA range. The producer's
-        # plan must not be selected just because the global aliases are equal.
+        # CED clears shared metadata and shortens SWA. The globals retain their
+        # producer offsets; the live SWA rows fit within the original capacity.
         shared.clear()
         shorter = workspace.SwaRows(flat, (128, 127, 31), (0, 256, 383))
-        current = workspace.combine_kv(shared, gs, shorter)
-        self.assertIsNot(current, first)
+        layout = plan.try_layout(shorter)
+        self.assertIsNotNone(layout)
+        with patch.object(torch, "cat", side_effect=AssertionError("CED cat")):
+            current = workspace.combine_kv(shared, gs, shorter)
+        self.assertIs(current, first)
+        self.assertIs(plan.try_layout(shorter), layout)
+        live = torch.cat(
+            [
+                current[start : start + count + size]
+                for count, start, size in zip(
+                    plan.global_sizes, plan.global_starts, shorter.sizes
+                )
+            ]
+        )
         self.assertTrue(
             torch.equal(
-                current.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
+                live.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
             )
         )
         flat.fill_(97)
         self.assertIs(workspace.combine_kv(shared, gs, shorter), current)
+        live = torch.cat(
+            [
+                current[start : start + count + size]
+                for count, start, size in zip(
+                    plan.global_sizes, plan.global_starts, shorter.sizes
+                )
+            ]
+        )
         self.assertTrue(
             torch.equal(
-                current.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
+                live.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
             )
         )
+
+    def test_direct_capacity_fallback_and_physical_layout_readmission(self):
+        flat = torch.ones((512, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (31, 127, 128), (0, 64, 256))
+        plan, gs = self.prepared(rows, (8192, 16381, 8193))
+        shared = {}
+        workspace.combine_kv(shared, gs, rows)
+        for sizes in ((32, 127, 128), (31, 128, 128), (31, 127, 129)):
+            expanded = workspace.SwaRows(flat, sizes, (0, 64, 256))
+            self.assertIsNone(plan.try_layout(expanded))
+            packed = workspace.combine_kv(shared, gs, expanded)
+            self.assertIsNot(packed, plan.output)
+            self.assertTrue(
+                torch.equal(
+                    packed.view(torch.uint8), reference(gs, expanded).view(torch.uint8)
+                )
+            )
+            packed_ref = weakref.ref(packed)
+            del packed
+            # A later supported geometry returns to physical offsets, releasing
+            # any cached packed output without changing global aliases.
+            with patch.object(
+                torch, "cat", side_effect=AssertionError("readmission cat")
+            ):
+                self.assertIs(workspace.combine_kv(shared, gs, rows), plan.output)
+            self.assertIsNone(packed_ref())
+            self.assertNotIn("prefill_kv_workspace", shared)
+        for other in (
+            workspace.SwaRows(flat, (31,), (0,)),
+            workspace.SwaRows(flat[:, :256], (31, 127, 128), (0, 64, 256)),
+            workspace.SwaRows(flat.float(), (31, 127, 128), (0, 64, 256)),
+            [flat],
+        ):
+            self.assertIsNone(plan.try_layout(other))
+
+    def test_direct_shrunk_layout_graph_padding_and_no_activation_retention(self):
+        flat = torch.zeros((2048, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (257, 0, 1021), (0, 512, 1024))
+        plan, gs = self.prepared(rows, (17, 0, 509))
+        output = workspace.combine_kv({}, gs, rows)
+        global_snapshots = [g.clone() for g, _ in gs]
+        compact = torch.empty((127 + 1, 516), device="cuda", dtype=torch.bfloat16)[
+            :, :512
+        ]
+        compact.view(torch.int16).random_(-32768, 32767)
+        compact_rows = workspace.SwaRows(compact, (127, 0, 1))
+        layout = plan.try_layout(compact_rows)
+        self.assertIsNotNone(layout)
+        workspace.combine_kv({}, gs, compact_rows)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            workspace.combine_kv({}, gs, compact_rows)
+        for _ in range(2):
+            compact.view(torch.int16).random_(-32768, 32767)
+            graph.replay()
+            live = torch.cat(
+                [
+                    output[start : start + count + size]
+                    for count, start, size in zip(
+                        plan.global_sizes, plan.global_starts, compact_rows.sizes
+                    )
+                ]
+            )
+            self.assertTrue(
+                torch.equal(
+                    live.view(torch.uint8),
+                    reference(gs, compact_rows).view(torch.uint8),
+                )
+            )
+            for (g, _), expected in zip(gs, global_snapshots):
+                self.assertTrue(
+                    torch.equal(g.view(torch.uint8), expected.view(torch.uint8))
+                )
+        activation_ref = weakref.ref(compact)
+        del compact, compact_rows, graph
+        self.assertIsNone(activation_ref())
 
     def test_direct_producer_nondefault_stream_graph_and_lifetime(self):
         flat = torch.zeros((129 + 33, 512), device="cuda", dtype=torch.bfloat16)
