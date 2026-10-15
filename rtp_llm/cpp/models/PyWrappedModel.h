@@ -308,7 +308,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
 
     weights_               = params.weights;
-    model_id_              = params.model_id;
+    module_id_             = params.module_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
@@ -342,6 +342,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
+    init_resources.module_id              = params.module_id;
+    init_resources.module_count           = params.cache_manager == nullptr ?
+                                                std::max<size_t>(1, params.module_id.value() + 1) :
+                                                1 + params.cache_manager->cacheConfig().mtp_sub_configs.size();
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
@@ -444,7 +448,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
-                   && (!params.model_id || is_prefill_cuda_graph_mode)) {
+                   && (params.module_id.isMain() || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else {
@@ -455,7 +459,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // this graph role from the model/config identity as well; otherwise the
         // Python model sees is_prefill=true and incorrectly enters prefill.
         const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
-                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                             && params.sp_config.gen_num_per_cycle > 0 && params.module_id.isMain()
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify =
             dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
@@ -598,8 +602,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     cache_store_async_writer_ =
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                 cache_manager_,
-                                                model_id_,
-                                                params.mtp_cache_config_index,
+                                                module_id_,
                                                 std::nullopt,
                                                 params.cache_store_producer_cp_topology);
 

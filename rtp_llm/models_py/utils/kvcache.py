@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import torch
 
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.ops.compute_ops import CacheModuleId, LayerCacheBinding, LayerKVCache
 
 
 class SingleGroupKVCacheAdapter:
@@ -71,6 +71,16 @@ class SingleGroupKVCacheAdapter:
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [self.get_layer_cache(layer_id)]
+
+    def get_layer_cache_binding(
+        self, module_id: CacheModuleId, module_count: int, local_layer_id: int
+    ) -> LayerCacheBinding:
+        self._validate_layer(local_layer_id)
+        caches = self.get_layer_cache_groups(local_layer_id)
+        tags = [cache.tag for cache in caches]
+        return LayerCacheBinding(
+            module_id, local_layer_id, module_count, self.layer_count, tags, caches
+        )
 
     def get_seq_size_per_block(self, tag: str) -> int:
         self._validate_tag(str(tag))

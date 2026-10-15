@@ -12,10 +12,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
-    get_group_tags_for_layers,
     get_primary_attention_inputs,
-    select_attention_inputs_for_layer,
-    select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -1588,12 +1585,19 @@ class Qwen3NextModel(GptModelBase):
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
             return None
-        full_attention_layers = (
-            layer_idx
-            for layer_idx, layer in enumerate(self.layers)
-            if layer.layer_type != HybridAttentionType.LINEAR
-        )
-        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
+        tags: list[str] = []
+        seen: set[str] = set()
+        for layer in self.layers:
+            if layer.layer_type == HybridAttentionType.LINEAR:
+                continue
+            binding = layer.cache_binding
+            if binding is None:
+                continue
+            for tag in binding.group_tags:
+                if tag not in seen:
+                    tags.append(tag)
+                    seen.add(tag)
+        return tags
 
     def _build_cp_linear_attn_metadata(
         self,
@@ -1676,8 +1680,11 @@ class Qwen3NextModel(GptModelBase):
             None,
         )
         if linear_layer_idx is not None:
-            linear_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, linear_layer_idx
+            linear_binding = self.layers[linear_layer_idx].cache_binding
+            linear_attention_inputs = (
+                linear_binding.select_attention_inputs(inputs.attention_inputs)
+                if linear_binding is not None
+                else inputs.attention_inputs
             )
             if isinstance(linear_attention_inputs, list):
                 raise RuntimeError(
@@ -1730,8 +1737,10 @@ class Qwen3NextModel(GptModelBase):
             for layer_idx, layer in enumerate(self.layers):
                 if layer.layer_type != HybridAttentionType.LINEAR:
                     continue
-                selected_inputs = select_attention_inputs_for_layer(
-                    inputs, self.kv_cache, layer_idx
+                selected_inputs = (
+                    layer.cache_binding.select_attention_inputs(inputs.attention_inputs)
+                    if layer.cache_binding is not None
+                    else inputs.attention_inputs
                 )
                 input_groups = (
                     selected_inputs
@@ -1776,19 +1785,26 @@ class Qwen3NextModel(GptModelBase):
             self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+            binding = decoder_layer.cache_binding
+            layer_attention_inputs = (
+                binding.select_attention_inputs(inputs.attention_inputs)
+                if binding is not None
+                else inputs.attention_inputs
             )
             layer_fmha_impl = (
                 None
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                else (
+                    binding.select_fmha_impl(fmha_impl)
+                    if binding is not None
+                    else fmha_impl
+                )
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=binding.sole_cache() if binding is not None else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )

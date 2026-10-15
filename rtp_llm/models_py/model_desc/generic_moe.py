@@ -10,9 +10,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
-    get_layer_caches_for_groups,
     select_fmha_impl_for_group,
-    select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -525,22 +523,24 @@ class GenericMoeModel(GptModelBase):
                 for group_tag in ("default", "indexer_kv")
             }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            binding = decoder_layer.cache_binding
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
                 layer_kv_cache = (
-                    get_layer_caches_for_groups(
-                        self.kv_cache, i, ("default", "indexer_kv")
-                    )
-                    if self.kv_cache is not None
+                    {
+                        group_tag: binding.cache_for_tag(group_tag)
+                        for group_tag in ("default", "indexer_kv")
+                    }
+                    if binding is not None
                     else None
                 )
             else:
-                layer_fmha_impl = select_fmha_impl_for_layer(
-                    fmha_impl, self.kv_cache, i
+                layer_fmha_impl = (
+                    binding.select_fmha_impl(fmha_impl)
+                    if binding is not None
+                    else fmha_impl
                 )
-                layer_kv_cache = (
-                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
-                )
+                layer_kv_cache = binding.sole_cache() if binding is not None else None
             output = decoder_layer(
                 hidden_states,
                 residual,

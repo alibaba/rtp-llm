@@ -5,7 +5,6 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -38,7 +37,6 @@ class Qwen3DecoderLayer(nn.Module):
             config.layernorm_eps,
             quant_config,
             hw_kernel_config,
-            layer_idx,
         )
         self.mlp = DenseMLP(
             config.activation_type,
@@ -143,11 +141,14 @@ class Qwen3Model(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            binding = decoder_layer.cache_binding
+            layer_fmha_impl = (
+                binding.select_fmha_impl(fmha_impl) if binding else fmha_impl
+            )
             hidden_states = decoder_layer(
                 hidden_states,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=binding.sole_cache() if binding else None,
             )
             capture.capture_layer(i, hidden_states)
         return capture.finalize(hidden_states)

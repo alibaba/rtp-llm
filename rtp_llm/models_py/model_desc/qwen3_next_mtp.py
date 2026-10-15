@@ -5,11 +5,6 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_group_tags_for_layers,
-    select_attention_inputs_for_layer,
-    select_fmha_impl_for_layer,
-)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextDecoderLayer,
@@ -92,12 +87,19 @@ class Qwen3NextMTPModel(GptModelBase):
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
             return None
-        full_attention_layers = (
-            layer_idx
-            for layer_idx, layer in enumerate(self.layers)
-            if layer.layer_type != HybridAttentionType.LINEAR
-        )
-        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
+        tags: list[str] = []
+        seen: set[str] = set()
+        for layer in self.layers:
+            if layer.layer_type == HybridAttentionType.LINEAR:
+                continue
+            binding = layer.cache_binding
+            if binding is None:
+                continue
+            for tag in binding.group_tags:
+                if tag not in seen:
+                    tags.append(tag)
+                    seen.add(tag)
+        return tags
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -113,19 +115,26 @@ class Qwen3NextMTPModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+            binding = decoder_layer.cache_binding
+            layer_attention_inputs = (
+                binding.select_attention_inputs(inputs.attention_inputs)
+                if binding is not None
+                else inputs.attention_inputs
             )
             layer_fmha_impl = (
                 None
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                else (
+                    binding.select_fmha_impl(fmha_impl)
+                    if binding is not None
+                    else fmha_impl
+                )
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=binding.sole_cache() if binding is not None else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=Qwen3NextMetadata(),
             )

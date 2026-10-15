@@ -8,7 +8,6 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -248,7 +247,12 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         return self.fc(features)
 
     def dspark_attention_inputs(self, inputs: PyModelInputs):
-        attention = select_attention_inputs_for_layer(inputs, self.kv_cache, 0)
+        binding = self.layers[0].cache_binding
+        attention = (
+            binding.select_attention_inputs(inputs.attention_inputs)
+            if binding is not None
+            else inputs.attention_inputs
+        )
         if isinstance(attention, list):
             if len(attention) != 1:
                 raise RuntimeError(
@@ -298,7 +302,12 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             self.context_rope._apply_rope(
                 dummy_q, key, _RopePositions(context_positions)
             )
-            cache = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
+            binding = self.layers[layer_idx].cache_binding
+            if binding is None:
+                raise RuntimeError(
+                    f"DSpark commit layer {layer_idx} has no bound KV cache"
+                )
+            cache = binding.sole_cache().kv_cache_base
             if is_hip():
                 is_fp8_cache = cache.dtype in (
                     torch.float8_e4m3fnuz,

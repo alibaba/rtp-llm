@@ -91,6 +91,7 @@ class _MoeLayer(nn.Module):
 
 class _Qwen3NextLayer(_MoeLayer):
     layer_type = None
+    cache_binding = None
 
     def forward(
         self,
@@ -108,6 +109,7 @@ class _Qwen3NextLayer(_MoeLayer):
 
 class _KimiLayer(_MoeLayer):
     layer_type = None
+    cache_binding = None
 
     def forward(
         self,
@@ -433,20 +435,15 @@ def _forward_qwen3_next(model: Qwen3NextModel, inputs: SimpleNamespace):
     with patch(
         "rtp_llm.models_py.model_desc.qwen3_next.get_primary_attention_inputs",
         return_value=attention_inputs,
-    ), patch(
-        "rtp_llm.models_py.model_desc.qwen3_next.select_attention_inputs_for_layer",
-        return_value=attention_inputs,
     ):
         return model.forward(inputs, fmha_impl=object())
 
 
 def _forward_kimi(model: KimiLinearModel, inputs: SimpleNamespace) -> torch.Tensor:
     attention_inputs = SimpleNamespace(is_prefill=False, is_target_verify=False)
+    inputs.attention_inputs = {"default": attention_inputs}
     with patch(
         "rtp_llm.models_py.model_desc.kimi_linear.get_primary_attention_inputs",
-        return_value=attention_inputs,
-    ), patch(
-        "rtp_llm.models_py.model_desc.kimi_linear.select_attention_inputs_for_layer",
         return_value=attention_inputs,
     ):
         return model.forward(inputs, fmha_impl=object()).hidden_states

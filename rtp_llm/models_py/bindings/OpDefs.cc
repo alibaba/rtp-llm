@@ -67,6 +67,44 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
+    pybind11::class_<rtp_llm::CacheModuleId>(m, "CacheModuleId")
+        .def(pybind11::init([](size_t value) { return rtp_llm::CacheModuleId(value); }), pybind11::arg("value"))
+        .def_property_readonly("value", &rtp_llm::CacheModuleId::value, "Stable module identity; 0 is main")
+        .def_property_readonly("is_main", &rtp_llm::CacheModuleId::isMain, "Whether this is the main module")
+        .def("__eq__", [](const rtp_llm::CacheModuleId& lhs, const rtp_llm::CacheModuleId& rhs) { return lhs == rhs; })
+        .def("__hash__", [](const rtp_llm::CacheModuleId& id) { return std::hash<rtp_llm::CacheModuleId>()(id); })
+        .def("__repr__",
+             [](const rtp_llm::CacheModuleId& id) { return "CacheModuleId(" + std::to_string(id.value()) + ")"; });
+
+    pybind11::class_<LayerCacheBinding>(m, "LayerCacheBinding")
+        .def(pybind11::init([](rtp_llm::CacheModuleId    module_id,
+                               size_t                    local_layer_id,
+                               size_t                    module_count,
+                               size_t                    layer_count,
+                               std::vector<std::string>  group_tags,
+                               std::vector<LayerKVCache> group_caches) {
+                 return LayerCacheBinding(module_id,
+                                          local_layer_id,
+                                          module_count,
+                                          layer_count,
+                                          std::move(group_tags),
+                                          std::move(group_caches));
+             }),
+             pybind11::arg("module_id"),
+             pybind11::arg("local_layer_id"),
+             pybind11::arg("module_count"),
+             pybind11::arg("layer_count"),
+             pybind11::arg("group_tags"),
+             pybind11::arg("group_caches"))
+        .def_readonly("module_id", &LayerCacheBinding::module_id, "Module identity of this layer")
+        .def_readonly("local_layer_id", &LayerCacheBinding::local_layer_id, "Module-local layer id")
+        .def_readonly("group_tags", &LayerCacheBinding::group_tags, "Bound cache group tags")
+        .def_readonly("group_caches", &LayerCacheBinding::group_caches, "Bound cache group views")
+        .def("select_attention_inputs", &LayerCacheBinding::selectAttentionInputs)
+        .def("select_fmha_impl", &LayerCacheBinding::selectFmhaImpl)
+        .def("sole_cache", &LayerCacheBinding::soleCache)
+        .def("cache_for_tag", &LayerCacheBinding::cacheForTag);
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology publication order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
@@ -79,6 +117,12 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache_groups",
              &KVCache::getLayerCacheGroups,
              "Return every valid LayerKVCache group owned by the layer")
+        .def("get_layer_cache_binding",
+             &KVCache::getLayerCacheBinding,
+             "Resolve and validate one immutable layer cache binding",
+             pybind11::arg("module_id"),
+             pybind11::arg("module_count"),
+             pybind11::arg("local_layer_id"))
         .def("get_seq_size_per_block",
              &KVCache::getSeqSizePerBlock,
              "Return the physical sequence size per block for a cache tag")
@@ -92,6 +136,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
+        .def_readonly("module_id", &PyModelInitResources::module_id, "Cache module identity")
+        .def_readonly("module_count", &PyModelInitResources::module_count, "Number of cache modules in this build")
         .def_readonly("is_speculative", &PyModelInitResources::is_speculative)
         .def_readonly("is_decode_role", &PyModelInitResources::is_decode_role)
         .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size);

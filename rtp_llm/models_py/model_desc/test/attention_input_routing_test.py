@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -188,7 +191,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 model.prepare_fmha_impl(inputs)
             factory.assert_not_called()
 
-    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(self):
+    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(
+        self,
+    ):
         model = object.__new__(GenericMoeModel)
         model.__dict__.update(
             config=SimpleNamespace(
@@ -294,6 +299,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 residual=residual,
             )
         )
+        decoder_layer.cache_binding = None
         model.__dict__.update(
             config=SimpleNamespace(
                 attn_config=SimpleNamespace(is_sparse=True, use_mla=True),
@@ -497,7 +503,19 @@ class AttentionInputRoutingTest(unittest.TestCase):
     def test_dspark_commit_publishes_only_with_swa_inputs(self):
         model = object.__new__(DeepSeekV4DSparkModel)
         nn.Module.__init__(model)
-        model.v4 = SimpleNamespace(layers=[object(), object()])
+        swa_caches = [
+            SimpleNamespace(layer_idx=layer_idx, tag="swa_kv") for layer_idx in range(2)
+        ]
+        model.v4 = SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    cache_binding=SimpleNamespace(
+                        cache_for_tag=lambda tag, cache=cache: cache
+                    )
+                )
+                for cache in swa_caches
+            ]
+        )
         published = []
 
         class DraftKVCache:
