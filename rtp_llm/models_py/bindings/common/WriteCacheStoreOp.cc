@@ -15,25 +15,24 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         return;
     }
 
-    const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
-
     // Capture all torch::Tensors by value so the underlying memory stays alive
     // in the background thread. torch::Tensor copy is a cheap refcount bump.
     auto captured_input_lengths          = input_lengths;
     auto captured_prefix_lengths         = prefix_lengths;
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
-    auto captured_cache_store            = cache_store_inputs;
-    auto captured_kv_cache               = kv_cache.value();
+    auto  captured_cache_store            = std::move(*cache_store_member);
+    auto  captured_kv_cache               = std::move(*kv_cache);
+    auto* async_writer                    = captured_cache_store.cache_store_async_writer;
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
 
-    auto run = [captured_input_lengths,
-                captured_prefix_lengths,
-                captured_kv_cache_block_id_host,
-                captured_cache_store,
-                captured_kv_cache,
-                event = std::move(event)]() mutable {
+    auto run = [captured_input_lengths          = std::move(captured_input_lengths),
+                captured_prefix_lengths         = std::move(captured_prefix_lengths),
+                captured_kv_cache_block_id_host = std::move(captured_kv_cache_block_id_host),
+                captured_cache_store            = std::move(captured_cache_store),
+                captured_kv_cache               = std::move(captured_kv_cache),
+                event                           = std::move(event)]() mutable {
         auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
             size_t stride_bytes = fallback_stride;
             if (!tensor.defined() || tensor.dim() != 2) {
@@ -119,7 +118,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
     };
 
-    auto* async_writer = cache_store_inputs.cache_store_async_writer;
     if (async_writer) {
         async_writer->submit(std::move(run));
     } else {
