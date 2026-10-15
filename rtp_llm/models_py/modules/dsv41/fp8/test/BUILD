@@ -30,6 +30,7 @@ _TESTS = [
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
     "test_v41_mega_attention",
+    "test_v41_merged_qb",
     "test_v41_mega_wiring",
     "test_v41_joint_pool",
     "test_v41_norm_quant",
@@ -49,14 +50,16 @@ _TESTS = [
     "test_v41_qkv_rope_cache",
     "test_v41_selection_oracle",
     "test_v41_sparse_prefill_indexer",
+    "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
     "test_v41_wo_a_quant",
 ]
 
 
-# The dense selection chain supports both SM100 ARM and SM100/SM103 x86.
+# The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_sparse_decode",
     "test_v41_decode_topk",
     "test_v41_decode_indexer",
     "test_v41_prefill_deepselect",

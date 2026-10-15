@@ -118,13 +118,16 @@ class GlobalOverlapCPUTest(unittest.TestCase):
             position_ids=torch.zeros(1, dtype=torch.int32),
             req_id_per_token=torch.zeros(1, dtype=torch.int32),
             start_pos=torch.zeros(1, dtype=torch.int32),
+            swa_global_slots=torch.zeros(1, 128, dtype=torch.int32),
             pool_write_slot_mappings={SWA_KV: torch.zeros(1, dtype=torch.int64)},
         )
         for fail_qkv in (False, True):
             with self.subTest(fail_qkv=fail_qkv):
                 calls = []
                 work = SimpleNamespace(finish=lambda: calls.append("join"))
-                qkv = SimpleNamespace(kv=x, qr=x, qr_quantized=None, swa_written=False)
+                qkv = SimpleNamespace(
+                    kv=x, qr=x, qr_quantized=None, index_q=None, swa_written=False
+                )
 
                 def project(*args, **kwargs):
                     calls.append("qkv")
@@ -142,6 +145,14 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     freqs_cis=torch.zeros(1, 32, dtype=torch.complex64),
                     compress_ratio=1,
                     is_kv_source=True,
+                    index_topk=128,
+                    _mega_attention=SimpleNamespace(
+                        supports_input=lambda _: True,
+                        supports_decode=lambda *args: True,
+                        supports_pool=lambda *args: True,
+                    ),
+                    _source_pool=lambda _: None,
+                    _global_region=lambda: SWA_KV,
                     _pool_view_3d_fp8=lambda _: None,
                     _decode_write_swa_fp8=lambda *args: calls.append("swa"),
                     _select_indices_decode=select,

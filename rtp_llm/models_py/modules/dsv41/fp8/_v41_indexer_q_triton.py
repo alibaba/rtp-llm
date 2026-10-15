@@ -56,6 +56,7 @@ def _fused_indexer_q_rope_fp4_kernel(
     payload_ptr,
     sf_ptr,
     weights_out_ptr,
+    q_token_stride,
     MAX_POSITION: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -69,7 +70,7 @@ def _fused_indexer_q_rope_fp4_kernel(
             "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
         )
         return
-    q = tl.load(q_ptr + row * 128 + tl.arange(0, 128))
+    q = tl.load(q_ptr + token * q_token_stride + (row % 32) * 128 + tl.arange(0, 128))
     # This helper matches eager CUDA complex multiplication, including the
     # explicit FMA and the BF16 rounding before the FP4 block reduction.
     rotated = _indexer_rope_bf16(q, frequencies_ptr, position).to(tl.float32)
@@ -103,8 +104,14 @@ def is_supported(
         or q.shape[0] < 1
         or q.shape[1] < 1
         or q.dtype != torch.bfloat16
-        or not q.is_contiguous()
+        or q.stride(-1) != 1
+        or q.stride(-2) != 128
         or rope_head_dim != 64
+    ):
+        return False
+    token_stride = q.stride(1) if q.shape[1] > 1 else q.stride(0)
+    if token_stride < 4096 or (
+        q.shape[0] > 1 and q.shape[1] > 1 and q.stride(0) != q.shape[1] * token_stride
     ):
         return False
     if (
@@ -166,6 +173,7 @@ def try_fused_indexer_q(
         payload,
         sf,
         scaled_weights,
+        q.stride(1) if q.shape[1] > 1 else q.stride(0),
         freqs_cis.shape[0],
         num_warps=4,
         enable_fp_fusion=False,
