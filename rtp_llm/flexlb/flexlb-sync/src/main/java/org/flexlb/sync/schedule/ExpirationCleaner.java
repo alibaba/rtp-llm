@@ -39,6 +39,7 @@ public class ExpirationCleaner {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final long workerTimeoutUs;
+    private final long statusCommitGraceUs;
     private final CacheAwareService cacheAwareService;
     private final WorkerDirectory workerDirectory;
 
@@ -52,6 +53,8 @@ public class ExpirationCleaner {
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
+        this.statusCommitGraceUs = configService.loadBalanceConfig().getWorkerRegistry()
+                .getHealth().getStatusCommitGraceMs() * 1000L;
     }
 
     /**
@@ -118,7 +121,8 @@ public class ExpirationCleaner {
                 long expirationTime = health.lastSuccessfulPollUs()
                         + workerTimeoutUs;
                 long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime) {
+                if (currentTime > expirationTime
+                        && !workerStatus.isStatusPollProtected(currentTime, statusCommitGraceUs)) {
                     endpointToRetire = workerDirectory.beginRetirement(
                             role, item.getKey(), workerStatus, "STATUS_EXPIRED",
                             workerTimeoutUs);
