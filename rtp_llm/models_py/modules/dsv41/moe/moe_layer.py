@@ -182,10 +182,27 @@ class MoE(nn.Module):
         self._is_decode_role = bool(is_decode_role)
         self.ep_size = ep_size
         self.ep_rank = ep_rank
-        self.n_local_experts = n_routed_experts // max(ep_size, 1)
+        from rtp_llm.models_py.modules.maxpander import (
+            MaxPanderRouter,
+            maxpander_enabled,
+        )
+        from rtp_llm.utils.model_weight import W
+
+        self.physical_router = None
+        if maxpander_enabled():
+            # These are the already EP-sliced loader stacks, including replicas.
+            self.n_local_experts = resolved_layer_weights[W.v4_routed_w1_w].shape[0]
+            self.physical_router = MaxPanderRouter(
+                resolved_layer_weights.get(W.log2phy),
+                resolved_layer_weights.get(W.logic_expert_cnt),
+                num_logical=n_routed_experts,
+                num_physical=self.n_local_experts * ep_size,
+                ep_size=ep_size,
+            )
+        else:
+            self.n_local_experts = n_routed_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
-        from rtp_llm.utils.model_weight import W
 
         shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
         shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
@@ -227,6 +244,12 @@ class MoE(nn.Module):
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        if self.physical_router is not None and strategy_cls.name not in (
+            "mega",
+            "mega_se",
+            "mega_fused",
+        ):
+            raise ValueError("MaxPander DSV4.1 requires a MegaMoE strategy")
         self._routed_includes_shared = bool(
             getattr(strategy_cls, "routed_includes_shared", False)
         )
@@ -253,9 +276,10 @@ class MoE(nn.Module):
             self._shared_executor.prepare(self.shared_experts)
         self._final_out: torch.Tensor | None = None
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = os.environ.get(
-            "MOEDBG", "0"
-        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        # DSV4.1 has a separate strategy stack from generic DSV4. Explicit
+        # gate/Top-K is required for the upcoming MaxPander replica mapping,
+        # including chunked prefill, decode and graph capture.
+        self._gate_pack_static = False
         self._has_visual_tokens = False
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
@@ -307,6 +331,8 @@ class MoE(nn.Module):
             return
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids)
+        if self.physical_router is not None:
+            indices = self.physical_router(indices)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
@@ -437,6 +463,8 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_topk_indices_{dbg_pos_name}",
                     indices[dbg_pos_mask].contiguous(),
                 )
+        if self.physical_router is not None:
+            indices = self.physical_router(indices)
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self._strategy(x, weights, indices)

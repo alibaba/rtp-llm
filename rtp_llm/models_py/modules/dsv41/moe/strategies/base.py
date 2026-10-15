@@ -58,6 +58,11 @@ class MoeCfg:
     shared_fp8_block_size: int = 128
     is_decode_role: bool = False
 
+    @property
+    def physical_expert_num(self) -> int:
+        # Gate dimensions remain n_routed_experts (logical); transport uses P.
+        return self.n_local_experts * self.ep_size
+
 
 class RoutedExpertsStrategy(nn.Module):
     """Single-card or multi-card routed-expert compute.

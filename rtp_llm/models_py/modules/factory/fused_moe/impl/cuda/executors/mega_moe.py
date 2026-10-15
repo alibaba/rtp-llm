@@ -162,14 +162,11 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     @property
     def supports_gate_pack(self) -> bool:
-        pack_impl = (
-            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
-        )
-        return (
-            self._input_packer.name == "fused"
-            and pack_impl == "optimized"
-            and 1 <= self.cfg.n_activated_experts <= 32
-        )
+        # MaxPander needs explicit logical Top-K before physical replica
+        # selection. Keep gate-pack (including its JIT warmup) disabled until
+        # that fast path implements the same remapping contract as forward().
+        # This does not disable the fused input packer or MegaMoE itself.
+        return False
 
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
@@ -260,7 +257,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).
         self._mega_buf = _get_or_create_mega_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -291,7 +288,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             return clamp_token_counts(override, max_tokens_per_rank)
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -320,7 +317,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -345,7 +342,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -520,7 +517,10 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         """Route and pack directly into the MegaMoE symmetric buffer."""
 
         if not self.supports_gate_pack:
-            raise RuntimeError("MegaMoE fused gate packing requires the fused packer")
+            raise RuntimeError(
+                "MegaMoE fused gate-pack is disabled for MaxPander adaptation; "
+                "use explicit gate/Top-K followed by the ordinary forward path"
+            )
         tokens = x.size(0)
         self._validate_capacity(tokens)
         from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (

@@ -782,6 +782,10 @@ class ModelLoader:
 
     def create_eplb(self):
         weights_info = self._weights_info
+        if os.environ.get("MAXPANDER_ENABLE", "0") == "1" and weights_info.enable_eplb_:
+            raise ValueError(
+                "MaxPander requires static placement; disable dynamic EPLB"
+            )
 
         logging.info(
             "create eplb: expert_num: %d, phy_exp_num: %d",
@@ -825,7 +829,9 @@ class ModelLoader:
         phy2log = self._load_config.phy2log
 
         if expert_num == 0 or (
-            not self._weights_info.enable_eplb_ and redundant_expert == 0
+            not self._weights_info.enable_eplb_
+            and redundant_expert == 0
+            and os.environ.get("MAXPANDER_ENABLE", "0") != "1"
         ):
             logging.info("don't need to init eplb weight, skip...")
             return

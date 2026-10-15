@@ -110,7 +110,7 @@ def _mega_intermediate_size(cfg: MoeCfg) -> int:
     alignment = 16 * FP4_BLOCK
     if intermediate % alignment == 0 or _native_mega_intermediate_supported(
         cfg.ep_size,
-        cfg.n_routed_experts,
+        cfg.physical_expert_num,
         cfg.n_activated_experts,
         cfg.dim,
         intermediate,
@@ -241,7 +241,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         group = dist.group.WORLD
         self._mega_group = group
         self._mega_buf_kwargs = dict(
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -342,7 +342,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -350,7 +350,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=_mega_intermediate_size(cfg),
@@ -379,7 +379,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -405,7 +405,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -504,15 +504,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             torch.cuda.synchronize(device)
 
     def can_use_gate_pack_static(self, gate) -> bool:
-        return (
-            os.environ.get("DSV4_GATE_FUSED", "1") != "0"
-            and os.environ.get("DSV4_GATE_FP32", "0") != "1"
-            and (gate.score_func == "sqrtsoftplus")
-            and (1 <= int(gate.topk) <= 32)
-            and (self.cfg.dim % 128 == 0)
-            and _gate_pack_input_packer_env_allows()
-            and (_get_gate_pack_kernels() is not None)
-        )
+        # Keep logical routing explicit while adapting MaxPander to DSV4.1.
+        return False
 
     def forward(
         self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
@@ -553,6 +546,11 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
     ) -> torch.Tensor:
         """Run MegaMoE with router gate + input pack fused together."""
+        if not self.can_use_gate_pack_static(gate):
+            raise RuntimeError(
+                "DSV4.1 MegaMoE fused gate-pack is disabled for MaxPander "
+                "adaptation; use explicit gate/Top-K and forward"
+            )
         kernels = _get_gate_pack_kernels()
         fused_mega_moe_gate_pack_nonhash, fused_mega_moe_gate_pack_hash, _ = kernels
         if self._mega_buf is None or self._mega_y is None:
