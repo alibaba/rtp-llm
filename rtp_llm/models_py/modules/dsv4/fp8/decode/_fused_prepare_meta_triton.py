@@ -326,15 +326,18 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_SWA:
         bis_swa_raw = abs_pos // SWA_TOKENS_PER_BLOCK
         in_blk_swa = abs_pos % SWA_E
-        valid_row_swa = (abs_pos >= 0) & (bis_swa_raw < SWA_BT_STRIDE)
-        bis_swa = tl.where(valid_row_swa, bis_swa_raw, 0)
+        neg_swa = abs_pos < 0
+        # Mainline ring semantics: clamp the table column so beyond-table
+        # positions still write through the last column, matching the eager
+        # compute_kv_pool_slot_mapping contract.
+        bis_swa = tl.minimum(tl.maximum(bis_swa_raw, 0), SWA_BT_STRIDE - 1)
         bid_swa = tl.load(
             bt_swa_ptr + r * SWA_BT_STRIDE + bis_swa,
-            mask=valid_row_swa,
+            mask=~neg_swa,
             other=0,
         ).to(tl.int64)
         slot_swa = tl.where(
-            valid_row_swa & (bid_swa > 0), bid_swa * SWA_E + in_blk_swa, -1
+            neg_swa | (bid_swa <= 0), -1, bid_swa * SWA_E + in_blk_swa
         )
         tl.store(slot_swa_ptr + out_idx, slot_swa)
 
@@ -348,15 +351,13 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_CSA:
         bis_csa_raw = safe_4 // CSA_TOKENS_PER_BLOCK
         in_blk_csa = safe_4 % CSA_E
-        valid_row_csa = bis_csa_raw < CSA_BT_STRIDE
-        load_csa = (~skip_4) & valid_row_csa
-        bis_csa = tl.where(load_csa, bis_csa_raw, 0)
+        bis_csa = tl.minimum(tl.maximum(bis_csa_raw, 0), CSA_BT_STRIDE - 1)
         bid_csa = tl.load(
             bt_csa_ptr + r * CSA_BT_STRIDE + bis_csa,
-            mask=load_csa,
+            mask=~skip_4,
             other=0,
         ).to(tl.int64)
-        skip_csa = (~load_csa) | (bid_csa <= 0)
+        skip_csa = skip_4 | (bid_csa <= 0)
         slot_csa = tl.where(skip_csa, -1, bid_csa * CSA_E + in_blk_csa)
         tl.store(slot_csa_ptr + out_idx, slot_csa)
 
@@ -364,15 +365,13 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     if HAS_IDX:
         bis_idx_raw = safe_4 // IDX_TOKENS_PER_BLOCK
         in_blk_idx = safe_4 % IDX_E
-        valid_row_idx = bis_idx_raw < IDX_BT_STRIDE
-        load_idx = (~skip_4) & valid_row_idx
-        bis_idx = tl.where(load_idx, bis_idx_raw, 0)
+        bis_idx = tl.minimum(tl.maximum(bis_idx_raw, 0), IDX_BT_STRIDE - 1)
         bid_idx = tl.load(
             bt_idx_ptr + r * IDX_BT_STRIDE + bis_idx,
-            mask=load_idx,
+            mask=~skip_4,
             other=0,
         ).to(tl.int64)
-        skip_idx = (~load_idx) | (bid_idx <= 0)
+        skip_idx = skip_4 | (bid_idx <= 0)
         slot_idx = tl.where(skip_idx, -1, bid_idx * IDX_E + in_blk_idx)
         tl.store(slot_idx_ptr + out_idx, slot_idx)
 
@@ -384,15 +383,13 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         safe_128 = tl.where(skip_128, 0, cmp_idx_128)
         bis_hca_raw = safe_128 // HCA_TOKENS_PER_BLOCK
         in_blk_hca = safe_128 % HCA_E
-        valid_row_hca = bis_hca_raw < HCA_BT_STRIDE
-        load_hca = (~skip_128) & valid_row_hca
-        bis_hca = tl.where(load_hca, bis_hca_raw, 0)
+        bis_hca = tl.minimum(tl.maximum(bis_hca_raw, 0), HCA_BT_STRIDE - 1)
         bid_hca = tl.load(
             bt_hca_ptr + r * HCA_BT_STRIDE + bis_hca,
-            mask=load_hca,
+            mask=~skip_128,
             other=0,
         ).to(tl.int64)
-        skip_hca = (~load_hca) | (bid_hca <= 0)
+        skip_hca = skip_128 | (bid_hca <= 0)
         slot_hca = tl.where(skip_hca, -1, bid_hca * HCA_E + in_blk_hca)
         tl.store(slot_hca_ptr + out_idx, slot_hca)
 

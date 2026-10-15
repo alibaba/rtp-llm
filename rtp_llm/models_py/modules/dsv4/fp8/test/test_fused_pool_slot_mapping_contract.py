@@ -98,12 +98,14 @@ class FusedPoolSlotMappingContractTest(unittest.TestCase):
             with self.subTest(tag=case["tag"]):
                 self._assert_parity(raw_tokens_per_block=256, **case)
 
-    def test_oob_never_aliases_positive_tail_column(self) -> None:
-        for tag, start, q_len, entries, ratio in (
-            (SWA_KV, 512, 1, 128, 1),
-            (CSA_KV, 515, 1, 64, 4),
-            (INDEXER_KV, 515, 1, 64, 4),
-            (HCA_KV, 639, 1, 2, 128),
+    def test_oob_clamps_to_last_table_column(self) -> None:
+        # Mainline ring semantics: beyond-table positions write through the
+        # last table column instead of being dropped.
+        for tag, start, q_len, entries, ratio, expected in (
+            (SWA_KV, 512, 1, 128, 1, 999 * 128),
+            (CSA_KV, 515, 1, 64, 4, 999 * 64),
+            (INDEXER_KV, 515, 1, 64, 4, 999 * 64),
+            (HCA_KV, 639, 1, 2, 128, 999 * 2),
         ):
             with self.subTest(tag=tag):
                 actual = self._assert_parity(
@@ -114,7 +116,7 @@ class FusedPoolSlotMappingContractTest(unittest.TestCase):
                     raw_tokens_per_block=256,
                     ratio=ratio,
                 )
-                self.assertEqual(actual.tolist(), [-1])
+                self.assertEqual(actual.tolist(), [expected])
 
     def test_launcher_rejects_zero_batch_before_zero_grid(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid fused slot shape"):

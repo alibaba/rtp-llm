@@ -70,6 +70,11 @@ def _prefill_fast_hc_pre_norm(
 
 
 class Block(nn.Module):
+    # Defaults so test stubs built via Block.__new__ (no __init__) keep the
+    # pre-TP single-rank behavior; real instances overwrite both in __init__.
+    tp_size: int = 1
+    tp_rank: int = 0
+
     def __init__(
         self,
         layer_id: int,

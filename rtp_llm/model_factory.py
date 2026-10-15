@@ -529,7 +529,11 @@ class ModelFactory:
         )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
-        propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
+        # Propagate the speculative step size only when the caller carries it;
+        # some mainline tests build configs without this field.
+        gen_num_per_cycle = getattr(model_config, "gen_num_per_cycle", None)
+        if gen_num_per_cycle is not None:
+            propose_model_config.gen_num_per_cycle = gen_num_per_cycle
         propose_model_config.quantization = sp_config.quantization
 
         logging.info(

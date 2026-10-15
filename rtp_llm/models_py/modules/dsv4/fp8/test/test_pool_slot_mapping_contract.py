@@ -27,8 +27,7 @@ def _scalar_slots(
             continue
         row = position // tokens_per_block
         if row >= len(block_table[request]):
-            result.append(-1)
-            continue
+            row = len(block_table[request]) - 1
         block_id = block_table[request][row]
         result.append(-1 if block_id <= 0 else block_id * entries + position % ring)
     return result
@@ -47,9 +46,9 @@ class PoolSlotMappingContractTest(unittest.TestCase):
             ring_entries=128,
         )
         self.assertEqual(actual.tolist(), expected)
-        self.assertEqual(expected, [128, 255, 128, 255, 896, 1023, -1, -1])
+        self.assertEqual(expected, [128, 255, 128, 255, 896, 1023, 896, -1])
 
-    def test_oob_does_not_alias_positive_last_column(self) -> None:
+    def test_oob_clamps_to_last_table_column(self) -> None:
         table = torch.tensor([[11, 999]], dtype=torch.int64)
         actual = compute_kv_pool_slot_mapping(
             table,
@@ -58,7 +57,7 @@ class PoolSlotMappingContractTest(unittest.TestCase):
             pool_tokens_per_block=256,
             ring_entries=128,
         )
-        self.assertEqual(actual.tolist(), [999 * 128 + 127, -1, -1])
+        self.assertEqual(actual.tolist(), [999 * 128 + 127, 999 * 128, 999 * 128])
 
     def test_reserved_null_and_valid_mask(self) -> None:
         actual = compute_kv_pool_slot_mapping(

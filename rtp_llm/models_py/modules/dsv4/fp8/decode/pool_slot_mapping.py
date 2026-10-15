@@ -149,25 +149,24 @@ def compute_kv_pool_slot_mapping(
     block_in_seq = safe_pos // pool_tokens_per_block
     in_block = safe_pos % ring_entries
 
-    # OOB rows are invalid, not aliases for the final block-table column. Point
-    # the defensive gather at row 0, then include row validity in the output
-    # mask so the result is always -1.
+    # Clamp block_in_seq to [0, max_blocks-1] to keep gather in range when
+    # abs_pos overflows the request's allocation (shouldn't happen for valid
+    # tokens; defensive against sentinel rows beyond [:bsz]). Mainline
+    # semantics: keep clamping so beyond-table positions still write through
+    # the last table column; callers that must skip rows pass valid_mask.
     max_blocks = block_table.shape[1]
-    valid_block_row = block_in_seq < max_blocks
-    safe_block_in_seq = torch.where(
-        valid_block_row, block_in_seq, torch.zeros_like(block_in_seq)
-    )
+    block_in_seq = block_in_seq.clamp_(0, max_blocks - 1)
 
     # Gather block_id per token.
     # block_table's integer/device contract was checked above; promote only to
     # make the returned flat slots unconditionally int64.
     flat_bt = block_table.to(torch.long)
-    block_id = flat_bt[req_idx, safe_block_in_seq]
+    block_id = flat_bt[req_idx, block_in_seq]
     global_slot = block_id * pool_entries_per_block + in_block
 
     # C++ BlockPool reserves block 0 and uses -1 for NULL_BLOCK_IDX.
     # Normalize every unallocated block-table entry to the single writer/
     # attention sentinel, -1. Leaving values like ``-256 + in_block`` in
     # slot tensors is unsafe because downstream kernels only understand -1.
-    skip = skip | (~valid_block_row) | (block_id <= 0)
+    skip = skip | (block_id <= 0)
     return torch.where(skip, torch.full_like(global_slot, -1), global_slot)
