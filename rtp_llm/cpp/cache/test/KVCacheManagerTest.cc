@@ -1117,7 +1117,8 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
     allocation.reuse_cache         = false;
     allocation.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(allocation).success);
-    const auto blocks = resource->blocks(0, 0);
+    const auto& tag = cache_config.topology().soleGroupForLayer(0).tag;
+    const auto blocks = resource->blocks(0, tag);
     ASSERT_EQ(blocks.size(), 1u);
     const auto& pool = manager->blockTreeCache()->groupSets().front()->devicePools().front();
     EXPECT_EQ(pool->refCount(blocks.front()), 1u);
@@ -1125,7 +1126,7 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
     const int64_t request_id  = 7010;
     const int64_t deadline_ms = currentTimeMs() + 10000;
     ASSERT_TRUE(
-        manager->writeP2PLayer(0, 0, cache_config.tagForGroup(0), {7001}, blocks, request_id, nullptr, deadline_ms));
+        manager->writeP2PLayer(0, 0, tag, {7001}, blocks, request_id, nullptr, deadline_ms));
     EXPECT_EQ(pool->refCount(blocks.front()), 2u);
     EXPECT_NE(worker->getComputedBuffersStore()->getBuffer(request_id, deadline_ms), nullptr);
 
