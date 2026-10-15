@@ -134,3 +134,56 @@ class TextMropeEmbeddingOp(MhaRotaryEmbeddingOp):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.position_ids.copy_(self._text_position_ids(attn_inputs), non_blocking=True)
+
+
+class InterleavedMropeEmbeddingOp(MhaRotaryEmbeddingOp):
+    """Apply interleaved MRoPE (Qwen3.5) with arbitrary per-axis T/H/W positions.
+
+    Unlike TextMropeEmbeddingOp (which requires all three axes to share one
+    position id), this op rotates each rotary pair with the position of its own
+    axis, matching the fused dynamic FP8 decode kernel's MRoPE path exactly.
+    Used by FP8 KV cache mode 2 prefill, where RoPE runs separately from the
+    per-token-scale KV write.
+    """
+
+    def __init__(
+        self, attn_config: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(attn_config)
+        rope_config = attn_config.rope_config
+        device = attn_inputs.combo_position_ids.device
+        rotary_pairs = rope_config.dim // 2
+        # Section assignment mirrors the CUDA kernel: pairs round-robin across
+        # the three T/H/W sections, bounded by the per-axis section counts.
+        axes = torch.zeros(rotary_pairs, dtype=torch.long)
+        axes[1 : 3 * rope_config.mrope_dim2 : 3] = 1
+        axes[2 : 3 * rope_config.mrope_dim3 : 3] = 2
+        self.mrope_axes = axes.to(device)
+        self.inv_freq = rope_config.base ** (
+            -2.0
+            * torch.arange(rotary_pairs, dtype=torch.float32, device=device)
+            / rope_config.dim
+        )
+        self.rope_dim = rope_config.dim
+        self.rotary_pairs = rotary_pairs
+        self.position_ids = attn_inputs.combo_position_ids.contiguous()
+
+    def _apply_rope(
+        self, query: torch.Tensor, key: torch.Tensor, _rope_params: Any
+    ) -> None:
+        num_tokens = query.shape[0]
+        positions = (
+            self.position_ids.reshape(-1, 3)[:num_tokens, self.mrope_axes].to(torch.float32)
+        )
+        angles = positions * self.inv_freq.unsqueeze(0)
+        cos = angles.cos().unsqueeze(1)
+        sin = angles.sin().unsqueeze(1)
+        for tensor in (query, key):
+            values = tensor.float()
+            low = values[..., : self.rotary_pairs]
+            high = values[..., self.rotary_pairs : self.rope_dim]
+            tail = values[..., self.rope_dim :]
+            rotated = torch.cat(
+                [low * cos - high * sin, high * cos + low * sin, tail], dim=-1
+            )
+            tensor.copy_(rotated.to(tensor.dtype))

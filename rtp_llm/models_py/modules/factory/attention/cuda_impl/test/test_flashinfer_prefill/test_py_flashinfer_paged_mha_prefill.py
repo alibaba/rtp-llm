@@ -11,6 +11,9 @@ from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+    InterleavedMropeEmbeddingOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPagedPrefillImpl,
     PyFlashinferPrefillPagedAttnOp,
@@ -24,8 +27,8 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     fill_paged_kv_cache,
 )
-from rtp_llm.ops import KvCacheDataType
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.ops import KvCacheDataType, RopeStyle
+from rtp_llm.ops.compute_ops import LayerKVCache, quantize_and_write_fp8_kv_cache
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -664,6 +667,173 @@ class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
             events, ["fused_rope", "cache_write", "cache_store", "paged_attention"]
         )
         torch.testing.assert_close(output, expected_q, rtol=1e-2, atol=1e-2)
+
+    def test_mode2_interleaved_mrope_separate_rope_dynamic_scale_write(self):
+        sequence_lengths = [3, 5]
+        page_size = 4
+        config = self._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=page_size,
+        )
+        attn_configs = config.attn_configs
+        attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        attn_configs.fp8_kv_cache_mode = 2
+        attn_configs.need_rope_kv_cache = True
+        attn_configs.max_seq_len = 2048
+        rope_config = attn_configs.rope_config
+        rope_config.style = RopeStyle.Mrope
+        rope_config.dim = 64
+        rope_config.base = 10000
+        rope_config.scale = 1.0
+        rope_config.max_pos = 2048
+        rope_config.index_factor = 3
+        rope_config.mrope_dim1 = 11
+        rope_config.mrope_dim2 = 11
+        rope_config.mrope_dim3 = 10
+        rope_config.mrope_interleaved = True
+
+        inputs = self._create_prefill_attention_inputs(
+            len(sequence_lengths), sequence_lengths, page_size
+        )
+        self._add_qwen35_mrope_inputs(inputs, sequence_lengths)
+        # Deliberately unequal per-axis positions: the mode-2 path must rotate
+        # each pair with its own axis position, not fall back to a text-only
+        # shared position.
+        text_positions = inputs.combo_position_ids[:, 0]
+        inputs.combo_position_ids = (
+            torch.stack(
+                (text_positions, text_positions + 2, 2 * text_positions + 1), dim=-1
+            )
+            .to(torch.int32)
+            .contiguous()
+        )
+        position_ids = inputs.combo_position_ids
+        self.assertTrue(PyFlashinferPagedPrefillImpl.support(attn_configs, inputs))
+
+        impl = PyFlashinferPagedPrefillImpl(
+            attn_configs, inputs, config.parallelism_config
+        )
+        self.assertIsNone(impl.fused_mrope_impl)
+        self.assertIsInstance(impl.rope_impl, InterleavedMropeEmbeddingOp)
+
+        total_tokens = sum(sequence_lengths)
+        qkv = torch.randn(
+            total_tokens,
+            (config.head_num + 2 * config.head_num_kv) * config.size_per_head,
+            dtype=attn_configs.dtype,
+            device=self.device,
+        )
+        q, k, v = torch.split(
+            qkv,
+            [
+                config.head_num * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+            ],
+            dim=-1,
+        )
+        q = q.reshape(total_tokens, config.head_num, config.size_per_head)
+        k = k.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        v = v.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        expected_q, expected_k = self._apply_qwen35_mrope_reference(q, k, position_ids)
+
+        page_count = sum(math.ceil(length / page_size) for length in sequence_lengths)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            page_count,
+            2,
+            config.head_num_kv,
+            page_size,
+            config.size_per_head,
+            dtype=torch.float8_e4m3fn,
+            device=self.device,
+        )
+        kv_cache.kv_scale_base = torch.ones(
+            page_count,
+            2 * config.head_num_kv * page_size,
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        events = []
+        rope_forward = impl.rope_impl.forward
+        cache_write = impl.kv_cache_write_op.forward
+
+        def observed_rope_forward(qkv_input):
+            events.append("separate_rope")
+            return rope_forward(qkv_input)
+
+        def observed_cache_write(key, value, cache):
+            events.append("cache_write")
+            self.assertEqual(key.dtype, attn_configs.dtype)
+            return cache_write(key, value, cache)
+
+        def observed_cache_store(*args, **kwargs):
+            events.append("cache_store")
+
+        def observed_attention(query, cache):
+            events.append("paged_attention")
+            self.assertIs(cache, kv_cache)
+            self.assertEqual(cache.kv_cache_base.dtype, torch.float8_e4m3fn)
+            return query
+
+        with mock.patch.object(
+            impl.rope_impl,
+            "forward",
+            side_effect=observed_rope_forward,
+        ), mock.patch.object(
+            impl.kv_cache_write_op,
+            "forward",
+            side_effect=observed_cache_write,
+        ), mock.patch.object(
+            common,
+            "apply_write_cache_store",
+            side_effect=observed_cache_store,
+        ), mock.patch.object(
+            impl.fmha_impl,
+            "forward",
+            side_effect=observed_attention,
+        ):
+            output = impl.forward(qkv.clone(), kv_cache)
+
+        self.assertEqual(
+            events,
+            ["separate_rope", "cache_write", "cache_store", "paged_attention"],
+        )
+        torch.testing.assert_close(output, expected_q, rtol=1e-2, atol=1e-2)
+
+        target_pages = []
+        target_offsets = []
+        for batch_idx, sequence_length in enumerate(sequence_lengths):
+            for position in range(sequence_length):
+                page_id = int(
+                    inputs.kv_cache_kernel_block_id[
+                        batch_idx, position // page_size
+                    ].item()
+                )
+                target_pages.append(page_id)
+                target_offsets.append(position % page_size)
+        oracle_cache = torch.zeros_like(kv_cache.kv_cache_base)
+        oracle_scales = torch.ones_like(kv_cache.kv_scale_base)
+        quantize_and_write_fp8_kv_cache(
+            expected_k.contiguous(),
+            v.contiguous(),
+            oracle_cache,
+            oracle_scales,
+            torch.tensor(target_pages, dtype=torch.int32, device=self.device),
+            torch.tensor(target_offsets, dtype=torch.int32, device=self.device),
+            page_size,
+            page_size,
+            1,
+        )
+        torch.testing.assert_close(
+            kv_cache.kv_cache_base.float(), oracle_cache.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            kv_cache.kv_scale_base, oracle_scales, rtol=1e-6, atol=1e-7
+        )
 
 
 class _NoReleasePagedAttnOp(PyFlashinferPrefillPagedAttnOp):

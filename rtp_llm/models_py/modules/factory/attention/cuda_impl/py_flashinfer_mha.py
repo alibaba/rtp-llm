@@ -15,6 +15,7 @@ from packaging.version import Version
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
+    InterleavedMropeEmbeddingOp,
     TextMropeEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
@@ -273,11 +274,44 @@ def _use_fused_mrope_prefill(
     )
 
 
+def _supports_dynamic_fp8_mrope_prefill(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> bool:
+    """Mode-2 MRoPE prefill uses separate RoPE (InterleavedMropeEmbeddingOp)."""
+    rope_config = attn_configs.rope_config
+    if getattr(attn_inputs, "is_cuda_graph", False):
+        return False
+    mrope_dims = (
+        rope_config.mrope_dim1,
+        rope_config.mrope_dim2,
+        rope_config.mrope_dim3,
+    )
+    if not (
+        rope_config.mrope_interleaved
+        and rope_config.index_factor == 3
+        and all(dim > 0 for dim in mrope_dims)
+        and 2 * sum(mrope_dims) == rope_config.dim
+    ):
+        return False
+    position_ids = getattr(attn_inputs, "combo_position_ids", None)
+    input_lengths = getattr(attn_inputs, "input_lengths", None)
+    return (
+        isinstance(position_ids, torch.Tensor)
+        and position_ids.is_cuda
+        and position_ids.dtype == torch.int32
+        and position_ids.is_contiguous()
+        and isinstance(input_lengths, torch.Tensor)
+        and position_ids.numel() == 3 * int(input_lengths.sum().item())
+    )
+
+
 def _supports_prefill_rope(
     attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
 ) -> bool:
     if attn_configs.rope_config.style != RopeStyle.Mrope:
         return True
+    if _is_dynamic_fp8(attn_configs):
+        return _supports_dynamic_fp8_mrope_prefill(attn_configs, attn_inputs)
     return _use_fused_mrope_prefill(attn_configs, attn_inputs)
 
 
@@ -1499,6 +1533,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
             return None
         if _use_text_mrope(attn_configs, self.attn_inputs):
             return TextMropeEmbeddingOp(attn_configs, self.attn_inputs)
+        if attn_configs.rope_config.style == RopeStyle.Mrope:
+            return InterleavedMropeEmbeddingOp(attn_configs, self.attn_inputs)
         return MhaRotaryEmbeddingOp(attn_configs)
 
     def _split_qkv(
