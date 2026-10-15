@@ -197,6 +197,7 @@ private:
     const RuntimeConfig                runtime_config_;
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
+    const CacheStoreConfig             cache_store_config_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
