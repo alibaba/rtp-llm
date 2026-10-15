@@ -1437,6 +1437,84 @@ class DashScMultimodalRequestTest(TestCase):
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+    def test_prompt_cache_usage_preserves_pd_prefill_and_zero(self) -> None:
+        # The PD bridge publishes the prompt-cache count in reuse_len. Decode
+        # KV acquired during handoff remains a separate diagnostic counter.
+        cases = (
+            AuxInfo(
+                input_len=347211,
+                pd_sep=True,
+                reuse_len=343040,
+                prefill_total_reuse_len=343040,
+                decode_total_reuse_len=347136,
+            ),
+            AuxInfo(
+                input_len=347211,
+                pd_sep=True,
+                reuse_len=0,
+                prefill_total_reuse_len=0,
+                decode_total_reuse_len=347136,
+            ),
+            AuxInfo(input_len=8192, reuse_len=4096),
+        )
+        for is_streaming in (True, False):
+            builder = StreamResponseBuilder(
+                dash_sc_request_id="cache-usage",
+                model_name="default",
+                request_log_tag="cache-usage",
+                is_streaming=is_streaming,
+            )
+            for aux in cases:
+                with self.subTest(is_streaming=is_streaming, aux=aux):
+                    go = GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([7], dtype=torch.int32),
+                                finished=True,
+                                aux_info=aux,
+                            )
+                        ]
+                    )
+                    # Reuse one builder to exercise template patching from a
+                    # nonzero cache count to zero, then back to nonzero.
+                    responses = (
+                        builder.build(go),
+                        codec.build_stream_response_from_generate_outputs(
+                            "cache-usage",
+                            "default",
+                            go,
+                            "cache-usage",
+                            is_streaming=is_streaming,
+                        ),
+                    )
+                    for response in responses:
+                        infer = response.infer_response
+                        by_name = {
+                            output.name: raw
+                            for output, raw in zip(
+                                infer.outputs, infer.raw_output_contents
+                            )
+                        }
+                        self.assertEqual(
+                            _unpack_int32_le(by_name["prompt_cached_token_num"]),
+                            [aux.reuse_len],
+                        )
+                        cached = infer.parameters["prompt_cached_token_num"]
+                        self.assertTrue(cached.HasField("int64_param"))
+                        self.assertEqual(cached.int64_param, aux.reuse_len)
+                        self.assertEqual(
+                            _unpack_int32_le(by_name["prompt_token_num"]),
+                            [aux.input_len],
+                        )
+                        self.assertEqual(
+                            infer.parameters["prompt_token_num"].int64_param,
+                            aux.input_len,
+                        )
+                        self.assertEqual(
+                            infer.parameters["incremental_output"].int64_param,
+                            int(is_streaming),
+                        )
+
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
         builder = StreamResponseBuilder(
