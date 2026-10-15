@@ -506,6 +506,12 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         '  echo ">>>PHASE:prepare_venv_skipped $(date +%s)"; '
         "fi; "
         'echo ">>>PHASE:pip_install_done $(date +%s)"; '
+        # FlashInfer's build.ninja embeds package paths. Sharing its default
+        # HOME cache across CAS-scoped venvs retains paths to evicted venvs.
+        'if [ -n "${VIRTUAL_ENV:-}" ] && [ -z "${FLASHINFER_WORKSPACE_BASE:-}" ]; then '
+        '  export FLASHINFER_WORKSPACE_BASE="$VIRTUAL_ENV"; '
+        "fi; "
+        'echo "[remote_setup] FLASHINFER_WORKSPACE_BASE=${FLASHINFER_WORKSPACE_BASE:-unset}"; '
         'if [ -n "${_rocm_native_library_path:-}" ]; then '
         '  export LD_LIBRARY_PATH="${_rocm_native_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; '
         "fi; "

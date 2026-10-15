@@ -1375,7 +1375,7 @@ def test_remote_setup_and_pytest_keep_heartbeat_alive_during_long_work(tmp_path)
     assert "_heartbeat_stop.set()" in heartbeat_plugin
 
 
-def test_remote_setup_exports_profile_env():
+def test_remote_setup_exports_profile_env(tmp_path):
     command = remote_exec_rtp.build_remote_setup_command(
         Path("."), setup_env={"RTP_BAZEL_CONFIG": "--config=custom"}
     )
@@ -1385,6 +1385,40 @@ def test_remote_setup_exports_profile_env():
         "RTP_BAZEL_CONFIG=--config=custom /opt/conda310/bin/python "
         "internal_source/ci/prepare_venv.py"
     ) in command
+
+    # Run only the post-install tail, not worker provisioning or eviction.
+    tail = command[command.index('if [ -n "${VIRTUAL_ENV:-}" ]') :]
+    for venv, workspace, expected in [
+        ("/venvs/cas-a", None, "/venvs/cas-a"),
+        ("/venvs/cas-b", None, "/venvs/cas-b"),
+        ("/venvs/cas with spaces", None, "/venvs/cas with spaces"),
+        ("/venvs/cas-a", "", "/venvs/cas-a"),
+        ("/venvs/cas-a", "/explicit/cache", "/explicit/cache"),
+        (None, "/explicit/cache", "/explicit/cache"),
+        (None, None, "unset"),
+    ]:
+        env = {"PATH": "/usr/bin:/bin"}
+        if venv is not None:
+            env["VIRTUAL_ENV"] = venv
+        if workspace is not None:
+            env["FLASHINFER_WORKSPACE_BASE"] = workspace
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                tail + 'printf "%s" "${FLASHINFER_WORKSPACE_BASE:-unset}"',
+            ],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        assert result.stdout.splitlines()[-1] == expected
+    assert command.index('eval "$OUT"') < command.index(
+        "export FLASHINFER_WORKSPACE_BASE"
+    )
 
 
 @pytest.mark.parametrize("profile_library_path", [None, "/profile/rocm/lib"])
