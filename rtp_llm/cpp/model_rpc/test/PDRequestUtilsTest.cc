@@ -31,7 +31,8 @@ public:
     bool fail             = false;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>, std::string) override {
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
         ++calls;
         if (fail) {
             return {ErrorCode::MM_PROCESS_ERROR, "test MM failure"};
