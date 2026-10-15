@@ -256,3 +256,16 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "registered_cache_staging_test",
+    srcs = ["RegisteredCacheStagingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:registered_cache_staging",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    exec_properties = {"gpu": "A10"},
+)

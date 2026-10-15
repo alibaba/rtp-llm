@@ -1,20 +1,24 @@
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import select_qsa_paged_tokens
-from rtp_llm.models_py.modules.qwen4_exp.qsa_topk_triton import try_select_qsa_tokens
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+    select_qsa_paged_tokens,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
+    try_select_qsa_tokens,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test.topk_reference import (
+    select_qsa_paged_tokens as reference_topk,
+)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class QsaTopkTritonTest(unittest.TestCase):
     def reference(self, scores, lengths, **options):
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_QSA_TOPK": "0"}):
-            return select_qsa_paged_tokens(
-                scores, lengths, compress_ratio=4, token_budget=2048, **options
-            )
+        return reference_topk(
+            scores, lengths, compress_ratio=4, token_budget=2048, **options
+        )
 
     def test_exact_native_order_for_ties_nonfinite_values_and_ragged_lengths(self):
         torch.manual_seed(821)
@@ -69,41 +73,40 @@ class QsaTopkTritonTest(unittest.TestCase):
             dtype=torch.int32,
         )
         expected = self.reference(scores, lengths, validate_lengths=False)
-        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_QSA_TOPK": "1"}):
-            actual = select_qsa_paged_tokens(
+        actual = select_qsa_paged_tokens(
+            scores,
+            lengths,
+            compress_ratio=4,
+            token_budget=2048,
+            validate_lengths=False,
+        )
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            select_qsa_paged_tokens(
+                scores, lengths, compress_ratio=4, token_budget=2048
+            )
+        with self.assertRaisesRegex(ValueError, "do not cover"):
+            select_qsa_paged_tokens(
                 scores,
-                lengths,
+                torch.full_like(lengths, 128),
                 compress_ratio=4,
                 token_budget=2048,
-                validate_lengths=False,
             )
-            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-            with self.assertRaisesRegex(ValueError, "non-negative"):
-                select_qsa_paged_tokens(
-                    scores, lengths, compress_ratio=4, token_budget=2048
-                )
-            with self.assertRaisesRegex(ValueError, "do not cover"):
-                select_qsa_paged_tokens(
-                    scores,
-                    torch.full_like(lengths, 128),
+        for unsupported in (scores.double(), scores[:, :0], scores.cpu()):
+            self.assertIsNone(
+                try_select_qsa_tokens(
+                    unsupported,
+                    lengths.to(unsupported.device),
                     compress_ratio=4,
                     token_budget=2048,
                 )
-            for unsupported in (scores.double(), scores[:, :0], scores.cpu()):
-                self.assertIsNone(
-                    try_select_qsa_tokens(
-                        unsupported,
-                        lengths.to(unsupported.device),
-                        compress_ratio=4,
-                        token_budget=2048,
-                    )
+            )
+        for ratio, budget in ((2, 2048), (4, 128)):
+            self.assertIsNone(
+                try_select_qsa_tokens(
+                    scores, lengths, compress_ratio=ratio, token_budget=budget
                 )
-            for ratio, budget in ((2, 2048), (4, 128)):
-                self.assertIsNone(
-                    try_select_qsa_tokens(
-                        scores, lengths, compress_ratio=ratio, token_budget=budget
-                    )
-                )
+            )
 
 
 if __name__ == "__main__":

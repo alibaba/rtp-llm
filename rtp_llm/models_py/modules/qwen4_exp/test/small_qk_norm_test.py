@@ -1,8 +1,8 @@
 import unittest
-from unittest.mock import patch
 
 import torch
-from rtp_llm.models_py.modules.qwen4_exp.norm import Qwen4ExpFusedQKRMSNorm
+
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
 
 
 class SmallQKNormTest(unittest.TestCase):
@@ -13,14 +13,21 @@ class SmallQKNormTest(unittest.TestCase):
         self.model = Qwen4ExpFusedQKRMSNorm(self.q, self.k, 3, 1, 256)
 
     def run_norm(self, value, enabled):
-        with patch.dict(
-            "os.environ",
-            {
-                "RTP_LLM_QWEN4_SMALL_QK_NORM": str(int(enabled)),
-                "RTP_LLM_QWEN4_FUSED_QK_NORM": "0",
-            },
-        ):
+        if enabled:
             return self.model(value.clone())
+        result = value.clone().reshape(-1, 5, 256)
+        for start, stop, gamma in (
+            (0, 3, self.model.q_weight),
+            (3, 4, self.model.k_weight),
+        ):
+            values = result[:, start:stop].float()
+            normalized = values * torch.rsqrt(
+                values.pow(2).mean(-1, keepdim=True) + self.model.eps
+            )
+            result[:, start:stop].copy_(
+                (normalized * (1.0 + gamma.float())).to(value.dtype)
+            )
+        return result.reshape_as(value)
 
     def test_prime_shapes_and_unchanged_v(self):
         for rows in (1, 3, 4, 7, 8, 17, 31, 32, 33, 4093):
@@ -33,24 +40,20 @@ class SmallQKNormTest(unittest.TestCase):
 
     def test_graph_reads_fresh_input_and_checkpoint_gains(self):
         x = torch.randn(17, 1280, device="cuda", dtype=torch.bfloat16)
-        with patch.dict(
-            "os.environ",
-            {"RTP_LLM_QWEN4_SMALL_QK_NORM": "1", "RTP_LLM_QWEN4_FUSED_QK_NORM": "0"},
-        ):
+        self.model(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
             self.model(x)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                self.model(x)
-            for _ in range(3):
-                source = torch.randn_like(x)
-                self.q.normal_(0, 0.1)
-                self.k.normal_(0, 0.1)
-                expected = self.run_norm(source, False)
-                x.copy_(source)
-                graph.replay()
-                torch.cuda.synchronize()
-                self.assertTrue(torch.equal(x, expected))
-                self.assertTrue(torch.equal(x[:, 1024:], source[:, 1024:]))
+        for _ in range(3):
+            source = torch.randn_like(x)
+            self.q.normal_(0, 0.1)
+            self.k.normal_(0, 0.1)
+            expected = self.run_norm(source, False)
+            x.copy_(source)
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertTrue(torch.equal(x, expected))
+            self.assertTrue(torch.equal(x[:, 1024:], source[:, 1024:]))
 
     def test_unsupported_gamma_and_dtype_use_original(self):
         self.model.q_weight = torch.randn(512, device="cuda", dtype=torch.bfloat16)[::2]

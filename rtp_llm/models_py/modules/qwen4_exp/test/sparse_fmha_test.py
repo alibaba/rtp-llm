@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.sparse_fmha import (
-    sparse_prefill_attn,
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import sparse_prefill_attn
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_fmha import (
     sparse_prefill_attn_torch_reference,
 )
 
@@ -20,7 +20,7 @@ _DEV = "cuda"
 
 
 class SparseFmhaTest(unittest.TestCase):
-    def test_pair_pv_matches_fp64_with_repeated_keys_and_empty_tiles(self):
+    def test_automatic_grouping_matches_fp64_with_repeated_keys_and_empty_tiles(self):
         torch.manual_seed(88)
         for gqa in (6, 12):
             with self.subTest(gqa=gqa):
@@ -35,33 +35,22 @@ class SparseFmhaTest(unittest.TestCase):
                 selected[:, 1, :2] = 31
                 selected[:, 2] = -1
                 selected[:, 2, -1] = 256
-                settings = {
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "0",
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1",
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY": "1",
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_PV_PAIR": "0",
-                }
-                with patch.dict("os.environ", settings):
-                    baseline = sparse_prefill_attn(q, k, v, selected)
+                baseline = sparse_prefill_attn_torch_reference(
+                    q.double(), k.double(), v.double(), selected
+                ).to(q.dtype)
                 expected = sparse_prefill_attn_torch_reference(
                     q.double(), k.double(), v.double(), selected
                 ).to(q.dtype)
-                for skip_empty in ("0", "1"):
-                    settings.update(
-                        RTP_LLM_QWEN4_SPARSE_PREFILL_PV_PAIR="1",
-                        RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY=skip_empty,
-                    )
-                    with patch.dict("os.environ", settings):
-                        candidate = sparse_prefill_attn(q, k, v, selected)
-                    torch.testing.assert_close(
-                        candidate, expected, atol=0.0078125, rtol=0.008
-                    )
-                    torch.testing.assert_close(
-                        candidate, baseline, atol=0.0078125, rtol=0.008
-                    )
-                    self.assertTrue((candidate[:, :, 0] == 0).all())
+                candidate = sparse_prefill_attn(q, k, v, selected)
+                torch.testing.assert_close(
+                    candidate, expected, atol=0.0078125, rtol=0.008
+                )
+                torch.testing.assert_close(
+                    candidate, baseline, atol=0.0078125, rtol=0.008
+                )
+                self.assertTrue((candidate[:, :, 0] == 0).all())
 
-    def test_skip_empty_preserves_sparse_tails_duplicates_and_empty_rows(self):
+    def test_sparse_grouping_preserves_sparse_tails_duplicates_and_empty_rows(self):
         torch.manual_seed(73)
         for gqa in (6, 12):
             with self.subTest(gqa=gqa):
@@ -77,16 +66,10 @@ class SparseFmhaTest(unittest.TestCase):
                 selected[:, 1, -1] = 256
                 selected[:, 2, :2] = 31  # Multiplicity must be retained.
                 selected[:, 3, :32] = -7  # All negative IDs are padding.
-                settings = {
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "0",
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1",
-                    "RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY": "0",
-                }
-                with patch.dict("os.environ", settings):
-                    baseline = sparse_prefill_attn(q, k, v, selected)
-                settings["RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY"] = "1"
-                with patch.dict("os.environ", settings):
-                    candidate = sparse_prefill_attn(q, k, v, selected)
+                baseline = sparse_prefill_attn_torch_reference(
+                    q.double(), k.double(), v.double(), selected
+                ).to(q.dtype)
+                candidate = sparse_prefill_attn(q, k, v, selected)
                 old_tf32 = torch.backends.cuda.matmul.allow_tf32
                 try:
                     torch.backends.cuda.matmul.allow_tf32 = False
@@ -120,10 +103,7 @@ class SparseFmhaTest(unittest.TestCase):
                     )
                     selected[:, 0] = -1
                     selected[:, 1, width // 2 :] = -1
-                    with patch.dict(
-                        "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1"}
-                    ):
-                        actual = sparse_prefill_attn(q, k, v, selected)
+                    actual = sparse_prefill_attn(q, k, v, selected)
                     expected = sparse_prefill_attn_torch_reference(q, k, v, selected)
                     torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
                     self.assertTrue((actual[:, :, 0] == 0).all())
@@ -136,10 +116,10 @@ class SparseFmhaTest(unittest.TestCase):
         selected = torch.randint(0, 2048, (1, 7, 1027), device=_DEV, dtype=torch.int32)
         selected[:, 0] = -1
         selected[:, 1, 17:] = -1
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "0"}):
-            expected = sparse_prefill_attn(q, k, v, selected)
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1"}):
-            actual = sparse_prefill_attn(q, k, v, selected)
+        expected = sparse_prefill_attn_torch_reference(
+            q.double(), k.double(), v.double(), selected
+        ).to(q.dtype)
+        actual = sparse_prefill_attn(q, k, v, selected)
         torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
 
     def test_auto_grouping_matches_reference_on_long_tp8_prefill(self):
@@ -149,8 +129,7 @@ class SparseFmhaTest(unittest.TestCase):
         v = torch.randn_like(k)
         selected = torch.randint(0, 257, (1, 131, 257), device=_DEV, dtype=torch.int32)
         selected[:, 0] = -1
-        with patch.dict("os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "auto"}):
-            actual = sparse_prefill_attn(q, k, v, selected)
+        actual = sparse_prefill_attn(q, k, v, selected)
         expected = sparse_prefill_attn_torch_reference(q, k, v, selected)
         torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
 
@@ -164,13 +143,10 @@ class SparseFmhaTest(unittest.TestCase):
         for backend in ("old_cuda", "hip"):
             with self.subTest(backend=backend):
                 with (
-                    patch.dict(
-                        "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1"}
-                    ),
                     patch("torch.cuda.get_device_capability", return_value=(7, 0)),
                     patch("torch.version.hip", "hip" if backend == "hip" else None),
                     patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.sparse_fmha._sparse_prefill_grouped_kernel",
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha._sparse_prefill_grouped_kernel",
                         new=object(),
                     ),
                 ):
@@ -243,14 +219,10 @@ class SparseFmhaTest(unittest.TestCase):
                 )
                 selected[:, 0] = -1
                 selected[:, 1, width // 2 :] = -1
-                with patch.dict(
-                    "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE": "0"}
-                ):
-                    baseline = sparse_prefill_attn(q, k, v, selected)
-                with patch.dict(
-                    "os.environ", {"RTP_LLM_QWEN4_SPARSE_PREFILL_ONLINE": "1"}
-                ):
-                    candidate = sparse_prefill_attn(q, k, v, selected)
+                baseline = sparse_prefill_attn_torch_reference(
+                    q.double(), k.double(), v.double(), selected
+                ).to(q.dtype)
+                candidate = sparse_prefill_attn(q, k, v, selected)
                 torch.testing.assert_close(candidate, baseline, atol=1e-2, rtol=1e-2)
 
 

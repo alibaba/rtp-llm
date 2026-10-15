@@ -1,11 +1,10 @@
 import math
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-from rtp_llm.models_py.modules.qwen4_exp.ple import (
+
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
@@ -217,14 +216,12 @@ class Qwen4ExpNGramEmbeddingTest(unittest.TestCase):
         "NVIDIA CUDA is required for CPU UVA",
     )
     def test_cpu_uva_gather_matches_host_rows_and_zeroes_remote_shards(self):
-        from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
             gather_local,
         )
 
         for dtype in (torch.float32, torch.bfloat16):
-            with self.subTest(dtype=dtype), patch.dict(
-                os.environ, {"RTP_LLM_QWEN4_PLE_CPU_UVA": "1"}
-            ):
+            with self.subTest(dtype=dtype):
                 full = torch.arange(51 * 160).reshape(51, 160).to(dtype)
                 module = Qwen4ExpNGramEmbedding(
                     [full[:17].clone(), full[34:].clone()],

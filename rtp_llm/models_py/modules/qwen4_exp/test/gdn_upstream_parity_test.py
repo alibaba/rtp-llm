@@ -4,7 +4,8 @@ Executes the upstream ``Qwen4ExpTextGatedDeltaNet`` (transformers main) against
 our ``Qwen3NextGatedDeltaNet`` with identical weights and compares outputs.
 
 Set ``QWEN4_EXP_UPSTREAM_SRC`` to transformers' ``modeling_qwen4_exp.py``; the
-test skips when unset (CI-safe). The upstream class is exec'd rather than
+optional component test skips when unset; qualification rejects a missing
+fixed source/manifest. The upstream class is exec'd rather than
 imported because upstream main's config framework cannot be loaded by the
 released transformers. The upstream file defines its own GQA-capable reference
 kernels (``torch_chunk_gated_delta_rule`` etc.); those are exec'd together with
@@ -23,7 +24,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_UPSTREAM_SRC = os.environ.get("QWEN4_EXP_UPSTREAM_SRC", "")
+from rtp_llm.models_py.modules.qwen4_exp.test.upstream_fixture import (
+    uncovered_fixture,
+    upstream_source_path,
+)
+
+_UPSTREAM_SRC = upstream_source_path()
 
 _HIDDEN = 32
 _SEQ = 16
@@ -204,7 +210,7 @@ def _exec_upstream_gdn():
         fallback = _fla_helpers()
         for name in missing:
             if name not in fallback:
-                raise unittest.SkipTest(
+                uncovered_fixture(
                     f"upstream defines no {name} and this transformers release "
                     "has no GDN helper fallback"
                 )

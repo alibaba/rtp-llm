@@ -1,4 +1,4 @@
-"""Runtime dispatch checks for the optional Qwen attention FP8 mode."""
+"""Runtime dispatch checks for the complete Qwen FP8/NVFP4 recipe."""
 
 import builtins
 import importlib.util
@@ -16,39 +16,31 @@ class QwenAttentionFp8RuntimeTest(unittest.TestCase):
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
 
         original = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
-        cfg = SimpleNamespace(quant_config=original, _qwen4_attention_fp8=True)
+        cfg = SimpleNamespace(quant_config=original, _qwen4_full_fp8_nvfp4=True)
         layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
         self.assertEqual(
             layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
         )
         self.assertIs(cfg.quant_config, original)
-        cfg._qwen4_attention_fp8 = False
+        cfg._qwen4_full_fp8_nvfp4 = False
         self.assertIs(layer._attention_quant_config(cfg, {}), original)
         base = Qwen3NextDecoderLayer.__new__(Qwen3NextDecoderLayer)
-        cfg._qwen4_attention_fp8 = True
+        cfg._qwen4_full_fp8_nvfp4 = True
         self.assertIs(base._attention_quant_config(cfg, {}), original)
 
-    def test_gdn_bf16_override_preserves_full_attention_fp8(self):
+    def test_full_recipe_quantizes_both_attention_geometries(self):
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
         from rtp_llm.ops import HybridAttentionType
 
         original = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
-        cfg = SimpleNamespace(
-            quant_config=original, _qwen4_attention_fp8=True, _qwen4_gdn_bf16=True
-        )
+        cfg = SimpleNamespace(quant_config=original, _qwen4_full_fp8_nvfp4=True)
         layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
-        layer.layer_type = HybridAttentionType.LINEAR
-        self.assertIs(layer._attention_quant_config(cfg, {}), original)
-        layer.layer_type = HybridAttentionType.NONE
-        self.assertEqual(
-            layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
-        )
-        self.assertIs(cfg.quant_config, original)
-        cfg._qwen4_gdn_bf16 = False
-        layer.layer_type = HybridAttentionType.LINEAR
-        self.assertEqual(
-            layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
-        )
+        for kind in (HybridAttentionType.LINEAR, HybridAttentionType.NONE):
+            layer.layer_type = kind
+            self.assertEqual(
+                layer._attention_quant_config(cfg, {}).get_method(), "FP8_PER_BLOCK"
+            )
+            self.assertIs(cfg.quant_config, original)
 
     def test_missing_optional_fp4_does_not_block_fp8_registration(self):
         from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -66,12 +58,11 @@ class QwenAttentionFp8RuntimeTest(unittest.TestCase):
         )
         module = importlib.util.module_from_spec(spec)
         module.__package__ = cuda.__name__
-        with mock.patch.object(
-            builtins, "__import__", import_without_fp4
-        ), mock.patch.object(LinearFactory, "register") as register, mock.patch(
-            "rtp_llm.models_py.utils.arch.is_cuda", return_value=True
-        ), mock.patch(
-            "rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)
+        with (
+            mock.patch.object(builtins, "__import__", import_without_fp4),
+            mock.patch.object(LinearFactory, "register") as register,
+            mock.patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True),
+            mock.patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)),
         ):
             spec.loader.exec_module(module)
         names = [args[0].__name__ for args, _ in register.call_args_list]

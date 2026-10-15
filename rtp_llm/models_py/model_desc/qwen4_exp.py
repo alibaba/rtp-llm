@@ -1,13 +1,12 @@
-import logging
-import os
+import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import IndexerGeometry
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
@@ -27,24 +26,42 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen35Model,
     _is_cuda_graph_forward,
 )
-from rtp_llm.models_py.modules import FMHAImplBase
-from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
-)
-from rtp_llm.models_py.modules.qwen4_exp.indexer import Qwen4ExpQSAIndexer
-from rtp_llm.models_py.modules.qwen4_exp.norm import Qwen4ExpFusedQKRMSNorm
-from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     prepare_side_cache_store_writers,
     publish_layer_side_caches,
-    validate_pd_cache_inputs,
 )
-from rtp_llm.models_py.modules.qwen4_exp.ple import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_execution import (
+    PLEExecution,
+    ple_input_ids,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
+    _PLETargetTransaction,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
+    PLETransactionCoordinator,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+    Qwen4ExpQSARuntimeContext,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+    Qwen4LinearFactory,
+    annotate_compute_inventory,
+    prepare_compute_weights,
+    record_projection_consumer,
+)
+from rtp_llm.models_py.modules import FMHAImplBase
+from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa_runtime import Qwen4ExpQSARuntimeContext
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
+    Qwen4ExpGatedResidual,
+    inject_into_residual,
+)
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
@@ -58,52 +75,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-
-# Bring-up fault injection for the speculative target-commit transaction:
-# "<attn_tp_rank>:<prepare|commit|finalize>" makes exactly that rank raise in
-# the named phase, so a real multi-rank run can verify the rank-symmetric
-# rollback / fail-stop rendezvous. Unset in any normal run.
-_SPEC_FAULT_INJECT_ENV = "RTP_LLM_QWEN4_SPEC_FAULT_INJECT"
-
-
-@dataclass
-class _PLETargetLayerStage:
-    layer_idx: int
-    page_size: int
-    prefixes: torch.Tensor
-    state_pool: torch.Tensor
-    ctx_pool: torch.Tensor
-    state_inputs: PyAttentionInputs
-    ctx_inputs: PyAttentionInputs
-    initial_state: torch.Tensor
-    candidate_state_inputs: torch.Tensor
-    initial_context: torch.Tensor
-    candidate_ids: torch.Tensor
-
-
-@dataclass
-class _PLEPreparedWrite:
-    state_pool: torch.Tensor
-    state_blocks: torch.Tensor
-    state_values: torch.Tensor
-    original_state: torch.Tensor
-    ctx_pool: torch.Tensor
-    ctx_blocks: torch.Tensor
-    ctx_values: torch.Tensor
-    original_context: torch.Tensor
-
-
-@dataclass
-class _PLETargetTransaction:
-    batch_size: int
-    query_len: int
-    prefixes: torch.Tensor
-    expected_layers: frozenset[int]
-    stages: Dict[int, _PLETargetLayerStage]
-    prepared_writes: Optional[list[_PLEPreparedWrite]] = None
-    commit_started: bool = False
-    tentative_committed: bool = False
-    graph_key: Optional[int] = None
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -133,6 +104,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            linear_factory=Qwen4LinearFactory,
         )
         self.layer_idx = layer_idx
         self.is_mtp_draft = bool(getattr(model_config, "is_mtp", False))
@@ -151,10 +123,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             raise RuntimeError(
                 f"qwen4_exp QSA layer {layer_idx} is missing weights {missing}"
             )
-        head_dim = int(getattr(model_config, "_qwen4_indexer_head_dim", 0))
-        ratio = int(getattr(model_config, "_qwen4_indexer_compress_ratio", 0))
-        budget = int(getattr(model_config, "_qwen4_indexer_budget", 0))
-        kv_heads = int(getattr(model_config, "_qwen4_indexer_kv_heads", 0))
+        geometry = IndexerGeometry.from_config(model_config)
+        head_dim = geometry.head_dim
+        ratio = geometry.compress_ratio
+        budget = geometry.budget
+        kv_heads = geometry.kv_heads
         heads = int(model_config.attn_config.indexer_head_num)
         if min(heads, kv_heads, head_dim, ratio, budget) <= 0:
             raise RuntimeError(
@@ -173,6 +146,12 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             projection_scale=weights.get(
                 W.qwen4_indexer_qk_proj_w + ".qwen4_fp8_storage_scale"
             ),
+        )
+
+        record_projection_consumer(
+            weights,
+            W.qwen4_indexer_qk_proj_w,
+            getattr(self.qsa_indexer, "qk_projection", None),
         )
 
     def _qsa_selected_indices(
@@ -366,6 +345,8 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     ``input_layernorm`` / ``post_attention_layernorm``.
     """
 
+    _linear_factory = Qwen4LinearFactory
+
     def __init__(
         self,
         config: ModelConfig,
@@ -377,6 +358,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional[HWKernelConfig] = None,
     ) -> None:
+        self._execution_role = getattr(parallelism_config, "role_type", "PDFUSION")
         super().__init__(
             config,
             parallelism_config,
@@ -387,10 +369,8 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             enable_cuda_graph,
             hw_kernel_config,
         )
-        if os.environ.get("RTP_LLM_QWEN4_FUSED_MOE_TOPK", "0") == "1" and hasattr(
-            self.mlp, "select_topk"
-        ):
-            from rtp_llm.models_py.modules.qwen4_exp.moe_topk_triton import (
+        if hasattr(self.mlp, "select_topk"):
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_topk_triton import (
                 Qwen4ExpMoeTopk,
             )
 
@@ -408,8 +388,6 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 hw_kernel_config=hw_kernel_config,
                 layer_idx=layer_idx,
             )
-        if self.layer_type == HybridAttentionType.LINEAR:
-            self.self_attn._qwen4_fused_post_conv = True
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
@@ -418,12 +396,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = Qwen4ExpFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
-        if (
-            bool(getattr(config, "_qwen4_gdn_bf16", False))
-            and getattr(self, "layer_type", None) == HybridAttentionType.LINEAR
-        ):
-            return super()._attention_quant_config(config, weights)
-        if bool(getattr(config, "_qwen4_attention_fp8", False)):
+        if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 
             return Fp8BlockWiseQuantConfig(is_quanted=False)
@@ -439,6 +412,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             weights[W.qwen4_hc_attn_inject],
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
+            role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
                 weights.get(name + ".qwen4_fp8_storage_scale")
                 for name in (
@@ -455,6 +429,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             weights[W.qwen4_hc_mlp_inject],
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
+            role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
                 weights.get(name + ".qwen4_fp8_storage_scale")
                 for name in (
@@ -464,32 +439,50 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 )
             ),
         )
-        if os.environ.get("RTP_LLM_QWEN4_SHARED_HC_WEIGHTS", "0") == "1":
-            for unit, down_name, inject_name in (
+        for unit, names in (
+            (
+                self.attn_hyper_connection,
                 (
-                    self.attn_hyper_connection,
                     W.qwen4_hc_attn_mix_down,
+                    W.qwen4_hc_attn_mix_up,
                     W.qwen4_hc_attn_inject,
                 ),
-                (
-                    self.mlp_hyper_connection,
-                    W.qwen4_hc_mlp_mix_down,
-                    W.qwen4_hc_mlp_inject,
-                ),
+            ),
+            (
+                self.mlp_hyper_connection,
+                (W.qwen4_hc_mlp_mix_down, W.qwen4_hc_mlp_mix_up, W.qwen4_hc_mlp_inject),
+            ),
+        ):
+            for name, projection in zip(
+                names,
+                (unit.down_projection, unit.up_projection, unit.inject_projection),
             ):
-                merged = unit.merged_down_inject
-                if merged is None:
-                    continue
-                rank = int(unit.mix_down.shape[0])
-                unit.mix_down = merged[:rank]
-                unit.inject = merged[rank : rank + unit.hc_mult]
-                # Views are also used by captured merged GEMMs. Updating them
-                # in place requires restarting, before either execution path
-                # can observe a partially changed projection.
-                unit.mix_down._rtp_requires_restart_for_update = True
-                unit.inject._rtp_requires_restart_for_update = True
-                weights[down_name] = unit.mix_down
-                weights[inject_name] = unit.inject
+                record_projection_consumer(weights, name, projection)
+        for unit, down_name, inject_name in (
+            (
+                self.attn_hyper_connection,
+                W.qwen4_hc_attn_mix_down,
+                W.qwen4_hc_attn_inject,
+            ),
+            (
+                self.mlp_hyper_connection,
+                W.qwen4_hc_mlp_mix_down,
+                W.qwen4_hc_mlp_inject,
+            ),
+        ):
+            merged = unit.merged_down_inject
+            if merged is None:
+                continue
+            rank = int(unit.mix_down.shape[0])
+            unit.mix_down = merged[:rank]
+            unit.inject = merged[rank : rank + unit.hc_mult]
+            # Views are also used by captured merged GEMMs. Updating them
+            # in place requires restarting, before either execution path
+            # can observe a partially changed projection.
+            unit.mix_down._rtp_requires_restart_for_update = True
+            unit.inject._rtp_requires_restart_for_update = True
+            weights[down_name] = unit.mix_down
+            weights[inject_name] = unit.inject
 
     def forward(
         self,
@@ -547,35 +540,47 @@ class Qwen4ExpModel(Qwen35Model):
         {PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_KV_TAG, INDEXER_STATE_TAG}
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights,
+        moe_config,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
         from rtp_llm.models.qwen4_exp.full_fp8_weight import FP8_STORAGE_SCALE_SUFFIX
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
-            Qwen4Fp8Linear,
-            compute_weight_view,
-        )
+        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
 
-        config = args[0] if args else kwargs["model_config"]
-        weights = args[2] if len(args) > 2 else kwargs["weights"]
-        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
-            view = compute_weight_view(weights)
-            if len(args) > 2:
-                args = (*args[:2], view, *args[3:])
-            else:
-                kwargs["weights"] = view
-        super().__init__(*args, **kwargs)
+        config = model_config
+        compute_weights = (
+            prepare_compute_weights(weights)
+            if getattr(config, "_qwen4_full_fp8_nvfp4", False)
+            else weights
+        )
+        super().__init__(
+            model_config,
+            parallelism_config,
+            compute_weights,
+            moe_config,
+            max_generate_batch_size,
+            fmha_config,
+            py_hw_kernel_config,
+            device_resource_config,
+        )
         if getattr(config, "_qwen4_full_fp8_nvfp4", False):
             self._fp8_lm_head = Qwen4Fp8Linear(
                 weights.global_weights[W.lm_head],
                 weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
             )
-        if getattr(self.config, "_qwen4_vocab_cpu_offload", False) or getattr(
-            self.config, "_qwen4_full_fp8_nvfp4", False
-        ):
+        if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
-                Qwen4CpuVocabEmbedding,
+                Qwen4Fp8VocabEmbedding,
             )
 
-            self.embed_tokens = Qwen4CpuVocabEmbedding(
+            self.embed_tokens = Qwen4Fp8VocabEmbedding(
                 self.embed_tokens.weight,
                 self.embed_tokens.tp_size,
                 torch.device("cuda", torch.cuda.current_device()),
@@ -584,17 +589,95 @@ class Qwen4ExpModel(Qwen35Model):
                 ),
             )
         self.ple_layers = nn.ModuleDict()
-        self.requires_cuda_graph_model_input_preparation = (
-            bool(getattr(self.config, "enable_qwen4_ple", False))
-            and bool(getattr(self.config, "qwen4_ple_cpu_offload", True))
-            and os.environ.get("RTP_LLM_QWEN4_PLE_CPU_GRAPH", "0").lower()
-            in ("1", "true", "yes", "on")
+        self.requires_cuda_graph_model_input_preparation = bool(
+            getattr(self.config, "enable_qwen4_ple", False)
         )
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
         self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
+        annotate_compute_inventory(self.weight)
+
+    def _ple_coordinator(self) -> PLETransactionCoordinator:
+        coordinator = self.__dict__.get("_ple_transaction_coordinator")
+        if coordinator is None:
+            owner = weakref.ref(self)
+
+            def fault(phase: str) -> None:
+                model = owner()
+                if model is not None:
+                    model._maybe_inject_speculative_fault(phase)
+
+            coordinator = PLETransactionCoordinator(self.ple_layers, fault)
+            self._ple_transaction_coordinator = coordinator
+        return coordinator
+
+    def _ple_execution(self) -> PLEExecution:
+        execution = self.__dict__.get("_ple_execution_runtime")
+        if execution is None or execution.kv_cache is not self.kv_cache:
+            execution = PLEExecution(
+                self.ple_layers,
+                self.kv_cache,
+                self.parallelism_config,
+                self.config.special_tokens.eos_token_id,
+                self._ple_coordinator(),
+            )
+            self._ple_execution_runtime = execution
+        return execution
+
+    @property
+    def _ple_target_transaction(self):
+        return self._ple_coordinator().active_transaction
+
+    @_ple_target_transaction.setter
+    def _ple_target_transaction(self, value):
+        self._ple_coordinator().active_transaction = value
+
+    @property
+    def _ple_graph_target_transactions(self):
+        return self._ple_coordinator().graph_registry.captured
+
+    @_ple_graph_target_transactions.setter
+    def _ple_graph_target_transactions(self, value):
+        self._ple_coordinator().graph_registry.captured = value
+
+    def resource_usage(self) -> dict[str, int]:
+        totals = {}
+        tables = {}
+        for ple in self.ple_layers.values():
+            embedding = ple.ple_embedding
+            for shard in embedding.shards:
+                if shard.device.type == "cpu":
+                    storage = shard.untyped_storage()
+                    tables[storage.data_ptr()] = (storage.nbytes(), shard.is_pinned())
+            for name, value in embedding.resource_usage().items():
+                if name != "cpu_table_bytes":
+                    totals[name] = totals.get(name, 0) + value
+        totals["cpu_table_bytes"] = sum(size for size, _ in tables.values())
+        totals["cpu_pinned_table_bytes"] = sum(
+            size for size, pinned in tables.values() if pinned
+        )
+        totals["ple_layer_count"] = len(self.ple_layers)
+        return totals
+
+    def close(self) -> None:
+        # C++ destroys graph runners before this hook. Drain all consumers before
+        # releasing mapped CPU or graph-owned lookup storage.
+        devices = {
+            ple.ple_embedding.vocab_sizes.device
+            for ple in self.ple_layers.values()
+            if ple.ple_embedding.vocab_sizes.is_cuda
+        }
+        for device in devices:
+            torch.cuda.synchronize(device)
+        coordinator = self.__dict__.get("_ple_transaction_coordinator")
+        if coordinator is not None:
+            coordinator.close()
+        for ple in self.ple_layers.values():
+            ple.ple_embedding.close()
+        self._ple_execution_runtime = None
+        self._closed = True
 
     def compute_fp8_lm_head(self, hidden):
         return self._fp8_lm_head(hidden.to(torch.bfloat16)).float()
@@ -708,6 +791,7 @@ class Qwen4ExpModel(Qwen35Model):
                 total_shards=total_shards,
                 distributed_reduce=tp_size > 1,
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
+                prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
@@ -734,200 +818,23 @@ class Qwen4ExpModel(Qwen35Model):
                 norm_eps=self.config.layernorm_eps,
             )
 
-    @staticmethod
-    def _fixed_state_pool(
-        cache: LayerKVCache, dtype: torch.dtype, entries: int, width: int
-    ) -> torch.Tensor:
-        base = cache.kv_cache_base
-        if base is None or base.dim() != 2 or not base.is_contiguous():
-            raise RuntimeError(f"PLE cache {cache.tag!r} must be a contiguous 2-D pool")
-        if base.dtype != dtype:
-            raise RuntimeError(
-                f"PLE cache {cache.tag!r} has dtype {base.dtype}, expected {dtype}"
+            unit = self.ple_layers[str(layer_idx)]
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_key_proj_w, unit.key_projection
             )
-        payload_bytes = entries * width * torch.empty((), dtype=dtype).element_size()
-        raw = base.view(torch.uint8)
-        if int(raw.shape[1]) != payload_bytes:
-            raise RuntimeError(
-                f"PLE cache {cache.tag!r} row has {raw.shape[1]} bytes, "
-                f"expected {payload_bytes}"
+            record_projection_consumer(
+                layer_weights, W.qwen4_ple_value_proj_w, unit.value_projection
             )
-        return raw.view(dtype).view(int(raw.shape[0]), entries, width)
 
-    @staticmethod
-    def _resolve_block_table(
-        attention_inputs: PyAttentionInputs,
-        tag: str,
-    ) -> torch.Tensor:
-        """The request-local HybridPool physical block table for one cache tag."""
-        table = getattr(attention_inputs, "kv_cache_block_id_device", None)
-        if table is None or table.numel() == 0:
-            table = getattr(attention_inputs, "kv_cache_block_id", None)
-        if table is None or table.numel() == 0 or table.dim() != 2:
-            raise RuntimeError(f"PLE cache {tag!r} needs a 2-D physical block table")
-        if table.dtype != torch.int32:
-            raise RuntimeError(
-                f"PLE cache {tag!r} physical block table must be int32, "
-                f"got {table.dtype}"
-            )
-        return table
+    _fixed_state_pool = staticmethod(PLECacheViews._fixed_state_pool)
 
-    @staticmethod
-    def _check_physical_blocks(
-        tag: str,
-        blocks: torch.Tensor,
-        pool_rows: int,
-    ) -> torch.Tensor:
-        if bool((blocks <= 0).any().item()):
-            raise RuntimeError(
-                f"PLE cache {tag!r} has an unallocated logical page; "
-                f"blocks={blocks.tolist()[:32]} pool_rows={pool_rows}"
-            )
-        if bool((blocks >= pool_rows).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(torch.long)
+    _resolve_block_table = staticmethod(PLECacheViews._resolve_block_table)
 
-    @classmethod
-    def _physical_blocks(
-        cls,
-        attention_inputs: PyAttentionInputs,
-        tag: str,
-        logical_pages: torch.Tensor,
-        pool_rows: int,
-        device: torch.device,
-        *,
-        graph_capture: bool = False,
-    ) -> torch.Tensor:
-        """Resolve one request-local logical page per batch row."""
-        table = cls._resolve_block_table(attention_inputs, tag)
-        if logical_pages.dim() != 1 or int(table.shape[0]) != int(
-            logical_pages.numel()
-        ):
-            raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
-        pages = logical_pages.to(device=table.device, dtype=torch.long)
-        if graph_capture:
-            # The graph runner owns the fixed-size device table and refreshes
-            # it each step. Clamp invalid indices to
-            # the reserved dummy row so malformed input cannot index outside
-            # the pool while capture/replay is in progress.
-            if not pages.numel() or not int(table.shape[1]) or pool_rows <= 0:
-                raise RuntimeError(f"PLE cache {tag!r} graph table is empty")
-            valid_page = (pages >= 0) & (pages < int(table.shape[1]))
-            safe_pages = pages.clamp(0, int(table.shape[1]) - 1)
-            blocks = table.gather(1, safe_pages.unsqueeze(1)).squeeze(1)
-            valid_block = (blocks > 0) & (blocks < pool_rows)
-            return torch.where(valid_page & valid_block, blocks, 0).to(
-                device=device, dtype=torch.long
-            )
-        if not pages.numel() or bool((pages < 0).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if bool((pages >= int(table.shape[1])).any().item()):
-            raise RuntimeError(
-                f"PLE cache {tag!r} logical page exceeds its block table"
-            )
-        return cls._check_physical_blocks(
-            tag, table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
-        ).to(device=device)
+    _check_physical_blocks = staticmethod(PLECacheViews._check_physical_blocks)
 
-    @classmethod
-    def _commit_physical_blocks(
-        cls,
-        attention_inputs: PyAttentionInputs,
-        tag: str,
-        logical_pages: torch.Tensor,
-        pool_rows: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, list[int]]:
-        """Validate commit destinations with one host read, before pool writes."""
-        table = cls._resolve_block_table(attention_inputs, tag)
-        if logical_pages.dim() != 1 or int(table.shape[0]) != int(
-            logical_pages.numel()
-        ):
-            raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
-        if not logical_pages.numel():
-            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        pages = logical_pages.to(device=table.device, dtype=torch.long)
-        from rtp_llm.models_py.modules.qwen4_exp.ple_commit_triton import (
-            resolve_commit_blocks,
-        )
+    _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
 
-        payload = resolve_commit_blocks(table, pages, pool_rows)
-        if payload is not None:
-            host = payload.tolist()
-            blocks = payload[4:]
-        else:
-            # Clamp only the temporary lookup. The original page validity remains
-            # part of the verdict; an invalid page never becomes a commit plan.
-            blocks = table.gather(
-                1, pages.clamp(0, int(table.shape[1]) - 1).unsqueeze(1)
-            ).squeeze(1)
-            verdict = torch.stack(
-                [
-                    (pages < 0).any(),
-                    (pages >= int(table.shape[1])).any(),
-                    (blocks <= 0).any(),
-                    (blocks >= pool_rows).any(),
-                ]
-            ).to(torch.long)
-            host = torch.cat([verdict, blocks.to(torch.long)]).tolist()
-        if host[0]:
-            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if host[1]:
-            raise RuntimeError(
-                f"PLE cache {tag!r} logical page exceeds its block table"
-            )
-        if host[2]:
-            raise RuntimeError(
-                f"PLE cache {tag!r} has an unallocated logical page; "
-                f"blocks={host[4:36]} pool_rows={pool_rows}"
-            )
-        if host[3]:
-            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(device=device, dtype=torch.long), host[4:]
-
-    @classmethod
-    def _physical_blocks_for_pairs(
-        cls,
-        attention_inputs: PyAttentionInputs,
-        tag: str,
-        rows: torch.Tensor,
-        pages: torch.Tensor,
-        pool_rows: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resolve (batch row, logical page) pairs, used for per-page writes.
-
-        Returns the physical blocks plus a mask of the pairs that own a block.
-        The allocator keeps the pages it plans to reuse (the request's tail page
-        is always among them) and leaves the rest unallocated, so a checkpoint
-        may legitimately have no home -- GDN's store_ssm_state_to_block_map
-        kernel skips those positions the same way.
-        """
-        table = cls._resolve_block_table(attention_inputs, tag)
-        if (
-            rows.dim() != 1
-            or pages.dim() != 1
-            or int(rows.numel()) != int(pages.numel())
-        ):
-            raise RuntimeError(f"PLE cache {tag!r} block-table pairs are inconsistent")
-        rows_l = rows.to(device=table.device, dtype=torch.long)
-        pages_l = pages.to(device=table.device, dtype=torch.long)
-        if bool((rows_l < 0).any().item()) or bool(
-            (rows_l >= int(table.shape[0])).any().item()
-        ):
-            raise RuntimeError(f"PLE cache {tag!r} block-table row is out of range")
-        if bool((pages_l < 0).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if bool((pages_l >= int(table.shape[1])).any().item()):
-            raise RuntimeError(
-                f"PLE cache {tag!r} logical page exceeds its block table"
-            )
-        blocks = table[rows_l, pages_l]
-        if bool((blocks >= pool_rows).any().item()):
-            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(device=device, dtype=torch.long), (blocks > 0).to(
-            device=device
-        )
+    _physical_blocks_for_pairs = staticmethod(PLECacheViews._physical_blocks_for_pairs)
 
     def _validate_ple_mode(
         self,
@@ -935,45 +842,14 @@ class Qwen4ExpModel(Qwen35Model):
         *,
         allow_target_verify: bool = False,
     ) -> None:
-        is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
-        if is_target_verify and not allow_target_verify:
-            raise RuntimeError("qwen4_exp PLE does not support target-verify/MTP yet")
-        is_cuda_graph = bool(getattr(attention_inputs, "is_cuda_graph", False))
-        if is_cuda_graph and bool(attention_inputs.is_prefill) and not is_target_verify:
-            raise RuntimeError("qwen4_exp PLE prefill does not support CUDA Graph")
-        # C++ chooses an exact batch graph for any Qwen side cache;
-        # is_s_padded also labels that exact-batch graph.
-        if getattr(attention_inputs, "is_s_padded", False) and not is_cuda_graph:
-            raise RuntimeError("qwen4_exp PLE does not support padded execution yet")
-        if getattr(attention_inputs, "context_parallel_info", None) is not None:
-            raise RuntimeError("qwen4_exp PLE does not support context parallelism yet")
-        cp = self.parallelism_config.prefill_cp_config
-        if cp.is_enabled() or cp.is_prefill_enabled():
-            raise RuntimeError("qwen4_exp PLE does not support prefill CP yet")
-        validate_pd_cache_inputs((attention_inputs,))
+        return self._ple_execution()._validate_ple_mode(
+            attention_inputs, allow_target_verify=allow_target_verify
+        )
         # Prefix reuse is supported for page-aligned prefixes: the prefill path
         # resumes state/context from the page holding the last prefix token (and
         # fails fast there when a prefix is not page-aligned).
 
-    @staticmethod
-    def _same_metadata(
-        lhs: PyAttentionInputs, rhs: PyAttentionInputs, name: str
-    ) -> bool:
-        left = getattr(lhs, name, None)
-        right = getattr(rhs, name, None)
-        if left is right:
-            return True
-        if left is None or right is None:
-            return left is right
-        if (
-            tuple(left.shape) != tuple(right.shape)
-            or left.dtype != right.dtype
-            or left.device != right.device
-        ):
-            return False
-        if left.stride() == right.stride() and left.data_ptr() == right.data_ptr():
-            return True
-        return bool(torch.equal(left, right))
+    _same_metadata = staticmethod(PLECacheViews._same_metadata)
 
     def _stage_ple_target_verify(
         self,
@@ -989,608 +865,63 @@ class Qwen4ExpModel(Qwen35Model):
         page_size: int,
         embeddings: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute all target rows while leaving the persistent PLE pools intact."""
-        if not bool(state_inputs.is_prefill):
-            raise RuntimeError(
-                "qwen4_exp PLE target verification must use context-style prefill"
-            )
-        lengths = state_inputs.input_lengths
-        prefixes = state_inputs.prefix_lengths
-        sequence_lengths = state_inputs.sequence_lengths
-        graph_capture = bool(getattr(state_inputs, "is_cuda_graph", False))
-        if (
-            lengths.dim() != 1
-            or lengths.dtype not in (torch.int32, torch.int64)
-            or not int(lengths.numel())
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires integer input_lengths [B]"
-            )
-        batch_size = int(lengths.numel())
-        query_len = int(lengths[0].item())
-        if query_len <= 0 or bool(torch.any(lengths != query_len).item()):
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires one uniform gamma+1 width"
-            )
-        # GraphRunner keeps a host sequence-length mirror even for context-style
-        # target verification.  The target path uses prefix_lengths instead.
-        if sequence_lengths.numel() != 0 and not graph_capture:
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires empty sequence_lengths"
-            )
-        if (
-            prefixes.dim() != 1
-            or prefixes.dtype != torch.int32
-            or int(prefixes.numel()) != batch_size
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires int32 prefix_lengths [B]"
-            )
-        prefixes_device = prefixes.to(
-            device=hyper_states.device, dtype=torch.long, non_blocking=True
-        ).contiguous()
-        if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires a non-empty committed history"
-            )
-        if int(ids.numel()) != batch_size * query_len:
-            raise RuntimeError(
-                "qwen4_exp PLE target verify input lengths do not partition "
-                f"the {ids.numel()} packed ids"
-            )
-        if (
-            state_pool.device != hyper_states.device
-            or ctx_pool.device != hyper_states.device
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target projection and side pools must share a device"
-            )
-
-        read_pages = torch.div(prefixes_device - 1, page_size, rounding_mode="floor")
-        state_read_blocks = self._physical_blocks(
-            state_inputs,
-            PLE_STATE_TAG,
-            read_pages,
-            int(state_pool.shape[0]),
-            state_pool.device,
-            graph_capture=graph_capture,
-        )
-        ctx_read_blocks = self._physical_blocks(
-            ctx_inputs,
-            PLE_NGRAM_CTX_TAG,
-            read_pages,
-            int(ctx_pool.shape[0]),
-            ctx_pool.device,
-            graph_capture=graph_capture,
-        )
-        initial_state = state_pool.index_select(0, state_read_blocks)
-        initial_context = ctx_pool.index_select(0, ctx_read_blocks)
-        candidate_ids = ids.reshape(batch_size, query_len)
-        history = torch.cat([initial_context, candidate_ids], dim=1)
-        output, candidate_state_inputs = ple.decode_chunk(
-            hyper_states.reshape(batch_size, query_len, -1),
-            history,
-            initial_state,
-            **({"embeddings": embeddings} if embeddings is not None else {}),
-        )
-
-        stage = _PLETargetLayerStage(
+        return self._ple_coordinator()._stage_ple_target_verify(
             layer_idx=layer_idx,
-            page_size=page_size,
-            prefixes=prefixes_device,
-            state_pool=state_pool,
-            ctx_pool=ctx_pool,
+            ple=ple,
+            hyper_states=hyper_states,
+            ids=ids,
             state_inputs=state_inputs,
             ctx_inputs=ctx_inputs,
-            initial_state=initial_state,
-            candidate_state_inputs=candidate_state_inputs,
-            initial_context=initial_context,
-            candidate_ids=candidate_ids,
+            state_pool=state_pool,
+            ctx_pool=ctx_pool,
+            page_size=page_size,
+            embeddings=embeddings,
         )
-        transaction = getattr(self, "_ple_target_transaction", None)
-        if transaction is None:
-            expected_layers = frozenset(int(key) for key in self.ple_layers.keys())
-            transaction = _PLETargetTransaction(
-                batch_size=batch_size,
-                query_len=query_len,
-                prefixes=prefixes_device,
-                expected_layers=expected_layers,
-                stages={},
-            )
-            self._ple_target_transaction = transaction
-        else:
-            if (
-                transaction.prepared_writes is not None
-                or transaction.commit_started
-                or transaction.tentative_committed
-            ):
-                raise RuntimeError("qwen4_exp PLE target transaction was not finalized")
-            if (
-                transaction.batch_size != batch_size
-                or transaction.query_len != query_len
-                or transaction.prefixes.device != prefixes_device.device
-                or (
-                    not graph_capture
-                    and not bool(torch.equal(transaction.prefixes, prefixes_device))
-                )
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE layers disagree about target-verify geometry"
-                )
-        if layer_idx not in transaction.expected_layers:
-            raise RuntimeError(
-                f"qwen4_exp PLE target transaction received unexpected layer {layer_idx}"
-            )
-        if layer_idx in transaction.stages:
-            raise RuntimeError(
-                f"qwen4_exp PLE target layer {layer_idx} was staged twice"
-            )
-        transaction.stages[layer_idx] = stage
-        return hyper_states + output.reshape_as(hyper_states)
 
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:
-        if transaction.prefixes.is_cuda:
-            torch.cuda.synchronize(transaction.prefixes.device)
+        return PLETransactionCoordinator._synchronize_ple_transaction(transaction)
 
     def _maybe_inject_speculative_fault(self, phase: str) -> None:
-        """Raise on the injected rank/phase of the target-commit transaction."""
-        spec = os.environ.get(_SPEC_FAULT_INJECT_ENV, "").strip()
-        if not spec:
-            return
-        rank_text, _, phase_name = spec.partition(":")
-        if phase_name != phase:
-            return
-        try:
-            rank = int(rank_text)
-        except ValueError:
-            return
-        if rank == int(self.parallelism_config.get_attn_tp_rank()):
-            raise RuntimeError(
-                f"qwen4_exp speculative target {phase} fault injection on TP rank {rank}"
-            )
+        """Invoke the private transaction test hook with actual phase and rank."""
+        hook = getattr(self, "_speculative_test_hook", None)
+        if hook is not None:
+            hook(phase, int(self.parallelism_config.get_attn_tp_rank()))
 
     def clear_speculative_target_graph_capture(self) -> None:
-        """Discard a target stage left by capture warmup, never a live commit."""
-        transaction = self._ple_target_transaction
-        if transaction is None:
-            return
-        if transaction.graph_key is not None or transaction.prepared_writes is not None:
-            raise RuntimeError("cannot discard an active PLE target commit")
-        self._synchronize_ple_transaction(transaction)
-        self._ple_target_transaction = None
+        return self._ple_coordinator().clear_speculative_target_graph_capture()
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
-        """Retain graph-owned stage tensors for later replay of this exact batch."""
-        if graph_key <= 0 or graph_key in self._ple_graph_target_transactions:
-            raise RuntimeError("invalid or duplicate PLE target graph key")
-        transaction = self._ple_target_transaction
-        if transaction is None:
-            if self.ple_layers:
-                raise RuntimeError("PLE target graph captured without a transaction")
-            return
-        if transaction.batch_size != graph_key or transaction.graph_key is not None:
-            raise RuntimeError("PLE target graph batch does not match its stage")
-        if set(transaction.stages) != set(transaction.expected_layers):
-            raise RuntimeError("PLE target graph has incomplete layer coverage")
-        if transaction.prepared_writes is not None or transaction.commit_started:
-            raise RuntimeError("PLE target graph contains an active commit")
-        transaction.graph_key = graph_key
-        self._ple_graph_target_transactions[graph_key] = transaction
-        self._ple_target_transaction = None
+        return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
 
     def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
-        """Select the captured stage whose kernels just replayed."""
-        if self._ple_target_transaction is not None:
-            raise RuntimeError("previous PLE target transaction is still active")
-        if not self.ple_layers:
-            return
-        transaction = self._ple_graph_target_transactions.get(graph_key)
-        if transaction is None or transaction.batch_size != graph_key:
-            raise RuntimeError("PLE target graph stage is missing for replay batch")
-        if transaction.prepared_writes is not None or transaction.commit_started:
-            raise RuntimeError("PLE target graph stage was not finalized")
-        self._ple_target_transaction = transaction
+        return self._ple_coordinator().activate_speculative_target_graph_replay(
+            graph_key
+        )
 
     def _release_ple_target_transaction(
         self, transaction: _PLETargetTransaction
     ) -> None:
-        if transaction.graph_key is not None:
-            transaction.prepared_writes = None
-            transaction.commit_started = False
-            transaction.tentative_committed = False
-        self._ple_target_transaction = None
+        return self._ple_coordinator()._release_ple_target_transaction(transaction)
 
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
-        """Select accepted PLE snapshots and prepare undo without writing pools."""
-        transaction = getattr(self, "_ple_target_transaction", None)
-        if transaction is None:
-            if len(getattr(self, "ple_layers", ())):
-                raise RuntimeError(
-                    "qwen4_exp PLE target commit has no staged transaction"
-                )
-            # QSA-only or PLE-disabled qwen4 targets need no PLE side-state commit.
-            return
-        self._maybe_inject_speculative_fault("prepare")
-        if (
-            transaction.prepared_writes is not None
-            or transaction.commit_started
-            or transaction.tentative_committed
-        ):
-            raise RuntimeError("qwen4_exp PLE target transaction is already prepared")
-        if set(transaction.stages) != set(transaction.expected_layers):
-            missing = sorted(transaction.expected_layers.difference(transaction.stages))
-            extra = sorted(
-                set(transaction.stages).difference(transaction.expected_layers)
-            )
-            raise RuntimeError(
-                "qwen4_exp PLE target transaction has incomplete layer coverage: "
-                f"missing={missing}, extra={extra}"
-            )
-        if (
-            not isinstance(accept_len, torch.Tensor)
-            or accept_len.dim() != 1
-            or accept_len.dtype != torch.int32
-            or int(accept_len.numel()) != transaction.batch_size
-            or accept_len.device != transaction.prefixes.device
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
-            )
-        if bool(
-            torch.any((accept_len < 1) | (accept_len > transaction.query_len)).item()
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target accept_len must be in "
-                f"[1, {transaction.query_len}]"
-            )
-
-        accepted = accept_len.to(torch.long)
-        pending = []
-        destination_rows: set[tuple[int, int]] = set()
-        bulk_validate = (
-            os.environ.get("RTP_LLM_QWEN4_PLE_COMMIT_BULK_VALIDATE", "0") == "1"
-        )
-        for layer_idx in sorted(transaction.stages):
-            stage = transaction.stages[layer_idx]
-            state_len = int(stage.initial_state.shape[1])
-            state_timeline = torch.cat(
-                [stage.initial_state, stage.candidate_state_inputs], dim=1
-            )
-            state_indices = accepted.unsqueeze(1) + torch.arange(
-                state_len, device=accepted.device, dtype=torch.long
-            ).unsqueeze(0)
-            state_values = state_timeline.gather(
-                1,
-                state_indices.unsqueeze(-1).expand(
-                    -1, -1, int(state_timeline.shape[-1])
-                ),
-            )
-
-            context_len = int(stage.initial_context.shape[1])
-            context_timeline = torch.cat(
-                [stage.initial_context, stage.candidate_ids], dim=1
-            )
-            context_indices = accepted.unsqueeze(1) + torch.arange(
-                context_len, device=accepted.device, dtype=torch.long
-            ).unsqueeze(0)
-            context_values = context_timeline.gather(1, context_indices)
-
-            final_positions = stage.prefixes + accepted - 1
-            final_pages = torch.div(
-                final_positions, stage.page_size, rounding_mode="floor"
-            )
-            host_blocks = {}
-            if bulk_validate:
-                state_blocks, host_blocks[PLE_STATE_TAG] = self._commit_physical_blocks(
-                    stage.state_inputs,
-                    PLE_STATE_TAG,
-                    final_pages,
-                    int(stage.state_pool.shape[0]),
-                    stage.state_pool.device,
-                )
-                ctx_blocks, host_blocks[PLE_NGRAM_CTX_TAG] = (
-                    self._commit_physical_blocks(
-                        stage.ctx_inputs,
-                        PLE_NGRAM_CTX_TAG,
-                        final_pages,
-                        int(stage.ctx_pool.shape[0]),
-                        stage.ctx_pool.device,
-                    )
-                )
-            else:
-                state_blocks = self._physical_blocks(
-                    stage.state_inputs,
-                    PLE_STATE_TAG,
-                    final_pages,
-                    int(stage.state_pool.shape[0]),
-                    stage.state_pool.device,
-                )
-                ctx_blocks = self._physical_blocks(
-                    stage.ctx_inputs,
-                    PLE_NGRAM_CTX_TAG,
-                    final_pages,
-                    int(stage.ctx_pool.shape[0]),
-                    stage.ctx_pool.device,
-                )
-            pending.append(
-                (
-                    stage,
-                    state_blocks,
-                    state_values,
-                    ctx_blocks,
-                    context_values,
-                )
-            )
-
-            for pool, blocks, tag in (
-                (stage.state_pool, state_blocks, PLE_STATE_TAG),
-                (stage.ctx_pool, ctx_blocks, PLE_NGRAM_CTX_TAG),
-            ):
-                pool_ptr = int(pool.data_ptr())
-                destination_ids = host_blocks[tag] if bulk_validate else blocks.tolist()
-                for block in destination_ids:
-                    row = (pool_ptr, int(block))
-                    if row in destination_rows:
-                        raise RuntimeError(
-                            f"qwen4_exp PLE cache {tag!r} has a duplicate target "
-                            "destination physical row"
-                        )
-                    destination_rows.add(row)
-
-        # Every layer, destination and selected value has been validated. Only
-        # now allocate the immutable undo snapshots; this phase still performs
-        # no persistent-pool writes.
-        prepared_writes = []
-        for stage, state_blocks, state_values, ctx_blocks, context_values in pending:
-            prepared_writes.append(
-                _PLEPreparedWrite(
-                    state_pool=stage.state_pool,
-                    state_blocks=state_blocks,
-                    state_values=state_values,
-                    original_state=stage.state_pool.index_select(
-                        0, state_blocks
-                    ).clone(),
-                    ctx_pool=stage.ctx_pool,
-                    ctx_blocks=ctx_blocks,
-                    ctx_values=context_values,
-                    original_context=stage.ctx_pool.index_select(0, ctx_blocks).clone(),
-                )
-            )
-        # Gather/clone launches above are part of prepare, not commit.  Complete
-        # them before publishing the plan so the C++ prepare consensus observes
-        # any asynchronous failure on this rank before persistent writes begin.
-        self._synchronize_ple_transaction(transaction)
-        transaction.prepared_writes = prepared_writes
+        return self._ple_coordinator().prepare_speculative_target_commit(accept_len)
 
     def finish_speculative_target_commit(self, commit: bool) -> None:
-        """Tentatively apply a prepared PLE plan or idempotently roll it back."""
-        transaction = getattr(self, "_ple_target_transaction", None)
-        if transaction is None:
-            return
-        if commit:
-            self._maybe_inject_speculative_fault("commit")
-        if not commit:
-            if transaction.commit_started:
-                assert transaction.prepared_writes is not None
-                for write in transaction.prepared_writes:
-                    write.state_pool.index_copy_(
-                        0, write.state_blocks, write.original_state
-                    )
-                    write.ctx_pool.index_copy_(
-                        0, write.ctx_blocks, write.original_context
-                    )
-            # Also synchronize an uncommitted transaction: target staging and a
-            # failed prepare may have queued work even though no pool write was
-            # launched.  Do not clear its lifetime until that work is settled.
-            self._synchronize_ple_transaction(transaction)
-            self._release_ple_target_transaction(transaction)
-            return
-
-        if transaction.prepared_writes is None:
-            raise RuntimeError("qwen4_exp PLE target transaction was not prepared")
-        if transaction.commit_started:
-            raise RuntimeError("qwen4_exp PLE target transaction was already committed")
-        # Mark before the first copy so finish(false) restores every destination
-        # even if a later launch or synchronization reports an error.
-        transaction.commit_started = True
-        for write in transaction.prepared_writes:
-            write.state_pool.index_copy_(0, write.state_blocks, write.state_values)
-            write.ctx_pool.index_copy_(0, write.ctx_blocks, write.ctx_values)
-        self._synchronize_ple_transaction(transaction)
-        transaction.tentative_committed = True
+        return self._ple_coordinator().finish_speculative_target_commit(commit)
 
     def finalize_speculative_target_commit(self) -> None:
-        """Release undo state after C++ confirms every TP rank committed."""
-        transaction = getattr(self, "_ple_target_transaction", None)
-        if transaction is None:
-            return
-        self._maybe_inject_speculative_fault("finalize")
-        if not transaction.tentative_committed:
-            raise RuntimeError(
-                "qwen4_exp PLE target transaction cannot finalize before commit"
-            )
-        self._release_ple_target_transaction(transaction)
+        return self._ple_coordinator().finalize_speculative_target_commit()
 
     def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
-        """Read PLE contexts early; leave persistent state untouched."""
-        enabled = [
-            (int(key), ple)
-            for key, ple in self.ple_layers.items()
-            if getattr(getattr(ple, "ple_embedding", None), "supports_prefetch", False)
-        ]
-        if not enabled:
+        if not self.ple_layers:
             return {}
-        ctx_inputs = select_attention_inputs_for_tag(
-            attention_inputs, PLE_NGRAM_CTX_TAG
-        )
-        if bool(ctx_inputs.is_cuda_graph):
-            return {}
-        ids = self._ple_input_ids(inputs).reshape(-1).long()
-        plans = {}
-        for layer_idx, ple in enabled:
-            embedding = ple.ple_embedding
-            self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
-            cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
-            page_size = int(cache.seq_size_per_block)
-            if ctx_inputs.is_prefill:
-                lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
-                raw_prefixes = ctx_inputs.prefix_lengths
-                prefixes = (
-                    [int(x) for x in raw_prefixes.tolist()]
-                    if raw_prefixes is not None and raw_prefixes.numel()
-                    else [0] * len(lengths)
-                )
-                if (
-                    not lengths
-                    or any(length <= 0 for length in lengths)
-                    or sum(lengths) != ids.numel()
-                    or len(prefixes) != len(lengths)
-                    or any(prefix < 0 for prefix in prefixes)
-                ):
-                    raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
-                if len(lengths) > 128:
-                    continue
-                contexts = ids.new_full(
-                    (len(lengths), embedding.context_len), embedding.eos_token_id
-                )
-                if any(prefixes):
-                    pool = self._fixed_state_pool(
-                        cache, torch.int64, embedding.context_len, 1
-                    ).squeeze(-1)
-                    pages = torch.tensor(
-                        [
-                            (prefix - 1) // page_size if prefix else 0
-                            for prefix in prefixes
-                        ],
-                        dtype=torch.long,
-                    )
-                    blocks = self._physical_blocks(
-                        ctx_inputs,
-                        PLE_NGRAM_CTX_TAG,
-                        pages,
-                        int(pool.shape[0]),
-                        pool.device,
-                    )
-                    cached = pool.index_select(0, blocks)
-                    mask = torch.tensor(prefixes, device=ids.device).gt(0).unsqueeze(1)
-                    contexts = torch.where(mask, cached, contexts)
-                if ctx_inputs.is_target_verify:
-                    width = lengths[0]
-                    if any(length != width for length in lengths):
-                        raise RuntimeError(
-                            "PLE target prefetch requires uniform query rows"
-                        )
-                    history = torch.cat(
-                        (contexts, ids.view(len(lengths), width)), dim=1
-                    )
-                    plans[layer_idx] = [
-                        embedding.start_prefetch(embedding.hashed_ids(history, width))
-                    ]
-                else:
-                    handles = []
-                    offset = 0
-                    for slot, length in enumerate(lengths):
-                        history = torch.cat(
-                            (
-                                contexts[slot : slot + 1],
-                                ids[offset : offset + length].view(1, length),
-                            ),
-                            dim=1,
-                        )
-                        handles.append(
-                            embedding.start_prefetch(
-                                embedding.hashed_ids(history, length), slot=slot
-                            )
-                        )
-                        offset += length
-                    plans[layer_idx] = handles
-            else:
-                lengths = ctx_inputs.sequence_lengths.to(
-                    device=ids.device, dtype=torch.long
-                )
-                if ids.numel() != lengths.numel() or bool((lengths <= 0).any().item()):
-                    raise RuntimeError("PLE decode prefetch metadata is inconsistent")
-                pool = self._fixed_state_pool(
-                    cache, torch.int64, embedding.context_len, 1
-                ).squeeze(-1)
-                pages = torch.div(lengths - 1, page_size, rounding_mode="floor")
-                blocks = self._physical_blocks(
-                    ctx_inputs,
-                    PLE_NGRAM_CTX_TAG,
-                    pages,
-                    int(pool.shape[0]),
-                    pool.device,
-                )
-                history = torch.cat(
-                    (pool.index_select(0, blocks), ids.view(-1, 1)), dim=1
-                )
-                plans[layer_idx] = [
-                    embedding.start_prefetch(embedding.hashed_ids(history, 1))
-                ]
-        return plans
+        return self._ple_execution()._start_eager_ple_prefetch(inputs, attention_inputs)
 
     def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
-        """Prepare CPU-resident PLE rows before replay, without committing state."""
-        if not self.requires_cuda_graph_model_input_preparation or not self.ple_layers:
+        if not self.ple_layers:
             return
-        groups = get_attention_inputs_value(inputs)
-        ctx_inputs = select_attention_inputs_for_tag(groups, PLE_NGRAM_CTX_TAG)
-        ids = self._ple_input_ids(inputs).reshape(-1).long()
-        graph_key = inputs.input_ids.data_ptr()
-        for key, ple in self.ple_layers.items():
-            embedding = ple.ple_embedding
-            cache = self.kv_cache.get_layer_cache(int(key), PLE_NGRAM_CTX_TAG)
-            pool = self._fixed_state_pool(
-                cache, torch.int64, embedding.context_len, 1
-            ).squeeze(-1)
-            if ctx_inputs.is_prefill:
-                lengths = ctx_inputs.input_lengths
-                batch = int(lengths.numel())
-                if batch <= 0:
-                    raise RuntimeError("PLE CPU graph requires nonempty query rows")
-                width = int(lengths[0].item())
-                if (
-                    width <= 0
-                    or ids.numel() != batch * width
-                    or bool((lengths != width).any().item())
-                ):
-                    raise RuntimeError(
-                        "PLE CPU graph requires uniform nonempty query rows"
-                    )
-                prefixes = ctx_inputs.prefix_lengths.to(
-                    device=ids.device, dtype=torch.long
-                )
-                pages = torch.div(
-                    prefixes - 1, cache.seq_size_per_block, rounding_mode="floor"
-                )
-            else:
-                batch, width = int(ids.numel()), 1
-                sequence_lengths = ctx_inputs.sequence_lengths_plus_1_device.long() - 1
-                pages = torch.div(
-                    sequence_lengths - 1,
-                    cache.seq_size_per_block,
-                    rounding_mode="floor",
-                )
-            blocks = self._physical_blocks(
-                ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                pages,
-                int(pool.shape[0]),
-                pool.device,
-                graph_capture=True,
-            )
-            context = pool.index_select(0, blocks)
-            if ctx_inputs.is_prefill and not ctx_inputs.is_target_verify:
-                context = torch.where(
-                    (prefixes > 0).unsqueeze(1),
-                    context,
-                    torch.full_like(context, embedding.eos_token_id),
-                )
-            history = torch.cat((context, ids.reshape(batch, width)), dim=1)
-            embedding.prepare_cpu_graph_rows(
-                embedding.hashed_ids(history, width), graph_key
-            )
+        return self._ple_execution().prepare_cuda_graph_model_inputs(inputs)
 
     def _apply_ple(
         self,
@@ -1600,376 +931,11 @@ class Qwen4ExpModel(Qwen35Model):
         attention_inputs: Any,
         prefetch=None,
     ) -> torch.Tensor:
-        ple = self.ple_layers[str(layer_idx)]
-        state_inputs = select_attention_inputs_for_tag(attention_inputs, PLE_STATE_TAG)
-        ctx_inputs = select_attention_inputs_for_tag(
-            attention_inputs, PLE_NGRAM_CTX_TAG
+        if str(layer_idx) not in self.ple_layers:
+            return hyper_states
+        return self._ple_execution()._apply_ple(
+            layer_idx, hyper_states, input_ids, attention_inputs, prefetch
         )
-        self._validate_ple_mode(state_inputs, allow_target_verify=True)
-        self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
-        is_target_verify = bool(state_inputs.is_target_verify)
-        if (
-            is_target_verify != bool(ctx_inputs.is_target_verify)
-            or bool(state_inputs.is_prefill) != bool(ctx_inputs.is_prefill)
-            or any(
-                not self._same_metadata(state_inputs, ctx_inputs, name)
-                for name in (
-                    "input_lengths",
-                    "prefix_lengths",
-                    "sequence_lengths",
-                    "cu_seqlens_device",
-                    "cu_kv_seqlens_device",
-                    "combo_position_ids",
-                )
-            )
-        ):
-            raise RuntimeError("qwen4_exp PLE state-region metadata is inconsistent")
-        state_cache = self.kv_cache.get_layer_cache(layer_idx, PLE_STATE_TAG)
-        ctx_cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
-        if state_cache.seq_size_per_block != ctx_cache.seq_size_per_block:
-            raise RuntimeError("qwen4_exp PLE state-region page sizes are inconsistent")
-        if hyper_states.dtype != torch.bfloat16:
-            raise RuntimeError(
-                "qwen4_exp PLE currently requires BF16 activations, "
-                f"got {hyper_states.dtype}"
-            )
-        state_pool = self._fixed_state_pool(
-            state_cache,
-            torch.bfloat16,
-            ple.short_conv_state_len,
-            ple.hc_hidden_size,
-        )
-        ctx_pool = self._fixed_state_pool(
-            ctx_cache, torch.int64, ple.ple_embedding.context_len, 1
-        ).squeeze(-1)
-        ids = input_ids.reshape(-1).to(device=hyper_states.device, dtype=torch.long)
-        if hyper_states.dim() != 2 or int(hyper_states.shape[0]) != int(ids.numel()):
-            raise RuntimeError("qwen4_exp PLE expects packed [tokens, hc_hidden] input")
-        eos = ple.ple_embedding.eos_token_id
-        context_len = ple.ple_embedding.context_len
-        page_size = int(state_cache.seq_size_per_block)
-        if page_size <= 0:
-            raise RuntimeError("qwen4_exp PLE cache page size must be positive")
-
-        graph_capture = bool(state_inputs.is_cuda_graph)
-        # Eager fallback must never reuse rows prepared for a captured graph.
-        ple.ple_embedding._graph_gather_required = graph_capture
-        local_rows = (
-            [
-                (
-                    ple.ple_embedding.consume_prefetch(handle)
-                    if handle is not None
-                    else None
-                )
-                for handle in prefetch
-            ]
-            if prefetch is not None
-            else None
-        )
-        if is_target_verify:
-            prefetched = (
-                {"embeddings": ple.ple_embedding._reduce_rows(local_rows[0])}
-                if local_rows is not None and local_rows[0] is not None
-                else {}
-            )
-            return self._stage_ple_target_verify(
-                layer_idx=layer_idx,
-                ple=ple,
-                hyper_states=hyper_states,
-                ids=ids,
-                state_inputs=state_inputs,
-                ctx_inputs=ctx_inputs,
-                state_pool=state_pool,
-                ctx_pool=ctx_pool,
-                page_size=page_size,
-                **prefetched,
-            )
-
-        if state_inputs.is_prefill:
-            lengths = [int(x) for x in state_inputs.input_lengths.tolist()]
-            if any(length <= 0 for length in lengths):
-                raise RuntimeError("qwen4_exp PLE requires positive prefill lengths")
-            if sum(lengths) != int(ids.numel()):
-                raise RuntimeError(
-                    "qwen4_exp PLE packed prefill lengths are inconsistent"
-                )
-            raw_prefixes = getattr(state_inputs, "prefix_lengths", None)
-            prefixes = (
-                [int(x) for x in raw_prefixes.tolist()]
-                if raw_prefixes is not None and int(raw_prefixes.numel()) > 0
-                else [0] * len(lengths)
-            )
-            if len(prefixes) != len(lengths) or any(p < 0 for p in prefixes):
-                raise RuntimeError(
-                    "qwen4_exp PLE prefill prefix lengths are inconsistent"
-                )
-            # Requests carry per-request new-token lengths; prefix reuse resumes
-            # the side state from the page holding the last prefix token, so
-            # prefixes must land on page boundaries.
-            if any(prefix % page_size for prefix in prefixes):
-                raise RuntimeError(
-                    "qwen4_exp PLE prefix reuse requires page-aligned prefixes"
-                )
-            read_buffers = None
-            read_contexts = None
-            if any(prefixes):
-                read_pages = torch.tensor(
-                    [(prefix - 1) // page_size if prefix else 0 for prefix in prefixes],
-                    dtype=torch.long,
-                )
-                read_buffers = state_pool.index_select(
-                    0,
-                    self._physical_blocks(
-                        state_inputs,
-                        PLE_STATE_TAG,
-                        read_pages,
-                        int(state_pool.shape[0]),
-                        state_pool.device,
-                    ),
-                )
-                read_contexts = ctx_pool.index_select(
-                    0,
-                    self._physical_blocks(
-                        ctx_inputs,
-                        PLE_NGRAM_CTX_TAG,
-                        read_pages,
-                        int(ctx_pool.shape[0]),
-                        ctx_pool.device,
-                    ),
-                )
-            # Checkpoint every page, not just the request's terminal page: a
-            # later request can reuse a prefix that ends at any page boundary,
-            # exactly like the GDN state snapshots written by
-            # store_ssm_state_to_block_map.
-            outputs = []
-            write_rows = []
-            write_pages = []
-            write_states = []
-            write_contexts = []
-            offset = 0
-            for idx, (prefix, length) in enumerate(zip(prefixes, lengths)):
-                if prefix > 0:
-                    state = read_buffers[idx : idx + 1]
-                    context = read_contexts[idx : idx + 1]
-                else:
-                    state = None
-                    context = ids.new_full((1, context_len), eos)
-                bulk_enabled = os.environ.get(
-                    "RTP_LLM_QWEN4_PLE_BULK_PREFILL", "0"
-                ).lower()
-                if bulk_enabled in ("1", "true", "on") and length >= 2 * page_size:
-                    request_ids = ids[offset : offset + length].view(1, length)
-                    history = torch.cat((context, request_ids), dim=1)
-                    output, snapshots = ple.prefill_page_snapshots(
-                        hyper_states[offset : offset + length].view(1, length, -1),
-                        history,
-                        page_size,
-                        state,
-                        **(
-                            {
-                                "embeddings": ple.ple_embedding._reduce_rows(
-                                    local_rows[idx]
-                                )
-                            }
-                            if local_rows is not None and local_rows[idx] is not None
-                            else {}
-                        ),
-                    )
-                    for end, snapshot in zip(
-                        range(page_size, length + page_size, page_size), snapshots
-                    ):
-                        end = min(end, length)
-                        write_rows.append(idx)
-                        write_pages.append((prefix + end - 1) // page_size)
-                        write_states.append(snapshot.squeeze(0))
-                        write_contexts.append(history[0, end : end + context_len])
-                    outputs.append(output.squeeze(0))
-                    offset += length
-                    continue
-                chunk_outputs = []
-                start = 0
-                while start < length:
-                    end = min(start + page_size, length)
-                    chunk_ids = ids[offset + start : offset + end].view(1, end - start)
-                    history = torch.cat([context, chunk_ids], dim=1)
-                    chunk_hyper = hyper_states[offset + start : offset + end].view(
-                        1, end - start, -1
-                    )
-                    if state is None:
-                        output, state = ple.prefill(
-                            chunk_hyper,
-                            history,
-                            **(
-                                {
-                                    "embeddings": ple.ple_embedding._reduce_rows(
-                                        local_rows[idx][:, start:end].contiguous()
-                                    )
-                                }
-                                if local_rows is not None
-                                and local_rows[idx] is not None
-                                else {}
-                            ),
-                        )
-                    else:
-                        output, state = ple.prefill_with_state(
-                            chunk_hyper,
-                            history,
-                            state,
-                            **(
-                                {
-                                    "embeddings": ple.ple_embedding._reduce_rows(
-                                        local_rows[idx][:, start:end].contiguous()
-                                    )
-                                }
-                                if local_rows is not None
-                                and local_rows[idx] is not None
-                                else {}
-                            ),
-                        )
-                    chunk_outputs.append(output.squeeze(0))
-                    write_rows.append(idx)
-                    write_pages.append((prefix + end - 1) // page_size)
-                    write_states.append(state.squeeze(0))
-                    write_contexts.append(history[0, -context_len:])
-                    context = history[:, -context_len:]
-                    start = end
-                outputs.append(torch.cat(chunk_outputs, dim=0))
-                offset += length
-            write_rows_t = torch.tensor(write_rows, dtype=torch.long)
-            write_pages_t = torch.tensor(write_pages, dtype=torch.long)
-            write_state_blocks, state_writable = self._physical_blocks_for_pairs(
-                state_inputs,
-                PLE_STATE_TAG,
-                write_rows_t,
-                write_pages_t,
-                int(state_pool.shape[0]),
-                state_pool.device,
-            )
-            write_ctx_blocks, ctx_writable = self._physical_blocks_for_pairs(
-                ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                write_rows_t,
-                write_pages_t,
-                int(ctx_pool.shape[0]),
-                ctx_pool.device,
-            )
-            # Decode resumes from the page holding each request's last token, so
-            # that page must exist even when the allocator dropped the rest of
-            # the checkpoint chain.
-            terminal_indices = []
-            placed = 0
-            for length in lengths:
-                placed += (length + page_size - 1) // page_size
-                terminal_indices.append(placed - 1)
-            terminal_t = torch.tensor(
-                terminal_indices, dtype=torch.long, device=state_writable.device
-            )
-            if not bool(
-                (state_writable[terminal_t] & ctx_writable[terminal_t]).all().item()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE terminal page is unallocated: decode resumes "
-                    "from its checkpoint"
-                )
-            writable = state_writable & ctx_writable
-            state_pool.index_copy_(
-                0,
-                write_state_blocks[writable],
-                torch.stack(write_states)[writable].to(state_pool.dtype),
-            )
-            ctx_pool.index_copy_(
-                0,
-                write_ctx_blocks[writable],
-                torch.stack(write_contexts)[writable].to(ctx_pool.dtype),
-            )
-            return hyper_states + torch.cat(outputs, dim=0)
-
-        lengths = state_inputs.input_lengths
-        sequence_lengths = state_inputs.sequence_lengths
-        batch = int(sequence_lengths.numel())
-        if batch == 0 or int(ids.numel()) != batch or int(lengths.numel()) != batch:
-            raise RuntimeError("qwen4_exp PLE supports single-token decode only")
-        if sequence_lengths.dim() != 1 or sequence_lengths.dtype not in (
-            torch.int32,
-            torch.int64,
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE decode sequence_lengths must be a 1-D integer tensor"
-            )
-        if graph_capture:
-            sequence_plus_one_device = getattr(
-                state_inputs, "sequence_lengths_plus_1_device", None
-            )
-            if (
-                sequence_plus_one_device is None
-                or sequence_plus_one_device.device != state_pool.device
-                or sequence_plus_one_device.dtype != torch.int32
-                or int(sequence_plus_one_device.numel()) != batch
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE decode Graph requires device sequence lengths"
-                )
-            sequence_lengths = sequence_plus_one_device.to(torch.long) - 1
-        else:
-            sequence_lengths = sequence_lengths.to(dtype=torch.long)
-        if not graph_capture and bool((sequence_lengths <= 0).any().item()):
-            raise RuntimeError(
-                "qwen4_exp PLE decode requires a non-empty prefill history"
-            )
-        read_pages = torch.div(sequence_lengths - 1, page_size, rounding_mode="floor")
-        write_pages = torch.div(sequence_lengths, page_size, rounding_mode="floor")
-        state_read_blocks = self._physical_blocks(
-            state_inputs,
-            PLE_STATE_TAG,
-            read_pages,
-            int(state_pool.shape[0]),
-            state_pool.device,
-            graph_capture=graph_capture,
-        )
-        ctx_read_blocks = self._physical_blocks(
-            ctx_inputs,
-            PLE_NGRAM_CTX_TAG,
-            read_pages,
-            int(ctx_pool.shape[0]),
-            ctx_pool.device,
-            graph_capture=graph_capture,
-        )
-        state_write_blocks = self._physical_blocks(
-            state_inputs,
-            PLE_STATE_TAG,
-            write_pages,
-            int(state_pool.shape[0]),
-            state_pool.device,
-            graph_capture=graph_capture,
-        )
-        ctx_write_blocks = self._physical_blocks(
-            ctx_inputs,
-            PLE_NGRAM_CTX_TAG,
-            write_pages,
-            int(ctx_pool.shape[0]),
-            ctx_pool.device,
-            graph_capture=graph_capture,
-        )
-        conv_buffer = state_pool.index_select(0, state_read_blocks)
-        context = ctx_pool.index_select(0, ctx_read_blocks)
-        history = torch.cat([context, ids.view(batch, 1)], dim=1)
-        output, new_state = ple.decode_step(
-            hyper_states.view(batch, 1, -1),
-            history,
-            conv_buffer,
-            **(
-                {"embeddings": ple.ple_embedding._reduce_rows(local_rows[0])}
-                if local_rows is not None and local_rows[0] is not None
-                else {}
-            ),
-        )
-        state_pool.index_copy_(0, state_write_blocks, new_state.to(state_pool.dtype))
-        ctx_pool.index_copy_(
-            0,
-            ctx_write_blocks,
-            history[:, -context_len:].to(ctx_pool.dtype),
-        )
-        return hyper_states + output.squeeze(1)
 
     def _attention_tag(self, layer_idx: int) -> str:
         """Tag of the layer's attention region, excluding the side regions.
@@ -2060,40 +1026,26 @@ class Qwen4ExpModel(Qwen35Model):
             None,
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
+            role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
             weight_scales=tuple(
                 weights.global_weights.get(name + ".qwen4_fp8_storage_scale")
                 for name in (W.qwen4_hc_mixer_mix_down, W.qwen4_hc_mixer_mix_up, "")
             ),
         )
 
-    def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
-        """Text ids for the n-gram hash; non-text positions hash as EOS.
+        for name, projection in (
+            (W.qwen4_hc_mixer_mix_down, self.hyper_connection_mixer.down_projection),
+            (W.qwen4_hc_mixer_mix_up, self.hyper_connection_mixer.up_projection),
+        ):
+            record_projection_consumer(weights.global_weights, name, projection)
 
-        Mirrors upstream: ``ple_input_ids = where(text_mask, ids, eos_token_id)``,
-        so image-placeholder positions contribute the EOS id to the n-gram
-        history instead of an arbitrary vision token id.
-        """
-        input_ids = inputs.input_ids
-        embedding_inputs = getattr(inputs, "embedding_inputs", None)
-        text_mask = getattr(embedding_inputs, "text_tokens_mask", None)
-        if text_mask is None or not text_mask.numel():
-            return input_ids
-        if text_mask.numel() != input_ids.numel():
-            raise RuntimeError(
-                "qwen4_exp PLE text token mask size does not match input ids: "
-                f"{text_mask.numel()} != {input_ids.numel()}"
-            )
-        text_flags = text_mask.bool()
-        if bool(text_flags.all().item()):
-            return input_ids
-        eos = self.config.special_tokens.eos_token_id
-        if eos is None:
-            raise RuntimeError(
-                "qwen4_exp PLE needs an eos token id to hash multimodal positions"
-            )
-        return torch.where(text_flags, input_ids, torch.full_like(input_ids, eos))
+    def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
+        tokens = getattr(getattr(self, "config", None), "special_tokens", None)
+        return ple_input_ids(inputs, getattr(tokens, "eos_token_id", None))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if self.__dict__.get("_closed", False):
+            raise RuntimeError("Qwen4 model is closed")
         try:
             return self._forward_with_ple_prefetch(inputs, fmha_impl)
         finally:
@@ -2144,31 +1096,12 @@ class Qwen4ExpModel(Qwen35Model):
         ple_input_ids = inputs.input_ids
         if self.ple_layers:
             ple_input_ids = self._ple_input_ids(inputs)
-        # Temporary numerical diagnostics: per-layer residual-stream norms.
-        # Enabled only when RTP_LLM_QWEN4_LAYER_STATS is set; logs the first
-        # few forwards so layer-by-layer magnitudes can be inspected.
-        stats_enabled = os.environ.get(
-            "RTP_LLM_QWEN4_LAYER_STATS", ""
-        ).strip().lower() in ("1", "true", "yes")
-        stats_forward = getattr(self, "_layer_stats_calls", 0)
-        stats_this_forward = stats_enabled and stats_forward < 3
-        if stats_this_forward:
-            self._layer_stats_calls = stats_forward + 1
-            logging.warning(
-                "[qwen4-layer-stats] forward=%d embed_stream=%.4f",
-                stats_forward,
-                float(hyper_states.float().norm()),
-            )
         for i, decoder_layer in enumerate(self.layers):
-            layer_in_norm = None
-            if stats_this_forward:
-                layer_in_norm = float(hyper_states.float().norm())
             if str(i) in self.ple_layers:
                 if self.kv_cache is None:
                     raise RuntimeError(
                         "qwen4_exp PLE requires its two state cache regions"
                     )
-                before_ple = hyper_states
                 hyper_states = self._apply_ple(
                     i,
                     hyper_states,
@@ -2176,13 +1109,6 @@ class Qwen4ExpModel(Qwen35Model):
                     attention_inputs,
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
-                if stats_this_forward:
-                    logging.warning(
-                        "[qwen4-layer-stats] forward=%d layer=%d ple_delta=%.4f",
-                        stats_forward,
-                        i,
-                        float((hyper_states - before_ple).float().norm()),
-                    )
             if self.kv_cache is None:
                 layer_kv_cache = None
                 layer_attention_inputs = attention_inputs
@@ -2219,14 +1145,6 @@ class Qwen4ExpModel(Qwen35Model):
                 qsa_runtime=qsa_runtime,
             )
             publish_layer_side_caches(self.kv_cache, i, side_cache_writers)
-            if layer_in_norm is not None:
-                logging.warning(
-                    "[qwen4-layer-stats] forward=%d layer=%d in=%.4f out=%.4f",
-                    stats_forward,
-                    i,
-                    layer_in_norm,
-                    float(hyper_states.float().norm()),
-                )
 
         if getattr(self, "_capture_mtp_target_hidden", False):
             # The pre-collapse stream is the MTP input. Return it as a
@@ -2236,13 +1154,6 @@ class Qwen4ExpModel(Qwen35Model):
         else:
             self._mtp_target_hidden_states = None
         hidden_states, _, _ = self.hyper_connection_mixer(hyper_states)
-        if stats_this_forward:
-            logging.warning(
-                "[qwen4-layer-stats] forward=%d stream=%.4f final=%.4f",
-                stats_forward,
-                float(hyper_states.float().norm()),
-                float(hidden_states.float().norm()),
-            )
         if self._mtp_target_hidden_states is not None:
             return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
         return PyModelOutputs(hidden_states)

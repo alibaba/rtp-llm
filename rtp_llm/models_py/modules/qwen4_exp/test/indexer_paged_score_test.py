@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.indexer_paged_score import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
     qsa_paged_indexer_score,
 )
 
@@ -51,7 +51,13 @@ class PagedScoreTest(unittest.TestCase):
 
         def score():
             return qsa_paged_indexer_score(
-                q, w, pool, bt, ctx, block_size=4, max_ctx_len=4,
+                q,
+                w,
+                pool,
+                bt,
+                ctx,
+                block_size=4,
+                max_ctx_len=4,
                 validate_block_table=False,
             )
 

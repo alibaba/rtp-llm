@@ -1,16 +1,13 @@
-"""Exact pinned-host vocabulary lookup using the existing PLE UVA gather."""
+"""GPU-resident FP8 vocabulary lookup with BF16 output and TP ordering."""
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
-    gather_local,
-    prepare_cpu_uva_shards,
-)
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import gather_local
 
 
-class Qwen4CpuVocabEmbedding(nn.Module):
+class Qwen4Fp8VocabEmbedding(nn.Module):
     def __init__(
         self,
         weight: torch.Tensor,
@@ -19,25 +16,22 @@ class Qwen4CpuVocabEmbedding(nn.Module):
         weight_scale=None,
     ):
         super().__init__()
-        fp8 = weight.dtype == torch.float8_e4m3fn
         if (
-            (weight.device.type != "cpu" and not (fp8 and weight.is_cuda))
-            or (weight.device.type == "cpu" and not weight.is_pinned())
+            not weight.is_cuda
+            or weight.dtype != torch.float8_e4m3fn
             or weight.ndim != 2
-            or weight.dtype not in (torch.bfloat16, torch.float32, torch.float8_e4m3fn)
             or not weight.is_contiguous()
             or min(weight.shape) <= 0
             or tp_size < 1
+            or weight.device != device
         ):
             raise ValueError(
-                "CPU vocabulary lookup requires pinned contiguous BF16/F32 rows"
+                "FP8 vocabulary requires contiguous CUDA E4M3 rows on its execution device"
             )
-        if fp8 and (weight_scale is None or weight_scale.numel() != 1):
+        if weight_scale is None or weight_scale.numel() != 1:
             raise ValueError("FP8 vocabulary requires one scale")
-        self.weight_scale = (
-            weight_scale.to(device=device, dtype=torch.float32).reshape(1)
-            if fp8
-            else None
+        self.weight_scale = weight_scale.to(device=device, dtype=torch.float32).reshape(
+            1
         )
         self.tp_size = tp_size
         self.hidden_size = weight.shape[1]
@@ -50,18 +44,13 @@ class Qwen4CpuVocabEmbedding(nn.Module):
         )
         self.column_tiles = self.hidden_size // self.tile_width
         flat = weight.view(-1, self.tile_width)
-        if weight.device.type == "cpu":
-            self.shards, self.pointer_table = prepare_cpu_uva_shards(
-                [flat], [0], 1, device
-            )
-            self.device = self.pointer_table.device
-        else:
-            self.shards = [flat]
-            self.pointer_table = torch.tensor(
-                [flat.data_ptr()], dtype=torch.int64, device=weight.device
-            )
-            self.device = weight.device
+        self.shards = [flat]
+        self.pointer_table = torch.tensor(
+            [flat.data_ptr()], dtype=torch.int64, device=weight.device
+        )
+        self.device = weight.device
         self.weight = self.shards[0].view_as(weight)
+        self.weight._rtp_requires_restart_for_update = True
         self.columns = torch.arange(
             self.column_tiles, dtype=torch.int64, device=self.device
         )
@@ -78,7 +67,7 @@ class Qwen4CpuVocabEmbedding(nn.Module):
             or input.ndim != 1
             or input.dtype not in (torch.int32, torch.int64)
         ):
-            raise ValueError("CPU vocabulary lookup requires packed CUDA token ids")
+            raise ValueError("FP8 vocabulary lookup requires packed CUDA token ids")
         tokens = input.to(torch.int64)
         tokens = torch.where((tokens >= 0) & (tokens < self.vocab_size), tokens, -1)
         ids = tokens.unsqueeze(-1) * self.column_tiles + self.columns

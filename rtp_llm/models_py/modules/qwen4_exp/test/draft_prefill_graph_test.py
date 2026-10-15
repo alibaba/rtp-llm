@@ -8,7 +8,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
-from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
     DraftPrefillGraphReplay,
     draft_graph_lanes,
     draft_graph_rows,

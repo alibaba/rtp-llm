@@ -1,11 +1,11 @@
 import logging
-import os
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -25,7 +25,6 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MultimodalEmbeddingInjector,
-    RMSNorm,
     RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
@@ -64,10 +63,10 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
+    HWKernelConfig,
     HybridAttentionType,
     LinearAttentionConfig,
     ParallelismConfig,
@@ -84,23 +83,8 @@ from rtp_llm.utils.swizzle_utils import (
     should_swizzle_linear_attn_ba,
 )
 from rtp_llm.utils.util import to_torch_dtype
-from torch import nn
 
 logger = logging.getLogger(__name__)
-_GDN_OUTPUT_NORM_FORWARD = RmsNormGated.forward
-
-
-def _can_fuse_gdn_output_norm(norm: RmsNormGated) -> bool:
-    module_hooks = torch.nn.modules.module
-    return (
-        type(norm) is RmsNormGated
-        and RmsNormGated.forward is _GDN_OUTPUT_NORM_FORWARD
-        and "forward" not in norm.__dict__
-        and not norm._forward_pre_hooks
-        and not norm._forward_hooks
-        and not module_hooks._global_forward_pre_hooks
-        and not module_hooks._global_forward_hooks
-    )
 
 
 @lru_cache(maxsize=None)
@@ -935,8 +919,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
-        output_norm: Optional[RmsNormGated] = None,
-        output_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
         assert (
@@ -953,55 +935,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
-        if (
-            output_norm is not None
-            and output_gate is not None
-            and _can_fuse_gdn_output_norm(output_norm)
-            and output_norm.bias is None
-            and output_norm.group_size == self.head_v_dim
-            and self.head_k_dim == self.head_v_dim == 128
-        ):
-            from rtp_llm.models_py.modules.qwen4_exp.gdn_post_conv_triton import (
-                try_gdn_post_conv,
-            )
-
-            batch, steps = self._get_bs_from_attenion_input(
-                mixed_qkv, attn_inputs, is_target_verify
-            )
-            qkv = mixed_qkv.reshape(
-                batch,
-                steps,
-                self.local_num_k_heads * 2 + self.local_num_v_heads,
-                self.head_k_dim,
-            )
-            query, key, value = torch.split(
-                qkv,
-                [
-                    self.local_num_k_heads,
-                    self.local_num_k_heads,
-                    self.local_num_v_heads,
-                ],
-                dim=2,
-            )
-            fused = try_gdn_post_conv(
-                query,
-                key,
-                value,
-                a,
-                b,
-                self.alog,
-                self.dt_bias,
-                output_gate,
-                output_norm.weight,
-                self._get_ssm_states(kv_cache_tensor),
-                self._get_fla_block_map(attn_inputs),
-                attn_inputs.sequence_lengths_plus_1_device,
-                page_size=kv_cache.seq_size_per_block,
-                eps=output_norm.eps,
-                activation=output_norm.activation,
-            )
-            if fused is not None:
-                return fused
         attn_out = self._fla(
             mixed_qkv,
             b,
@@ -1011,11 +944,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             attn_meta,
         )
-        if output_norm is not None:
-            return output_norm(
-                attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim),
-                output_gate,
-            )
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -1049,6 +977,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        linear_factory=None,
     ):
         super().__init__(
             attn_config,
@@ -1057,9 +986,10 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            linear_factory=linear_factory,
         )
         # maybe fuse gate in qkv_proj later
-        self.gate = LinearFactory.create_linear_from_weights(
+        self.gate = self.linear_factory.create_linear_from_weights(
             weights,
             W.attn_gate_w,
             W.attn_gate_s,
@@ -1091,8 +1021,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         norm_activation: Optional[str] = None,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -1147,13 +1079,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights[W.linear_attn_qkvz_w] = fused_w[:, : self._qkvz_size]
             weights[W.linear_attn_ba_w] = fused_w[:, self._qkvz_size :]
             del qkvz_w, ba_w
-            self.in_proj_fused = LinearFactory.create_linear(
+            self.in_proj_fused = self.linear_factory.create_linear(
                 fused_w, None, None, quant_config, hw_kernel_config=hw_kernel_config
             )
             self.in_proj_qkvz = None
             self.in_proj_ba = None
         else:
-            self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
+            self.in_proj_qkvz = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.linear_attn_qkvz_w,
                 W.linear_attn_qkvz_s,
@@ -1167,7 +1099,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ba_hw_kernel_config = hw_kernel_config
             if rocm_swizzle_enabled and not should_swizzle_linear_attn_ba(ba_w):
                 ba_hw_kernel_config = None
-            self.in_proj_ba = LinearFactory.create_linear_from_weights(
+            self.in_proj_ba = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.linear_attn_ba_w,
                 None,
@@ -1189,7 +1121,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             group_size=linear_attn_config.linear_value_head_dim,
             activation=norm_activation or "silu",
         )
-        self.out_proj = LinearFactory.create_linear_from_weights(
+        self.out_proj = self.linear_factory.create_linear_from_weights(
             weights,
             W.linear_attn_out_w,
             W.linear_attn_out_s,
@@ -1437,11 +1369,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
-        fused_decode_norm = (
-            getattr(self, "_qwen4_fused_post_conv", False)
-            and os.environ.get("RTP_LLM_QWEN4_FUSED_GDN_POST_CONV", "0") == "1"
-            and not (attention_inputs.is_prefill and not attn_meta.is_target_verify)
-        )
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
@@ -1458,16 +1385,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 attention_inputs,
                 kv_cache,
                 attn_meta,
-                **(
-                    dict(output_norm=self.norm, output_gate=z)
-                    if fused_decode_norm
-                    else {}
-                ),
             )
-        if not fused_decode_norm:
-            attn_output = self.norm(
-                attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-            )
+        attn_output = self.norm(
+            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
+        )
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
@@ -1475,6 +1396,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
 
 class Qwen3NextDecoderLayer(nn.Module):
+    _linear_factory = LinearFactory
+
     def __init__(
         self,
         config: ModelConfig,
@@ -1500,6 +1423,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
                 # Qwen4-Exp gates this norm with `output_gate_type` (sigmoid);
                 # Qwen3-Next checkpoints leave it unset and keep silu.
                 norm_activation=getattr(config, "linear_attn_norm_activation", None),
@@ -1515,6 +1439,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
 
         if config.moe_style in (1, 2):
@@ -1526,6 +1451,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
@@ -1534,6 +1460,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
 
         self._build_residual_modules(config, weights)

@@ -1,7 +1,5 @@
 #include <cstdint>
 #include <cstddef>
-#include <cstdlib>
-#include <cstring>
 
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
 
@@ -70,16 +68,10 @@ void invokeFusedCopy(const FusedD2DCopyParams& params, cudaStream_t stream) {
         return;
     // Preserve the small-copy launch and per-task parallelism. Large MTP hidden
     // tensors otherwise use just eight blocks for hundreds of MiB of payload.
-    static const bool bulk = []() {
-        const char* value = std::getenv("RTP_LLM_FUSED_COPY_BULK_EXPERIMENTAL");
-        return value && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0);
-    }();
     int blocks = FUSED_COPY_BLOCKS_PER_TASK;
-    if (bulk) {
-        for (int i = 0; i < params.num_copies; ++i) {
-            const int task_blocks = fusedCopyBlocks(params.size[i]);
-            blocks                = task_blocks > blocks ? task_blocks : blocks;
-        }
+    for (int i = 0; i < params.num_copies; ++i) {
+        const int task_blocks = fusedCopyBlocks(params.size[i]);
+        blocks                = task_blocks > blocks ? task_blocks : blocks;
     }
     if (blocks > FUSED_COPY_BLOCKS_PER_TASK) {
         fusedCopyKernel<true><<<dim3(blocks, params.num_copies), FUSED_COPY_THREADS, 0, stream>>>(params);

@@ -1,14 +1,10 @@
-"""Admission for the experimental Qwen NVFP4 tensor-parallel path."""
-
-import os
+"""Topology admission for the complete Qwen4 FP8/NVFP4 recipe."""
 
 
 def use_nvfp4_tensor_parallel(config) -> bool:
-    if os.environ.get("RTP_LLM_QWEN4_NVFP4_TP_EXPERIMENTAL", "0") != "1":
-        return False
     pc = config.parallelism_config
     return (
-        bool(getattr(config.model_config, "_qwen4_moe_only_fp4", False))
+        bool(getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False))
         and config.tp_size == 2
         and config.ep_size == 1
         and pc.world_size == 2

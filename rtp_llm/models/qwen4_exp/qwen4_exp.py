@@ -1,20 +1,20 @@
 import json
-import logging
-import os
 from pathlib import Path
 from typing import Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
+from rtp_llm.config.qwen4_exp_config import (
+    build_qwen4_quant_config,
+    freeze_runtime_config,
+    validate_qwen4_runtime,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
-    qwen4_pd_enabled,
 )
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
-from rtp_llm.ops import DataType, HybridAttentionType, KvCacheDataType, RoleType
-from rtp_llm.utils.util import str_to_bool
+from rtp_llm.ops import HybridAttentionType
 
 _LAYER_TYPE_TO_HYBRID_ATTENTION: Dict[str, HybridAttentionType] = {
     "linear_attention": HybridAttentionType.LINEAR,
@@ -22,28 +22,12 @@ _LAYER_TYPE_TO_HYBRID_ATTENTION: Dict[str, HybridAttentionType] = {
     "full_attention": HybridAttentionType.NONE,
 }
 
-_SKELETON_WARNING = (
-    "qwen4_exp is experimental and supports only the documented BF16 correctness "
-    "matrix. Unsupported combinations of PLE/QSA/MTP, parallelism, "
-    "quantization and CUDA Graph "
-    "fail fast. See docs/design/qwen3.8_flash_next_support_design.md appendix C."
-)
-
-_EXPERIMENTAL_SERVING_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL"
-_PLE_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_PLE"
-_PLE_CPU_OFFLOAD_ENV = "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD"
-_QSA_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_QSA"
-_GRAPH_EXPERIMENTAL_ENV = "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL"
-_MOE_FP4_ENV = "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL"
-_MOE_FP8_ENV = "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL"
-
 
 class Qwen4Exp(Qwen35Moe):
     """Qwen3.8-Flash-Next (``Qwen4ExpForConditionalGeneration``).
 
     Shares the Qwen3.5 multimodal shell and GDN linear-attention layers. Gated
-    residual plus restricted PLE/QSA correctness paths are connected. Serving
-    remains disabled unless the model-level experimental gate is explicit.
+    residual and checkpoint-required PLE/QSA paths are always connected.
     """
 
     @staticmethod
@@ -51,184 +35,14 @@ class Qwen4Exp(Qwen35Moe):
         return Qwen4ExpWeight
 
     def support_cuda_graph(self) -> bool:
-        # The Qwen3 Next backbone already owns graph-safe GDN/MoE metadata.
-        # Qwen4's PLE and QSA side pools have dynamic writes and host-side
-        # validation, so only the development variant without them may use
-        # that backbone graph path. The MTP draft has a separate graph contract.
-        config = getattr(self, "model_config", None)
-        if config is None:
-            return False
-        if getattr(config, "enable_qwen4_ple", False) and getattr(
-            config, "qwen4_ple_cpu_offload", True
-        ):
-            # Host lookup must finish outside capture/replay. The explicit
-            # model-input preparation path stages only the selected rows.
-            if not str_to_bool(os.environ.get("RTP_LLM_QWEN4_PLE_CPU_GRAPH", "false")):
-                return False
-        side_cache_or_draft = (
-            bool(getattr(config, "enable_qwen4_ple", False))
-            or bool(getattr(config, "enable_qwen4_qsa", False))
-            or bool(getattr(config, "is_mtp", False))
-        )
-        return not side_cache_or_draft or (
-            self._experimental_serving_enabled()
-            and str_to_bool(os.environ.get(_GRAPH_EXPERIMENTAL_ENV, "false"))
-        )
-
-    @staticmethod
-    def _experimental_serving_enabled() -> bool:
-        """Return whether the known-incomplete serving path may run.
-
-        The guard is evaluated by ``load`` rather than config parsing so config
-        and checkpoint-manifest tests remain usable. It runs before any weight
-        tensor is materialised, including the 102-GB PLE table.
-        """
-        return str_to_bool(os.environ.get(_EXPERIMENTAL_SERVING_ENV, "false"))
+        # Capability only; the common graph setting and exact-batch metadata
+        # decide capture. CPU PLE rows are prepared before capture/replay.
+        return getattr(self, "model_config", None) is not None
 
     def load(self, skip_python_model: bool = False):
-        if not self._experimental_serving_enabled():
-            raise RuntimeError(
-                "qwen4_exp serving is incomplete and disabled by default: the "
-                "restricted PLE/QSA correctness paths are not production-ready. Set "
-                f"{_EXPERIMENTAL_SERVING_ENV}=true only for isolated development."
-            )
-        # Use the already-parsed config instead of re-reading the environment:
-        # changing the process environment after config construction must not
-        # change which model implementation is loaded.
         config = getattr(self, "model_config", None)
-        moe_only_fp8 = getattr(config, "_qwen4_moe_only_fp8", False) is True
-        moe_only_fp4 = getattr(config, "_qwen4_moe_only_fp4", False) is True
-        if moe_only_fp4:
-            quant = getattr(config, "quant_config", None)
-            if (
-                not isinstance(quant, ModelOptFp4Config)
-                or quant.is_quanted()
-                or quant.group_size() != 16
-            ):
-                raise RuntimeError(
-                    "qwen4_exp online expert NVFP4 requires BF16 source and block16"
-                )
-        if moe_only_fp8:
-            quant = getattr(config, "quant_config", None)
-            parallelism = getattr(self, "parallelism_config", None)
-            if (
-                not isinstance(quant, Fp8BlockWiseQuantConfig)
-                or not quant.is_quanted()
-                or quant.group_size() != 128
-                or parallelism is None
-                or parallelism.get_ffn_tp_size() != 1
-            ):
-                raise RuntimeError(
-                    "qwen4_exp expert FP8 requires prequantized 128x128 weights "
-                    "and FFN TP=1 (expert parallelism); got "
-                    f"quant={type(quant).__name__}, "
-                    f"prequantized={quant.is_quanted() if isinstance(quant, Fp8BlockWiseQuantConfig) else None}, "
-                    f"block={quant.group_size() if isinstance(quant, Fp8BlockWiseQuantConfig) else None}, "
-                    f"ffn_tp={parallelism.get_ffn_tp_size() if parallelism is not None else None}"
-                )
-        if getattr(config, "enable_qwen4_qsa", False):
-            gamma = int(getattr(config, "gen_num_per_cycle", 0))
-            ratio = int(getattr(config, "_qwen4_indexer_compress_ratio", 0))
-            if gamma > 0 and ratio > 0 and gamma + 1 > ratio:
-                raise RuntimeError(
-                    "qwen4_exp QSA target verify requires gen_num_per_cycle + 1 "
-                    f"<= indexer_compress_ratio; got {gamma} + 1 > {ratio}"
-                )
-            if getattr(config, "data_type", None) != DataType.TYPE_BF16:
-                raise RuntimeError(
-                    "qwen4_exp QSA currently requires act_type=BF16; refusing "
-                    "before indexer weights are loaded"
-                )
-            quant_config = getattr(config, "quant_config", None)
-            is_quanted = getattr(quant_config, "is_quanted", None)
-            if (
-                not (moe_only_fp8 or moe_only_fp4)
-                and quant_config is not None
-                and (not callable(is_quanted) or bool(is_quanted()))
-            ):
-                raise RuntimeError(
-                    "qwen4_exp QSA does not support quantized indexer weights"
-                )
-            attn_config = getattr(config, "attn_config", None)
-            if not bool(getattr(attn_config, "is_sparse", False)) or not bool(
-                getattr(attn_config, "use_sparse_gqa_fmha", False)
-            ):
-                raise RuntimeError(
-                    "qwen4_exp QSA routing flags are inconsistent; dense fallback "
-                    "is forbidden"
-                )
-            kv_cache_dtype = getattr(
-                attn_config, "kv_cache_dtype", KvCacheDataType.BASE
-            )
-            if kv_cache_dtype != KvCacheDataType.BASE and not (
-                kv_cache_dtype == KvCacheDataType.FP8
-                and os.environ.get("RTP_LLM_QWEN4_FP8_KV_EXPERIMENTAL", "0") == "1"
-            ):
-                raise RuntimeError(
-                    "qwen4_exp QSA paged attention requires the base BF16 KV cache"
-                )
-            parallelism = getattr(self, "parallelism_config", None)
-            role_type = getattr(parallelism, "role_type", RoleType.PDFUSION)
-            if (
-                role_type in (RoleType.PREFILL, RoleType.DECODE)
-                and not qwen4_pd_enabled()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp QSA does not support PD-separated PREFILL/DECODE "
-                    "roles; refusing before indexer weights are loaded"
-                )
-            cp = getattr(parallelism, "prefill_cp_config", None)
-            if cp is not None and (cp.is_enabled() or cp.is_prefill_enabled()):
-                raise RuntimeError(
-                    "qwen4_exp QSA does not support context/prefill parallelism; "
-                    "refusing before indexer weights are loaded"
-                )
-        if getattr(config, "enable_qwen4_ple", False) and (
-            getattr(config, "data_type", None) != DataType.TYPE_BF16
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE currently requires act_type=BF16; refusing to "
-                "load its rank-local n-gram table for an incompatible dtype"
-            )
-        if getattr(config, "enable_qwen4_ple", False):
-            parallelism = getattr(self, "parallelism_config", None)
-            role_type = getattr(parallelism, "role_type", RoleType.PDFUSION)
-            if (
-                role_type in (RoleType.PREFILL, RoleType.DECODE)
-                and not qwen4_pd_enabled()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE does not support PD-separated PREFILL/DECODE "
-                    "roles; refusing before its rank-local n-gram table is loaded"
-                )
-            cp = getattr(parallelism, "prefill_cp_config", None)
-            if cp is not None and (cp.is_enabled() or cp.is_prefill_enabled()):
-                raise RuntimeError(
-                    "qwen4_exp PLE does not support context/prefill parallelism; "
-                    "refusing before its rank-local n-gram table is loaded"
-                )
-            # Match ModelDeployWeightInfo/LoadConfig exactly. In particular,
-            # ALL_GATHER context parallelism changes attention TP to one; using
-            # raw tp_size here would let the 102-GB table start loading before
-            # its descriptor rejected the effective topology.
-            tp_size = (
-                int(parallelism.get_attn_tp_size()) if parallelism is not None else 0
-            )
-            shard_count = int(getattr(config, "_qwen4_split_ngram_parts", 0))
-            if tp_size < 1 or shard_count <= 0 or shard_count % tp_size:
-                raise RuntimeError(
-                    "qwen4_exp PLE requires effective attention TP >= 1 and an "
-                    "even rank-local shard split, got "
-                    f"split_ngram_parts={shard_count}, attn_tp_size={tp_size}"
-                )
-            if tp_size == 1 and not bool(
-                getattr(config, "qwen4_ple_cpu_offload", True)
-            ):
-                raise RuntimeError("qwen4_exp TP1 PLE requires CPU table residency")
-        logging.warning(
-            "%s=true bypasses the qwen4_exp incomplete-model safety gate",
-            _EXPERIMENTAL_SERVING_ENV,
-        )
+        validate_qwen4_runtime(config, self.parallelism_config)
+        freeze_runtime_config(config, self.parallelism_config)
         return super().load(skip_python_model=skip_python_model)
 
     def _py_model_class(self):
@@ -239,69 +53,27 @@ class Qwen4Exp(Qwen35Moe):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
-        config._qwen4_moe_only_fp8 = False
-        config._qwen4_moe_only_fp4 = False
-        config._qwen4_vocab_cpu_offload = str_to_bool(
-            os.environ.get("RTP_LLM_QWEN4_VOCAB_CPU_OFFLOAD", "false")
-        )
-        config._qwen4_attention_fp8 = str_to_bool(
-            os.environ.get("RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL", "false")
-        )
-        config._qwen4_gdn_bf16 = str_to_bool(
-            os.environ.get("RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL", "false")
-        )
-        config._qwen4_full_fp8_nvfp4 = str_to_bool(
-            os.environ.get("RTP_LLM_QWEN4_FULL_FP8_NVFP4_EXPERIMENTAL", "false")
-        )
-        config._qwen4_fp8_source = False
-        if config._qwen4_full_fp8_nvfp4:
-            if config._qwen4_gdn_bf16:
-                raise ValueError("full FP8 NVFP4 mode cannot keep GDN BF16 weights")
-            config._qwen4_attention_fp8 = True
-        if config._qwen4_full_fp8_nvfp4 or str_to_bool(
-            os.environ.get(_MOE_FP4_ENV, "false")
-        ):
-            root = Path(ckpt_path)
-            config_json = json.loads((root / "config.json").read_text())
-            if config._qwen4_full_fp8_nvfp4:
-                from rtp_llm.models.qwen4_exp.moe_fp8 import (
-                    validate_moe_fp8_checkpoint,
-                )
-
-                index = json.loads((root / "model.safetensors.index.json").read_text())
-                validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
-                config._qwen4_fp8_source = True
-            elif config_json.get("quantization_config"):
-                raise ValueError(
-                    "Qwen4 online NVFP4 requires an unquantized BF16 source"
-                )
-            config.quant_config = ModelOptFp4Config(
-                bits=4,
-                group_size=16,
-                is_quanted=False,
-                activation_amax=32.0,
-                online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
-                require_contiguous_experts=True,
-                source_fp8_block_size=128 if config._qwen4_fp8_source else None,
-            )
-            config._qwen4_moe_only_fp4 = True
-        if not config._qwen4_full_fp8_nvfp4 and str_to_bool(
-            os.environ.get(_MOE_FP8_ENV, "false")
-        ):
+        config.model_type = "qwen4_exp"
+        root = Path(ckpt_path)
+        config_json = json.loads((root / "config.json").read_text())
+        source_quant = config_json.get("quantization_config")
+        config._qwen4_fp8_source = bool(source_quant)
+        if source_quant:
             from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
 
-            root = Path(ckpt_path)
-            config_json = json.loads((root / "config.json").read_text())
-            if config_json.get("quantization_config"):
-                index = json.loads((root / "model.safetensors.index.json").read_text())
-                validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
-                config._qwen4_moe_only_fp8 = True
-        if config._qwen4_attention_fp8 and not config._qwen4_moe_only_fp4:
-            raise ValueError(
-                "Qwen4 attention FP8 requires online MoE FP4 from BF16 source"
-            )
-        logging.warning(_SKELETON_WARNING)
+            index = json.loads((root / "model.safetensors.index.json").read_text())
+            validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
+        cls._configure_precision_recipe(config)
         return config
+
+    @staticmethod
+    def _configure_precision_recipe(config: ModelConfig) -> None:
+        config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
+        config.quant_config = build_qwen4_quant_config(
+            config.quantization, config._qwen4_full_fp8_nvfp4
+        )
+        if config.quant_config is not None:
+            config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
 
     @classmethod
     def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:
@@ -317,17 +89,6 @@ class Qwen4Exp(Qwen35Moe):
         config.linear_attn_norm_activation = config_json.get(
             "output_gate_type"
         ) or config_json.get("hidden_act", "silu")
-        # Keep unfinished subsystems disabled independently from the model-level
-        # experimental gate. This prevents dense-fallback development from
-        # allocating unused side pools or loading the 102-GB PLE table.
-        config.enable_qwen4_ple = str_to_bool(os.environ.get(_PLE_ENV, "false"))
-        # Snapshot storage selection alongside the PLE feature gate. This has
-        # the same default/meaning as vLLM's EngramConfig.cpu_offload.
-        config.qwen4_ple_cpu_offload = str_to_bool(
-            os.environ.get(_PLE_CPU_OFFLOAD_ENV, "true")
-        )
-        config.enable_qwen4_qsa = str_to_bool(os.environ.get(_QSA_ENV, "false"))
-        config.attn_config.use_sparse_gqa_fmha = config.enable_qwen4_qsa
         config._qwen4_ple_layer_ids = list(config_json.get("ple_layer_ids", []))
         config._qwen4_ngram_size = int(config_json.get("ngram_size", 0))
         config._qwen4_ple_conv_kernel_size = int(
@@ -359,7 +120,8 @@ class Qwen4Exp(Qwen35Moe):
                     f"qwen4_exp indexer_head_dim={head_dim} enables the indexer but "
                     f"indexer_compress_ratio is {ratio}"
                 )
-            config.attn_config.is_sparse = config.enable_qwen4_qsa
+            config.attn_config.is_sparse = True
+            config.attn_config.use_sparse_gqa_fmha = True
             config.attn_config.indexer_head_dim = head_dim
             config.attn_config.indexer_head_num = int(config_json["indexer_n_heads"])
             config.attn_config.indexer_topk = config._qwen4_indexer_budget // ratio
@@ -405,28 +167,23 @@ class Qwen4Exp(Qwen35Moe):
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes
         # Size/parameter APIs describe the full checkpoint independently of
-        # feature gates. Resident loader memory only includes PLE when its
-        # execution path is explicitly enabled.
+        # loader residency. PLE tables reside in pinned host memory; auxiliary
+        # weights remain replicated on the execution device.
         if config.enable_qwen4_ple:
-            if not config.qwen4_ple_cpu_offload:
-                config._tp_sharded_extra_weight_bytes = table_bytes
             config._replicated_extra_weight_bytes = replicated_bytes
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        if getattr(model_config, "_qwen4_moe_only_fp4", False) is True:
-            model_config.quant_config = ModelOptFp4Config(
-                bits=4,
-                group_size=16,
-                is_quanted=False,
-                activation_amax=32.0,
-                online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
-                require_contiguous_experts=True,
-                source_fp8_block_size=(
-                    128 if getattr(model_config, "_qwen4_fp8_source", False) else None
-                ),
-            )
-            model_config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
+        # Generic precision initialization reads source checkpoint metadata;
+        # finalize the complete source-to-runtime recipe after that stage.
+        cls._configure_precision_recipe(model_config)
+        if not model_config.is_mtp:
+            cls._set_ple_weight_size_estimate(model_config)
+        if (
+            type(model_config.qwen4_ple_prefetch_mb) is not int
+            or model_config.qwen4_ple_prefetch_mb <= 0
+        ):
+            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
         ple_layer_ids = (
             getattr(model_config, "_qwen4_ple_layer_ids", [])
             if model_config.enable_qwen4_ple

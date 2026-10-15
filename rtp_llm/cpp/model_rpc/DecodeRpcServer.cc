@@ -23,6 +23,8 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/LinearTpCacheLayout.h"
+#include "rtp_llm/cpp/model_rpc/TpCacheTransferPlan.h"
+#include "rtp_llm/cpp/model_rpc/RegisteredCacheStaging.h"
 #include "rtp_llm/cpp/model_rpc/MhaTpCacheLayout.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -1071,35 +1073,22 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const bool use_hybrid          = cache_config.groupNums() > 1;
     const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
 
-    const char* typed_tp_env = std::getenv("RTP_LLM_QWEN4_ASYMMETRIC_TP_PD");
-    const bool  typed_tp     = typed_tp_env != nullptr && std::string(typed_tp_env) == "1" && use_opaque_kv_store
-                          && (peer_cnt > 1 || load_context.partition_count > 1);
-    if (typed_tp && (load_context.prefill_cp_size != 1 || load_context.partition_count != 1)) {
+    const bool typed_tp = useTypedTpCacheLayout(
+        maga_init_params_.model_config_.model_type, use_opaque_kv_store, peer_cnt, load_context.partition_count);
+    const TpCacheTransferTopology transfer_topology{
+        static_cast<size_t>(maga_init_params_.parallelism_config.get_attn_tp_size()),
+        static_cast<size_t>(peer_cnt),
+        static_cast<size_t>(load_context.prefill_cp_size),
+        static_cast<size_t>(load_context.partition_count)};
+    if (typed_tp && !transfer_topology.supportsTypedTransfer()) {
         return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "typed TP handoff requires P>D and CP=1"), 0};
     }
     c10::OptionalDeviceGuard staging_device_guard;
     if (typed_tp) {
         staging_device_guard.reset_device(torch::Device(torch::kCUDA, maga_init_params_.parallelism_config.local_rank));
     }
-    struct RegisteredLinearStaging {
-        torch::Tensor               tensor;
-        std::shared_ptr<MemoryUtil> memory;
-        bool                        registered = false;
-        ~RegisteredLinearStaging() {
-            if (registered && !memory->deregUserMr(tensor.data_ptr(), false)) {
-                RTP_LLM_LOG_WARNING("failed to deregister linear TP staging memory");
-            }
-        }
-    };
-    struct PendingLinearCopy {
-        std::shared_ptr<RegisteredLinearStaging> source;
-        BlockInfo                                destination;
-        std::vector<LinearTpCacheSlice>          slices;
-        size_t                                   part_count;
-        size_t                                   part_id;
-    };
-    std::vector<PendingLinearCopy>                                      pending_linear_copies;
-    std::unordered_map<void*, std::shared_ptr<RegisteredLinearStaging>> staging_owners;
+    std::vector<PendingCacheCopy>                                      pending_cache_copies;
+    std::unordered_map<void*, std::shared_ptr<RegisteredCacheStaging>> staging_owners;
     auto requireTypedTp = [](bool valid, const std::string& message) {
         if (!valid) {
             throw std::invalid_argument(message);
@@ -1128,29 +1117,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         requireTypedTp(item_size > 0 && linear_spec->v_block_size_bytes() == rows * (2 * q_bytes + v_bytes)
                            && parts[0].size_bytes == linear_spec->block_size_bytes(),
                        "typed linear TP payload does not match its state/conv layout");
-        auto slices =
-            linearTpCacheSlices(linear_spec->k_block_size_bytes(), q_bytes, q_bytes, v_bytes, rows, peer_cnt, peer_idx);
-        const size_t source_bytes = parts[0].size_bytes / peer_cnt;
-        // Round registration storage; only source_bytes participate in RDMA
-        // and in reassembly. The owner deregisters before releasing pinned RAM.
-        constexpr size_t registration_alignment = 64 * 1024;
-        const size_t     registered_bytes =
-            ((source_bytes + registration_alignment - 1) / registration_alignment) * registration_alignment;
-        auto staging = std::make_shared<RegisteredLinearStaging>();
-        staging->tensor =
-            torch::empty({static_cast<int64_t>(registered_bytes)},
-                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
-        staging->memory = resource_.cache_store->getMemoryUtil();
-        if (staging->memory->isRdmaMode()) {
-            requireTypedTp(
-                staging->memory->regUserMr(staging->tensor.data_ptr(), registered_bytes, false, registration_alignment),
-                "failed to register linear TP staging memory");
-            staging->registered = true;
-        }
-        staging_owners.emplace(staging->tensor.data_ptr(), staging);
-        pending_linear_copies.push_back(
-            {staging, parts[0], std::move(slices), static_cast<size_t>(peer_cnt), static_cast<size_t>(peer_idx)});
-        parts[0].addr       = staging->tensor.data_ptr();
+        auto plan = TpCacheTransferPlan::linear(
+            linear_spec->k_block_size_bytes(), q_bytes, q_bytes, v_bytes, rows, peer_cnt, peer_idx);
+        plan.validateSlices();
+        requireTypedTp(plan.destination_bytes == parts[0].size_bytes, "typed linear TP destination bytes changed");
+        const size_t source_bytes = plan.source_bytes;
+        auto staging = std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
+        staging_owners.emplace(staging->tensor().data_ptr(), staging);
+        pending_cache_copies.push_back({staging, parts[0], std::move(plan)});
+        parts[0].addr       = staging->tensor().data_ptr();
         parts[0].size_bytes = source_bytes;
         parts[0].is_cuda    = false;
         return parts;
@@ -1174,24 +1149,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             const auto v_bytes = index == 0 ? mha->v_block_size_bytes() : mha->v_scale_block_size_bytes();
             requireTypedTp(parts[index].is_cuda && parts[index].size_bytes == k_bytes + v_bytes,
                            "typed TP QSA destination is not a CUDA packed payload");
-            auto             slices           = mhaTpCacheSlices(k_bytes, v_bytes, 2, head);
-            const size_t     source_bytes     = parts[index].size_bytes / 2;
-            constexpr size_t alignment        = 64 * 1024;
-            const size_t     registered_bytes = ((source_bytes + alignment - 1) / alignment) * alignment;
-            auto             staging          = std::make_shared<RegisteredLinearStaging>();
-            staging->tensor =
-                torch::empty({static_cast<int64_t>(registered_bytes)},
-                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
-            staging->memory = resource_.cache_store->getMemoryUtil();
-            if (staging->memory->isRdmaMode()) {
-                requireTypedTp(
-                    staging->memory->regUserMr(staging->tensor.data_ptr(), registered_bytes, false, alignment),
-                    "failed to register QSA TP staging memory");
-                staging->registered = true;
-            }
-            staging_owners.emplace(staging->tensor.data_ptr(), staging);
-            pending_linear_copies.push_back({staging, parts[index], std::move(slices), 2, head});
-            parts[index].addr       = staging->tensor.data_ptr();
+            auto plan = TpCacheTransferPlan::mha(k_bytes, v_bytes, 2, head);
+            plan.validateSlices();
+            const size_t source_bytes = plan.source_bytes;
+            auto         staging =
+                std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
+            staging_owners.emplace(staging->tensor().data_ptr(), staging);
+            pending_cache_copies.push_back({staging, parts[index], std::move(plan)});
+            parts[index].addr       = staging->tensor().data_ptr();
             parts[index].size_bytes = source_bytes;
             parts[index].is_cuda    = false;
         }
@@ -1256,24 +1221,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer =
-        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
+    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
         if (typed_tp && cfg.topology().group(tag).spec->type != KVCacheSpecType::LinearAttention) {
-            requireTypedTp(tag == "full" || tag == "ple_conv_state" || tag == "ple_ngram_ctx" || tag == "indexer_kv"
-                               || tag == "indexer_state",
-                           "typed TP handoff rejects an unknown replicated cache tag=" + tag);
-            if (cfg.topology().group(tag).spec->type == KVCacheSpecType::MultiHeadAttention) {
-                const auto heads = cfg.topology().group(tag).localKvHeadNum();
-                requireTypedTp(heads == 1
-                                   || (heads == 2 && maga_init_params_.parallelism_config.get_attn_tp_size() == 1),
-                               "typed TP QSA handoff requires one local head or D1 with two heads");
-                if (heads == 2) {
-                    return mhaTpPeerOwnsHead(static_cast<size_t>(peer_cnt), 2, static_cast<size_t>(peer_idx));
-                }
-            }
-            // QSA K/V and scales, indexer, and PLE state are replicated within
-            // the prefill peer group; select one owner instead of overwriting.
-            return peer_idx == 0;
+            const bool mha = cfg.topology().group(tag).spec->type == KVCacheSpecType::MultiHeadAttention;
+            return replicatedTpCachePeerOwnsTag(tag,
+                                                mha,
+                                                mha ? cfg.topology().group(tag).localKvHeadNum() : 0,
+                                                transfer_topology,
+                                                static_cast<size_t>(peer_idx));
         }
             if (!is_page_level_rr) {
                 return true;
@@ -1626,56 +1581,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
     }
 
-    if (!pending_linear_copies.empty()) {
-        c10::DeviceGuard guard(torch::Device(torch::kCUDA, maga_init_params_.parallelism_config.local_rank));
-        std::unordered_map<void*, std::vector<size_t>> destination_groups;
-        size_t                                         scratch_bytes = 0;
-        for (size_t index = 0; index < pending_linear_copies.size(); ++index) {
-            const auto& copy = pending_linear_copies[index];
-            requireTypedTp(copy.destination.device_index == maga_init_params_.parallelism_config.local_rank,
-                           "typed TP cache destination belongs to another CUDA device");
-            destination_groups[copy.destination.addr].push_back(index);
-            scratch_bytes = std::max(scratch_bytes, copy.destination.size_bytes);
-        }
-        auto scratch =
-            torch::empty({static_cast<int64_t>(scratch_bytes)},
-                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
-        // Assemble one complete state on host and upload it once. A blocking
-        // bulk copy makes the same scratch safe for the next layer and avoids
-        // a stream synchronization for every small Q/K/V history segment.
-        for (const auto& [address, indices] : destination_groups) {
-            const auto&       destination_info = pending_linear_copies[indices.front()].destination;
-            std::vector<bool> received_parts(pending_linear_copies[indices.front()].part_count, false);
-            for (size_t index : indices) {
-                const auto& copy = pending_linear_copies[index];
-                requireTypedTp(copy.destination.size_bytes == destination_info.size_bytes,
-                               "inconsistent typed TP destination payload");
-                requireTypedTp(!copy.slices.empty() && copy.slices.front().bytes > 0,
-                               "typed TP frame has no state shard");
-                requireTypedTp(copy.part_count == received_parts.size() && copy.part_id < received_parts.size(),
-                               "typed TP frame has an invalid shard id or count");
-                requireTypedTp(!received_parts[copy.part_id], "typed TP frame repeats a prefill shard");
-                received_parts[copy.part_id] = true;
-                const auto* source           = static_cast<const uint8_t*>(copy.source->tensor.data_ptr());
-                auto*       output           = static_cast<uint8_t*>(scratch.data_ptr());
-                for (const auto& slice : copy.slices) {
-                    requireTypedTp(slice.source_offset <= static_cast<size_t>(copy.source->tensor.numel())
-                                       && slice.bytes
-                                              <= static_cast<size_t>(copy.source->tensor.numel()) - slice.source_offset
-                                       && slice.destination_offset <= destination_info.size_bytes
-                                       && slice.bytes <= destination_info.size_bytes - slice.destination_offset,
-                                   "typed TP reassembly slice exceeds its payload");
-                    std::memcpy(output + slice.destination_offset, source + slice.source_offset, slice.bytes);
-                }
-            }
-            requireTypedTp(std::all_of(received_parts.begin(), received_parts.end(), [](bool seen) { return seen; }),
-                           "typed TP state is missing a prefill shard");
-            auto destination = torch::from_blob(address,
-                                                {static_cast<int64_t>(destination_info.size_bytes)},
-                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-            destination.copy_(scratch.narrow(0, 0, destination_info.size_bytes), false);
-        }
-    }
+    reassembleCacheTransfers(pending_cache_copies, maga_init_params_.parallelism_config.local_rank);
 
     const size_t already_reused_blocks = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
     return {

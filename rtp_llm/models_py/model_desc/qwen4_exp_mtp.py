@@ -1,6 +1,5 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
-import os
 from collections.abc import Mapping
 from typing import Optional
 
@@ -12,9 +11,14 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
-from rtp_llm.models_py.modules import LinearFactory
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import grouped_rms_norm
-from rtp_llm.models_py.modules.qwen4_exp.norm import exact_head_rms_norm
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+    Qwen4LinearFactory as LinearFactory,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
+    annotate_compute_inventory,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
+from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import grouped_rms_norm
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
@@ -28,7 +32,7 @@ def normalize_mtp_pd_positions(inputs, index_factor: int) -> None:
         getattr(value, "cache_store_inputs", None) is not None for value in values
     ):
         return
-    from rtp_llm.models_py.modules.qwen4_exp.pd_cache_store import (
+    from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
         validate_pd_cache_inputs,
     )
 
@@ -150,12 +154,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
     def supports_cuda_graph_draft_prefill(self) -> bool:
-        return os.environ.get("RTP_LLM_QWEN4_DRAFT_PREFILL_GRAPH", "0").lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+        return True
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
         groups = get_attention_inputs_value(inputs)
@@ -178,7 +177,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             INDEXER_KV_TAG,
             INDEXER_STATE_TAG,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
             DraftPrefillGraphReplay,
         )
 
@@ -201,7 +200,11 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
                     (
                         side_tag,
                         int(cache.kv_cache_base.shape[0]),
-                        page // 4 if side_tag == INDEXER_KV_TAG else page,
+                        (
+                            page // int(self.config._qwen4_indexer_compress_ratio)
+                            if side_tag == INDEXER_KV_TAG
+                            else page
+                        ),
                         side_tag == INDEXER_KV_TAG,
                     )
                 )
@@ -275,6 +278,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
         )
+        annotate_compute_inventory(self.weight)
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)

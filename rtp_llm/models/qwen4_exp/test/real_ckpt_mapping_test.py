@@ -63,8 +63,6 @@ class RealCkptMappingTest(unittest.TestCase):
         # Manifest coverage is intentionally broader than the safe serving
         # default. Enabling the descriptors here does not load tensor data; it
         # verifies that both opt-in paths claim every real checkpoint key.
-        cls.config.enable_qwen4_ple = True
-        cls.config.enable_qwen4_qsa = True
         weight = Qwen4ExpWeight(
             model_config=cls.config,
             parallelism_config=ParallelismConfig(),
