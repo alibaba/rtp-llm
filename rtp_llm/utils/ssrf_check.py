@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 _MAX_REDIRECTS = 5
 
 
+def _url_origin(url: str):
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname, port
+
+
 def _is_private_ip(ip_str: str) -> bool:
     """Return True if *ip_str* is a private/loopback/reserved/link-local/multicast/unspecified address."""
     try:
@@ -88,7 +96,9 @@ def _validate_url(url: str) -> str:
     """Validate scheme and host of *url*.  Returns the URL if safe, else raises."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"URL scheme {parsed.scheme!r} is not allowed for safe download")
+        raise ValueError(
+            f"URL scheme {parsed.scheme!r} is not allowed for safe download"
+        )
     if _is_private_host(parsed.hostname or ""):
         raise ValueError(
             f"URL host {parsed.hostname!r} resolves to a private/internal address "
@@ -116,7 +126,7 @@ class _SSRFAdapter(HTTPAdapter):
         hostname set to *original_host*."""
         conn.host = validated_ip
         if scheme == "https":
-            conn.server_hostname = original_host
+            conn.conn_kw["server_hostname"] = original_host
             conn.assert_hostname = original_host
 
     def get_connection_with_tls_context(
@@ -164,6 +174,9 @@ class _SSRFAdapter(HTTPAdapter):
         # TLS SNI and certificate verification work correctly.
         request._ssrf_validated_ip = validated_ip
         request._ssrf_original_host = original_host
+        # urllib3 would otherwise derive Host from the pinned IP. Preserve an
+        # explicit caller Host; redirects to another origin discard it below.
+        request.headers.setdefault("Host", parsed.netloc.rsplit("@", 1)[-1])
         return super().send(request, stream, timeout, verify, cert, proxies)
 
 
@@ -180,6 +193,7 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
     between URL validation and the actual TCP connect.
     """
     current_url = _validate_url(url)
+    current_headers = requests.structures.CaseInsensitiveDict(headers)
     response = None
     session = requests.Session()
     session.mount("http://", _SSRFAdapter())
@@ -189,7 +203,7 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
             response = session.get(
                 current_url,
                 stream=True,
-                headers=headers,
+                headers=current_headers,
                 timeout=timeout,
                 allow_redirects=False,
             )
@@ -198,8 +212,18 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
                 response.close()
                 if not location:
                     break
-                next_url = urljoin(current_url, location)
-                current_url = _validate_url(next_url)
+                next_url = _validate_url(urljoin(current_url, location))
+                if _url_origin(current_url) != _url_origin(next_url):
+                    # These caller headers belong to the original origin.
+                    # Never restore them if a later hop returns to that origin.
+                    for name in (
+                        "Authorization",
+                        "Proxy-Authorization",
+                        "Cookie",
+                        "Host",
+                    ):
+                        current_headers.pop(name, None)
+                current_url = next_url
                 continue
             return response
     if response is not None:
