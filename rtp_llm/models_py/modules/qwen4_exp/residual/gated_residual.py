@@ -151,6 +151,22 @@ class Qwen4ExpGatedResidual(nn.Module):
                 f"expected {self.hc_hidden_size} gated residual features, got "
                 f"{hyper_input.shape[-1]}"
             )
+        if (
+            self.down_projection is not None
+            and self.down_projection.use_scaled_mm
+            and tuple(self.down_projection.weight.shape) == (320, 10240)
+            and 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
+            and hyper_input.is_cuda
+            and torch.version.hip is None
+        ):
+            from .gated_residual_norm_triton import try_grouped_rms_norm_with_fp8_scale
+
+            fused = try_grouped_rms_norm_with_fp8_scale(
+                hyper_input, self.norm_gamma, self.hidden_size, self.norm_eps
+            )
+            if fused is not None:
+                normed, scale = fused
+                return self._forward_normed(hyper_input, normed, down_input_scale=scale)
         normed = self._norm(hyper_input)
 
         return self._forward_normed(hyper_input, normed)
@@ -164,7 +180,7 @@ class Qwen4ExpGatedResidual(nn.Module):
         return self(inject_into_residual(hyper_input, sublayer_out, inject_weights))
 
     def _forward_normed(
-        self, hyper_input: torch.Tensor, normed: torch.Tensor
+        self, hyper_input: torch.Tensor, normed: torch.Tensor, *, down_input_scale=None
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
 
         inject_weights = None
@@ -184,27 +200,36 @@ class Qwen4ExpGatedResidual(nn.Module):
                 F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
             )
         else:
-            mix = F.silu(
+            down = (
                 dense_projection(normed, self.mix_down, self.down_projection)
-                / self.hc_mult
+                if down_input_scale is None
+                else self.down_projection(normed, input_scale=down_input_scale)
             )
-        mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
-        branches = (self.hc_mult, self.hidden_size)
-        fused_mix = False
-        if normed.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
-                fused_mix_reduce,
-                is_supported,
-            )
+            mix = F.silu(down / self.hc_mult)
+        mixed = None
+        up = self.up_projection
+        if up is not None and up.bias is None and up.role in ("DECODE", "PDFUSION"):
+            from .gated_residual_up_mix_triton import try_fp8_up_mix
 
-            fused_mix = is_supported(mix_logits, normed, self.hc_mult)
-        if fused_mix:
-            mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
-        else:
-            mix = torch.sigmoid(mix_logits)
-            mixed = (mix.unflatten(-1, branches) * normed.unflatten(-1, branches)).mean(
-                -2
-            )
+            mixed = try_fp8_up_mix(mix, up.weight, up.scale, normed, self.hc_mult)
+        if mixed is None:
+            mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
+            branches = (self.hc_mult, self.hidden_size)
+            fused_mix = False
+            if normed.is_cuda and torch.version.hip is None:
+                from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
+                    fused_mix_reduce,
+                    is_supported,
+                )
+
+                fused_mix = is_supported(mix_logits, normed, self.hc_mult)
+            if fused_mix:
+                mixed = fused_mix_reduce(mix_logits, normed, self.hc_mult)
+            else:
+                mix = torch.sigmoid(mix_logits)
+                mixed = (
+                    mix.unflatten(-1, branches) * normed.unflatten(-1, branches)
+                ).mean(-2)
 
         if self.inject is None:
             return mixed, hyper_input, None

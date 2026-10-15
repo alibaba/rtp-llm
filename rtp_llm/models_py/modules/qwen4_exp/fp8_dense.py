@@ -39,7 +39,7 @@ class Qwen4Fp8Linear(nn.Module):
     def forward_with_bias_gelu(self, x):
         return F.gelu(self.forward(x))
 
-    def forward(self, x):
+    def forward(self, x, *, input_scale=None):
         if self.compute_weight is not None:
             return F.linear(x, self.compute_weight, self.bias)
         rows = x.reshape(-1, x.shape[-1])
@@ -72,7 +72,7 @@ class Qwen4Fp8Linear(nn.Module):
                 dtype=torch.float8_e4m3fn,
             )
         quantized, scale = scaled_fp8_per_tensor_quant(
-            rows.contiguous(), output=padded_output
+            rows.contiguous(), scale=input_scale, output=padded_output
         )
         out = torch._scaled_mm(
             quantized,
