@@ -1,7 +1,8 @@
-"""Startup-warmed candidate-only FP32 K2048 selection on SM100/SM103.
+"""Startup-warmed candidate-only FP32 K2048 selection on CUDA major 10.
 
-SM103 defaults to the qualified [512, 4096] score shape. SM100 retains its
-explicit opt-in; other devices and SM103 shapes keep the existing fallback.
+CUDA major 10 defaults to the runtime domain: 1..8192 rows and 2049..16384
+FP32 scores per row, with K=2048, after startup compilation and a semantic
+check against the running Torch wheel. Other devices/shapes retain fallback.
 
 try_select never compiles or reads device data. Unsupported/cold calls return
 None before allocation or output writes. warmup owns the fixed CUDA variants.
@@ -27,17 +28,17 @@ from pathlib import Path
 import torch
 
 _READY = {}
-_QUALIFIED_SHAPES = {}
+_AUTO_READY = {}
 # cudaErrorInvalidDeviceFunction / InvalidKernelImage / NoKernelImageForDevice.
 _PREPARE_IMAGE_ERRORS = frozenset((98, 200, 209))
 _LIBRARY = None
 _LOCK = threading.Lock()
 _SOURCE = Path(__file__).resolve().parent
 _NATIVE = Path(__file__).resolve().parents[3] / "bindings/cuda/kernels"
-_WHEEL_HEADERS = {
-    "ATen/native/cuda/SortingRadixSelect.cuh": "a793b2c17838eda6f68a09783cfb1e5fcb53a09203e34821502495e6500821f2",
-    "ATen/cuda/ScanUtils.cuh": "db3d87ab3e707f3c52c12a5bcc37deb93f45e198e2d89bb746dc82c0d8a080ef",
-}
+_TORCH_HEADERS = (
+    "ATen/native/cuda/SortingRadixSelect.cuh",
+    "ATen/cuda/ScanUtils.cuh",
+)
 STATUS = {
     1: "all_coarse_ties",
     2: "small32",
@@ -122,16 +123,11 @@ def _find_nvcc():
 
 def _build_library():
     """CPU-only compilation; called exclusively from explicit startup warmup."""
-    if torch.__version__ != "2.11.0+cu130":
+    if torch.version.cuda is None or torch.version.hip is not None:
         return None
     include = Path(torch.__file__).resolve().parent / "include"
-    for name, expected in _WHEEL_HEADERS.items():
-        path = include / name
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
-            return None
+    if not all((include / name).is_file() for name in _TORCH_HEADERS):
+        return None
     nvcc = _find_nvcc()
     cxx = os.environ.get("CXX") or shutil.which("c++")
     if not nvcc or not cxx:
@@ -144,7 +140,7 @@ def _build_library():
     sources = [
         _SOURCE / "_v41_candidate_topk.cu",
         _SOURCE / "_v41_candidate_topk_sb.cuh",
-        _NATIVE / "topk_v3.cuh",
+        _SOURCE / "_v41_candidate_topk_impl.cuh",
         _NATIVE / "topk_v3_compat.cuh",
     ]
     digest = hashlib.sha256(platform.machine().encode() + version)
@@ -269,13 +265,9 @@ def try_select(scores, out, *, k=2048, scratch=None):
     entry = _READY.get(scores.device.index)
     if entry is None:
         return None
-    qualified = _QUALIFIED_SHAPES.get(scores.device.index)
-    if qualified is not None and tuple(scores.shape) != qualified:
-        return None
-    if (
-        os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") != "1"
-        and qualified is None
-    ):
+    if os.environ.get(
+        "DSV41_CANDIDATE_NATIVE_TOPK", "auto"
+    ) != "1" and not _AUTO_READY.get(scores.device.index, False):
         return None
     lib, context = entry
     with torch.cuda.device(scores.device):
@@ -288,10 +280,46 @@ def try_select(scores, out, *, k=2048, scratch=None):
         return _execute(lib, scores, out, scratch)
 
 
+def _warmup_scores(width, device):
+    # Build deterministic edge cases on the CPU, then copy once at startup.
+    # Repeated rows exercise Torch's multi-block top-k path as well as both
+    # register widths in our kernel. No RNG state or forward buffers are used.
+    rows = torch.full((16, width), -torch.inf, dtype=torch.float32)
+    rows[1].zero_()
+    rows[2].zero_()
+    rows[2, ::2] = -0.0
+    rows[3].fill_(-1e30)
+    rows[4].fill_(torch.inf)
+    rows[5].fill_(1.0)
+    rows[5, :2047] = 2.0
+    rows[6] = torch.arange(width, dtype=torch.float32).remainder(4093)
+    rows[7, :2047] = 1.0
+    rows[7, 2047] = torch.nan
+    for index, count in enumerate((2047, 2048, 2049)):
+        rows[8 + index].fill_(1.0)
+        rows[8 + index, :count] = torch.nan
+        rows[11 + index, :count] = torch.inf
+    rows[14].fill_(-0.500244140625)
+    rows[15].fill_(-torch.finfo(torch.float32).max)
+    return rows.repeat(16, 1).to(device=device)
+
+
+def _semantic_matches(samples):
+    # Torch does not guarantee tie-index stability across implementations.
+    # Validate against the running wheel instead of pinning its release/hash.
+    expected = []
+    for scores, _ in samples:
+        values, ids = torch.topk(scores, 2048, dim=-1, sorted=False)
+        expected.append(torch.where(values > -torch.inf, ids, -1).int())
+    actual = torch.cat([out for _, out in samples]).sort(dim=-1).values
+    reference = torch.cat(expected).sort(dim=-1).values
+    return torch.equal(actual, reference)
+
+
 @torch.inference_mode()
 def warmup(device):
     """Compile/load and prime qualified variants outside graph capture."""
-    if not _enabled() or torch.__version__ != "2.11.0+cu130":
+    if not _enabled() or torch.version.cuda is None or torch.version.hip is not None:
         return False
     device = torch.device(device)
     if device.type != "cuda":
@@ -302,16 +330,7 @@ def warmup(device):
         device = torch.device("cuda", torch.cuda.current_device())
         prop = torch.cuda.get_device_properties(device)
         capability = (prop.major, prop.minor)
-        if capability not in ((10, 0), (10, 3)):
-            return False
-        if capability == (10, 3) and torch.version.git_version != (
-            "70d99e998b4955e0049d13a98d77ae1b14db1f45"
-        ):
-            return False
-        if (
-            capability == (10, 0)
-            and os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") != "1"
-        ):
+        if capability[0] != 10:
             return False
         if device.index in _READY:
             lib, context = _READY[device.index]
@@ -326,7 +345,7 @@ def warmup(device):
             )
             return False
         if lib is None:
-            logging.info("Candidate TopK unavailable; retaining existing selection")
+            logging.warning("Candidate TopK unavailable; retaining existing selection")
             return False
         context = ctypes.c_void_p()
         error = lib.v41_candidate_topk_prepare(ctypes.byref(context))
@@ -334,36 +353,31 @@ def warmup(device):
             error in _PREPARE_IMAGE_ERRORS
             and os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") == "auto"
         ):
-            logging.info(
+            logging.warning(
                 "Candidate TopK image unavailable (CUDA %s); retaining existing selection",
                 error,
             )
             return False
         if error or not context.value:
             raise RuntimeError(f"Candidate TopK prepare failed: CUDA {error}")
-        if capability == (10, 3):
-            # Prime the target shape and both aligned/offset input variants.
-            # Dynamic leading strides and output padding do not add variants.
-            for offset in (0, 1):
-                storage = torch.full(
-                    (512, 4096 + 7 * offset),
-                    float("-inf"),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                scores = storage[:, offset : 4096 + offset]
-                out = torch.empty((512, 2065), dtype=torch.int32, device=device)
-                scratch = torch.empty((512,), dtype=torch.int32, device=device)
-                _execute(lib, scores, out, scratch)
-        else:
-            for width in (4096, 4099, 8196, 8199):
-                scores = torch.full(
-                    (256, width), float("-inf"), dtype=torch.float32, device=device
-                )
-                out = torch.empty((256, 2048), dtype=torch.int32, device=device)
-                scratch = torch.empty((256,), dtype=torch.int32, device=device)
-                _execute(lib, scores, out, scratch)
+        # Prime both register-width families and aligned/unaligned inputs. Row
+        # count is only grid.x; runtime lengths/strides add no CUDA variants.
+        samples = []
+        for width in (4096, 4099, 8196, 8199):
+            scores = _warmup_scores(width, device)
+            out = torch.empty((256, 2048), dtype=torch.int32, device=device)
+            scratch = torch.empty((256,), dtype=torch.int32, device=device)
+            _execute(lib, scores, out, scratch)
+            samples.append((scores, out))
         torch.cuda.current_stream(device).synchronize()
-        _QUALIFIED_SHAPES[device.index] = (512, 4096) if capability == (10, 3) else None
+        if not _semantic_matches(samples):
+            logging.warning(
+                "Candidate TopK semantics differ from torch.topk (%s, CUDA %s); "
+                "retaining existing selection without publishing ready state",
+                torch.__version__,
+                torch.version.cuda,
+            )
+            return False
+        _AUTO_READY[device.index] = True
         _READY[device.index] = (lib, context)
     return True

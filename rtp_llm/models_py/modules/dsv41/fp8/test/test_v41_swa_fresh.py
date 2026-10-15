@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace as workspace
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_triton as codec
 
 
@@ -40,6 +41,7 @@ def load_attention():
     env = dict(
         torch=torch,
         swa_codec=codec,
+        prefill_kv_workspace=workspace,
         SWA_KV="swa",
         record_function_range=lambda *a: nullcontext(),
         _use_small_cp_x_gather=lambda cp: False,

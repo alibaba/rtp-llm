@@ -385,6 +385,7 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,
     )
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_pools import _trim_rows
 
     counts = tuple(x // ratio for x in ends)
     result = []
@@ -423,7 +424,10 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
         del packet, q, s, raw
         padded = tuple((n + 255) // 256 * 256 for n in counts[first:stop])
         result.extend(
-            (g[:n], PrefillIndexerKeys(qv[:n], sv[:n]))
+            (
+                _trim_rows(g, n),
+                PrefillIndexerKeys(_trim_rows(qv, n), _trim_rows(sv, n)),
+            )
             for n, g, qv, sv in zip(
                 counts[first:stop],
                 out.split(padded),

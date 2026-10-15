@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace as workspace
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_triton as codec
 
 
@@ -897,6 +898,7 @@ class BatchedBoundedSWA(unittest.TestCase):
             "__package__": PREFIX + ".fp8",
             "torch": torch,
             "swa_codec": self.codec,
+            "prefill_kv_workspace": workspace,
             "SWA_KV": 7,
         }
         exec(
@@ -1156,6 +1158,7 @@ class BatchedBoundedSWA(unittest.TestCase):
         for pool in (False, True):
             for ratio in (1, 2):
                 with self.subTest(pool=pool, ratio=ratio):
+                    self.fast_meta.reset_mock()
                     owner = self.owner(pool=pool)
                     owner.compress_ratio = ratio
                     lengths, prefixes = (2048, 7, 133), (30720, 0, 17)
@@ -1181,7 +1184,13 @@ class BatchedBoundedSWA(unittest.TestCase):
                         self.assertTrue(
                             torch.equal(value, torch.tensor(expected)[reqs, None])
                         )
-                    self.fast_meta.assert_not_called()
+                    if pool:
+                        self.fast_meta.assert_called_once()
+                        self.assertTrue(
+                            self.fast_meta.call_args.kwargs["compact_replay"]
+                        )
+                    else:
+                        self.fast_meta.assert_not_called()
                     self.assertIs(
                         owner._prefill_chunk_meta(
                             globals_by_req,

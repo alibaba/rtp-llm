@@ -2,7 +2,9 @@
 
 import contextlib
 import importlib.util
+import itertools
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -228,7 +230,7 @@ class HostContractTest(unittest.TestCase):
                 self.assertEqual(tensor.record_stream.call_count, 2)
 
     def test_warmup_rejects_capture_before_loading(self):
-        with mock.patch.object(torch, "__version__", "2.11.0+cu130"), mock.patch.object(
+        with mock.patch.object(torch, "__version__", "2.8.0+cu129"), mock.patch.object(
             torch.cuda, "device", return_value=contextlib.nullcontext()
         ), mock.patch.object(
             torch.cuda, "is_current_stream_capturing", return_value=True
@@ -250,8 +252,12 @@ class HostContractTest(unittest.TestCase):
         lib.v41_candidate_topk_prepare.side_effect = prepare
         prop = mock.Mock(major=10, minor=0, multi_processor_count=80)
         with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
+            )
+            stack.enter_context(mock.patch.dict(op._AUTO_READY, {}, clear=True))
             stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
-            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.8.0+cu129"))
             stack.enter_context(
                 mock.patch.object(
                     torch.cuda, "device", return_value=contextlib.nullcontext()
@@ -271,11 +277,14 @@ class HostContractTest(unittest.TestCase):
                 )
             )
             stack.enter_context(mock.patch.object(torch.cuda, "current_stream"))
+            stack.enter_context(
+                mock.patch.object(op, "_semantic_matches", return_value=True)
+            )
             build = stack.enter_context(
                 mock.patch.object(op, "_load", return_value=lib)
             )
             allocate = stack.enter_context(
-                mock.patch.object(torch, "full", return_value=self.scores)
+                mock.patch.object(op, "_warmup_scores", return_value=self.scores)
             )
             stack.enter_context(
                 mock.patch.object(torch, "empty", return_value=self.out)
@@ -290,9 +299,10 @@ class HostContractTest(unittest.TestCase):
             execute.side_effect = None
             self.assertTrue(op.warmup("cuda:0"))
             self.assertEqual(
-                [call.args[0][1] for call in allocate.call_args_list],
+                [call.args[0] for call in allocate.call_args_list],
                 [4096, 4099, 8196, 8199],
             )
+            self.assertTrue(op._AUTO_READY[0])
             build.reset_mock()
             self.assertTrue(op.warmup("cuda:0"))
             build.assert_not_called()
@@ -306,8 +316,8 @@ class CUDAContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if torch.cuda.get_device_capability() != (10, 0):
-            raise unittest.SkipTest("Broad opt-in domain is qualified only on SM100")
-        cls.env = mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "1"})
+            raise unittest.SkipTest("SM100-specific execution")
+        cls.env = mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
         cls.env.start()
         if not op.warmup("cuda:0"):
             cls.env.stop()
@@ -412,13 +422,13 @@ class SM103HostPolicyTest(unittest.TestCase):
         lib = mock.Mock()
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
-            stack.enter_context(mock.patch.dict(op._QUALIFIED_SHAPES, {}, clear=True))
-            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(mock.patch.dict(op._AUTO_READY, {}, clear=True))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.8.0+cu129"))
             stack.enter_context(
                 mock.patch.object(
                     torch.version,
                     "git_version",
-                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                    "another-wheel-build",
                 )
             )
             stack.enter_context(
@@ -461,7 +471,7 @@ class SM103HostPolicyTest(unittest.TestCase):
                             ):
                                 op.warmup("cuda:0")
                         self.assertEqual(op._READY, {})
-                        self.assertEqual(op._QUALIFIED_SHAPES, {})
+                        self.assertEqual(op._AUTO_READY, {})
             allocate.assert_not_called()
             launch.assert_not_called()
             stream.assert_not_called()
@@ -479,13 +489,13 @@ class SM103HostPolicyTest(unittest.TestCase):
                 mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
             )
             stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
-            stack.enter_context(mock.patch.dict(op._QUALIFIED_SHAPES, {}, clear=True))
-            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(mock.patch.dict(op._AUTO_READY, {}, clear=True))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.8.0+cu129"))
             stack.enter_context(
                 mock.patch.object(
                     torch.version,
                     "git_version",
-                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                    "another-wheel-build",
                 )
             )
             stack.enter_context(
@@ -510,9 +520,12 @@ class SM103HostPolicyTest(unittest.TestCase):
             )
             stack.enter_context(mock.patch.object(op, "_load", return_value=lib))
             stack.enter_context(
-                mock.patch.object(torch, "full", return_value=mock.MagicMock())
+                mock.patch.object(op, "_warmup_scores", return_value=mock.MagicMock())
             )
             stack.enter_context(mock.patch.object(torch, "empty"))
+            semantic = stack.enter_context(
+                mock.patch.object(op, "_semantic_matches", return_value=True)
+            )
             launch = stack.enter_context(
                 mock.patch.object(
                     op, "_execute", side_effect=RuntimeError("launch failed: CUDA 209")
@@ -531,7 +544,55 @@ class SM103HostPolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synchronize failed: CUDA 700"):
                 op.warmup("cuda:0")
             self.assertEqual(op._READY, {})
-            self.assertEqual(op._QUALIFIED_SHAPES, {})
+            self.assertEqual(op._AUTO_READY, {})
+
+            launch.reset_mock()
+            stream.return_value.synchronize.side_effect = None
+            self.assertTrue(op.warmup("cuda:0"))
+            self.assertEqual(launch.call_count, 4)
+            self.assertTrue(op._AUTO_READY[0])
+            # Row count is a runtime grid parameter, not another JIT variant.
+            self.assertTrue(op.warmup("cuda:0"))
+            self.assertEqual(launch.call_count, 4)
+
+            op._READY.clear()
+            op._AUTO_READY.clear()
+            semantic.return_value = False
+            with self.assertLogs(level="WARNING") as logs:
+                self.assertFalse(op.warmup("cuda:0"))
+            self.assertIn("semantics differ", logs.output[0])
+            self.assertEqual(op._READY, {})
+            self.assertEqual(op._AUTO_READY, {})
+
+    def test_required_headers_accept_active_wheel_content_without_version_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory)
+            for name in op._TORCH_HEADERS:
+                path = wheel / "include" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("// Different wheel header revision\n")
+            with mock.patch.object(
+                torch, "__file__", str(wheel / "__init__.py")
+            ), mock.patch.object(
+                torch, "__version__", "2.8.0+cu129"
+            ), mock.patch.object(
+                op, "_find_nvcc", side_effect=RuntimeError("compiler discovery reached")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "compiler discovery reached"):
+                    op._build_library()
+                path.unlink()
+                self.assertIsNone(op._build_library())
+
+    def test_warmup_semantic_probe_detects_membership_change(self):
+        samples = []
+        for width in (4096, 8199):
+            scores = op._warmup_scores(width, "cpu")
+            values, ids = scores.topk(2048, dim=-1, sorted=False)
+            out = torch.where(values > -torch.inf, ids, -1).int()
+            samples.append((scores, out.flip(-1)))
+        self.assertTrue(op._semantic_matches(samples))
+        samples[-1][1][1, 0] = -1
+        self.assertFalse(op._semantic_matches(samples))
 
     def test_optional_auto_compile_failure_keeps_existing_path(self):
         with contextlib.ExitStack() as stack:
@@ -539,12 +600,12 @@ class SM103HostPolicyTest(unittest.TestCase):
                 mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
             )
             stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
-            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.8.0+cu129"))
             stack.enter_context(
                 mock.patch.object(
                     torch.version,
                     "git_version",
-                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                    "another-wheel-build",
                 )
             )
             stack.enter_context(
@@ -592,23 +653,48 @@ class SM103HostPolicyTest(unittest.TestCase):
             with mock.patch.object(op.Path, "is_file", return_value=False):
                 self.assertIsNone(op._find_nvcc())
 
-    def test_default_qualified_shape_and_explicit_disable(self):
-        scores = metadata((512, 4096), torch.float32, 4096)
-        out = metadata((512, 2048), torch.int32, 8192)
-        scratch = metadata((512,), torch.int32, 12288)
+    def test_default_runtime_domain_and_explicit_disable(self):
         lib = mock.Mock()
         lib.v41_candidate_topk_is_current.return_value = 1
         with mock.patch.dict(
             os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"}
         ), mock.patch.dict(op._READY, {0: (lib, 123)}, clear=True), mock.patch.dict(
-            op._QUALIFIED_SHAPES, {0: (512, 4096)}, clear=True
+            op._AUTO_READY, {0: True}, clear=True
         ), mock.patch.object(
             torch.cuda, "device", return_value=contextlib.nullcontext()
         ), mock.patch.object(
-            op, "_execute", return_value=out
+            op, "_execute", side_effect=lambda lib, scores, out, scratch: out
         ) as launch:
-            self.assertIs(op.try_select(scores, out, scratch=scratch), out)
-            for rows, width in ((511, 4096), (513, 4096), (512, 4095), (512, 4097)):
+            shapes = [
+                (rows, 4096)
+                for rows in (
+                    1,
+                    3,
+                    17,
+                    257,
+                    511,
+                    513,
+                    767,
+                    769,
+                    1279,
+                    1281,
+                    2047,
+                    2049,
+                    8192,
+                )
+            ]
+            shapes += [(257, width) for width in (2049, 4095, 4097, 8192, 8193, 16384)]
+            for rows, width in shapes:
+                scores = metadata((rows, width), torch.float32, 4096)
+                out = metadata((rows, 2048), torch.int32, 8192)
+                scratch = metadata((rows,), torch.int32, 12288)
+                self.assertIs(op.try_select(scores, out, scratch=scratch), out)
+            for rows, width in (
+                (0, 4096),
+                (8193, 4096),
+                (257, 2048),
+                (257, 16385),
+            ):
                 self.assertIsNone(
                     op.try_select(
                         metadata((rows, width), torch.float32, 4096),
@@ -617,9 +703,9 @@ class SM103HostPolicyTest(unittest.TestCase):
                 )
             with mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "0"}):
                 self.assertIsNone(op.try_select(scores, out, scratch=scratch))
-            self.assertEqual(launch.call_count, 1)
+            self.assertEqual(launch.call_count, len(shapes))
 
-    def test_sm100_ready_state_still_requires_explicit_opt_in(self):
+    def test_auto_path_requires_successful_startup_semantic_validation(self):
         scores = metadata((512, 4096), torch.float32, 4096)
         out = metadata((512, 2048), torch.int32, 8192)
         with mock.patch.dict(
@@ -627,7 +713,7 @@ class SM103HostPolicyTest(unittest.TestCase):
         ), mock.patch.dict(
             op._READY, {0: (mock.Mock(), 123)}, clear=True
         ), mock.patch.dict(
-            op._QUALIFIED_SHAPES, {0: None}, clear=True
+            op._AUTO_READY, {0: False}, clear=True
         ), mock.patch.object(
             op, "_execute"
         ) as launch:
@@ -656,16 +742,45 @@ class SM103CUDAContractTest(unittest.TestCase):
 
     def test_target_ties_nonfinite_strides_padding_and_reuse(self):
         torch.manual_seed(71031)
-        for offset in (0, 1):
-            backing = torch.empty((512, 4096 + 7 * offset), device="cuda")
-            scores = backing[:, offset : offset + 4096]
+        shapes = [
+            (rows, 4096)
+            for rows in (
+                1,
+                3,
+                17,
+                127,
+                257,
+                511,
+                512,
+                513,
+                767,
+                768,
+                769,
+                1279,
+                1280,
+                1281,
+                2047,
+                2048,
+                2049,
+                4093,
+                8192,
+            )
+        ]
+        shapes += [
+            (257, width)
+            for width in (2049, 2053, 3073, 4095, 4097, 8191, 8192, 8193, 12289, 16384)
+        ]
+        for (rows, width), offset in itertools.product(shapes, (0, 1)):
+            backing = torch.empty((rows, width + 7 * offset), device="cuda")
+            scores = backing[:, offset : offset + width]
             output_storage = torch.full(
-                (512, 2080), -77, device="cuda", dtype=torch.int32
+                (rows, 2080), -77, device="cuda", dtype=torch.int32
             )
             out = output_storage[:, 1:2066]
-            scratch = torch.empty((512,), device="cuda", dtype=torch.int32)
+            scratch = torch.empty((rows,), device="cuda", dtype=torch.int32)
             for case in (
                 "random",
+                "bf16_ties",
                 "ties",
                 "zeros",
                 "signed_zero",
@@ -677,9 +792,11 @@ class SM103CUDAContractTest(unittest.TestCase):
                 "inf2049",
                 "all_inf",
             ):
-                with self.subTest(offset=offset, case=case):
+                with self.subTest(rows=rows, width=width, offset=offset, case=case):
                     scores.normal_()
-                    if case == "ties":
+                    if case == "bf16_ties":
+                        scores.copy_(scores.bfloat16().float())
+                    elif case == "ties":
                         scores[:, 1000:4000] = 0.5
                     elif case == "zeros":
                         scores.zero_()
@@ -733,21 +850,31 @@ class SM103CUDAContractTest(unittest.TestCase):
                     )
 
     def test_graph_replay_keeps_qualified_path(self):
-        scores = torch.randn((512, 4096), device="cuda")
-        out = torch.empty((512, 2048), device="cuda", dtype=torch.int32)
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            op.try_select(scores, out)
-        stream.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=stream):
-            self.assertIs(op.try_select(scores, out), out)
-        for _ in range(3):
-            scores.normal_()
-            graph.replay()
-            ids = scores.topk(2048, dim=-1, sorted=False).indices.int()
-            self.assertTrue(torch.equal(out.sort(1).values, ids.sort(1).values))
+        for rows, width in (
+            (1, 2049),
+            (17, 4096),
+            (257, 4097),
+            (769, 8192),
+            (1281, 8193),
+            (2049, 16384),
+            (8192, 4096),
+        ):
+            with self.subTest(rows=rows, width=width):
+                scores = torch.randn((rows, width), device="cuda")
+                out = torch.empty((rows, 2048), device="cuda", dtype=torch.int32)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    op.try_select(scores, out)
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    self.assertIs(op.try_select(scores, out), out)
+                for _ in range(3):
+                    scores.normal_()
+                    graph.replay()
+                    ids = scores.topk(2048, dim=-1, sorted=False).indices.int()
+                    self.assertTrue(torch.equal(out.sort(1).values, ids.sort(1).values))
 
 
 if __name__ == "__main__":
