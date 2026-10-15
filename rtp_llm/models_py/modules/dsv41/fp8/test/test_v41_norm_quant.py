@@ -69,11 +69,55 @@ def _bf16_ulp_distance(actual: torch.Tensor, expected: torch.Tensor) -> torch.Te
     return (ai - bi).abs()
 
 
+class V41NormQuantHostTest(unittest.TestCase):
+    def test_blackwell_gate_is_cached_by_device_and_cpu_never_queries(self):
+        candidate._device_supported.cache_clear()
+        self.addCleanup(candidate._device_supported.cache_clear)
+        for index, capability in enumerate(
+            ((9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
+        ):
+            device = torch.device("cuda", index)
+            with self.subTest(capability=capability), patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as query:
+                self.assertEqual(
+                    candidate._device_supported(device), capability[0] == 10
+                )
+                self.assertEqual(
+                    candidate._device_supported(device), capability[0] == 10
+                )
+                query.assert_called_once_with(device)
+        with patch.object(
+            candidate, "_device_supported", side_effect=AssertionError("CUDA query")
+        ):
+            self.assertIsNone(
+                candidate.rmsnorm_group32_quant(torch.empty(1, 5120), torch.empty(5120))
+            )
+            self.assertFalse(candidate.warmup("cpu"))
+
+    def test_warmup_refuses_capture_before_allocating(self):
+        with patch.object(
+            candidate, "_device_supported", return_value=True
+        ), patch.object(torch.cuda, "device"), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ), patch.object(
+            torch, "zeros", side_effect=AssertionError("capture allocation")
+        ), self.assertRaisesRegex(
+            RuntimeError, "precede CUDA graph capture"
+        ):
+            candidate.warmup("cuda:0")
+
+
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0),
-    "requires SM100 CUDA",
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10,
+    "requires Blackwell SM10x CUDA",
 )
 class V41NormQuantTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not candidate.warmup(torch.device("cuda", torch.cuda.current_device())):
+            raise AssertionError("norm quant startup warmup failed")
+
     def setUp(self):
         torch.manual_seed(20260922)
 
@@ -115,6 +159,19 @@ class V41NormQuantTest(unittest.TestCase):
         self.assertEqual(scales.shape, (x.shape[0], 40))
         self.assertEqual(scales.stride(), (1, max(1, (x.shape[0] + 3) // 4 * 4)))
         return norm, quant, scales
+
+    def test_warmup_covers_runtime_rows_and_quant_policies(self):
+        # A single startup shape must cover ragged, aligned and large rows.
+        with patch.object(
+            candidate._v41_norm_quant_kernel,
+            "_do_compile",
+            side_effect=AssertionError("cold compile"),
+        ):
+            for m in (1, 17, 32, 820, 32769):
+                x = torch.zeros((m, 5120), device="cuda", dtype=torch.bfloat16)
+                weight = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
+                for mode in ("legacy", "v2", "auto"):
+                    self.check(x, weight, mode=mode)
 
     def test_shapes_modes_and_padding(self):
         for m in [0, 1, 32, 33, 819, 820, 1021, 1664, 4096, 8192, 32768]:

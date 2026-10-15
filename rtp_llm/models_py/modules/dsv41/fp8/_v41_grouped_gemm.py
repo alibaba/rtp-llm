@@ -1,4 +1,4 @@
-"""Opt-in, startup-warmed variable-M BF16 index GEMM for SM100 prefill.
+"""Opt-in, startup-warmed variable-M BF16 index GEMM for Blackwell SM10x prefill.
 
 Call warmup(weight) at startup, then try_grouped_index_gemm(x, weight, rows).
 Rows are host integers partitioning a contiguous [sum(rows), 512] tensor.
@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -29,6 +30,11 @@ _MAX_ROWS = 65536
 _READY = {}
 _LIBRARY = None
 _LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=16)
+def _device_supported(device):
+    return torch.cuda.get_device_capability(device)[0] == 10
 
 
 def _enabled():
@@ -219,8 +225,7 @@ def warmup(weight):
     with torch.cuda.device(device), _LOCK:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("grouped index warmup must precede CUDA graph capture")
-        props = torch.cuda.get_device_properties(device)
-        if (props.major, props.minor) != (10, 0) or not torch.version.cuda:
+        if not _device_supported(device) or not torch.version.cuda:
             return False
         if int(torch.version.cuda.split(".")[0]) < 13:
             return False
