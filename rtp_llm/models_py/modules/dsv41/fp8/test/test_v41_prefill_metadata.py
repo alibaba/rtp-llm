@@ -18,9 +18,15 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 class PrefillMetadataTest(unittest.TestCase):
     def test_compact_replay_ragged_lengths_prefixes_and_graph_updates(self):
         # CED keeps the final window from each request, including short requests.
-        for dtype in (torch.int32, torch.int64):
-            p = torch.tensor([0, 31, 16387, 31744, 511], device="cuda", dtype=dtype)
-            n = torch.tensor([1, 127, 128, 1024, 259], device="cuda", dtype=dtype)
+        for prefix_dtype, length_dtype in itertools.product(
+            (torch.int32, torch.int64), repeat=2
+        ):
+            p = torch.tensor(
+                [0, 31, 16387, 31744, 511], device="cuda", dtype=prefix_dtype
+            )
+            n = torch.tensor(
+                [1, 127, 128, 1024, 259], device="cuda", dtype=length_dtype
+            )
             req = torch.tensor([4, 2, 0, 3, 1, -1, -5], device="cuda")
             for ratio in (1, 2):
                 for replay in (False, True):
@@ -57,6 +63,65 @@ class PrefillMetadataTest(unittest.TestCase):
                     graph.replay()
                     for got, expected in zip(captured, reference()):
                         torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+    def test_mixed_dtype_offsets_and_runtime_lengths_after_startup_warmup(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_attention_jit_warmup as warmup,
+        )
+
+        for ratio in (1, 2):
+            warmup._warm_chunk_metadata(fused, ratio, 128, "cuda")
+        # Compilation after these startup launches is a missing warmup variant.
+        with patch.object(
+            fused._chunk_metadata_kernel,
+            "_do_compile",
+            side_effect=AssertionError("request metadata JIT"),
+        ):
+            for prefix_dtype, length_dtype in itertools.product(
+                (torch.int32, torch.int64), repeat=2
+            ):
+                for offsets in itertools.product((0, 1), repeat=3):
+                    for stride in (1, 2):
+                        p = torch.arange(34, dtype=prefix_dtype, device="cuda")[
+                            offsets[0] :: stride
+                        ][:13]
+                        n = torch.arange(34, dtype=length_dtype, device="cuda")[
+                            offsets[1] :: stride
+                        ][:13]
+                        p.mul_(4099)
+                        n.mul_(137).add_(1)
+                        req = torch.arange(1028, dtype=torch.int64, device="cuda")[
+                            offsets[2] :: stride
+                        ][:257]
+                        req.remainder_(13).sub_(13)
+                        for ratio, replay, compact in itertools.product(
+                            (1, 2), (False, True), (False, True)
+                        ):
+                            actual = fused.try_chunk_metadata(
+                                p, n, req, ratio, 128, replay, compact_replay=compact
+                            )
+                            prefix, length = p.long(), n.long()
+                            tail = (
+                                torch.zeros_like(prefix)
+                                if replay
+                                else prefix.clamp(max=127)
+                            )
+                            swa_length = length.clamp(max=128) if compact else length
+                            sizes = (prefix + length) // ratio
+                            chunks = sizes + swa_length + tail
+                            start = (
+                                prefix + length - swa_length
+                                if compact
+                                else prefix - tail
+                            )
+                            expected = (
+                                (chunks.cumsum(0) - chunks)[req, None],
+                                sizes[req, None],
+                                start[req, None],
+                            )
+                            self.assertIsNotNone(actual)
+                            for got, want in zip(actual, expected):
+                                torch.testing.assert_close(got, want, rtol=0, atol=0)
 
     def test_chunk_metadata_preserves_long_arithmetic(self):
         for batch in (2, 32, 128):
@@ -95,7 +160,9 @@ class PrefillMetadataTest(unittest.TestCase):
         sizes = (p.long() + n.long()) // 2
         actual = fused.try_chunk_metadata(p, n, req, 2, 128, True)
         torch.testing.assert_close(actual[1][:, 0], sizes, rtol=0, atol=0)
-        self.assertIsNone(fused.try_chunk_metadata(p, n.long(), req, 2, 128, True))
+        for pp, nn in ((p, n.long()), (p.long(), n)):
+            mixed = fused.try_chunk_metadata(pp, nn, req, 2, 128, True)
+            torch.testing.assert_close(mixed[1][:, 0], sizes, rtol=0, atol=0)
 
     def test_chunk_metadata_graph_and_empty_rows(self):
         p = torch.tensor([512, 16384, 30720], device="cuda", dtype=torch.int64)
