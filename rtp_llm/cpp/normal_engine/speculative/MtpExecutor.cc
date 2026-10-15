@@ -2992,31 +2992,70 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     torch::Tensor next_seq_len_all;
     torch::Tensor hidden_idx_all;
     if (accept_len_gpu_all.defined() && batch_size > 0) {
-        // Build prev_seq_len per-stream: use device state when available,
-        // fall back to host seqLength for new streams without device state.
-        std::vector<torch::Tensor> prev_slices;
-        prev_slices.reserve(batch_size);
+        auto accept_len_i32 = accept_len_gpu_all.to(torch::kInt32);
+        next_seq_len_all    = torch::empty({batch_size}, cuda_i32);
+        hidden_idx_all      = torch::empty({batch_size}, cuda_i64);
+
+#if USING_CUDA
+        // Pass scalar sources in the launch arguments. This also batches fresh
+        // host rows without a separate blocking H2D for every new stream.
+        std::vector<MtpSequenceRow> sequence_rows;
+        sequence_rows.reserve(batch_size);
+        bool can_fuse_rows = accept_len_i32.is_cuda() && accept_len_i32.dim() == 1
+                             && accept_len_i32.numel() == batch_size && accept_len_i32.is_contiguous();
         for (const auto& stream : all_streams) {
-            const auto& gpu_val = stream->getNextSeqLenGpu();
+            if (!can_fuse_rows) {
+                break;
+            }
+            const auto gpu_val = stream->getNextSeqLenGpu();
             if (gpu_val.defined() && gpu_val.is_cuda()) {
-                prev_slices.push_back(gpu_val.reshape({1}));
+                if (gpu_val.scalar_type() != torch::kInt32 || gpu_val.numel() != 1
+                    || gpu_val.device() != accept_len_i32.device()) {
+                    can_fuse_rows = false;
+                    break;
+                }
+                buffer_holder_.hold(gpu_val);
+                recordSpecTensorUseOnCurrentStream(gpu_val);
+                sequence_rows.push_back({gpu_val.data_ptr<int32_t>(), 0});
             } else {
-                prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
+                sequence_rows.push_back({nullptr, static_cast<int32_t>(stream->seqLength())});
             }
         }
-        prev_seq_len_all = torch::cat(prev_slices, 0);
+        if (can_fuse_rows) {
+            // Linear cache-table updates below still consume the exact previous
+            // lengths, so materialize them in the same kernel as next/hidden.
+            prev_seq_len_all = torch::empty({batch_size}, cuda_i32);
+            recordSpecTensorUseOnCurrentStream(accept_len_i32);
+            invokeMtpDispatchStatePrepareRows(sequence_rows,
+                                              accept_len_i32,
+                                              prev_seq_len_all,
+                                              next_seq_len_all,
+                                              hidden_idx_all,
+                                              at::cuda::getCurrentCUDAStream().stream());
+        } else {
+#endif
+            // Preserve the generic tensor path for unsupported source layouts or
+            // backends. CUDA int32 scalar state uses the fused path above.
+            std::vector<torch::Tensor> prev_slices;
+            prev_slices.reserve(batch_size);
+            for (const auto& stream : all_streams) {
+                const auto& gpu_val = stream->getNextSeqLenGpu();
+                if (gpu_val.defined() && gpu_val.is_cuda()) {
+                    prev_slices.push_back(gpu_val.reshape({1}));
+                } else {
+                    prev_slices.push_back(torch::tensor({static_cast<int32_t>(stream->seqLength())}, cuda_i32));
+                }
+            }
+            prev_seq_len_all = torch::cat(prev_slices, 0);
 
-        next_seq_len_all = torch::empty({batch_size}, cuda_i32);
-        hidden_idx_all   = torch::empty({batch_size}, cuda_i64);
-
-        auto accept_len_i32 = accept_len_gpu_all.to(torch::kInt32);
 #if USING_CUDA
-        invokeMtpDispatchStatePrepare(accept_len_i32,
-                                      prev_seq_len_all,
-                                      next_seq_len_all,
-                                      hidden_idx_all,
-                                      batch_size,
-                                      at::cuda::getCurrentCUDAStream().stream());
+            invokeMtpDispatchStatePrepare(accept_len_i32,
+                                          prev_seq_len_all,
+                                          next_seq_len_all,
+                                          hidden_idx_all,
+                                          batch_size,
+                                          at::cuda::getCurrentCUDAStream().stream());
+        }
 #else
         next_seq_len_all = prev_seq_len_all + accept_len_i32;
         hidden_idx_all   = (accept_len_i32.to(torch::kInt64) - 1);

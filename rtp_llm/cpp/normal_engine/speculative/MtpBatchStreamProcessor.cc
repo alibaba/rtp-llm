@@ -7,6 +7,9 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -455,6 +458,110 @@ torch::Tensor dsparkNewestToken(const GenerateStreamPtr& stream, const GenerateS
 // Round-head per-stream state: the anchor (newest committed token) and the
 // committed end (committed length - 1). The propose and verify builders read
 // exactly the same stream state, so both consume this one derivation.
+#if USING_CUDA
+bool isRoundHeadCudaInt32(const torch::Tensor& tensor, int device) {
+    return tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == torch::kInt32
+           && tensor.get_device() == device;
+}
+
+// The scheduler may reorder, compact or mix independently published states.
+// Pass row pointers by value instead of assuming one contiguous previous batch.
+bool acceptedTokenRow(const GenerateStream::MtpAsyncDeviceState& state, int device, MtpRoundHeadRow& row) {
+    const auto& tokens = state.accept_tokens_gpu;
+    const auto& length = state.accept_len_gpu;
+    if (!isRoundHeadCudaInt32(tokens, device) || tokens.dim() != 2 || tokens.size(0) != 1 || tokens.size(1) <= 0
+        || !isRoundHeadCudaInt32(length, device) || length.numel() != 1) {
+        return false;
+    }
+    row.tokens       = tokens.data_ptr<int32_t>();
+    row.accept_len   = length.data_ptr<int32_t>();
+    row.token_stride = tokens.stride(1);
+    row.token_count  = tokens.size(1);
+    return true;
+}
+
+void holdRoundHeadSources(const std::vector<torch::Tensor>& sources, TensorHolder& holder) {
+    const auto stream = cuda_graph::graphGetCurrentStream();
+    for (const auto& tensor : sources) {
+        // Publication replaces per-stream handles later in the round. Keep the
+        // actual allocations, and register use if allocated on another stream.
+        holder.hold(tensor);
+        tensor.record_stream(stream);
+    }
+}
+
+bool fusedDSparkRoundHead(const StreamGroups&   stream_groups,
+                          const GptModelInputs& model_input,
+                          TensorHolder&         holder,
+                          int32_t               width,
+                          int32_t               mask_token,
+                          torch::Tensor&        anchors,
+                          torch::Tensor&        committed_ends,
+                          torch::Tensor&        proposal_tokens) {
+    const auto                   cuda_stream = at::cuda::getCurrentCUDAStream();
+    const int                    device      = cuda_stream.device_index();
+    const int64_t                batch_size  = stream_groups.size();
+    std::vector<MtpRoundHeadRow> rows;
+    std::vector<torch::Tensor>   sources;
+    rows.reserve(batch_size);
+    sources.reserve(3 * batch_size + 1);
+    for (const auto& stream : stream_groups.allStreams()) {
+        const auto      state = stream->getMtpAsyncDeviceState();
+        MtpRoundHeadRow row;
+        if (state.accept_tokens_gpu.defined() && state.accept_tokens_gpu.is_cuda() && state.accept_len_gpu.defined()
+            && state.accept_len_gpu.is_cuda()) {
+            if (!acceptedTokenRow(state, device, row)) {
+                return false;
+            }
+            sources.push_back(state.accept_tokens_gpu);
+            sources.push_back(state.accept_len_gpu);
+        } else if (!stream->isFakeStream()) {
+            const auto tokens = stream->completeTokenIds();
+            const auto length = stream->seqLength();
+            if (!tokens.device().is_cpu() || tokens.scalar_type() != torch::kInt32 || tokens.dim() != 2
+                || tokens.size(0) < 1 || length <= 0 || length > tokens.size(1)) {
+                return false;
+            }
+            row.anchor = tokens.data_ptr<int32_t>()[(length - 1) * tokens.stride(1)];
+        }
+        // Anchor and length availability are independent. In particular a new
+        // PD request reads model_input's committed end without subtracting one.
+        const auto& next = state.next_seq_len_gpu;
+        if (next.defined() && next.is_cuda()) {
+            if (!isRoundHeadCudaInt32(next, device) || next.numel() != 1) {
+                return false;
+            }
+            row.sequence      = next.data_ptr<int32_t>();
+            row.sequence_bias = -1;
+            sources.push_back(next);
+        } else {
+            const auto& lengths = model_input.sequence_lengths;
+            if (!lengths.defined() || lengths.scalar_type() != torch::kInt32 || lengths.dim() != 1
+                || lengths.numel() < batch_size) {
+                return false;
+            }
+            const auto* ptr = lengths.data_ptr<int32_t>() + rows.size() * lengths.stride(0);
+            if (lengths.device().is_cpu()) {
+                row.sequence_value = *ptr;
+            } else if (isRoundHeadCudaInt32(lengths, device)) {
+                row.sequence = ptr;
+                sources.push_back(lengths);
+            } else {
+                return false;
+            }
+        }
+        rows.push_back(row);
+    }
+    anchors         = emptyInt32OnCuda({batch_size});
+    committed_ends  = emptyInt32OnCuda({batch_size});
+    proposal_tokens = emptyInt32OnCuda({batch_size * width});
+    holdRoundHeadSources(sources, holder);
+    invokeMtpDSparkRoundHeadPrepare(
+        rows, anchors, committed_ends, proposal_tokens, width, mask_token, cuda_stream.stream());
+    return true;
+}
+#endif
+
 std::pair<torch::Tensor, torch::Tensor>
 dsparkRoundHeadState(const StreamGroups& stream_groups, const GptModelInputs& model_input, TensorHolder& host_holder) {
     const int64_t              batch_size = static_cast<int64_t>(stream_groups.size());
@@ -668,6 +775,52 @@ torch::Tensor MtpBatchStreamProcessor::collectDSparkPositionBases(const StreamGr
         return {};
     }
 
+#if USING_CUDA
+    const auto                  cuda_stream = at::cuda::getCurrentCUDAStream();
+    std::vector<torch::Tensor>  sources;
+    std::vector<const int32_t*> rows(batch_size, nullptr);
+    torch::Tensor               host_positions;
+    bool                        supported = true;
+    int64_t                     row       = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        const auto positions = stream->getNextPositionIdsGpu();
+        if (positions.defined() && positions.is_cuda() && positions.scalar_type() == torch::kInt32
+            && positions.numel() == position_factor) {
+            if (!positions.is_contiguous() || positions.get_device() != cuda_stream.device_index()) {
+                supported = false;
+                break;
+            }
+            rows[row] = positions.data_ptr<int32_t>();
+            sources.push_back(positions);
+        } else {
+            if (!host_positions.defined()) {
+                host_positions = torch::zeros({batch_size, position_factor},
+                                              torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            }
+            stream->generateNextPositionId(host_positions.data_ptr<int32_t>() + row * position_factor);
+        }
+        ++row;
+    }
+    if (supported) {
+        if (host_positions.defined()) {
+            auto uploaded = toCudaInt32(host_positions, host_holder);
+            if (sources.empty()) {
+                return uploaded;
+            }
+            for (int64_t i = 0; i < batch_size; ++i) {
+                if (!rows[i]) {
+                    rows[i] = uploaded.data_ptr<int32_t>() + i * position_factor;
+                }
+            }
+            sources.push_back(uploaded);
+        }
+        auto bases = emptyInt32OnCuda({batch_size, position_factor});
+        holdRoundHeadSources(sources, host_holder);
+        invokeMtpPositionGather(rows, bases, cuda_stream.stream());
+        return bases;
+    }
+#endif
+
     std::vector<torch::Tensor> base_positions;
     base_positions.reserve(batch_size);
     for (const auto& stream : stream_groups.allStreams()) {
@@ -695,6 +848,15 @@ torch::Tensor MtpBatchStreamProcessor::expandDSparkPositionIds(const torch::Tens
     RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK position width must be positive, got %ld", width);
     RTP_LLM_CHECK_WITH_INFO(
         position_bases.dim() == 2, "DSpARK position bases must be [batch, factor], got dim=%ld", position_bases.dim());
+#if USING_CUDA
+    if (position_bases.is_cuda() && position_bases.scalar_type() == torch::kInt32 && position_bases.stride(1) == 1
+        && position_bases.get_device() == at::cuda::current_device()) {
+        auto result = emptyInt32OnCuda({position_bases.numel() * width});
+        position_bases.record_stream(cuda_graph::graphGetCurrentStream());
+        invokeMtpPositionExpand(position_bases, result, width, at::cuda::getCurrentCUDAStream().stream());
+        return result;
+    }
+#endif
     auto bases = position_bases.to(torch::kInt32).unsqueeze(1);
     auto steps = torch::arange(width, cudaInt32Options()).reshape({1, width, 1});
     return (bases + steps).reshape({-1}).contiguous();
@@ -1164,6 +1326,43 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
     }
     g_mtp_device_state_success_count.fetch_add(1, std::memory_order_relaxed);
 
+#if USING_CUDA
+    // The non-DSpARK one-step path has the same per-request anchor gather.
+    // Keep its pair/metadata contract while replacing the O(batch) launches.
+    const auto                   cuda_stream = at::cuda::getCurrentCUDAStream();
+    std::vector<MtpRoundHeadRow> rows;
+    std::vector<torch::Tensor>   sources;
+    std::vector<torch::Tensor>   proposals;
+    rows.reserve(batch_size);
+    sources.reserve(3 * batch_size);
+    proposals.reserve(batch_size);
+    for (const auto& state : states) {
+        MtpRoundHeadRow row;
+        if (!acceptedTokenRow(state, cuda_stream.device_index(), row)
+            || !isRoundHeadCudaInt32(state.next_seq_len_gpu, cuda_stream.device_index())
+            || state.next_seq_len_gpu.numel() != 1) {
+            break;
+        }
+        row.sequence      = state.next_seq_len_gpu.data_ptr<int32_t>();
+        row.sequence_bias = -1;
+        rows.push_back(row);
+        sources.insert(sources.end(), {state.accept_tokens_gpu, state.accept_len_gpu, state.next_seq_len_gpu});
+        proposals.push_back(lastColumnAsFlat(state.propose_tokens_gpu));
+    }
+    if (rows.size() == batch_size) {
+        auto anchors  = emptyInt32OnCuda({static_cast<int64_t>(batch_size)});
+        auto prefixes = emptyInt32OnCuda({static_cast<int64_t>(batch_size)});
+        auto tokens   = emptyInt32OnCuda({static_cast<int64_t>(batch_size)});
+        holdRoundHeadSources(sources, host_holder);
+        invokeMtpDSparkRoundHeadPrepare(rows, anchors, prefixes, tokens, 1, 0, cuda_stream.stream());
+        auto proposed              = torch::cat(proposals, 0).to(torch::kInt32);
+        model_input.prefix_lengths = std::move(prefixes);
+        setVerifyPairInputs(
+            model_input, interleaveTokenPairs(tokens, proposed), batch_size, propose_step_ + 1, host_holder);
+        return true;
+    }
+#endif
+
     std::vector<torch::Tensor> target_last_slices_gpu;
     std::vector<torch::Tensor> propose_slices_gpu;
     std::vector<torch::Tensor> next_seq_len_slices_gpu;
@@ -1429,12 +1628,30 @@ MtpBatchStreamProcessor::DSparkRoundState MtpBatchStreamProcessor::buildDSparkRo
     if (stream_groups.size() == 0) {
         return {};
     }
-    // A freshly handed-over PD stream carries its first generated token and
-    // prompt length in the same fields, so new and old streams take one
-    // identical path here.
-    auto [anchors, committed_ends] = dsparkRoundHeadState(stream_groups, model_input, host_holder);
-    auto position_bases            = collectDSparkPositionBases(stream_groups, host_holder);
-    return {std::move(anchors), std::move(committed_ends), std::move(position_bases), model_input.engram_token_windows};
+    DSparkRoundState result;
+#if USING_CUDA
+    RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0 && dspark_mask_token_id_ >= 0,
+                            "DSpARK requires positive draft width and non-negative mask token");
+    if (!fusedDSparkRoundHead(stream_groups,
+                              model_input,
+                              host_holder,
+                              dsparkQueryWidth(),
+                              dspark_mask_token_id_,
+                              result.anchors,
+                              result.committed_ends,
+                              result.proposal_tokens))
+#endif
+    {
+        // A freshly handed-over PD stream carries its first generated token and
+        // prompt length in the same fields, so new and old streams take one
+        // identical path here.
+        auto [anchors, committed_ends] = dsparkRoundHeadState(stream_groups, model_input, host_holder);
+        result.anchors                 = std::move(anchors);
+        result.committed_ends          = std::move(committed_ends);
+    }
+    result.position_bases = collectDSparkPositionBases(stream_groups, host_holder);
+    result.engram_windows = model_input.engram_token_windows;
+    return result;
 }
 
 void MtpBatchStreamProcessor::prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
@@ -1443,7 +1660,17 @@ void MtpBatchStreamProcessor::prepareDSparkProposeModelInput(const DSparkRoundSt
     if (!round_state.anchors.defined() || round_state.anchors.numel() == 0) {
         return;
     }
-    buildDSparkProposeInput(model_input, round_state.anchors, round_state.committed_ends, host_holder);
+    if (round_state.proposal_tokens.defined()) {
+        const int64_t batch_size       = round_state.anchors.numel();
+        model_input.combo_tokens       = round_state.proposal_tokens;
+        model_input.last_hidden_states = torch::Tensor();
+        model_input.prefix_lengths     = round_state.committed_ends;
+        model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
+        model_input.sequence_lengths   = emptyInt32OnCuda({0});
+        model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
+    } else {
+        buildDSparkProposeInput(model_input, round_state.anchors, round_state.committed_ends, host_holder);
+    }
     model_input.engram_token_windows = torch::Tensor();
     model_input.combo_position_ids   = expandDSparkPositionIds(round_state.position_bases, dsparkQueryWidth());
     // The fixed-width proposal CUDA graph uses the framework's multi-token
