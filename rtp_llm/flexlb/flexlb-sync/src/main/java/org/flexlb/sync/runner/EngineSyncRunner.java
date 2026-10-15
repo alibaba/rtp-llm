@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -62,6 +63,8 @@ public class EngineSyncRunner implements Runnable {
     private final long statusStaleAfterUs;
     private final long statusCommitGraceUs;
 
+    private final EndpointTrace.Poll trace;
+
     public EngineSyncRunner(String modelName,
                             WorkerDirectory workerDirectory,
                             WorkerAddressService workerAddressService,
@@ -93,6 +96,8 @@ public class EngineSyncRunner implements Runnable {
                 cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCycleId = syncCycleId;
+        this.trace = new EndpointTrace.Poll("SYNC", syncCycleId);
+        this.trace.record(Stage.RUNNER_SUBMITTED);
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
         if (statusStaleAfterUs <= 0L) {
@@ -106,8 +111,20 @@ public class EngineSyncRunner implements Runnable {
         this.statusCommitGraceUs = statusCommitGraceUs;
     }
 
+    public EndpointTrace.Poll trace() {return trace;}
+
     @Override
     public void run() {
+        trace.record(Stage.RUNNER_STARTED);
+        trace.record(Stage.SYNC_DISCOVERY);
+        try {
+            syncAndReport();
+        } finally {
+            trace.record(Stage.RUNNER_ENDED);
+        }
+    }
+
+    private void syncAndReport() {
         logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
@@ -125,6 +142,7 @@ public class EngineSyncRunner implements Runnable {
                         modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             }
 
+            trace.record(Stage.SYNC_RETIREMENT);
             // Remove if not in latest engine list
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
@@ -145,6 +163,7 @@ public class EngineSyncRunner implements Runnable {
                 logger.debug("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
             }
 
+            trace.record(Stage.SYNC_DISPATCH);
             logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getIpPort();
@@ -223,6 +242,7 @@ public class EngineSyncRunner implements Runnable {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
+            trace.record(Stage.SYNC_REPORT);
             logger.debug("Entering finally block for model: {}", modelName);
             Map<String, WorkerStatus> currentStatuses =
                     workerDirectory.statusSnapshot(roleType);
