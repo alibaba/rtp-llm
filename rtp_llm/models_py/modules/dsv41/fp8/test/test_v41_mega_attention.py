@@ -762,7 +762,7 @@ class MegaAttentionCUDA(unittest.TestCase):
         self._assert_projection_close(actual, reference)
 
     @torch.inference_mode()
-    def test_mega_fp8_pair_keeps_fused_wo_a_projection_and_graph(self):
+    def test_mega_fp8_pair_optional_wo_a_projection_and_graph(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -772,7 +772,14 @@ class MegaAttentionCUDA(unittest.TestCase):
             torch.ones(160, 256, device="cuda").to(torch.float8_e8m0fnu),
         )
         state = attn._mega_attention
-        self.assertTrue(_v41_wo_a_quant.warmup(state.output_weight, state.output_scale))
+        fused_ready = _v41_wo_a_quant.warmup(state.output_weight, state.output_scale)
+
+        def dequant(data, scales):
+            factors = torch.exp2(_unpack_scale(scales).float() - 127)
+            return data.float() * factors.repeat_interleave(32, -1)
+
+        wo_a = dequant(state.output_weight, state.output_scale)
+        wo_b = dequant(attn.wo_b.weight, attn.wo_b.weight_scales)
         for rows in (1, 64, 512):
             with self.subTest(rows=rows):
                 q = _q_fused(torch.randn(rows, 64, 512, device="cuda").bfloat16())
@@ -780,26 +787,51 @@ class MegaAttentionCUDA(unittest.TestCase):
                 indices = torch.randint(0, 257, (rows, 128), device="cuda").int()
                 positions = torch.arange(rows, device="cuda").int().remainder_(256)
                 pair = state.prefill(q, kv, indices, positions)
-                self.assertTrue(
-                    _v41_wo_a_quant.is_supported(
+                self.assertEqual(
+                    _v41_wo_a_quant.try_grouped_quant(
                         pair, (state.output_weight, state.output_scale)
                     )
+                    is not None,
+                    fused_ready,
                 )
                 with patch.object(
                     _v41_wo_a_quant, "try_grouped_quant", return_value=None
                 ):
                     expected = state.project_output(pair, attn.wo_b)
-                out = torch.empty_like(expected)
-                self.assertIs(state.project_output(pair, attn.wo_b, out=out), out)
-                torch.testing.assert_close(out, expected, atol=0, rtol=0)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    captured = state.project_output(pair, attn.wo_b)
-                pair[0].zero_()
-                graph.replay()
-                torch.testing.assert_close(
-                    captured, state.project_output(pair, attn.wo_b), atol=0, rtol=0
+
+                # Independent FP32 reference keeps WO_A's BF16 rounding and
+                # tolerates only the ordinary WO_B input requantization.
+                projected = torch.einsum("mgk,grk->mgr", dequant(*pair), wo_a)
+                reference = torch.nn.functional.linear(
+                    projected.bfloat16().flatten(1).float(), wo_b
                 )
+                self._assert_projection_close(expected, reference)
+                for force_fallback in (True, False):
+                    context = (
+                        patch.object(
+                            _v41_wo_a_quant, "try_grouped_quant", return_value=None
+                        )
+                        if force_fallback
+                        else nullcontext()
+                    )
+                    with self.subTest(force_fallback=force_fallback), context:
+                        out = torch.empty_like(expected)
+                        self.assertIs(
+                            state.project_output(pair, attn.wo_b, out=out), out
+                        )
+                        torch.testing.assert_close(out, expected, atol=0, rtol=0)
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            captured = state.project_output(pair, attn.wo_b)
+                        pair[0].copy_((-pair[0].float()).to(pair[0].dtype))
+                        graph.replay()
+                        torch.testing.assert_close(
+                            captured,
+                            state.project_output(pair, attn.wo_b),
+                            atol=0,
+                            rtol=0,
+                        )
+                        pair[0].copy_((-pair[0].float()).to(pair[0].dtype))
 
 
 if __name__ == "__main__":

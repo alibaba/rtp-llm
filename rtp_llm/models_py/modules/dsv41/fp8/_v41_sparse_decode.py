@@ -59,9 +59,19 @@ class SparseDecodePlan(NamedTuple):
 
 @triton.jit
 def _prepare_plan_kernel(
-    candidates, lengths, table, sorted_blocks, active_blocks, row_table, requests,
-    QUERY_LEN: tl.constexpr, K: tl.constexpr, COLS: tl.constexpr,
-    TABLE_STRIDE: tl.constexpr, COL_BLOCK: tl.constexpr, SEARCH_STEPS: tl.constexpr,
+    candidates,
+    lengths,
+    table,
+    sorted_blocks,
+    active_blocks,
+    row_table,
+    requests,
+    QUERY_LEN: tl.constexpr,
+    K: tl.constexpr,
+    COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    COL_BLOCK: tl.constexpr,
+    SEARCH_STEPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
 ):
     row = tl.program_id(0)
@@ -89,23 +99,24 @@ def _prepare_plan_kernel(
         filler = tl.gather(fillers, tl.maximum(lanes - count, 0), 0)
         # Encode the validity bit so sorting keeps it attached to its block.
         blocks = tl.where(active, values, filler)
-        tagged = tl.sort(tl.where(
-            lanes < expected,
-            blocks.to(tl.int64) * 2 + ~active,
-            9223372036854775807,
-        ))
+        tagged = tl.sort(
+            tl.where(
+                lanes < expected,
+                blocks.to(tl.int64) * 2 + ~active,
+                9223372036854775807,
+            )
+        )
         values = (tagged // 2).to(tl.int32)
         active = (lanes < expected) & ((tagged & 1) == 0)
     last = tl.maximum(tl.cdiv(length, BLOCK_SIZE) - 1, 0)
-    tl.store(sorted_blocks + row * K + lanes,
-             tl.where(lanes < expected, values, last))
+    tl.store(sorted_blocks + row * K + lanes, tl.where(lanes < expected, values, last))
     tl.store(active_blocks + row * K + lanes, active & (lanes < expected))
     columns = tl.arange(0, COL_BLOCK)
     request = row // QUERY_LEN
-    physical = tl.load(table + request * TABLE_STRIDE + columns,
-                       columns < COLS, other=0)
-    tl.store(row_table + row * COLS + columns,
-             tl.maximum(physical, 0), columns < COLS)
+    physical = tl.load(
+        table + request * TABLE_STRIDE + columns, columns < COLS, other=0
+    )
+    tl.store(row_table + row * COLS + columns, tl.maximum(physical, 0), columns < COLS)
     tl.store(requests + row, request)
 
 
@@ -125,26 +136,53 @@ def make_plan(candidates, lengths, block_table, *, query_len):
     lengths = lengths.reshape(rows).to(torch.int32).contiguous()
     blocks = torch.empty_like(candidates)
     active = torch.empty_like(candidates, dtype=torch.bool)
-    table = torch.empty((rows, block_table.shape[1]), device=candidates.device,
-                        dtype=torch.int32)
+    table = torch.empty(
+        (rows, block_table.shape[1]), device=candidates.device, dtype=torch.int32
+    )
     requests = torch.empty(rows, device=candidates.device, dtype=torch.int32)
     _prepare_plan_kernel[(rows,)](
-        candidates, lengths, block_table, blocks, active, table, requests, query_len, k,
-        table.shape[1], block_table.stride(0),
-        triton.next_power_of_2(table.shape[1]), k.bit_length(), num_warps=8,
+        candidates,
+        lengths,
+        block_table,
+        blocks,
+        active,
+        table,
+        requests,
+        query_len,
+        k,
+        table.shape[1],
+        block_table.stride(0),
+        triton.next_power_of_2(table.shape[1]),
+        k.bit_length(),
+        num_warps=8,
     )
     metadata = deep_gemm.get_paged_sparse_mqa_logits_metadata(
-        lengths, table, requests, PAGE_SIZE, blocks, torch.int8, BLOCK_SIZE,
+        lengths,
+        table,
+        requests,
+        PAGE_SIZE,
+        blocks,
+        torch.int8,
+        BLOCK_SIZE,
     )
     return SparseDecodePlan(blocks, active, table, lengths, metadata)
 
 
 @triton.jit
 def _clean_logits_kernel(
-    raw, blocks, active, table, lengths, output, select_lengths,
-    K: tl.constexpr, RAW_STRIDE: tl.constexpr, TABLE_COLS: tl.constexpr,
+    raw,
+    blocks,
+    active,
+    table,
+    lengths,
+    output,
+    select_lengths,
+    K: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
     TILE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE, PAGE_SIZE: tl.constexpr = PAGE_SIZE,
+    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    PAGE_SIZE: tl.constexpr = PAGE_SIZE,
 ):
     row = tl.program_id(0)
     slot = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -157,10 +195,14 @@ def _clean_logits_kernel(
     page = tl.load(table + row * TABLE_COLS + token // PAGE_SIZE, valid, other=0)
     # Never read DG's unwritten padding. Restore RTP's zero-K semantics for
     # unallocated pages, independently of bytes stored in the page-0 sentinel.
-    score = tl.load(raw + row * RAW_STRIDE + slot,
-                    valid & (page > 0), other=0).to(tl.float32)
-    tl.store(output + row * (K * BLOCK_SIZE) + slot,
-             tl.where(valid, score, -float("inf")), slot < K * BLOCK_SIZE)
+    score = tl.load(raw + row * RAW_STRIDE + slot, valid & (page > 0), other=0).to(
+        tl.float32
+    )
+    tl.store(
+        output + row * (K * BLOCK_SIZE) + slot,
+        tl.where(valid, score, -float("inf")),
+        slot < K * BLOCK_SIZE,
+    )
     if tl.program_id(1) == 0:
         # Short contexts contain every historical block, including fillers;
         # long contexts scan all K blocks. Holes stay -inf in either case.
@@ -169,8 +211,14 @@ def _clean_logits_kernel(
 
 @triton.jit
 def _restore_indices_kernel(
-    output, logits, blocks, lengths, K: tl.constexpr, TILE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE, TOKEN_TOPK: tl.constexpr = TOKEN_TOPK,
+    output,
+    logits,
+    blocks,
+    lengths,
+    K: tl.constexpr,
+    TILE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    TOKEN_TOPK: tl.constexpr = TOKEN_TOPK,
 ):
     row = tl.program_id(0)
     lane = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -180,7 +228,9 @@ def _restore_indices_kernel(
     block = tl.load(blocks + row * K + slot // BLOCK_SIZE, valid, other=0)
     token = block * BLOCK_SIZE + slot % BLOCK_SIZE
     keep = valid & (token < tl.load(lengths + row)) & (tl.abs(score) < float("inf"))
-    tl.store(output + row * TOKEN_TOPK + lane, tl.where(keep, token, -1), lane < TOKEN_TOPK)
+    tl.store(
+        output + row * TOKEN_TOPK + lane, tl.where(keep, token, -1), lane < TOKEN_TOPK
+    )
 
 
 def select_tokens(logits, plan):
@@ -190,8 +240,17 @@ def select_tokens(logits, plan):
     scores = torch.empty((rows, width), device=logits.device, dtype=torch.float32)
     lengths = torch.empty_like(plan.lengths)
     _clean_logits_kernel[(rows, triton.cdiv(width, 256))](
-        logits, plan.blocks, plan.active, plan.table, plan.lengths, scores, lengths,
-        k, logits.stride(0), plan.table.shape[1], 256,
+        logits,
+        plan.blocks,
+        plan.active,
+        plan.table,
+        plan.lengths,
+        scores,
+        lengths,
+        k,
+        logits.stride(0),
+        plan.table.shape[1],
+        256,
     )
     output = torch.empty((rows, TOKEN_TOPK), device=logits.device, dtype=torch.int32)
     selected = deepselect.try_select_tokens(
@@ -202,11 +261,22 @@ def select_tokens(logits, plan):
         enabled=os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1",
     )
     if selected is None:
-        rtp_llm_ops.topk_v3(scores, lengths, output,
-                           _get_topk_workspace(logits.device), TOKEN_TOPK, width)
+        rtp_llm_ops.topk_v3(
+            scores,
+            lengths,
+            output,
+            _get_topk_workspace(logits.device),
+            TOKEN_TOPK,
+            width,
+        )
     # Both selectors share finite filtering and logical-index restoration.
     _restore_indices_kernel[(rows, triton.cdiv(TOKEN_TOPK, 256))](
-        output, scores, plan.blocks, plan.lengths, k, 256,
+        output,
+        scores,
+        plan.blocks,
+        plan.lengths,
+        k,
+        256,
     )
     return output
 
@@ -214,14 +284,23 @@ def select_tokens(logits, plan):
 def select_decode(q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim):
     """Run fused Q preparation, official sparse score, and logical token TopK."""
     payload, scales, weights = prepare_indexer_q_and_weights(
-        q, weights, freqs_cis, positions, rope_head_dim,
+        q,
+        weights,
+        freqs_cis,
+        positions,
+        rope_head_dim,
         weights_out_dtype=torch.bfloat16,
     )
     rows, k = plan.blocks.shape
     logits = deep_gemm.fp8_fp4_paged_sparse_mqa_logits(
-        (payload.reshape(rows, 1, NUM_HEADS, HEAD_DIM // 2),
-         scales.reshape(rows, 1, NUM_HEADS)),
-        pool.unsqueeze(2), weights.reshape(rows, NUM_HEADS),
-        plan.metadata, k, BLOCK_SIZE,
+        (
+            payload.reshape(rows, 1, NUM_HEADS, HEAD_DIM // 2),
+            scales.reshape(rows, 1, NUM_HEADS),
+        ),
+        pool.unsqueeze(2),
+        weights.reshape(rows, NUM_HEADS),
+        plan.metadata,
+        k,
+        BLOCK_SIZE,
     )
     return select_tokens(logits, plan)

@@ -669,9 +669,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
     def _assert_candidates(
         self, logits, lengths, candidates, flags, block_size=8, topk_blocks=2048
     ):
-        expected, _ = self._old_candidates(
-            logits, lengths, block_size, topk_blocks
-        )
+        expected, _ = self._old_candidates(logits, lengths, block_size, topk_blocks)
         self.assertEqual(candidates.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.uint8)
         self.assertEqual(candidates.shape, expected.shape)
@@ -686,9 +684,12 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         )
 
         def selected_scores(ids):
-            return scores.gather(1, ids.clamp_min(0).long()).masked_fill(
-                ids < 0, -torch.inf
-            ).sort(-1).values
+            return (
+                scores.gather(1, ids.clamp_min(0).long())
+                .masked_fill(ids < 0, -torch.inf)
+                .sort(-1)
+                .values
+            )
 
         torch.testing.assert_close(
             selected_scores(candidates), selected_scores(expected), rtol=0, atol=0
@@ -716,7 +717,18 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         # Cover the original K=8 regression, both sides of radix-supported K,
         # and pools smaller than/equal to K, including a partial final block.
         for topk_blocks in (
-            1, 8, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4096
+            1,
+            8,
+            511,
+            512,
+            513,
+            1023,
+            1024,
+            1025,
+            2047,
+            2048,
+            2049,
+            4096,
         ):
             for nblocks in (max(1, topk_blocks - 1), topk_blocks, topk_blocks + 3):
                 with self.subTest(topk_blocks=topk_blocks, nblocks=nblocks):
@@ -746,10 +758,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
                         )
                     self.assertEqual(
                         radix.call_count,
-                        int(
-                            nblocks > topk_blocks
-                            and topk_blocks in (512, 1024, 2048)
-                        ),
+                        int(nblocks > topk_blocks and topk_blocks in (512, 1024, 2048)),
                     )
                     expected_flags = self._assert_candidates(
                         logits, lengths, ids, flags, topk_blocks=topk_blocks

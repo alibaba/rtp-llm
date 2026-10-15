@@ -47,8 +47,15 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
         self.addCleanup(workspace.stop)
 
     def test_deepselect_default_switch_and_fallback(self):
-        for switch, available in ((None, True), ("1", True), ("0", True), (None, False)):
-            with self.subTest(switch=switch, available=available), patch.dict(os.environ):
+        for switch, available in (
+            (None, True),
+            ("1", True),
+            ("0", True),
+            (None, False),
+        ):
+            with self.subTest(switch=switch, available=available), patch.dict(
+                os.environ
+            ):
                 os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
                 if switch is not None:
                     os.environ["DSV41_DECODE_DEEPSELECT"] = switch
@@ -63,13 +70,13 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
 
                 with patch.object(
                     sparse.deepselect, "try_select_tokens", side_effect=select
-                ) as native, patch.object(
-                    sparse.rtp_llm_ops, "topk_v3"
-                ) as fallback:
+                ) as native, patch.object(sparse.rtp_llm_ops, "topk_v3") as fallback:
                     output = sparse.select_tokens(self.logits, self.plan)
                 native.assert_called_once()
                 self.assertIs(native.call_args.kwargs["out"], output)
-                self.assertEqual(fallback.call_count, int(switch == "0" or not available))
+                self.assertEqual(
+                    fallback.call_count, int(switch == "0" or not available)
+                )
                 if fallback.called:
                     self.assertIs(fallback.call_args.args[2], output)
                 restore = sparse._restore_indices_kernel.__getitem__.return_value
@@ -77,7 +84,9 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
 
     def test_deepselect_errors_do_not_fall_back(self):
         with patch.object(
-            sparse.deepselect, "try_select_tokens", side_effect=RuntimeError("DeepSelect failed")
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=RuntimeError("DeepSelect failed"),
         ), patch.object(sparse.rtp_llm_ops, "topk_v3") as fallback:
             with self.assertRaisesRegex(RuntimeError, "DeepSelect failed"):
                 sparse.select_tokens(self.logits, self.plan)
@@ -262,7 +271,9 @@ class SparseDecodeCUDA(unittest.TestCase):
         return table, pool
 
     def test_candidate_holes_match_dense_and_graph_replay(self):
-        from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import quantize_rows_fp4
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+            quantize_rows_fp4,
+        )
 
         dg = sparse.deep_gemm
         for k in (512, 1024, 2048):
@@ -377,11 +388,13 @@ class SparseDecodeCUDA(unittest.TestCase):
             capacity = k * 16
             lengths = torch.tensor(
                 [0, 1, 511, 512, 513, capacity - 1, capacity, capacity],
-                device="cuda", dtype=torch.int32,
+                device="cuda",
+                dtype=torch.int32,
             )
             rows = lengths.numel()
             candidates = (
-                torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(rows, 1) * 2
+                torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(rows, 1)
+                * 2
             )
             candidates.masked_fill_(candidates * 8 >= lengths[:, None], -1)
             candidates[4:, 1::3] = -1
@@ -392,7 +405,10 @@ class SparseDecodeCUDA(unittest.TestCase):
             tokens = plan.blocks[:, :, None].long() * 8 + torch.arange(8, device="cuda")
             raw = tokens.reshape(rows, k * 8).bfloat16()
             dense = (
-                torch.arange(capacity, device="cuda").bfloat16().float()[None].repeat(rows, 1)
+                torch.arange(capacity, device="cuda")
+                .bfloat16()
+                .float()[None]
+                .repeat(rows, 1)
             )
             dense[-2, :128] = 0  # Unallocated page, regardless of raw logits.
             for switch in ("0", "1"):
@@ -524,7 +540,11 @@ class SparseDecodeCUDA(unittest.TestCase):
                 q = layer.index_wq(qr.reshape(rows, 16)).view(batch, query_len, 32, 128)
                 weights = torch.nn.functional.linear(x, layer.index_weights)
                 payload, scales, scaled = indexer.prepare_indexer_q_and_weights(
-                    q, weights, frequencies, positions, 64,
+                    q,
+                    weights,
+                    frequencies,
+                    positions,
+                    64,
                     weights_out_dtype=torch.bfloat16,
                 )
                 dense = fp8_fp4_paged_indexer_score(
