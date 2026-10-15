@@ -4,6 +4,7 @@ import ast
 import importlib.util
 import sys
 import unittest
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -35,6 +36,46 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_chunk_metadata_warmup_covers_mixed_types_and_independent_offsets(self):
+        import torch
+
+        meta = SimpleNamespace(try_chunk_metadata=Mock(return_value=object()))
+        warmup._warm_chunk_metadata(meta, 2, 128, "cpu")
+        observed = set()
+        for call in meta.try_chunk_metadata.call_args_list:
+            prefixes, lengths, requests, ratio, window, replay = call.args
+            self.assertEqual((ratio, window), (2, 128))
+            self.assertEqual(prefixes.shape, (3,))
+            self.assertEqual(lengths.shape, (3,))
+            self.assertEqual(requests.dtype, torch.int64)
+            observed.add(
+                (
+                    prefixes.dtype,
+                    lengths.dtype,
+                    prefixes.storage_offset(),
+                    lengths.storage_offset(),
+                    requests.storage_offset(),
+                    replay,
+                    call.kwargs["compact_replay"],
+                )
+            )
+        expected = set(
+            product(
+                (torch.int32, torch.int64),
+                (torch.int32, torch.int64),
+                (0, 1),
+                (0, 1),
+                (0, 1),
+                (False, True),
+                (False, True),
+            )
+        )
+        self.assertEqual(observed, expected)
+        self.assertEqual(meta.try_chunk_metadata.call_count, len(expected))
+        meta.try_chunk_metadata.return_value = None
+        with self.assertRaisesRegex(RuntimeError, "chunk metadata"):
+            warmup._warm_chunk_metadata(meta, 2, 128, "cpu")
+
     def test_norm_quant_must_be_ready_before_requests(self):
         package = "rtp_llm.models_py.modules.dsv41.fp8"
         quant = SimpleNamespace(warmup=Mock(return_value=True))
