@@ -4,9 +4,10 @@ The dense GPU oracle uses the same BF16 head reduction/logits as the sparse
 kernel. This tests indexing exactly, not equality to the old FP32 arithmetic.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
@@ -22,6 +23,63 @@ from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion i
     _original_paged_score,
     _select,
 )
+
+
+class SparseDecodeTopKRoutingCPU(unittest.TestCase):
+    def setUp(self):
+        self.logits = torch.empty(2, 4096, dtype=torch.bfloat16)
+        self.plan = sparse.SparseDecodePlan(
+            torch.empty(2, 512, dtype=torch.int32),
+            torch.empty(2, 512, dtype=torch.bool),
+            torch.empty(2, 64, dtype=torch.int32),
+            torch.empty(2, dtype=torch.int32),
+            None,
+        )
+        for name in ("_clean_logits_kernel", "_restore_indices_kernel"):
+            mocked = patch.object(sparse, name, MagicMock())
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        workspace = patch.object(sparse, "_get_topk_workspace", return_value=None)
+        workspace.start()
+        self.addCleanup(workspace.stop)
+
+    def test_deepselect_default_switch_and_fallback(self):
+        for switch, available in ((None, True), ("1", True), ("0", True), (None, False)):
+            with self.subTest(switch=switch, available=available), patch.dict(os.environ):
+                os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
+                if switch is not None:
+                    os.environ["DSV41_DECODE_DEEPSELECT"] = switch
+
+                def select(scores, lengths, *, out, filter_finite, enabled):
+                    self.assertEqual(scores.dtype, torch.float32)
+                    self.assertEqual(scores.shape, (2, 4096))
+                    self.assertEqual(lengths.shape, (2,))
+                    self.assertFalse(filter_finite)
+                    self.assertEqual(enabled, switch != "0")
+                    return out if enabled and available else None
+
+                with patch.object(
+                    sparse.deepselect, "try_select_tokens", side_effect=select
+                ) as native, patch.object(
+                    sparse.rtp_llm_ops, "topk_v3"
+                ) as fallback:
+                    output = sparse.select_tokens(self.logits, self.plan)
+                native.assert_called_once()
+                self.assertIs(native.call_args.kwargs["out"], output)
+                self.assertEqual(fallback.call_count, int(switch == "0" or not available))
+                if fallback.called:
+                    self.assertIs(fallback.call_args.args[2], output)
+                restore = sparse._restore_indices_kernel.__getitem__.return_value
+                self.assertIs(restore.call_args.args[0], output)
+
+    def test_deepselect_errors_do_not_fall_back(self):
+        with patch.object(
+            sparse.deepselect, "try_select_tokens", side_effect=RuntimeError("DeepSelect failed")
+        ), patch.object(sparse.rtp_llm_ops, "topk_v3") as fallback:
+            with self.assertRaisesRegex(RuntimeError, "DeepSelect failed"):
+                sparse.select_tokens(self.logits, self.plan)
+        fallback.assert_not_called()
+        sparse._restore_indices_kernel.__getitem__.assert_not_called()
 
 
 class SparseDecodeSupportCPU(unittest.TestCase):
@@ -280,6 +338,55 @@ class SparseDecodeCUDA(unittest.TestCase):
             rtol=0,
             atol=0,
         )
+
+    def test_deepselect_and_fallback_masked_selection_graph(self):
+        if not sparse.deepselect.is_available(torch.device("cuda"), enabled=True):
+            self.skipTest("Native FP32 DeepSelect required")
+        for k in (512, 1024, 2048):
+            capacity = k * 16
+            lengths = torch.tensor(
+                [0, 1, 511, 512, 513, capacity - 1, capacity, capacity],
+                device="cuda", dtype=torch.int32,
+            )
+            rows = lengths.numel()
+            candidates = (
+                torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(rows, 1) * 2
+            )
+            candidates.masked_fill_(candidates * 8 >= lengths[:, None], -1)
+            candidates[4:, 1::3] = -1
+            candidates[-1] = -1
+            table = torch.ones(rows, capacity // 128, device="cuda", dtype=torch.int32)
+            table[-2, 0] = 0
+            plan = sparse.make_plan(candidates, lengths, table, query_len=1)
+            tokens = plan.blocks[:, :, None].long() * 8 + torch.arange(8, device="cuda")
+            raw = tokens.reshape(rows, k * 8).bfloat16()
+            dense = (
+                torch.arange(capacity, device="cuda").bfloat16().float()[None].repeat(rows, 1)
+            )
+            dense[-2, :128] = 0  # Unallocated page, regardless of raw logits.
+            for switch in ("0", "1"):
+                with self.subTest(k=k, deepselect=switch), patch.dict(
+                    os.environ, {"DSV41_DECODE_DEEPSELECT": switch}
+                ), patch.object(
+                    sparse.rtp_llm_ops, "topk_v3", wraps=sparse.rtp_llm_ops.topk_v3
+                ) as fallback:
+                    self._check_selection(
+                        sparse.select_tokens(raw, plan), candidates, lengths, dense
+                    )
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        sparse.select_tokens(raw, plan)
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        result = sparse.select_tokens(raw, plan)
+                    self.assertEqual(fallback.call_count, 3 if switch == "0" else 0)
+                    for sign in (1, -1):
+                        raw.copy_(tokens.reshape(rows, k * 8).bfloat16() * sign)
+                        graph.replay()
+                        self._check_selection(result, candidates, lengths, dense * sign)
+                    raw.copy_(tokens.reshape(rows, k * 8).bfloat16())
 
     def test_missing_backend_and_unsupported_k_keep_dense_path(self):
         attn, _, x, qr, positions = _fixture("cuda", 1, candidate=True)

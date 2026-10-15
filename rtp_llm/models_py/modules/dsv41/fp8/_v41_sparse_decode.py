@@ -5,6 +5,7 @@ step. DeepGEMM requires sorted candidate blocks and uses BF16 head reduction and
 BF16 logits, matching the current dense paged scorer's precision boundary.
 """
 
+import os
 from typing import NamedTuple
 
 import torch
@@ -16,6 +17,7 @@ try:
 except ImportError:
     deep_gemm = None
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8._v41_decode_indexer import (
     prepare_indexer_q_and_weights,
 )
@@ -192,8 +194,17 @@ def select_tokens(logits, plan):
         k, logits.stride(0), plan.table.shape[1], 256,
     )
     output = torch.empty((rows, TOKEN_TOPK), device=logits.device, dtype=torch.int32)
-    rtp_llm_ops.topk_v3(scores, lengths, output,
-                       _get_topk_workspace(logits.device), TOKEN_TOPK, width)
+    selected = deepselect.try_select_tokens(
+        scores,
+        lengths,
+        out=output,
+        filter_finite=False,
+        enabled=os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1",
+    )
+    if selected is None:
+        rtp_llm_ops.topk_v3(scores, lengths, output,
+                           _get_topk_workspace(logits.device), TOKEN_TOPK, width)
+    # Both selectors share finite filtering and logical-index restoration.
     _restore_indices_kernel[(rows, triton.cdiv(TOKEN_TOPK, 256))](
         output, scores, plan.blocks, plan.lengths, k, 256,
     )
