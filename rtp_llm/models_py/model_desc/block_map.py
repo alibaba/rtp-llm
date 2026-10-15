@@ -1,14 +1,29 @@
+from typing import List, Optional
+
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
+def cpu_layer_group_ids(attention_inputs: PyAttentionInputs) -> Optional[List[int]]:
+    if attention_inputs.kv_cache_kernel_block_id_device_by_group is None:
+        return None
+    layer_to_group = attention_inputs.kv_cache_layer_to_group
+    if layer_to_group is None or layer_to_group.device.type != "cpu":
+        return None
+    return layer_to_group.tolist()
+
+
 def select_block_map_for_layer(
-    attention_inputs: PyAttentionInputs, layer_idx: int
+    attention_inputs: PyAttentionInputs,
+    layer_idx: int,
+    layer_group_ids: Optional[List[int]] = None,
 ) -> int:
     if attention_inputs.kv_cache_kernel_block_id_device_by_group is None:
         return
 
     gid = 0
-    if attention_inputs.kv_cache_layer_to_group is not None:
+    if layer_group_ids is not None:
+        gid = layer_group_ids[layer_idx]
+    elif attention_inputs.kv_cache_layer_to_group is not None:
         gid = int(attention_inputs.kv_cache_layer_to_group[layer_idx].item())
 
     if attention_inputs.kv_cache_kernel_block_id_device_by_group is not None and len(

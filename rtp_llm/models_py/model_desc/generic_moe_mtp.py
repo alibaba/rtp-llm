@@ -6,7 +6,10 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    cpu_layer_group_ids,
+    select_block_map_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
@@ -309,8 +312,9 @@ class GenericMoeMTPModel(GptModelBase):
             self.kv_cache,
             force_reuse_topk_indices=reuse_topk_indices,
         )
+        layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            select_block_map_for_layer(inputs.attention_inputs, i, layer_group_ids)
             output = decoder_layer(
                 hidden_states,
                 residual,
