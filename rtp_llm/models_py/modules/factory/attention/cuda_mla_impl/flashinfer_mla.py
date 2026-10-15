@@ -173,6 +173,10 @@ class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
     _trtllm_gen_workspace = None  # class-level lazy workspace (uint8, 128 MiB)
     _trtllm_lens_cache = None  # (key, (bs, max_q, max_kv), qo_indptr, kv_indptr
+    _trtllm_run = None  # cached JIT module entry (wrapper bypass)
+    _trtllm_sm_count = 0
+    _trtllm_pdl = False
+    _trtllm_log2e = 1.0
     _kv_b_proj_cache = None  # {(weights_id, layer_id): linear} — forward rebuilt per call
 
     def __init__(
@@ -475,26 +479,60 @@ class MlaFlashInferPrefillOp(object):
             MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.empty(
                 128 * 1024 * 1024, dtype=torch.uint8, device=q.device
             )
-        attn_output = flashinfer.prefill.trtllm_ragged_attention_deepseek(
-            query=q,
-            key=k,
-            value=value_states,
-            workspace_buffer=MlaFlashInferPrefillOp._trtllm_gen_workspace,
-            seq_lens=self._trtllm_seq_lens,
-            max_q_len=self._trtllm_max_q_len,
-            max_kv_len=self._trtllm_max_kv_len,
-            bmm1_scale=self.scale * self.softmax_extra_scale,
-            bmm2_scale=1.0,
-            o_sf_scale=1.0,
-            batch_size=self._trtllm_batch_size,
-            window_left=-1,
-            cum_seq_lens_q=self.qo_indptr,
-            cum_seq_lens_kv=self._trtllm_kv_indptr,
-            enable_pdl=None,
-            is_causal=True,
-            return_lse=False,
+        ws = MlaFlashInferPrefillOp._trtllm_gen_workspace
+        # Bypass the flashinfer python wrapper (its per-call device queries,
+        # api-logging decorator and arg processing cost ~390us x40 layers on
+        # the host-bound prefill path): cache the JIT module entry, sm count
+        # and PDL flag once, and call the op directly with the same argument
+        # order the wrapper assembles (bmm1 carries the wrapper's log2e
+        # exp2-trick scaling).
+        if MlaFlashInferPrefillOp._trtllm_run is None:
+            from flashinfer.prefill import get_trtllm_gen_fmha_module
+            from flashinfer.utils import (
+                device_support_pdl,
+                get_device_sm_count,
+            )
+            import math
+
+            MlaFlashInferPrefillOp._trtllm_run = (
+                get_trtllm_gen_fmha_module().trtllm_ragged_attention
+            )
+            MlaFlashInferPrefillOp._trtllm_sm_count = get_device_sm_count(
+                q.device
+            )
+            MlaFlashInferPrefillOp._trtllm_pdl = device_support_pdl(q.device)
+            MlaFlashInferPrefillOp._trtllm_log2e = math.log2(math.e)
+        out = torch.empty(
+            (q.shape[0], self.num_heads, self.v_head_dim),
+            dtype=torch.bfloat16,
+            device=q.device,
         )
-        return attn_output.view(-1, self.num_heads, self.v_head_dim)
+        MlaFlashInferPrefillOp._trtllm_run(
+            out,
+            q,
+            k,
+            value_states,
+            ws,
+            self._trtllm_seq_lens,
+            self._trtllm_max_q_len,
+            self._trtllm_max_kv_len,
+            self.scale * self.softmax_extra_scale
+            * MlaFlashInferPrefillOp._trtllm_log2e,
+            1.0,
+            1.0,
+            self._trtllm_batch_size,
+            -1,
+            self.qo_indptr,
+            self._trtllm_kv_indptr,
+            MlaFlashInferPrefillOp._trtllm_sm_count,
+            MlaFlashInferPrefillOp._trtllm_pdl,
+            True,  # is_causal
+            ws.numel() * ws.element_size(),  # workspace_size
+            None,  # attention_sinks
+            None,  # skip_softmax_threshold_scale_factor
+            None,  # lse
+        )
+        return out.view(-1, self.num_heads, self.v_head_dim)
 
 
 class MlaFlashInferDecodeOp(object):
