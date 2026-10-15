@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
@@ -496,8 +497,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
 }
 
 void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {
-    auto       first_token_rt_us = stream->getTimeInfo().first_token_rt_us;
-    auto       cost_time_us      = autil::TimeUtility::currentTimeInMicroSeconds() - stream->beginTimeUs();
+    const auto time_info         = stream->getTimeInfo();
+    const auto first_token_rt_us = time_info.first_token_rt_us;
+    const auto cost_time_us      = autil::TimeUtility::currentTimeInMicroSeconds() - time_info.begin_time_us;
     const auto reuse_lens        = getPrefillReuseLens(stream);
 
     for (size_t i = 0; i < outputs_pb.flatten_output().aux_info_size(); i++) {
