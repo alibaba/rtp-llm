@@ -111,6 +111,7 @@ class Qwen3DSparkConfigTest(unittest.TestCase):
 
     def test_draft_kv_cache_exempt_from_target_fp8_kv_mode(self):
         from rtp_llm.models_py.model_desc.qwen3_dspark_model import Qwen3DSparkModel
+        from rtp_llm.ops import KvCacheDataType
 
         # The exemption contract: the Qwen3 dspark draft opts out of the
         # target's FP8 KV cache mode and the factory resets both the mode and
@@ -126,7 +127,7 @@ class Qwen3DSparkConfigTest(unittest.TestCase):
                 )
                 ModelFactory._reset_draft_fp8_kv_cache(draft, "Qwen3DSparkModel")
                 self.assertEqual(draft.attn_config.fp8_kv_cache_mode, 0)
-                self.assertEqual(draft.attn_config.kv_cache_dtype, "base")
+                self.assertEqual(draft.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
 
 
 if __name__ == "__main__":

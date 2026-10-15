@@ -14,6 +14,7 @@ from unittest import mock
 import torch
 
 import rtp_llm.model_loader  # noqa: F401  (registers QuantWeight classes)
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     NVFP4_BLOCK_SIZE,
@@ -25,12 +26,11 @@ from rtp_llm.utils.model_weight import W
 
 
 def _quant_config(flag: bool = True):
-    return SimpleNamespace(
-        get_method=lambda: "FP8_PER_BLOCK",
-        is_quanted=lambda: False,
-        group_size=lambda: 0,
-        enable_nvfp4_dense_ffn=flag,
-    )
+    # PerBlockFp8Weight.support() isinstance-checks the real algo config, and
+    # init_precision_config injects enable_nvfp4_dense_ffn onto it.
+    config = Fp8BlockWiseQuantConfig(is_quanted=True)
+    config.enable_nvfp4_dense_ffn = flag
+    return config
 
 
 def _ffn_weight(name: str) -> FfnAtomicWeight:
@@ -92,15 +92,12 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         # Dequantize: e2m1 ordinal -> value, then per-block scale * scale2.
         low = (packed & 0x0F)
         high = (packed >> 4)
-        sign = lambda q: torch.where(q >= 8, -1.0, 1.0)
-        magnitude = lambda q: torch.gather(
-            torch.tensor(
-                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-                device=q.device,
-            ),
-            0,
-            (q & 0x07).long(),
+        lut = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            device=packed.device,
         )
+        sign = lambda q: torch.where(q >= 8, -1.0, 1.0)
+        magnitude = lambda q: lut[(q & 0x07).long()]
         unpacked = torch.stack(
             [sign(low) * magnitude(low), sign(high) * magnitude(high)], dim=-1
         ).view(64, 128)

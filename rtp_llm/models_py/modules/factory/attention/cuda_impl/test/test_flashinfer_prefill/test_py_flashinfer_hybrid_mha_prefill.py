@@ -705,9 +705,8 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
         config.attn_configs.fp8_kv_cache_mode = 2
         config.attn_configs.is_causal = True
         inputs = harness._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths),
-            prefix_lengths,
             input_lengths,
+            prefix_lengths,
             kernel_page_size,
         )
         block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
@@ -915,9 +914,8 @@ class TestDynamicFp8HybridUnit(unittest.TestCase):
                     config.attn_configs.fp8_kv_cache_mode = 2
                     config.attn_configs.is_causal = True
                     inputs = harness._create_chunked_prefill_attention_inputs(
-                        len(prefix_lengths),
-                        prefix_lengths,
                         input_lengths,
+                        prefix_lengths,
                         kernel_page_size,
                         dtype=dtype,
                     )
