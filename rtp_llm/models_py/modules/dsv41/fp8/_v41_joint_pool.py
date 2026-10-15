@@ -90,6 +90,8 @@ def _metadata(
     RATIO: tl.constexpr,
     RANK: tl.constexpr,
     CP_SIZE: tl.constexpr,
+    output_offsets,
+    DIRECT_OUTPUT: tl.constexpr,
 ):
     ix = tl.arange(0, 128)
     counts = tl.load(ends + (FIRST + ix) * ES, FIRST + ix < STOP, other=0) // RATIO
@@ -113,6 +115,9 @@ def _metadata(
     ii = _slot(pos, req, valid, it, IC, IS, IEB, ITPB, OWNER, RATIO, RANK, CP_SIZE)
     tl.store(slots + row, mi, row < ROWS)
     tl.store(slots + ROWS + row, ii, row < ROWS)
+    if DIRECT_OUTPUT:
+        output_row = tl.load(output_offsets + req, valid, other=0) + local
+        tl.store(slots + 2 * ROWS + row, tl.where(valid, output_row, -1), row < ROWS)
 
 
 @triton.jit(do_not_specialize=["ROWS", "MP", "IP"])
@@ -138,23 +143,30 @@ def _gather(
 
 
 @triton.jit(do_not_specialize=["ROWS"])
-def _dequant(raw, quant, scale, out, oq, os, ROWS):
-    stride = tl.full((), _RAW_C, tl.int64)
-    codec._fp4_global_dequant_kernel(
-        raw,
-        raw,
-        out,
-        ROWS,
-        _GLOBAL_DIM,
-        _GLOBAL_GROUP,
-        _RAW_C,
-        1,
-        stride,
-        ROWS,
-        tl.bfloat16,
-        True,
-    )
+def _dequant(raw, quant, scale, out, oq, os, ROWS, slots, DIRECT_OUTPUT: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
+    stride = tl.full((), _RAW_C, tl.int64)
+    if DIRECT_OUTPUT:
+        destination = tl.load(slots + 2 * ROWS + row)
+    else:
+        destination = row
+    if destination >= 0:
+        # Keep the FP4 codec as the only arithmetic/format owner. Adjusting its
+        # base pointer changes the destination row, never the decoded values.
+        codec._fp4_global_dequant_kernel(
+            raw,
+            raw,
+            out + (destination - row) * _GLOBAL_DIM,
+            ROWS,
+            _GLOBAL_DIM,
+            _GLOBAL_GROUP,
+            _RAW_C,
+            1,
+            stride,
+            ROWS,
+            tl.bfloat16,
+            True,
+        )
     columns = tl.arange(0, _PAYLOAD_C)
     tl.store(
         oq + row * _PAYLOAD_C + columns, tl.load(quant + row * _PAYLOAD_C + columns)
@@ -183,7 +195,9 @@ def _views(packet, rows):
     return quant, scale, raw
 
 
-def _metadata_args(ends, mt, it, slots, rows, first, stop, layout):
+def _metadata_args(
+    ends, mt, it, slots, rows, first, stop, layout, *, output_offsets=None
+):
     ratio, owner, mtpb, itpb, rank, _, _, meb, ieb, cp_size = layout
     return (
         ends,
@@ -206,6 +220,8 @@ def _metadata_args(ends, mt, it, slots, rows, first, stop, layout):
         ratio,
         rank,
         cp_size,
+        ends if output_offsets is None else output_offsets,
+        output_offsets is not None,
     )
 
 
@@ -325,7 +341,7 @@ def warmup(main_layout, index_layout, *, cp_size, cp_rank, device):
                 main.shape[1],
                 index.shape[1],
             ),
-            (raw, q, s, out, oq, os, rows),
+            (raw, q, s, out, oq, os, rows, slots, False),
         )
         kernels = tuple(
             fn.warmup(*a, grid=(1,), num_warps=4)
@@ -333,12 +349,90 @@ def warmup(main_layout, index_layout, *, cp_size, cp_rank, device):
         )
         for kernel, a, grid in zip(kernels, args, (triton.cdiv(rows, 128), rows, rows)):
             kernel[(grid, 1, 1)](*a)
+        direct_slots = torch.empty((3, rows), dtype=torch.int64, device=device)
+        direct_ends = torch.full((33,), ratio, dtype=torch.int64, device=device)[1:]
+        output_offsets = torch.arange(33, dtype=torch.int64, device=device)[1:]
+        direct_args = (
+            _metadata_args(
+                direct_ends,
+                mt,
+                it,
+                direct_slots,
+                rows,
+                0,
+                32,
+                layout,
+                output_offsets=output_offsets,
+            ),
+            (raw, q, s, out, oq, os, rows, direct_slots, True),
+        )
+        direct_kernels = tuple(
+            fn.warmup(*a, grid=(1,), num_warps=4)
+            for fn, a in zip((_metadata, _dequant), direct_args)
+        )
+        for kernel, a, grid in zip(
+            direct_kernels, direct_args, (triton.cdiv(rows, 128), rows)
+        ):
+            kernel[(grid, 1, 1)](*a)
         torch.cuda.current_stream().synchronize()
-        _READY[key] = kernels
+        # Preserve legacy indices 0..2; direct output uses metadata/dequant 3/4
+        # with the same gather handle at index 1. Both paths are startup-warmed.
+        _READY[key] = (*kernels, *direct_kernels)
     return True
 
 
-def try_gather(attn, main, index, ends, seq_ends, *, groups):
+def _validate_workspace(workspace, counts, device):
+    output, offsets = workspace.output, workspace.device_offsets
+    starts = workspace.global_starts
+    if (
+        workspace.global_sizes != counts
+        or len(starts) != len(counts)
+        or output.device != device
+        or output.dtype != torch.bfloat16
+        or output.ndim != 2
+        or output.shape[1] != codec.FP4_GLOBAL_HEAD_DIM
+        or not output.is_contiguous()
+        or output.requires_grad
+        or output.is_conj()
+        or output.is_neg()
+        or offsets.device != device
+        or offsets.dtype != torch.int64
+        or offsets.shape != (len(counts),)
+        or not offsets.is_contiguous()
+    ):
+        raise ValueError("Joint pool destination has incompatible storage or lengths")
+    limit, previous_end = output.shape[0], 0
+    for start, count in zip(starts, counts):
+        if type(start) is not int or start < previous_end or start + count > limit:
+            raise ValueError("Joint pool destination ranges overlap or exceed storage")
+        previous_end = start + count
+
+
+def _row_partitions(counts, starts, rows):
+    """Describe exact request rows and gaps for a single C++ view operation.
+
+    No per-request Python Tensor call is needed, including nonuniform padding.
+    Zero-size requests retain their position and storage offset.
+    """
+    sizes, selected, cursor = [], [], 0
+    for count, start in zip(counts, starts):
+        if start > cursor:
+            sizes.append(start - cursor)
+        selected.append(len(sizes))
+        sizes.append(count)
+        cursor = start + count
+    if cursor < rows:
+        sizes.append(rows - cursor)
+    return sizes, selected
+
+
+def _split_rows(tensor, partitions):
+    sizes, selected = partitions
+    views = tensor.split(sizes, dim=0)
+    return tuple(views[index] for index in selected)
+
+
+def try_gather(attn, main, index, ends, seq_ends, *, groups, workspace=None, swa=None):
     """Choose the schedule from common host geometry and prepared pool layouts."""
     if not _MIN_BATCH <= len(ends) <= 128:
         return None
@@ -385,17 +479,42 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,
     )
-    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_pools import _trim_rows
 
     counts = tuple(x // ratio for x in ends)
+    if workspace is None and swa is not None:
+        from ._v41_prefill_kv_workspace import prepare_global_workspace
+
+        workspace = prepare_global_workspace(swa, counts)
+    if workspace is not None:
+        _validate_workspace(workspace, counts, seq_ends.device)
+        globals_by_request = _split_rows(
+            workspace.output,
+            _row_partitions(counts, workspace.global_starts, workspace.output.shape[0]),
+        )
     result = []
     for first, stop, rows in groups:
         packet = torch.empty(rows * _PACKED, dtype=torch.uint8, device=seq_ends.device)
         q, s, raw = _views(packet, rows)
         if rows:
-            slots = torch.empty((2, rows), dtype=torch.int64, device=seq_ends.device)
-            kernels[0][(triton.cdiv(rows, 128), 1, 1)](
-                *_metadata_args(seq_ends, mt, it, slots, rows, first, stop, layout)
+            slots = torch.empty(
+                (3 if workspace is not None else 2, rows),
+                dtype=torch.int64,
+                device=seq_ends.device,
+            )
+            kernels[3 if workspace is not None else 0][(triton.cdiv(rows, 128), 1, 1)](
+                *_metadata_args(
+                    seq_ends,
+                    mt,
+                    it,
+                    slots,
+                    rows,
+                    first,
+                    stop,
+                    layout,
+                    output_offsets=(
+                        None if workspace is None else workspace.device_offsets
+                    ),
+                )
             )
             kernels[1][(rows, 1, 1)](
                 slots,
@@ -410,30 +529,50 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups):
                 main.shape[1],
                 index.shape[1],
             )
-            del slots
+            if workspace is None:
+                del slots
             attn._gather_shards(packet)
-        # Preserve original groups; overlap is explicitly 424 B/row, not 420.
-        out = torch.empty(
-            (rows, codec.FP4_GLOBAL_HEAD_DIM),
-            dtype=torch.bfloat16,
-            device=seq_ends.device,
+        # Common groups budget 448 B/row, including the retained direct slots.
+        out = (
+            torch.empty(
+                (rows, codec.FP4_GLOBAL_HEAD_DIM),
+                dtype=torch.bfloat16,
+                device=seq_ends.device,
+            )
+            if workspace is None
+            else workspace.output
         )
         oq, os = torch.empty_like(q), torch.empty_like(s)
         if rows:
-            kernels[2][(rows, 1, 1)](raw, q, s, out, oq, os, rows)
-        del packet, q, s, raw
-        padded = tuple((n + 255) // 256 * 256 for n in counts[first:stop])
-        result.extend(
-            (
-                _trim_rows(g, n),
-                PrefillIndexerKeys(_trim_rows(qv, n), _trim_rows(sv, n)),
+            kernels[4 if workspace is not None else 2][(rows, 1, 1)](
+                raw,
+                q,
+                s,
+                out,
+                oq,
+                os,
+                rows,
+                seq_ends if workspace is None else slots,
+                workspace is not None,
             )
-            for n, g, qv, sv in zip(
-                counts[first:stop],
-                out.split(padded),
-                oq.split(padded),
-                os.split(padded),
+            if workspace is not None:
+                del slots
+        del packet, q, s, raw
+        offset, starts = 0, []
+        for count in counts[first:stop]:
+            starts.append(offset)
+            offset += (count + 255) // 256 * 256
+        partitions = _row_partitions(counts[first:stop], starts, rows)
+        global_views = (
+            _split_rows(out, partitions)
+            if workspace is None
+            else globals_by_request[first:stop]
+        )
+        result.extend(
+            (g, PrefillIndexerKeys(qv, sv))
+            for g, qv, sv in zip(
+                global_views, _split_rows(oq, partitions), _split_rows(os, partitions)
             )
         )
         del out, oq, os
-    return result
+    return result if workspace is None else workspace.publish(result)

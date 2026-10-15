@@ -335,6 +335,99 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
             self.skipTest("V4.1 fused MXFP4 indexer Q requires SM100 family")
 
     @torch.no_grad()
+    def test_selection_initialization_covers_ragged_widths_and_graph_replay(self):
+        for rows, width, candidate_width in ((1, 1, 0), (7, 37, 19), (131, 512, 2048)):
+            with self.subTest(rows=rows, width=width, candidate_width=candidate_width):
+                case = make_case(rows, 1)
+                # Offset views exercise unaligned output pointers too. The
+                # storage guards prove initialization writes only each output.
+                storage = torch.full(
+                    (rows * width + 2,), 123, device="cuda", dtype=torch.int32
+                )
+                selection = storage[1:-1].view(rows, width)
+                candidates = (
+                    torch.full(
+                        (rows, candidate_width), 456, device="cuda", dtype=torch.int32
+                    )
+                    if candidate_width
+                    else None
+                )
+
+                def run():
+                    return fused.try_fused_indexer_q(
+                        **case,
+                        weights_out_dtype=torch.bfloat16,
+                        selection_out=selection,
+                        candidates_out=candidates,
+                    )
+
+                expected = baseline(case, weights_out_dtype=torch.bfloat16)
+                assert_identical(run(), expected)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+                selection.fill_(987)
+                if candidates is not None:
+                    candidates.fill_(654)
+                graph.replay()
+                assert_identical(actual, expected)
+                self.assertTrue(bool((selection == -1).all()))
+                self.assertEqual(storage[0].item(), 123)
+                self.assertEqual(storage[-1].item(), 123)
+                if candidates is not None:
+                    self.assertTrue(bool((candidates == -1).all()))
+
+    @torch.no_grad()
+    def test_selection_layout_rejection_does_not_write_other_output(self):
+        case = make_case(7, 1)
+        valid = torch.full((7, 512), 123, device="cuda", dtype=torch.int32)
+        for invalid in (
+            torch.empty((7, 16), dtype=torch.int32),
+            torch.empty((7, 16), dtype=torch.int64, device="cuda"),
+            torch.empty((8, 16), dtype=torch.int32, device="cuda"),
+            torch.empty((7, 32), dtype=torch.int32, device="cuda")[:, ::2],
+        ):
+            self.assertIsNone(
+                fused.try_fused_indexer_q(
+                    **case,
+                    selection_out=valid,
+                    candidates_out=invalid,
+                )
+            )
+            self.assertTrue(bool((valid == 123).all()))
+
+    @torch.no_grad()
+    def test_selection_initialization_uses_only_q_kernel(self):
+        case = make_case(131, 1)
+        selection = torch.empty((131, 512), dtype=torch.int32, device="cuda")
+        candidates = torch.empty((131, 2048), dtype=torch.int32, device="cuda")
+
+        def run():
+            return fused.try_fused_indexer_q(
+                **case,
+                weights_out_dtype=torch.bfloat16,
+                selection_out=selection,
+                candidates_out=candidates,
+            )
+
+        for _ in range(3):
+            run()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as profile:
+            run()
+            torch.cuda.synchronize()
+        events = profile.events()
+        self.assertFalse(any(e.name in ("aten::full", "aten::fill_") for e in events))
+        kernels = [e for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
+        self.assertEqual(len(kernels), 1, [e.name for e in kernels])
+        self.assertIn("_fused_indexer_q_rope_fp4_kernel", kernels[0].name)
+
+    @torch.no_grad()
     def test_real_shapes_and_input_immutability(self):
         for batch, span in (
             (1, 1),

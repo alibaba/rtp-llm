@@ -18,7 +18,9 @@ class JointPoolHostTest(unittest.TestCase):
         with patch.object(torch, "empty", side_effect=AssertionError("allocation")):
             for batch in (0, 1, 6, 31, 129):
                 self.assertIsNone(
-                    joint.try_gather(None, None, None, [1] * batch, None, groups=[])
+                    joint.try_gather(
+                        None, None, None, [1] * batch, None, groups=[], swa=object()
+                    )
                 )
 
     def test_unsupported_topology_and_ratio_are_common_fallbacks(self):
@@ -29,7 +31,9 @@ class JointPoolHostTest(unittest.TestCase):
                 _kv_cache=object(),
             )
             self.assertIsNone(
-                joint.try_gather(attn, None, None, [1] * 32, None, groups=[])
+                joint.try_gather(
+                    attn, None, None, [1] * 32, None, groups=[], swa=object()
+                )
             )
 
     def test_warmup_rejects_common_unsupported_layout_without_cuda(self):
@@ -73,6 +77,55 @@ class JointPoolHostTest(unittest.TestCase):
             self.assertFalse(
                 joint.warmup(main, compact_index, cp_size=4, cp_rank=0, device="cuda:0")
             )
+
+    def test_exact_row_views_preserve_padding_offset_and_empty_aliases(self):
+        backing = torch.arange(1024 * 64, dtype=torch.int32).reshape(1024, 64)
+        slab = backing[1:]
+        starts, counts = (0, 0, 256, 512), (0, 129, 1, 257)
+        views = joint._split_rows(
+            slab, joint._row_partitions(counts, starts, slab.shape[0])
+        )
+        for view, start, count in zip(views, starts, counts):
+            with self.subTest(start=start, count=count):
+                self.assertTrue(torch.equal(view, slab[start : start + count]))
+                self.assertEqual(view.storage_offset(), (start + 1) * 64)
+                self.assertEqual(
+                    view.untyped_storage().data_ptr(),
+                    backing.untyped_storage().data_ptr(),
+                )
+
+    def test_invalid_destination_rejected_without_device_work(self):
+        workspace = SimpleNamespace(
+            output=torch.empty((10, 512), dtype=torch.bfloat16),
+            global_sizes=(2, 3),
+            global_starts=(0, 4),
+            device_offsets=torch.tensor([0, 4], dtype=torch.int64),
+        )
+        joint._validate_workspace(workspace, (2, 3), torch.device("cpu"))
+        for starts in ((0, 1), (0, 8), (-1, 4)):
+            workspace.global_starts = starts
+            with self.assertRaisesRegex(ValueError, "overlap or exceed"):
+                joint._validate_workspace(workspace, (2, 3), torch.device("cpu"))
+        workspace.global_starts = (0, 4)
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            joint._validate_workspace(workspace, (2, 4), torch.device("cpu"))
+
+    def test_common_group_budget_includes_retained_destination_slots(self):
+        for counts in ((32768,) * 32, tuple(32749 + i * 7 for i in range(32))):
+            groups = pools._request_groups(counts)
+            self.assertEqual(len(groups), 2)
+            self.assertEqual(groups[0][0], 0)
+            self.assertEqual(groups[-1][1], len(counts))
+            self.assertEqual(groups[0][1], groups[1][0])
+            for _, _, rows in groups:
+                packet = rows * (288 + 64 + 4)
+                index_outputs = rows * (64 + 4)
+                slot_planes = (
+                    rows * 3 * torch.tensor([], dtype=torch.int64).element_size()
+                )
+                self.assertLessEqual(
+                    packet + index_outputs + slot_planes, 256 * 1024**2
+                )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -177,6 +230,21 @@ class JointPoolCudaTest(unittest.TestCase):
                 cp_rank=rank,
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
+        )
+
+    def destination(self, counts):
+        starts, cursor = [], 2
+        for request, count in enumerate(counts):
+            starts.append(cursor)
+            cursor += count + (request % 5) * 3 + 1
+        return SimpleNamespace(
+            output=torch.full(
+                (cursor + 3, 512), 7.25, dtype=torch.bfloat16, device="cuda"
+            ),
+            global_sizes=tuple(counts),
+            global_starts=tuple(starts),
+            device_offsets=torch.tensor(starts, dtype=torch.int64, device="cuda"),
+            publish=lambda result: result,
         )
 
     def oracle(self, attn, main, index, host):
@@ -301,6 +369,103 @@ class JointPoolCudaTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "transport witness"):
             pools.try_gather_prefill_pools(attn, main, index, host, ends)
         self.assertEqual(attn._gather_shards.call_count, 1)
+
+    def test_direct_destination_all_owners_ragged_groups_and_gaps(self):
+        counts = (0, 1, 63, 64, 65, 127, 128, 129, 255, 256, 257) * 3
+        counts = counts[:32]
+        for ratio in (1, 2):
+            for rank in range(4):
+                with self.subTest(ratio=ratio, rank=rank):
+                    attn, main, index, host, ends = self.fixture(
+                        counts, ratio, rank, torch.int32, torch.int64
+                    )
+                    self.warm(ratio, rank, torch.int32, torch.int64)
+                    expected, _ = self.oracle(attn, main, index, host)
+                    workspace = self.destination(counts)
+                    reference = workspace.output.clone()
+                    for start, (g, _, _) in zip(workspace.global_starts, expected):
+                        reference[start : start + g.shape[0]].copy_(g)
+                    groups = [
+                        (
+                            first,
+                            stop,
+                            sum((n + 255) // 256 * 256 for n in counts[first:stop]),
+                        )
+                        for first, stop in ((0, 11), (11, 24), (24, 32))
+                    ]
+                    with patch.object(
+                        joint._metadata,
+                        "run",
+                        side_effect=AssertionError("forward JIT"),
+                    ), patch.object(
+                        joint._dequant, "run", side_effect=AssertionError("forward JIT")
+                    ):
+                        actual = joint.try_gather(
+                            attn,
+                            main,
+                            index,
+                            host,
+                            ends,
+                            groups=groups,
+                            workspace=workspace,
+                        )
+                    self.assert_bits(workspace.output, reference)
+                    for request, ((g, keys), refs) in enumerate(zip(actual, expected)):
+                        self.assertEqual(
+                            g.storage_offset(), workspace.global_starts[request] * 512
+                        )
+                        self.assertEqual(
+                            g.untyped_storage().data_ptr(),
+                            workspace.output.untyped_storage().data_ptr(),
+                        )
+                        for left, right in zip((g, keys.quant, keys.scale), refs):
+                            self.assert_bits(left, right)
+                            self.assertTrue(left.is_contiguous())
+
+    def test_direct_destination_graph_replay_and_padded_indexer_aliases(self):
+        counts = tuple(257 + i % 3 for i in range(32))
+        attn, main, index, host, ends = self.fixture(counts, 2, 0)
+        self.warm(2, 0, torch.int32)
+        workspace = self.destination(counts)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            pools.try_gather_prefill_pools(
+                attn, main, index, host, ends, workspace=workspace
+            )
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            actual = pools.try_gather_prefill_pools(
+                attn, main, index, host, ends, workspace=workspace
+            )
+        main.random_(0, 256)
+        index.random_(0, 256)
+        graph.replay()
+        expected, _ = self.oracle(attn, main, index, host)
+        for request, ((g, keys), refs) in enumerate(zip(actual, expected)):
+            self.assertEqual(keys.quant.storage_offset(), request * 512 * 64)
+            self.assertEqual(keys.scale.storage_offset(), request * 512)
+            for left, right in zip((g, keys.quant, keys.scale), refs):
+                self.assert_bits(left, right)
+
+    def test_direct_empty_groups_do_not_transport_or_write(self):
+        counts = (0,) * 32
+        attn, main, index, host, ends = self.fixture(counts, 2, 0)
+        self.warm(2, 0, torch.int32)
+        workspace = self.destination(counts)
+        before = workspace.output.clone()
+        attn._gather_shards = Mock()
+        actual = pools.try_gather_prefill_pools(
+            attn, main, index, host, ends, workspace=workspace
+        )
+        attn._gather_shards.assert_not_called()
+        self.assert_bits(workspace.output, before)
+        self.assertEqual(len(actual), len(counts))
+        for g, keys in actual:
+            self.assertEqual(
+                (g.shape, keys.quant.shape, keys.scale.shape), ((0, 512), (0, 64), (0,))
+            )
 
     def test_native_capacity_with_padded_physical_stride(self):
         attn, main, index, host, ends = self.fixture(

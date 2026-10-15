@@ -822,6 +822,35 @@ def _warm_indexer_layout(
             weights_out_dtype=torch.bfloat16,
         ),
     )
+    # Prefill initializes token/candidate selection outputs in the Q launch.
+    # Widths are model configuration, independent of request lengths. Warm the
+    # token-only and candidate-publishing signatures before profiling/capture.
+    selection = torch.empty((rows, attn.index_topk), dtype=torch.int32, device=device)
+    count = int(attn.v41_config.get("candidate_topk_blocks", 0))
+    outputs = [None]
+    if count > 0:
+        outputs.append(torch.empty((rows, count), dtype=torch.int32, device=device))
+    for candidates_out in outputs:
+        initialized = qfusion.try_fused_indexer_q(
+            q,
+            raw_weights,
+            attn.freqs_cis,
+            positions,
+            weights_out_dtype=torch.bfloat16,
+            selection_out=selection,
+            candidates_out=candidates_out,
+        )
+        _require_launch(
+            initialized,
+            "fused indexer Q selection initialization",
+            enabled=qfusion.is_supported(
+                q,
+                raw_weights,
+                attn.freqs_cis,
+                positions,
+                weights_out_dtype=torch.bfloat16,
+            ),
+        )
     sparse_weights = (
         prepared_sparse[2].squeeze(1)
         if prepared_sparse is not None
