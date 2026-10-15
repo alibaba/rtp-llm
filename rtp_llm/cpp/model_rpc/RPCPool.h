@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -74,9 +77,9 @@ public:
             args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
             args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
             args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+            args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, readKeepaliveEnv("RTP_LLM_GRPC_KEEPALIVE_TIME_MS", 10000));
             // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
+            args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, readKeepaliveEnv("RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS", 5000));
             args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
             auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
             if (!grpc_channel) {
@@ -124,6 +127,22 @@ public:
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed
 
 private:
+    // Milliseconds; missing or invalid overrides preserve the existing defaults.
+    static int readKeepaliveEnv(const char* name, int default_value) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return default_value;
+        }
+        char* end = nullptr;
+        errno = 0;
+        const long parsed = std::strtol(value, &end, 10);
+        if (errno == ERANGE || end == value || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
+            RTP_LLM_LOG_WARNING("invalid %s=%s, fallback to %d ms", name, value, default_value);
+            return default_value;
+        }
+        return static_cast<int>(parsed);
+    }
+
     std::mutex                                     mutex_;
     std::unordered_map<std::string, Connection<T>> connection_pool_;
 };
