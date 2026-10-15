@@ -6,6 +6,25 @@
 
 namespace rtp_llm {
 
+CacheKeysType calculateCacheKeys(const int* token_ids, size_t token_count, int seq_size_per_block) {
+    CacheKeysType cache_keys;
+    if (!token_ids || seq_size_per_block <= 0) {
+        return cache_keys;
+    }
+
+    const size_t block_size  = seq_size_per_block;
+    const size_t block_count = token_count / block_size + (token_count % block_size != 0);
+
+    int64_t rolling_hash = 0;
+    for (size_t block_index = 0; block_index < block_count; ++block_index) {
+        const size_t pos       = block_index * block_size;
+        const size_t block_len = std::min(block_size, token_count - pos);
+        rolling_hash          = hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
+        cache_keys.push_back(rolling_hash);
+    }
+    return cache_keys;
+}
+
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
                    int                     seq_size_per_block,

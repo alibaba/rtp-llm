@@ -29,6 +29,11 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+public:
+    grpc::Status WriteReady(grpc::ServerContext*                   context,
+                            const P2PConnectorWriteReadyRequestPB* request,
+                            P2PConnectorWriteReadyResponsePB*      response);
+
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;
     autil::LoopThreadPtr              cancel_cleanup_thread_;
