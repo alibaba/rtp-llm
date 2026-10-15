@@ -69,10 +69,12 @@ def community_vl_sm120_suites():
                 name = "qwen3_vl_sm120",
                 # per-pool golden (repo convention, cf. q_r_1_7b_bf16_sm120):
                 # the sm120+flash_attn ViT path diverges from the H20-recorded
-                # golden at a near-tie (token 89 of 100; "sitting" vs "sits
-                # attentively" - coherent same-image description, run
-                # 79773827). The E2E path itself is validated by that run
-                # (2752 image tokens embedded, 100 tokens generated).
+                # golden at a near-tie (90/100 tokens shared, divergence at
+                # token #91; "sitting" vs "sits attentively" - coherent
+                # same-image description, run 79773827; note the H20 golden
+                # itself records both variants across its two queries). The
+                # E2E path is validated by that run (2766 prompt tokens
+                # incl. 2752 image tokens, 100 tokens generated).
                 task_info = "data/model/qwen_vl/q_r_3_sm120.json",
                 smoke_args = {
                     "llm": "--act_type BF16 --use_local 1 --tp_size 1 --reuse_cache 1",

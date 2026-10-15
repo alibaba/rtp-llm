@@ -428,6 +428,34 @@ def fix_fmha_gen_jit_cache() -> None:
     roots and the header staging only triggers when the cubin entry is
     missing.
     """
+    _isolate_jit_scope_per_run()
+
+
+def _isolate_jit_scope_per_run() -> None:
+    """Give this test run its own JIT cache root.
+
+    Parallel tests on one worker share /tmp/rtp-llm/.jit_cache; an entry
+    written by one test bakes that test's runfiles absolute paths into
+    build.ninja, and when its sandbox is torn down a later test reusing the
+    entry recompiles against dead include paths (CI runs 79780452/79781607:
+    the profiled perf pair died exactly this way while the unprofiled twin
+    passed). The cache manager's test-only TEST_JIT_LOCAL_DIR override
+    provides per-run isolation; set it (before the server process spawns
+    and imports flashinfer) so no entry is ever shared across test runs.
+    """
+    import os
+    import tempfile
+
+    if os.environ.get("TEST_JIT_LOCAL_DIR", "").strip():
+        return
+    base = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or tempfile.mkdtemp(
+        prefix="jit_scope_"
+    )
+    os.environ["TEST_JIT_LOCAL_DIR"] = str(Path(base) / "jit_cache")
+    logging.info(
+        "isolated JIT cache root for this test run: %s",
+        os.environ["TEST_JIT_LOCAL_DIR"],
+    )
     for cache_root in Path("/tmp/rtp-llm/.jit_cache/v2").glob(
         "*/flashinfer/.cache/flashinfer/*/10*a/cached_ops/fmha_gen"
     ):
