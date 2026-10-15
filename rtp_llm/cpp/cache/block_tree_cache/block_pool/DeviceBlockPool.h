@@ -88,6 +88,12 @@ public:
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
+    bool usesDedicatedDeviceAllocation() const {
+        return uses_dedicated_device_allocation_;
+    }
+    size_t getAllocationSizeBytes() const {
+        return allocation_size_bytes_;
+    }
     size_t getTotalSizeBytes() const;
     size_t blockSizeBytes() const override;
 
@@ -147,6 +153,8 @@ private:
 
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};
+    size_t        allocation_size_bytes_{0};
+    bool          uses_dedicated_device_allocation_{false};
 
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;

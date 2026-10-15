@@ -332,6 +332,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::OkStatus();
     }
     const std::string error_text = error.ToString();
+    if (error.code() == ErrorCode::DEADLINE_EXCEEDED) {
+        return absl::DeadlineExceededError(error_text.empty() ? "allocator load timed out" : error_text);
+    }
     return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
 }
 
@@ -433,8 +436,10 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();
         } else if (!status.ok()) {
-            stream_->reportEventWithoutLock(
-                StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
+            stream_->reportEventWithoutLock(StreamEvents::Error,
+                                            absl::IsDeadlineExceeded(status) ? ErrorCode::LOAD_CACHE_TIMEOUT :
+                                                                               ErrorCode::MALLOC_FAILED,
+                                            std::string(status.message()));
         }
     }
     return true;
