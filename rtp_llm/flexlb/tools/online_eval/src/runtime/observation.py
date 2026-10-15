@@ -59,14 +59,20 @@ def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False):
     """Preserve the last sample at a boundary; all waiting uses the stage clock."""
     if type(interval_s) not in (int, float) or not math.isfinite(interval_s) or interval_s <= 0:
         raise ValueError("poll interval must be finite and positive")
+    next_sample = deadline.clock() + (0 if immediate else interval_s)
     first = True
     while first or until is None or deadline.clock() < until:
         deadline.check()
-        if not (first and immediate):
-            wait = interval_s if until is None else min(interval_s, max(0, until - deadline.clock()))
-            deadline.sleep(wait)
+        target = next_sample if until is None else min(next_sample, until)
+        deadline.sleep(max(0, target - deadline.clock()))
         first = False
         yield sample()
+        next_sample += interval_s
+        # Skip elapsed ticks instead of issuing catch-up bursts. Consumer work
+        # also counts toward the period; the last boundary sample is retained.
+        now = deadline.clock()
+        if next_sample < now:
+            next_sample += math.ceil((now - next_sample) / interval_s) * interval_s
 
 
 @dataclass(frozen=True)

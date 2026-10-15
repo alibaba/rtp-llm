@@ -89,7 +89,11 @@ class ContractTest(unittest.TestCase):
         fields = {name: dict(metric="mock/"+name, labels=dict(role="prefill")) for name in ("running", "waiting")}
         row = engine_metric_snapshot(monitor, fields)["P0"]
         self.assertEqual((row["running"], row["waiting"]), (2, 128))
-        monitor.client.instant.assert_called_once_with("mock", 5)
+        args, kwargs = monitor.client.instant.call_args
+        self.assertEqual(args, ("mock", 5))
+        self.assertEqual(set(kwargs["metric_names"]),
+                         {"rtp_llm_running_stream_size", "rtp_llm_wait_stream_size"})
+        self.assertEqual(kwargs["labels"], {"role": "prefill"})
         del monitor.client.instant.return_value[0]["metric"]["engine_incarnation"]
         with self.assertRaisesRegex(ValueError, "labels"):
             engine_metric_snapshot(monitor, fields)

@@ -205,3 +205,27 @@ def test_action_field_error_has_one_location_and_preserves_the_cause():
                'stages', 10, {'custom': handler})
     assert str(caught.value) == "stages[1].params: unknown configuration fields ['typo']"
     assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_poll_period_includes_sample_and_consumer_work():
+    now = [0.0]
+    deadline = Deadline(20, lambda: now[0], lambda dt: now.__setitem__(0, now[0] + dt))
+    def sample():
+        started = now[0]
+        now[0] += .4
+        return started
+    rows = []
+    for value in poll_samples(deadline, 1, sample, until=3):
+        rows.append(value)
+        now[0] += .2
+    assert rows == [1, 2, 3]
+
+
+def test_poll_skips_overrun_ticks_without_catchup_and_keeps_boundary():
+    now = [0.0]
+    deadline = Deadline(20, lambda: now[0], lambda dt: now.__setitem__(0, now[0] + dt))
+    def sample():
+        started = now[0]
+        now[0] += 1.5
+        return started
+    assert list(poll_samples(deadline, 1, sample, until=6.8)) == [1, 3, 5, 6.8]

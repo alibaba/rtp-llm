@@ -426,3 +426,33 @@ def test_expired_outer_budget_does_not_refresh_shutdown_allowance(tmp_path):
     session.process.terminate.assert_called_once()
     session.process.kill.assert_called_once()
     session.process.wait.assert_called_once_with(timeout=1)
+
+
+def test_snapshot_queries_only_requested_metrics_and_labels_at_one_scrape():
+    from monitoring.client import PrometheusClient
+    client = PrometheusClient('http://owned-tsdb', query_plan=load_plan('cache_scale_in.yaml'),
+                              target_kinds={'mock': 'mock'}, max_gap_s=5)
+    labels = dict(__name__='mock_context_requests_total', role='prefill',
+                  engine_name='p0', engine_incarnation='one', engine_ip='127.0.0.1', grpc_port='7000')
+    # A removed engine's older series must not be resurrected through lookback.
+    samples = [[dict(metric={'__name__': 'up'}, values=[[10, '1'], [11, '1']])],
+               [dict(metric=labels, values=[[10, '3'], [11, '4']]),
+                dict(metric=dict(labels, engine_name='removed'), values=[[10, '7']])]]
+    with patch.object(client, 'query', side_effect=samples) as query:
+        result = client.metric_snapshot(['mock/context_requests_total'], source='mock', labels={'role': 'prefill'})
+    assert len(result) == 1 and result[0]['value'] == [11, '4']
+    health, values = query.call_args_list
+    assert health.args[0] == 'up{job="mock"}[5000ms]'
+    assert values.args[0] == '{job="mock",__name__=~"mock_context_requests_total",role="prefill"}[5000ms]'
+    assert values.args[1] == 11  # Query pinned to health scrape, even if a new scrape commits meanwhile.
+
+
+@pytest.mark.parametrize('health, message', [([], 'stale'),
+    ([dict(metric={}, values=[[10, '0']])], 'unavailable')])
+def test_snapshot_rejects_stale_or_failed_target_before_reading_metrics(health, message):
+    from monitoring.client import PrometheusClient
+    client = PrometheusClient('http://owned-tsdb', query_plan=load_plan('cache_scale_in.yaml'),
+                              target_kinds={'mock': 'mock'}, max_gap_s=5)
+    with patch.object(client, 'query', return_value=health) as query, pytest.raises(RuntimeError, match=message):
+        client.metric_snapshot(['mock/context_requests_total'], source='mock')
+    assert query.call_count == 1

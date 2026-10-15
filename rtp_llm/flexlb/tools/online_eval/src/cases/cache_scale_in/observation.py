@@ -4,7 +4,8 @@ def engine_metric_snapshot(monitor, fields, timeout=5):
     """Strict field projection from the declared, TSDB-owned raw metric IDs."""
     import math
     bindings = {name: spec["metric"] for name, spec in fields.items()}
-    rows = monitor.client.metric_snapshot(bindings.values(), source="mock", timeout=timeout)
+    rows = monitor.client.metric_snapshot(bindings.values(), source="mock", timeout=timeout,
+                                          labels={"role": "prefill"})
     reverse = {identity: field for field, identity in bindings.items()}
     engines = {}
     for observation in rows:
