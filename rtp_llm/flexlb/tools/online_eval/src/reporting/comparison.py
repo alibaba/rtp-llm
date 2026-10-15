@@ -13,7 +13,7 @@ from reporting.comparison_inputs import load_snapshot
 from reporting.report_model import MeasurementIdentity
 from reporting.values import thaw
 from reporting.comparison_colors import metric_colors, curve_style
-from reporting.pairing import event_anchor, shifted_panel
+from reporting.pairing import event_anchor, shifted_panel, merge_nearby_events
 
 def _leaves(value, prefix=''):
     if isinstance(value, dict) and value:
@@ -77,7 +77,7 @@ def _time_origin(run, index):
     return f'unknown-origin-{index}'
 
 
-def _pair(prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None):
+def _pair(prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None, event_merge_tolerance=1.0):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
     colors = metric_colors(prepared[baseline_index])
@@ -150,7 +150,9 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
                 if any(curve['name'] == label + ' · ' + name for label in labels for name in names)]
         for i, source in candidates:
             if any(entry[0] == i for entry in entries):
-                panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name']) for e in source.get('events', []))
+                panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name'],
+                    run=labels[i], event_name=e['name']) for e in source.get('events', []))
+        panel['events'] = merge_nearby_events(panel['events'], event_merge_tolerance)
         range_note = '时间范围取各 run 对齐后的显示范围并集。' if time_range is not None else '保留基准报告的显示范围。'
         panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，观测曲线为实线，门禁参考线保留虚线。保留基准报告的指标组合和数值轴；' + range_note + '未兼容的其他 run 曲线单独展示。'
         overlays.append(panel)
@@ -178,7 +180,8 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
 
 
 def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, views=None,
-            include_original_panels=False):
+            include_original_panels=False, event_merge_tolerance=1.0):
+    merge_nearby_events([], event_merge_tolerance)
     if len(paths) < 2:
         raise ValueError('at least two runs are required')
     if alignment_event is not None and (not isinstance(alignment_event, str) or not alignment_event.strip()):
@@ -261,10 +264,11 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
                        max=max(value['max'] for value in aligned_ranges))
     panels, pairing = _pair(prepared, labels, origins, baseline_index=baseline_index,
                             include_original_panels=include_original_panels,
-                            time_range=display if aligned_ranges else None)
+                            time_range=display if aligned_ranges else None, event_merge_tolerance=event_merge_tolerance)
     time_alignment['display_ranges'] = dict(zip(labels, ranges))
     time_alignment['origins'] = dict(zip(labels, origins))
     result = dict(purpose='OBSERVATION_ONLY', sources=sources,
+        event_display=dict(merge_tolerance_s=event_merge_tolerance),
         runs={label: run.analysis for label, run in zip(labels, loaded)},
         executions={label: run.execution for label, run in zip(labels, loaded)},
         controls=dict(reference=baseline, values=dict(zip(labels, controls)), comparisons=comparisons),
@@ -293,12 +297,14 @@ def main(argv=None):
     parser.add_argument('--baseline', help='reference label (default: first input)')
     parser.add_argument('--view', action='append', help='repeat once per input; ZIP view name or auto')
     parser.add_argument('--alignment-event', help='explicit event ID used as common time origin')
+    parser.add_argument('--event-merge-tolerance', type=float, default=1.0,
+                        help='merge equivalent events within this many seconds; 0 disables merging (default: 1)')
     parser.add_argument('--include-original-panels', action='store_true', help='also show all original panels')
     args = parser.parse_args(argv)
     try:
         compare(args.runs, args.output, alignment_event=args.alignment_event, labels=args.label,
             baseline=args.baseline, views=[None if v == 'auto' else v for v in args.view] if args.view else None,
-            include_original_panels=args.include_original_panels)
+            include_original_panels=args.include_original_panels, event_merge_tolerance=args.event_merge_tolerance)
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 2

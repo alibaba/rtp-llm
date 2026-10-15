@@ -79,7 +79,8 @@ assert.equal(choices.children.find(c=>c.tag==='label').hidden,true);
 assert.equal(choices.children.filter(c=>c.tag==='label')[1].hidden,false);
 search.value='';search.oninput();
 picker.onkeydown({key:'Escape'});assert.equal(dropdown.hidden,true);
-toolbar.children[1].onclick();
+const presetSelect=toolbar.children.find(c=>c.className==='multi-presets');
+presetSelect.value='Queue';presetSelect.onchange();
 assert.deepEqual(chart.visible,[false,true]);
 assert.match(pickerButton.textContent,/1\/2/);
 assert.equal(legend.children[0].classes.has('is-muted'),true);
@@ -152,3 +153,22 @@ assert.equal(gateChart.data.datasets[0].statistics(2,8).count,0);
 assert.equal(gateValues.children[0].textContent,'阈值 95 %');
 assert.equal(gateValues.children[1].textContent,'窗口 0–10 s');
 assert.equal(gateChart.data.datasets[0].pointRadius,0);
+
+// Hundreds of presets stay in a native dropdown rather than creating header rows.
+const denseRoot=new Element('root');
+const manyPresets=Object.fromEntries(Array.from({length:200},(_,i)=>['指标组 '+i,['one']]));
+const dense=FlexMultiCurve.mount(denseRoot,{title:'dense',caption:'',axes:{y:{title:'count'}},
+  series:[{name:'one',points:[{x:0,y:1}],color:'#123456'},{name:'two',points:[{x:0,y:2}],color:'#654321'}],presets:manyPresets},
+  {timeAxis:{min:0,max:10},events:[{id:'start',name:'开始 ×2',t:.15,members:[{name:'A · 开始',t:.1},{name:'B · 开始',t:.2}]}]});
+const denseToolbar=denseRoot.children[0].children.find(e=>e.className==='multi-toolbar');
+assert.equal(denseToolbar.children.length,6);
+const densePresets=denseToolbar.children.find(e=>e.className==='multi-presets');
+assert.equal(densePresets.children.length,201);
+densePresets.value='指标组 199';densePresets.onchange();
+assert.deepEqual(dense.visible,[true,false]);assert.equal(densePresets.value,'');
+denseToolbar.children.find(e=>e.textContent==='全选').onclick();assert.deepEqual(dense.visible,[true,true]);
+denseToolbar.children.find(e=>e.textContent==='清空').onclick();assert.deepEqual(dense.visible,[false,false]);
+const denseEvents=denseRoot.children[0].children.find(e=>e.className==='multi-events');
+assert.match(denseEvents.children[0].textContent,/1 条标记 \/ 2 个原始事件/);
+assert.match(denseEvents.children[1].children[0].children[1].textContent,/A · 开始 @ 0.100000 s/);
+assert.match(denseEvents.children[1].children[0].children[2].textContent,/B · 开始 @ 0.200000 s/);

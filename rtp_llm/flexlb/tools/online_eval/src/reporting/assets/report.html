@@ -17,9 +17,11 @@ body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
 header{margin-bottom:20px}
 h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .sub{color:var(--sub)}
-.multi-toolbar{position:sticky;top:8px;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;padding:8px;background:rgba(255,255,255,.97);border:1px solid var(--border);border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
-.multi-toolbar button{border:1px solid __REPORT_BORDER__;background:__REPORT_CARD__;border-radius:6px;padding:5px 11px;cursor:pointer}
-.multi-toolbar button:hover{border-color:__REPORT_PRIMARY__;color:__REPORT_PRIMARY__}.multi-range{margin-left:auto;color:var(--sub)}
+.multi-toolbar{position:relative;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;padding:8px;background:rgba(255,255,255,.97);border:1px solid var(--border);border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.multi-toolbar button,.multi-presets{border:1px solid __REPORT_BORDER__;background:__REPORT_CARD__;border-radius:6px;padding:5px 11px;cursor:pointer}
+.multi-presets{width:220px;max-width:100%;min-width:0;text-overflow:ellipsis}.multi-presets[hidden]{display:none}
+.multi-events{margin-top:10px;color:var(--sub);font-size:12px}.multi-events summary{cursor:pointer}.multi-event-list{max-height:180px;overflow:auto;margin-top:6px}.multi-event-row{padding:5px 8px;border-bottom:1px solid var(--border)}.multi-event-row div{padding-left:12px}
+.multi-toolbar button:hover{border-color:__REPORT_PRIMARY__;color:__REPORT_PRIMARY__}.multi-range{margin-left:auto;color:var(--sub);white-space:nowrap}
 .multi-range input{margin:0 5px;border:1px solid __REPORT_BORDER__;border-radius:5px;padding:4px}
 .multi-picker{position:relative}.multi-picker-button{font-weight:600;color:__REPORT_PRIMARY__}
 .multi-dropdown{position:absolute;top:calc(100% + 8px);left:0;width:min(520px,calc(100vw - 56px));max-height:min(68vh,560px);overflow:auto;padding:10px;background:__REPORT_CARD__;border:1px solid __REPORT_BORDER__;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
@@ -73,7 +75,7 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .panel h3{margin:0 0 4px;font-size:15px;overflow-wrap:anywhere}
 .panel .cap{color:var(--sub);font-size:12px;margin-bottom:8px}
 .panel .box{height:280px;position:relative}
-@media(max-width:700px){body{padding:12px}.context-grid{grid-template-columns:1fr}.multi-range{margin-left:0}.multi-plot{height:380px!important}}
+@media(max-width:700px){.multi-toolbar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.multi-picker,.multi-presets{grid-column:span 2;width:100%}.multi-picker-button{width:100%}.multi-range{grid-column:1/-1;grid-row:2;font-size:12px}.multi-range input{width:65px!important;margin:0 2px}.multi-toolbar>button:last-child{grid-column:span 2}body{padding:12px}.context-grid{grid-template-columns:1fr}.multi-range{margin-left:0}.multi-plot{height:380px!important}}
 </style></head><body>
 <header>
   <h1 id="title"></h1><div class="sub" id="subtitle"></div>

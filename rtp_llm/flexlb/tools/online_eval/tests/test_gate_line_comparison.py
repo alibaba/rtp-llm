@@ -31,6 +31,7 @@ def demo_runs(root):
         panels = apply_gate_lines(project_panels([curve], presentation), presentation, thresholds)
         for panel in panels:
             panel['caption'] = '兼容性演示数据，不是实际压测。' + panel['caption']
+            panel['events'] = [dict(id='checkpoint', name='演示对齐事件', t=event)]
         spec = dict(title='门禁线 compare 演示 ' + label, subtitle='演示数据，不是实际压测',
                     timeOriginLabel='演示 run 开始', timeAxis=dict(min=0, max=25),
                     events=[dict(id='checkpoint', name='演示对齐事件', t=event)], panels=panels)
