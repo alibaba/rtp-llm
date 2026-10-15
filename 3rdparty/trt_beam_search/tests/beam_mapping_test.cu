@@ -5,12 +5,13 @@
 // Runs the V2 stage pipeline on small deterministic inputs:
 //   A: invokeTopkLastDim per beam (nBS*nBMIn groups of nV)
 //   B: launchAddCumLogProbs
-//   C: invokeTopkLastDim merged per batch (nBS groups of nBMIn*nBMOut)
+//   C: invokeTopkLastDim merged per batch (nBS groups of nBMIn*min(nV,nBMOut))
 //   D: gatherId
 // and compares stage-C output ids/values and the gathered final ids against a
 // host reference element-wise.
 //
-// Two cases: symmetric (nBMIn == nBMOut == 4) and VBWS-asymmetric (nBMIn=3,
+// Cases include a pruned vocabulary smaller than the output beam width.
+// The original cases are symmetric (nBMIn == nBMOut == 4) and VBWS-asymmetric (nBMIn=3,
 // nBMOut=5) — the strides mix nBMIn and nBMOut, so the asymmetric case is where
 // a swapped divisor shows up. All candidate values are distinct (integer-exact
 // in fp32), so ordering is unambiguous on every top-k path.
@@ -86,7 +87,8 @@ std::vector<T> fromDevice(T const* dev, size_t n)
 // proportional to 3m + 2*nBMOut*v + (32+nBMIn)*b, all distinct.
 int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
 {
-    int const nCand = nBMIn * nBMOut; // candidates per batch after stage A
+    int const nStage1TopK = std::min(nV, nBMOut);
+    int const nCand = nBMIn * nStage1TopK; // candidates per batch after stage A
 
     std::vector<float> logProbs(nBS * nBMIn * nV);
     for (int b = 0; b < nBS; ++b)
@@ -107,7 +109,7 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
         cumLogProbs[i] = -static_cast<float>(i) * 0.03125f;
     }
 
-    // Host reference: per-beam top-nBMOut (value desc, index asc), add cumLogProbs,
+    // Host reference: per-beam top-min(nV,nBMOut) (value desc, index asc), add cumLogProbs,
     // merged top-nBMOut per batch (value desc, flat stage-1 index asc), then the
     // gatherId mapping final = beam * nV + token.
     std::vector<int> refStage2Ids(nBS * nBMOut); // flat stage-1 indices, value-desc
@@ -118,14 +120,14 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
         struct Cand
         {
             float val;
-            int flat; // m * nBMOut + v: position in this batch's stage-1 candidate block
+            int flat; // m * nStage1TopK + v: position in this batch's stage-1 candidate block
         };
         std::vector<Cand> cands;
         for (int m = 0; m < nBMIn; ++m)
         {
-            for (int v = 0; v < nBMOut; ++v)
+            for (int v = 0; v < nStage1TopK; ++v)
             {
-                cands.push_back({logProbs[(b * nBMIn + m) * nV + v] + cumLogProbs[b * nBMIn + m], m * nBMOut + v});
+                cands.push_back({logProbs[(b * nBMIn + m) * nV + v] + cumLogProbs[b * nBMIn + m], m * nStage1TopK + v});
             }
         }
         std::sort(cands.begin(), cands.end(), [](Cand const& x, Cand const& y) {
@@ -135,8 +137,8 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
         {
             refStage2Ids[b * nBMOut + j] = cands[j].flat;
             refStage2Vals[b * nBMOut + j] = cands[j].val;
-            int const beam = cands[j].flat / nBMOut;
-            int const tok = cands[j].flat % nBMOut; // position == token: in-row values decrease in token index
+            int const beam = cands[j].flat / nStage1TopK;
+            int const tok = cands[j].flat % nStage1TopK; // position == token: in-row values decrease in token index
             refFinalIds[b * nBMOut + j] = beam * nV + tok;
         }
     }
@@ -148,20 +150,20 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
     cudaStream_t stream;
     CHECK_CUDA(cudaStreamCreate(&stream));
 
-    // Stage A: top-nBMOut per beam.
-    size_t const wsABytes = invokeComputeTopkLastDimWorkspaceSize<float>(nBS * nBMIn, nV, nBMOut, true, 0);
+    // Stage A: top-min(nV,nBMOut) per beam.
+    size_t const wsABytes = invokeComputeTopkLastDimWorkspaceSize<float>(nBS * nBMIn, nV, nStage1TopK, true, 0);
     void* wsA = nullptr;
     CHECK_CUDA(cudaMalloc(&wsA, wsABytes));
     float* dStage1Vals = nullptr;
     int* dStage1Ids = nullptr;
     CHECK_CUDA(cudaMalloc(&dStage1Vals, sizeof(float) * nBS * nCand));
     CHECK_CUDA(cudaMalloc(&dStage1Ids, sizeof(int) * nBS * nCand));
-    invokeTopkLastDim<float>(nBS * nBMIn, nV, nBMOut, true, mask, dLogProbs, dStage1Vals, dStage1Ids, wsA, stream,
+    invokeTopkLastDim<float>(nBS * nBMIn, nV, nStage1TopK, true, mask, dLogProbs, dStage1Vals, dStage1Ids, wsA, stream,
         /*sorted=*/false, /*force_path=*/0);
 
     // Stage B: add cumLogProbs in place.
     launchAddCumLogProbs<float>(dStage1Vals, dCumLogProbs, /*finished=*/nullptr, /*endIds=*/nullptr,
-        /*diversityRates=*/nullptr, /*batchSlots=*/nullptr, nBS, nBMIn, nBMOut, /*nThread=*/32, stream);
+        /*diversityRates=*/nullptr, /*batchSlots=*/nullptr, nBS, nBMIn, nStage1TopK, nCand, /*nThread=*/32, stream);
 
     // Stage C: merged top-nBMOut per batch.
     size_t const wsCBytes = invokeComputeTopkLastDimWorkspaceSize<float>(nBS, nCand, nBMOut, true, 0);
@@ -178,7 +180,7 @@ int runCase(int nBS, int nBMIn, int nBMOut, int nV, char const* label)
     auto devStage2Vals = fromDevice(dStage2Vals, nBS * nBMOut);
 
     // Stage D: gatherId rewrites stage-2 ids into final logProbs indices.
-    gatherId<<<nBS, 32, 0, stream>>>(dStage1Ids, dStage2Ids, nBS, nBMIn, nBMOut, nV);
+    gatherId<<<nBS, 32, 0, stream>>>(dStage1Ids, dStage2Ids, nBS, nBMIn, nStage1TopK, nBMOut, nV);
     CHECK_CUDA(lastError());
     auto devFinalIds = fromDevice(dStage2Ids, nBS * nBMOut);
 
@@ -219,6 +221,8 @@ int main()
     int failures = 0;
     failures += runCase(2, 4, 4, 32, "symmetric");
     failures += runCase(2, 3, 5, 32, "vbws-asymmetric");
+    failures += runCase(2, 2, 9, 5, "pruned-vocab-odd-stride");
+    failures += runCase(2, 2, 5, 5, "vocab-equals-output-width");
     if (failures == 0)
     {
         std::printf("beam_mapping_test: PASS\n");
