@@ -56,6 +56,10 @@ from rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton import (
 )
 from rtp_llm.models_py.modules.dsv41.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
+from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+    get_or_build_sched_meta,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv41.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
@@ -789,14 +793,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
-            # Project and insert all query KVs before attention so each query
-            # can read every other query position, including future noise.
-            mega = attn._mega_attention
-            if mega is None:
-                raise RuntimeError("V4.1 DSpark requires prepared Mega Attention")
-            qkv = decode_compute_qkv(
-                attn, x, query_positions.reshape(-1), mega_attention=mega
-            )
             query_slots, global_indices, topk_length = self._proposal_metadata(
                 query_positions,
                 prefix_lengths,
@@ -805,6 +801,21 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 entries_per_block,
                 tokens_per_block,
                 metadata_by_geometry,
+            )
+            topk = int(global_indices.shape[-1])
+            mega = getattr(attn, "_mega_attention", None)
+            mega_indices = global_indices.view(batch_size * gamma, topk).contiguous()
+            if mega is not None and not (
+                mega.supports_input(x) and mega.supports_decode(pool, mega_indices)
+            ):
+                mega = None
+            # Select the layout before Q projection. Both paths insert every
+            # proposal KV before attention, preserving noncausal visibility.
+            qkv = decode_compute_qkv(
+                attn,
+                x,
+                query_positions.reshape(-1),
+                **({"mega_attention": mega} if mega is not None else {}),
             )
             _write_dspark_swa(
                 kv=qkv.kv,
@@ -815,25 +826,47 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 head_dim=int(attn.head_dim),
             )
 
-            topk = int(global_indices.shape[-1])
-            global_indices = global_indices.view(batch_size * gamma, topk).contiguous()
-            # DSpark metadata stores one length per request; Mega flattens
-            # the proposal queries and requires one length per query token.
-            swa_lengths = (
-                None if topk_length is None else topk_length.repeat_interleave(gamma)
+            if mega is not None:
+                # DSpark lengths are per request; Mega flattens query tokens.
+                swa_lengths = (
+                    None
+                    if topk_length is None
+                    else topk_length.repeat_interleave(gamma)
+                )
+                output = mega.decode(
+                    qkv.q,
+                    pool,
+                    mega_indices,
+                    query_positions.reshape(-1).to(torch.int32).contiguous(),
+                    swa_lengths=swa_lengths,
+                )
+                projected = mega.project_output(output, attn.wo_b)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
+
+            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
+            sched_meta = get_or_build_sched_meta(
+                graph_metadata,
+                batch_size=batch_size,
+                q_len=gamma,
+                num_heads=int(attn.n_heads),
+                topk=topk,
+                extra_attn_type=None,
             )
-            # Proposal rows are non-causal: keep their shared block slots and
-            # per-row lengths, while Q-RoPE and inverse O-RoPE run in Mega.
-            output = mega.decode(
-                qkv.q,
-                pool,
-                global_indices,
-                query_positions.reshape(-1).to(torch.int32).contiguous(),
-                swa_lengths=swa_lengths,
+            output = attn._get_fp8_decode_op().forward(
+                q=qkv.q,
+                kv_cache=pool,
+                attn_sink=attn.attn_sink,
+                topk_idxs=global_indices,
+                sched_meta=sched_meta,
+                topk_length=topk_length,
             )
-            projected = mega.project_output(output, attn.wo_b)
-            attn._prefill_output_all_reduce(projected)
-            return projected.reshape(batch_size, gamma, -1)
+            if hasattr(attn, "_project_output"):
+                # V4.1 uses block-32 MXFP8 grouped wo_a weights.
+                projected = attn._project_output(output, qkv.freqs_cis)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
+            return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
 
     def _forward_layers(
         self,

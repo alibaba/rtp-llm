@@ -51,12 +51,11 @@ def _state(device="cpu", heads=16, backend=None):
 
 
 class MegaAttentionCPU(unittest.TestCase):
-    def test_unsupported_configuration_raises_without_loading_backend(self):
+    def test_disabled_configuration_skips_backend_loading(self):
         with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}), patch.object(
             mega, "_backend", side_effect=AssertionError("backend imported")
         ):
-            with self.assertRaisesRegex(RuntimeError, "V4.1 Mega Attention requires"):
-                mega.prepare(SimpleNamespace())
+            self.assertIsNone(mega.prepare(SimpleNamespace()))
 
     def _supported_cpu_fixture(self):
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -82,7 +81,7 @@ class MegaAttentionCPU(unittest.TestCase):
             o_lora_rank=128,
         )
 
-    def test_old_switch_cannot_disable_mega_attention(self):
+    def test_enabled_by_default_and_switch_disables_mega_attention(self):
         attn = self._supported_cpu_fixture()
         with patch.dict(os.environ, {}, clear=True), patch.object(
             torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
@@ -92,19 +91,21 @@ class MegaAttentionCPU(unittest.TestCase):
             torch.cuda, "_lazy_init", side_effect=AssertionError("CUDA initialized")
         ):
             self.assertTrue(mega.is_supported(attn))
+            backend.assert_called_once_with()
+            backend.reset_mock()
             with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}):
-                self.assertTrue(mega.is_supported(attn))
+                self.assertFalse(mega.is_supported(attn))
+                self.assertIsNone(mega.prepare(attn))
             backend.assert_not_called()
 
-    def test_cpu_fails_before_hardware_probe(self):
+    def test_cpu_falls_back_before_hardware_probe(self):
         attn = self._supported_cpu_fixture()
         with patch.dict(os.environ, {}, clear=True), patch.object(
             mega, "_device_capability", side_effect=AssertionError("CUDA queried")
         ), patch.object(
             mega, "_backend", side_effect=AssertionError("backend imported")
         ):
-            with self.assertRaisesRegex(RuntimeError, "SM10x"):
-                mega.prepare(attn)
+            self.assertIsNone(mega.prepare(attn))
 
     def test_default_requires_sm10x_and_native_backend(self):
         attn = self._supported_cpu_fixture()
@@ -118,10 +119,64 @@ class MegaAttentionCPU(unittest.TestCase):
             ), patch.object(
                 mega, "_backend", return_value=backend
             ):
-                exception = RuntimeError if capability[0] != 10 else ImportError
-                message = "SM10x" if capability[0] != 10 else "deps/ requirements"
-                with self.assertRaisesRegex(exception, message):
-                    mega.prepare(attn)
+                self.assertIsNone(mega.prepare(attn))
+
+    def test_partial_wheel_and_import_failures_reject_backend(self):
+        required = (
+            "fused_norm_rope_attn_rope_cast_fwd",
+            "fused_norm_rope_attn_rope_cast_decode",
+            "permute_q_b_proj",
+            "permute_wv_proj",
+        )
+        self.addCleanup(mega._backend.cache_clear)
+        for missing in required:
+            backend = SimpleNamespace(
+                **{name: Mock() for name in required if name != missing}
+            )
+            mega._backend.cache_clear()
+            with self.subTest(missing=missing), patch.object(
+                mega.importlib, "import_module", return_value=backend
+            ):
+                self.assertIsNone(mega._backend())
+        for exception in (ImportError("old wheel"), OSError("missing library")):
+            mega._backend.cache_clear()
+            with self.subTest(exception=exception), patch.object(
+                mega.importlib, "import_module", side_effect=exception
+            ):
+                self.assertIsNone(mega._backend())
+
+    def test_preparation_errors_are_not_hidden(self):
+        with patch.object(mega, "is_supported", return_value=True), patch.object(
+            mega, "_backend", return_value=object()
+        ), patch.object(
+            mega, "_permuted_weights", side_effect=RuntimeError("kernel failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "kernel failed"):
+                mega.prepare(SimpleNamespace())
+
+    def test_q_permutation_keeps_scales_and_avoids_native_tp_restrictions(self):
+        attn = self._supported_cpu_fixture()
+        rows, width = attn.wq_b.weight.shape
+        weight = (torch.arange(rows * width).reshape(rows, width) % 31 - 15).float()
+        attn.wq_b.weight.copy_(weight.to(torch.float8_e4m3fn))
+        attn.wq_b.weight_scales.copy_(torch.arange(rows).int()[:, None])
+        backend = SimpleNamespace(
+            permute_q_b_proj=Mock(
+                side_effect=AssertionError("old native head restriction")
+            ),
+            permute_wv_proj=Mock(return_value=(attn._wo_a_stk_w, attn._wo_a_stk_s)),
+        )
+        qw, qs, _, _ = mega._permuted_weights(attn, backend)
+        x = torch.arange(width).float()[None] / width
+        original_q = (x @ attn.wq_b.weight.float().T).view(1, attn.n_heads, 512)
+        actual_q = (x @ qw.float().T).view_as(original_q)
+        torch.testing.assert_close(actual_q, _q_fused(original_q), rtol=0, atol=0)
+        expected_scales = _q_fused(torch.arange(rows).view(1, attn.n_heads, 512))
+        torch.testing.assert_close(
+            qs[:, 0], expected_scales.flatten().int(), rtol=0, atol=0
+        )
+        self.assertEqual(qs.stride(0), 1)
+        backend.permute_q_b_proj.assert_not_called()
 
     def test_tp4_padding_preserves_chunk_layout(self):
         state = _state()

@@ -168,6 +168,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
 
     def test_mega_gate_skips_before_cuda_or_private_warmup(self):
         for env, device, max_m in (
+            ({"DSV41_MEGA_ATTENTION": "0"}, "cuda:0", 8),
             ({"DSV41_MEGA_ATTENTION": "1", "MODEL_WARM_UP": "0"}, "cuda:0", 8),
             ({"DSV41_MEGA_ATTENTION": "1", "WARM_UP": "0"}, "cuda:0", 8),
             ({}, "cpu", 8),
@@ -185,7 +186,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self,
     ):
         model, layers, operation, stream, _, _ = self.mega_fixture()
-        with mock.patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "0"}):
+        with mock.patch.dict(os.environ, {}, clear=True):
             warmup.warmup_v41_mega_jit(model, max_m=8, device="cuda:0", decode=True)
         self.assertEqual(
             operation.call_args_list,

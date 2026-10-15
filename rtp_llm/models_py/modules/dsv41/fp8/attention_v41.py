@@ -689,12 +689,15 @@ class AttentionV41FP8(AttentionFP8):
             self._mega_attention.reload_weights(self)
         else:
             self._mega_attention = prepare(self, shared=self._shared_attention)
-            from ._v41_merged_qb import MergedQB
+            if self._mega_attention is not None:
+                from ._v41_merged_qb import MergedQB
 
-            merged = MergedQB.create(self, self._mega_attention, self._qb_weight_owner)
-            self._mega_attention.merged_qb = merged
-            if merged is not None:
-                self._qb_weight_owner = None
+                merged = MergedQB.create(
+                    self, self._mega_attention, self._qb_weight_owner
+                )
+                self._mega_attention.merged_qb = merged
+                if merged is not None:
+                    self._qb_weight_owner = None
 
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
@@ -1004,37 +1007,60 @@ class AttentionV41FP8(AttentionFP8):
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        mega = self._mega_attention
-        if mega is None or not (
-            mega.supports_query(qkv.qr)
-            and mega.supports_prefill(kv, indices, topk_length)
-        ):
-            raise RuntimeError(
-                "V4.1 Mega Attention prefill input contract is unsupported"
-            )
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
         chunk = _FLASH_MLA_SPARSE_Q_CHUNK
-        _, index_chunks, length_chunks = common.workspace.attention_metadata(
+        freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
             common.freqs_cis, indices, topk_length, rows, chunk
         )
         qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
         out_chunks = (out,) if rows <= chunk else out.split(chunk)
-        positions = (
-            common.cp_ctx.global_positions if common.cp_on else common.position_ids
-        )
-        position_chunks = self._mega_position_chunks(positions, rows, chunk)
-        for qr, target, indices_chunk, lengths, pos in zip(
-            qr_chunks, out_chunks, index_chunks, length_chunks, position_chunks
+        mega = getattr(self, "_mega_attention", None)
+        if (
+            mega is not None
+            and mega.supports_query(qkv.qr)
+            and mega.supports_prefill(kv, indices, topk_length)
         ):
-            q_out, _, _ = common.workspace.prefill_q_head_views(
-                qr.shape[0], self.n_heads, self.head_dim, self.rope_head_dim
+            positions = (
+                common.cp_ctx.global_positions if common.cp_on else common.position_ids
             )
-            with record_function_range("dsv41.prefill.q_lora_b_mega"):
-                q = mega.project_q(self.wq_b, qr, out=q_out)
-            with record_function_range("dsv41.prefill.mega_attention"):
-                pair = mega.prefill(q, kv, indices_chunk, pos, lengths)
+            position_chunks = self._mega_position_chunks(positions, rows, chunk)
+            for qr, target, indices_chunk, lengths, pos in zip(
+                qr_chunks, out_chunks, index_chunks, length_chunks, position_chunks
+            ):
+                q_out, _, _ = common.workspace.prefill_q_head_views(
+                    qr.shape[0], self.n_heads, self.head_dim, self.rope_head_dim
+                )
+                with record_function_range("dsv41.prefill.q_lora_b_mega"):
+                    q = mega.project_q(self.wq_b, qr, out=q_out)
+                with record_function_range("dsv41.prefill.mega_attention"):
+                    pair = mega.prefill(q, kv, indices_chunk, pos, lengths)
+                with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                    mega.project_output(pair, self.wo_b, out=target)
+            self._prefill_output_all_reduce(out)
+            return out
+        from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
+
+        for qr, target, freqs, indices_chunk, lengths in zip(
+            qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
+        ):
+            q = self._project_prefill_q(qr, freqs, common.workspace)
+            with record_function_range(profile_name):
+                o, _, _ = flash_mla_sparse_fwd(
+                    q=q,
+                    kv=kv,
+                    indices=indices_chunk,
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=lengths,
+                )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                mega.project_output(pair, self.wo_b, out=target)
+                # FlashMLA has submitted the final Q read on this stream. Its
+                # separate output tensor remains live while output quantization
+                # overwrites the now-dead Q workspace, before the next chunk.
+                self._prefill_output_proj_into(
+                    o, freqs, out=target, workspace=common.workspace
+                )
+            dispose_tensor(o)
         self._prefill_output_all_reduce(out)
         return out
 
@@ -2718,9 +2744,12 @@ class AttentionV41FP8(AttentionFP8):
             from . import _v41_sparse_decode as sparse_decode
 
             if (
-                self.compress_ratio == 1 and candidate_size == 8
-                and self.index_topk == 512 and self.index_n_heads == 32
-                and self.index_head_dim == 128 and keys.pool.shape[1] == 128
+                self.compress_ratio == 1
+                and candidate_size == 8
+                and self.index_topk == 512
+                and self.index_n_heads == 32
+                and self.index_head_dim == 128
+                and keys.pool.shape[1] == 128
                 and keys.logical_entries_per_block == 128
                 and sparse_decode.is_supported(candidates)
             ):
@@ -2728,14 +2757,20 @@ class AttentionV41FP8(AttentionFP8):
                 if plan is None:
                     with record_function_range("dsv41.decode.sparse_mqa_plan"):
                         plan = sparse_decode.make_plan(
-                            candidates, visible_per_token, keys.block_table, query_len=S,
+                            candidates,
+                            visible_per_token,
+                            keys.block_table,
+                            query_len=S,
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
                     output = sparse_decode.select_decode(
                         q.view(B, S, self.index_n_heads, self.index_head_dim),
-                        weights.view(B, S, self.index_n_heads), self.freqs_cis,
-                        positions.reshape(T), keys.pool, plan,
+                        weights.view(B, S, self.index_n_heads),
+                        self.freqs_cis,
+                        positions.reshape(T),
+                        keys.pool,
+                        plan,
                         rope_head_dim=self.rope_head_dim,
                     )
                 shared["topk"] = {self.layer_id: output}
@@ -2925,12 +2960,14 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
         )
         swa_pool = self._pool_view_3d_fp8(SWA_KV)
-        mega = self._mega_attention
-        mega_swa = metadata.swa_global_slots[:T]
+        mega = getattr(self, "_mega_attention", None)
+        mega_swa = metadata.swa_global_slots[:T] if mega is not None else None
         mega_global = (
-            self._source_pool(self._global_region()) if self.compress_ratio else None
+            self._source_pool(self._global_region())
+            if mega is not None and self.compress_ratio
+            else None
         )
-        if mega is None or not (
+        if mega is not None and not (
             mega.supports_input(x)
             and mega.supports_decode(swa_pool, mega_swa)
             and (
@@ -2942,9 +2979,7 @@ class AttentionV41FP8(AttentionFP8):
                 )
             )
         ):
-            raise RuntimeError(
-                "V4.1 Mega Attention decode input contract is unsupported"
-            )
+            mega = None
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
         if self.compress_ratio and self.is_kv_source:
@@ -2963,35 +2998,75 @@ class AttentionV41FP8(AttentionFP8):
                 freqs_cis=freqs,
                 swa_pool=swa_pool,
                 swa_slots=None if swa_slots is None else swa_slots[:T],
-                mega_attention=mega,
+                **({"mega_attention": mega} if mega is not None else {}),
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
         finally:
             if global_work is not None:
                 global_work.finish()
-        slots = None
-        if self.compress_ratio:
+        if mega is not None:
+            slots = None
+            if self.compress_ratio:
+                if self.is_kv_source and global_work is None:
+                    self._produce_global_decode(x, positions, req, starts)
+                selected = self._select_indices_decode(
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                )
+                slots = (
+                    self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+                    .to(dtype=torch.int32)
+                    .contiguous()
+                )
+            mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
+            with record_function_range("dsv41.decode.mega_attention"):
+                pair = mega.decode(
+                    qkv.q,
+                    swa_pool,
+                    mega_swa,
+                    mega_positions,
+                    extra_pool=mega_global,
+                    extra_indices=slots,
+                )
+            out = mega.project_output(pair, self.wo_b)
+            self._prefill_output_all_reduce(out)
+            return out.view(B, S, self.dim)
+        if not self.compress_ratio:
+            o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
+        else:
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                x, qkv.qr, positions, qkv.qr_quantized
             )
-            slots = (
-                self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-                .to(dtype=torch.int32)
-                .contiguous()
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
+                fp4_dual_decode_attention,
             )
-        mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
-        with record_function_range("dsv41.decode.mega_attention"):
-            pair = mega.decode(
-                qkv.q,
-                swa_pool,
-                mega_swa,
-                mega_positions,
-                extra_pool=mega_global,
-                extra_indices=slots,
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+                get_or_build_sched_meta,
             )
-        out = mega.project_output(pair, self.wo_b)
+
+            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
+            o = fp4_dual_decode_attention(
+                q=qkv.q,
+                swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
+                global_pool_3d=self._source_pool(self._global_region()),
+                attn_sink=self.attn_sink,
+                swa_topk_3d=metadata.swa_global_slots[:T]
+                .view(B, S, self.window_size)
+                .contiguous(),
+                global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
+                swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
+                sched_meta=get_or_build_sched_meta(
+                    metadata,
+                    batch_size=B,
+                    q_len=S,
+                    num_heads=self.n_heads,
+                    topk=self.window_size,
+                    extra_attn_type=self._global_region(),
+                ),
+                fp8_op=self._get_fp8_decode_op(),
+            )
+        out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
         return out.view(B, S, self.dim)

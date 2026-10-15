@@ -3,8 +3,7 @@
 
 The installed FlashMLA extension owns both CUDA kernels. We permute projection
 weights once, so their head-chunk layouts require no activation shuffle. The
-checkpoint weights remain intact for reload and the merged Q-B projection.
-V4.1 execution requires this backend; unsupported configurations fail at startup.
+ordinary weights remain intact for unsupported inputs and the disabled path.
 No compilation or CUDA initialization occurs while importing this module.
 Layout conventions follow vLLM's deepseek_v41/nvidia/flash_mla_mega_attn.py
 and deepseek_v41/common/ops/fused_layout.py. Calls use RTP's pybind ABI.
@@ -13,6 +12,7 @@ and deepseek_v41/common/ops/fused_layout.py. Calls use RTP's pybind ABI.
 from __future__ import annotations
 
 import importlib
+import os
 from functools import lru_cache
 
 import torch
@@ -49,13 +49,17 @@ def _backend():
 
 
 def is_supported(attn) -> bool:
-    """Check the weight and hardware contract without changing execution paths.
+    """Enabled by default; unsupported configurations keep split ops.
+
+    Set ``DSV41_MEGA_ATTENTION=0`` to retain the ordinary attention path.
 
     Native mega attention takes 64 or 128 query heads and eight heads per wo_a
     group. Smaller TP shards pad only the projected Q activation; the GEMM
     keeps its local head count. CP partitions query tokens without changing
     the sparse KV slot/length contract.
     """
+    if os.environ.get("DSV41_MEGA_ATTENTION", "1") != "1":
+        return False
     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
     linear = getattr(attn, "wq_b", None)
@@ -102,7 +106,7 @@ def is_supported(attn) -> bool:
         and all(not t.requires_grad for t in (qw, qs, weight, scale, table, sink))
     ):
         return False
-    return _device_capability(qw.device)[0] == 10
+    return _device_capability(qw.device)[0] == 10 and _backend() is not None
 
 
 class MegaAttention(torch.nn.Module):
@@ -396,11 +400,17 @@ class MegaAttention(torch.nn.Module):
 
 
 def _permuted_weights(attn, backend):
-    # The native permuter supports local TP heads. Only the attention
-    # kernel requires 64/128 heads, so activation padding remains in pad_q.
-    query_weight, query_scale = backend.permute_q_b_proj(
-        attn.wq_b.weight, attn.wq_b.weight_scales, attn.n_heads, _HEAD_DIM
+    # Some FlashMLA versions only permute native head counts. This startup
+    # gather also handles TP2/TP4/TP8 without requiring a newer native permuter.
+    permutation = (
+        torch.arange(attn.n_heads * _HEAD_DIM, device=attn.wq_b.weight.device)
+        .view(attn.n_heads, 32, 16)
+        .permute(1, 0, 2)
+        .reshape(-1)
     )
+    query_weight = attn.wq_b.weight.view(torch.uint8).index_select(0, permutation)
+    query_weight = query_weight.view(attn.wq_b.weight.dtype)
+    query_scale = attn.wq_b.weight_scales.T.index_select(1, permutation).contiguous().T
     output_weight, output_scale = backend.permute_wv_proj(
         attn._wo_a_stk_w, attn._wo_a_stk_s, _HEADS_PER_GROUP, _HEAD_DIM
     )
@@ -408,23 +418,14 @@ def _permuted_weights(attn, backend):
 
 
 def prepare(attn, *, shared=None):
-    """Prepare the mandatory Mega Attention path before any measured forward.
+    """Prepare an optional Mega Attention path before any measured forward.
 
     Keep checkpoint linears untouched for weight reload and merged Q-B storage.
     RoPE tables with the same storage are converted once per model, not per layer.
     """
     if not is_supported(attn):
-        raise RuntimeError(
-            "V4.1 Mega Attention requires SM10x, MXFP8 projection weights, "
-            "8/16/32/64/128 local heads, head_dim=512 and rope_head_dim=64"
-        )
+        return None
     backend = _backend()
-    if backend is None:
-        raise ImportError(
-            "FlashMLA Mega Attention prefill/decode APIs are missing. "
-            "Install the pinned FlashMLA wheel from RTP's deps/ requirements "
-            "for your platform in the service's Python environment."
-        )
     query_weight, query_scale, output_weight, output_scale = _permuted_weights(
         attn, backend
     )
@@ -457,7 +458,7 @@ def prepare(attn, *, shared=None):
 
 
 def warmup(attn, *, rows, decode, swa_entries=32, global_entries=128):
-    """Run the complete Mega Attention chain using exclusively private KV storage.
+    """Run the complete optional chain using exclusively private KV storage.
 
     The caller deduplicates shapes and owns synchronization/warmup timing.
     ``swa_entries`` must match the serving page size to prepare the Triton
