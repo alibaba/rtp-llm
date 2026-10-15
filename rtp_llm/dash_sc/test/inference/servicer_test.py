@@ -806,6 +806,65 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("backend down", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
+    async def test_content_inspection_error_keeps_public_contract(self) -> None:
+        cases = (
+            (
+                ExceptionType.UNSAFE_INPUT_CONTENT,
+                "Input image [1] data may contain inappropriate content.",
+                400,
+                "DataInspectionFailed",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.UNSAFE_OUTPUT_CONTENT,
+                "Output data may contain inappropriate content.",
+                400,
+                "DataInspectionFailed",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_PROCESS_ERROR,
+                "DataInspectionFailed service unavailable",
+                500,
+                "InternalError",
+                19,
+                LLMFinishReason.INNER_ENGINE_ERROR,
+            ),
+        )
+        for exception_type, message, status, name, error_no, finish_reason in cases:
+            with self.subTest(exception_type=exception_type):
+
+                class _RejectedVisitor:
+                    async def enqueue(self, _generate_input):
+                        raise FtRuntimeException(exception_type, message)
+
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        self._minimal_request(),
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertEqual(len(chunks), 1)
+                self.assertEqual(_gen_ids(chunks[0]), [])
+                actual_error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(actual_error_no, error_no)
+                self.assertEqual(payload["status_code"], status)
+                self.assertEqual(payload["status_name"], name)
+                self.assertEqual(payload["status_message"], message)
+                infer = chunks[0].infer_response
+                self.assertEqual(infer.parameters["status_code"].int64_param, status)
+                self.assertEqual(infer.parameters["status_name"].string_param, name)
+                self.assertEqual(
+                    infer.parameters["status_message"].string_param, message
+                )
+                self.assertEqual(_finish_reason(chunks[0]), finish_reason)
+
     async def test_ft_exception_sets_access_backend_error_code(self) -> None:
         req = self._minimal_request()
         exception_aux_info = {
