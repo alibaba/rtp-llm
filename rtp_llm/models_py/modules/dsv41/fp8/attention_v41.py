@@ -602,6 +602,8 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
         self.v41_config = v41_config
+        # Unsupported configurations still use dense selection; set 0 to opt out.
+        self.decode_sparse_mqa = os.environ.get("DSV41_DECODE_SPARSE_MQA", "1") == "1"
         # Read once: changing this policy in a running cache namespace is unsafe.
         # SWA-only DSpark draft layers have no global-source/CED boundary.
         kv_sources = v41_config.get("kv_source_layer_ids", [])
@@ -643,6 +645,7 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         w = kwargs["layer_weights"]
+        self._qb_weight_owner = w if self.is_index_source else None
         if self.is_kv_source:
             self.global_wkv = w[W.v4_compressor_wkv]
             self.global_norm = w[W.v4_compressor_norm]
@@ -680,7 +683,21 @@ class AttentionV41FP8(AttentionFP8):
         super().init_rope_cache(device=device)
         from ._v41_mega_attention import prepare
 
-        self._mega_attention = prepare(self, shared=self._shared_attention)
+        if self._mega_attention is not None:
+            # Reinitialization must refresh the buffers captured by existing
+            # graphs, including the shared Main/Indexer Q-B weight slices.
+            self._mega_attention.reload_weights(self)
+        else:
+            self._mega_attention = prepare(self, shared=self._shared_attention)
+            if self._mega_attention is not None:
+                from ._v41_merged_qb import MergedQB
+
+                merged = MergedQB.create(
+                    self, self._mega_attention, self._qb_weight_owner
+                )
+                self._mega_attention.merged_qb = merged
+                if merged is not None:
+                    self._qb_weight_owner = None
 
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
@@ -990,8 +1007,6 @@ class AttentionV41FP8(AttentionFP8):
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
-
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
         chunk = _FLASH_MLA_SPARSE_Q_CHUNK
         freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
@@ -1023,6 +1038,8 @@ class AttentionV41FP8(AttentionFP8):
                     mega.project_output(pair, self.wo_b, out=target)
             self._prefill_output_all_reduce(out)
             return out
+        from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
+
         for qr, target, freqs, indices_chunk, lengths in zip(
             qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
         ):
@@ -1053,6 +1070,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
+            self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -2683,7 +2701,7 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
-    def _select_indices_decode(self, x, qr, positions, qr_quantized=None):
+    def _select_indices_decode(self, x, qr, positions, qr_quantized=None, index_q=None):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
         if not self.is_index_source:
@@ -2701,13 +2719,62 @@ class AttentionV41FP8(AttentionFP8):
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-        q = (
-            self.index_wq.forward_quantized(*qr_quantized)
-            if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
-            else self._lin(self.index_wq, qr.reshape(T, -1))
-        ).view(T, self.index_n_heads, self.index_head_dim)
+        if index_q is None:
+            index_q = (
+                self.index_wq.forward_quantized(*qr_quantized)
+                if qr_quantized is not None
+                and isinstance(self.index_wq, V41MXFP8Linear)
+                else self._lin(self.index_wq, qr.reshape(T, -1))
+            )
+        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
+        config = self.v41_config
+        candidate_source = int(config.get("candidate_source_layer_id", -1))
+        candidate_blocks = int(config.get("candidate_topk_blocks", 0))
+        candidate_size = int(config.get("candidate_block_size", 0))
+        candidates = shared.get("candidates")
+        if (
+            getattr(self, "decode_sparse_mqa", False)
+            and paged
+            and candidates is not None
+            and self.layer_id > candidate_source
+            and self.kv_source_layer_id == candidate_source
+        ):
+            from . import _v41_sparse_decode as sparse_decode
+
+            if (
+                self.compress_ratio == 1
+                and candidate_size == 8
+                and self.index_topk == 512
+                and self.index_n_heads == 32
+                and self.index_head_dim == 128
+                and keys.pool.shape[1] == 128
+                and keys.logical_entries_per_block == 128
+                and sparse_decode.is_supported(candidates)
+            ):
+                plan = shared.get("decode_sparse_plan")
+                if plan is None:
+                    with record_function_range("dsv41.decode.sparse_mqa_plan"):
+                        plan = sparse_decode.make_plan(
+                            candidates,
+                            visible_per_token,
+                            keys.block_table,
+                            query_len=S,
+                        )
+                    shared["decode_sparse_plan"] = plan
+                with record_function_range("dsv41.decode.sparse_mqa_select"):
+                    output = sparse_decode.select_decode(
+                        q.view(B, S, self.index_n_heads, self.index_head_dim),
+                        weights.view(B, S, self.index_n_heads),
+                        self.freqs_cis,
+                        positions.reshape(T),
+                        keys.pool,
+                        plan,
+                        rope_head_dim=self.rope_head_dim,
+                    )
+                shared["topk"] = {self.layer_id: output}
+                return output
         if paged:
             all_logits = decode_indexer.score_decode_indexer(
                 q.view(B, S, self.index_n_heads, self.index_head_dim),
@@ -2728,10 +2795,6 @@ class AttentionV41FP8(AttentionFP8):
             )
             freqs = self.freqs_cis[positions]
             q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
-        config = self.v41_config
-        candidate_source = int(config.get("candidate_source_layer_id", -1))
-        candidate_blocks = int(config.get("candidate_topk_blocks", 0))
-        candidate_size = int(config.get("candidate_block_size", 0))
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -2948,7 +3011,7 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])

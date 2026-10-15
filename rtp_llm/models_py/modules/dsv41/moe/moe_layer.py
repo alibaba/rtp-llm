@@ -277,6 +277,15 @@ class MoE(nn.Module):
     def _use_gate_pack(self) -> bool:
         return self._gate_pack_static and (not self._has_visual_tokens)
 
+    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor):
+        from .mega_gate import can_use_mega_gate, mega_gate
+
+        if can_use_mega_gate(x, self.gate):
+            with record_function_range("dsv4.moe.deepgemm_mega_gate"):
+                weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
+            return self._strategy(x, weights, indices)
+        return self._strategy.forward_with_gate_pack(x, self.gate, input_ids)
+
     def _run_chunk(
         self,
         x: torch.Tensor,
@@ -287,18 +296,14 @@ class MoE(nn.Module):
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    routed = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids
-                    )
+                    routed = self._forward_gate_pack(x, input_ids)
                 out.copy_(routed)
                 return
             with record_function_range("dsv4.moe.shared_expert_start"):
                 self._shared_executor.start(self.shared_experts, x)
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    routed = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids
-                    )
+                    routed = self._forward_gate_pack(x, input_ids)
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
                     self._shared_executor.finish()
@@ -415,9 +420,7 @@ class MoE(nn.Module):
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    y = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids_flat
-                    )
+                    y = self._forward_gate_pack(x, input_ids_flat)
                 with record_function_range("dsv4.moe.add_shared"):
                     T = x.size(0)
                     out = _get_or_create_final_out(
@@ -429,9 +432,7 @@ class MoE(nn.Module):
                 self._shared_executor.start(self.shared_experts, x)
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    y = self._strategy.forward_with_gate_pack(
-                        x, self.gate, input_ids_flat
-                    )
+                    y = self._forward_gate_pack(x, input_ids_flat)
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
                     self._shared_executor.finish()

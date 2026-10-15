@@ -623,9 +623,9 @@ class V41Fp4DualDecodeAttentionCUDA(unittest.TestCase):
 class V41DecodeTopKFusionCUDA(unittest.TestCase):
     """Independent old-PyTorch oracles for the decode selection helpers.
 
-    Candidate membership must be exact, including cutoff ties. Token TopK has
-    an unordered contract: compare selected score multisets and uniqueness,
-    while keeping the old short-context ascending indices exactly.
+    Candidate and token TopK allow different indices at cutoff ties: compare
+    selected score multisets and uniqueness. Keep the old short-context token
+    selection's ascending indices exactly.
     """
 
     def setUp(self):
@@ -666,13 +666,43 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         flags.scatter_(1, torch.where(candidates >= 0, candidates, nblocks).long(), 1)
         return candidates, flags[:, :nblocks]
 
-    def _assert_candidates(self, logits, lengths, candidates, flags, block_size=8):
-        expected, expected_flags = self._old_candidates(logits, lengths, block_size)
+    def _assert_candidates(
+        self, logits, lengths, candidates, flags, block_size=8, topk_blocks=2048
+    ):
+        expected, _ = self._old_candidates(logits, lengths, block_size, topk_blocks)
         self.assertEqual(candidates.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.uint8)
-        torch.testing.assert_close(
-            candidates.sort(-1).values, expected.sort(-1).values, rtol=0, atol=0
+        self.assertEqual(candidates.shape, expected.shape)
+        rows, width = logits.shape
+        nblocks = (width + block_size - 1) // block_size
+        self.assertTrue(bool(((candidates >= -1) & (candidates < nblocks)).all()))
+        scores = F.pad(logits, (0, nblocks * block_size - width), value=-torch.inf)
+        scores = scores.view(rows, nblocks, block_size).amax(-1)
+        newest = (lengths.long() - 1).clamp_min(0) // block_size
+        scores.scatter_(
+            1, newest[:, None], torch.where(lengths > 0, torch.inf, -torch.inf)[:, None]
         )
+
+        def selected_scores(ids):
+            return (
+                scores.gather(1, ids.clamp_min(0).long())
+                .masked_fill(ids < 0, -torch.inf)
+                .sort(-1)
+                .values
+            )
+
+        torch.testing.assert_close(
+            selected_scores(candidates), selected_scores(expected), rtol=0, atol=0
+        )
+        # Validate flags against the selected IDs, not torch's arbitrary tie
+        # choices; subsequent masking must follow these exact flags.
+        expected_flags = torch.zeros(
+            (rows, nblocks + 1), dtype=torch.uint8, device=logits.device
+        )
+        expected_flags.scatter_(
+            1, torch.where(candidates >= 0, candidates, nblocks).long(), 1
+        )
+        expected_flags = expected_flags[:, :nblocks]
         torch.testing.assert_close(flags, expected_flags, rtol=0, atol=0)
         for row, visible in enumerate(lengths.cpu().tolist()):
             ids = candidates[row][candidates[row] >= 0]
@@ -682,6 +712,88 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
             else:
                 self.assertEqual(ids.numel(), 0)
         return expected_flags
+
+    def test_candidate_counts_preserve_reference_and_dispatch(self):
+        # Cover the original K=8 regression, both sides of radix-supported K,
+        # and pools smaller than/equal to K, including a partial final block.
+        for topk_blocks in (
+            1,
+            8,
+            511,
+            512,
+            513,
+            1023,
+            1024,
+            1025,
+            2047,
+            2048,
+            2049,
+            4096,
+        ):
+            for nblocks in (max(1, topk_blocks - 1), topk_blocks, topk_blocks + 3):
+                with self.subTest(topk_blocks=topk_blocks, nblocks=nblocks):
+                    width = nblocks * 8 - 3
+                    columns = torch.arange(width, device="cuda")
+                    storage = torch.full((6, width + 13), 12345.0, device="cuda")
+                    logits = storage[:, :width]
+                    logits.copy_(columns.float()[None])
+                    lengths = torch.tensor(
+                        [0, 1, min(7, width), min(9, width), width - 1, width],
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                    logits[4].fill_(-torch.inf)
+                    # PyTorch ranks NaN above the pinned +inf; leave room for
+                    # both so the newest-block assertion remains applicable.
+                    if topk_blocks > 1:
+                        logits[5, 0] = torch.nan
+                    logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+                    with patch.object(
+                        self.impl.rtp_llm_ops,
+                        "topk_v3",
+                        wraps=self.impl.rtp_llm_ops.topk_v3,
+                    ) as radix:
+                        ids, flags = self.impl.select_candidates(
+                            logits, lengths, 8, topk_blocks
+                        )
+                    self.assertEqual(
+                        radix.call_count,
+                        int(nblocks > topk_blocks and topk_blocks in (512, 1024, 2048)),
+                    )
+                    expected_flags = self._assert_candidates(
+                        logits, lengths, ids, flags, topk_blocks=topk_blocks
+                    )
+                    expected = logits.masked_fill(
+                        ~expected_flags[:, columns // 8].bool(), -torch.inf
+                    )
+                    self.impl.mask_candidates(logits, flags, 8)
+                    torch.testing.assert_close(
+                        logits, expected, rtol=0, atol=0, equal_nan=True
+                    )
+                    self.assertTrue(bool((storage[:, width:] == 12345.0).all()))
+
+    def test_candidate_torch_fallback_graph_replay(self):
+        width, topk_blocks = 768, 8
+        columns = torch.arange(width, device="cuda")
+        logits = columns.float()[None].repeat(6, 1)
+        lengths = torch.full((6,), width, dtype=torch.int32, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            ids, flags = self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        for visible in ([0, 1, 7, 8, 9, width], [width, 511, 65, 64, 63, 0]):
+            lengths.copy_(torch.tensor(visible, device="cuda", dtype=torch.int32))
+            logits.copy_(-columns.float()[None])
+            logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+            graph.replay()
+            self._assert_candidates(
+                logits, lengths, ids, flags, topk_blocks=topk_blocks
+            )
 
     def _assert_tokens(self, logits, lengths, result, topk=512):
         self.assertEqual(result.dtype, torch.int32)
@@ -703,7 +815,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
                 logits[row, ids].sort().values, expected_values, rtol=0, atol=0
             )
 
-    def test_candidate_real_capacity_batch24_preserves_ties_and_flags(self):
+    def test_candidate_real_capacity_batch24_preserves_scores_and_flags(self):
         torch.manual_seed(4102048)
         rows, width = 24, 524288
         logits = torch.rand(rows, width, dtype=torch.float32, device="cuda")
@@ -738,7 +850,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
             device="cuda",
         )
         # All-zero cutoff ties span more blocks than K. The latest block must
-        # still be included, and batching 4x6 -> 24 must keep the same set.
+        # still be included; other tied indices may differ from torch.topk.
         logits[12].zero_()
         logits[16].fill_(1.0)
         logits[16, : 1023 * 8] = 3.0

@@ -793,9 +793,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
-            # Project and insert all query KVs before attention so each query
-            # can read every other query position, including future noise.
-            qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
             query_slots, global_indices, topk_length = self._proposal_metadata(
                 query_positions,
                 prefix_lengths,
@@ -804,6 +801,21 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 entries_per_block,
                 tokens_per_block,
                 metadata_by_geometry,
+            )
+            topk = int(global_indices.shape[-1])
+            mega = getattr(attn, "_mega_attention", None)
+            mega_indices = global_indices.view(batch_size * gamma, topk).contiguous()
+            if mega is not None and not (
+                mega.supports_input(x) and mega.supports_decode(pool, mega_indices)
+            ):
+                mega = None
+            # Select the layout before Q projection. Both paths insert every
+            # proposal KV before attention, preserving noncausal visibility.
+            qkv = decode_compute_qkv(
+                attn,
+                x,
+                query_positions.reshape(-1),
+                **({"mega_attention": mega} if mega is not None else {}),
             )
             _write_dspark_swa(
                 kv=qkv.kv,
@@ -814,9 +826,25 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 head_dim=int(attn.head_dim),
             )
 
-            topk = int(global_indices.shape[-1])
-            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
+            if mega is not None:
+                # DSpark lengths are per request; Mega flattens query tokens.
+                swa_lengths = (
+                    None
+                    if topk_length is None
+                    else topk_length.repeat_interleave(gamma)
+                )
+                output = mega.decode(
+                    qkv.q,
+                    pool,
+                    mega_indices,
+                    query_positions.reshape(-1).to(torch.int32).contiguous(),
+                    swa_lengths=swa_lengths,
+                )
+                projected = mega.project_output(output, attn.wo_b)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
 
+            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
             sched_meta = get_or_build_sched_meta(
                 graph_metadata,
                 batch_size=batch_size,

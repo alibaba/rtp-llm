@@ -139,13 +139,13 @@ class MegaAttention(torch.nn.Module):
         self.softmax_scale = softmax_scale
         self.heads = heads
         self.groups = groups
+        self.merged_qb = None
 
     @torch.no_grad()
     def reload_weights(self, attn):
         """Refresh derived weights in place without replacing captured buffers.
 
-        Explicit refresh ignores the feature env because already captured
-        graphs may still reference these prepared tensors.
+        Existing graphs and merged Q-B views reference these prepared tensors.
         """
         qw, qs, ow, oscale = _permuted_weights(attn, self.backend)
         table = attn.freqs_cis
@@ -170,6 +170,8 @@ class MegaAttention(torch.nn.Module):
                     "mega attention weight geometry changed during reload"
                 )
             target.copy_(source)
+        if self.merged_qb is not None:
+            self.merged_qb.reload(self, attn.index_wq)
 
     @property
     def padded_heads(self):
@@ -398,8 +400,8 @@ class MegaAttention(torch.nn.Module):
 
 
 def _permuted_weights(attn, backend):
-    # The native permuter only accepts native head counts in some FlashMLA
-    # versions. This equivalent startup gather also handles TP2/TP4/TP8.
+    # Some FlashMLA versions only permute native head counts. This startup
+    # gather also handles TP2/TP4/TP8 without requiring a newer native permuter.
     permutation = (
         torch.arange(attn.n_heads * _HEAD_DIM, device=attn.wq_b.weight.device)
         .view(attn.n_heads, 32, 16)
@@ -416,10 +418,9 @@ def _permuted_weights(attn, backend):
 
 
 def prepare(attn, *, shared=None):
-    """Create a complete optional execution path before any measured forward.
+    """Prepare an optional Mega Attention path before any measured forward.
 
-    Keep the original linears untouched so disabling mega attention, unsupported
-    input dtypes, and other execution paths continue using their original layouts.
+    Keep checkpoint linears untouched for weight reload and merged Q-B storage.
     RoPE tables with the same storage are converted once per model, not per layer.
     """
     if not is_supported(attn):
@@ -469,7 +470,11 @@ def warmup(attn, *, rows, decode, swa_entries=32, global_entries=128):
     device = state.query_weight.device
     qr = torch.zeros(rows, attn.wq_b.K, dtype=torch.bfloat16, device=device)
     positions = torch.zeros(rows, dtype=torch.int32, device=device)
-    q = state.project_q(attn.wq_b, qr)
+    if decode and state.merged_qb is not None:
+        q, _ = state.merged_qb.forward_quantized(*attn.wq_b._quantize_input(qr))
+        q = q.unflatten(-1, (state.heads, _HEAD_DIM))
+    else:
+        q = state.project_q(attn.wq_b, qr)
     width = attn.window_size + (attn.index_topk if attn.compress_ratio else 0)
     if not decode:
         kv = torch.zeros(128, 1, 512, dtype=torch.bfloat16, device=device)

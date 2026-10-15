@@ -242,7 +242,15 @@ def fused_pack_mega_moe_inputs_optimized(
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
     block_m_env = os.environ.get("DSV4_MEGA_MOE_PACK_BLOCK_M")
-    block_m = int(block_m_env) if block_m_env is not None else (8 if T >= 2048 else 2)
+    num_warps = 4
+    if block_m_env is not None:
+        block_m = int(block_m_env)
+    elif T < 64:
+        block_m, num_warps = 4, 1
+    elif T < 2048:
+        block_m, num_warps = 16, 2
+    else:
+        block_m, num_warps = 32, 2
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
@@ -266,7 +274,7 @@ def fused_pack_mega_moe_inputs_optimized(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
-        num_warps=4,
+        num_warps=num_warps,
     )
 
 
