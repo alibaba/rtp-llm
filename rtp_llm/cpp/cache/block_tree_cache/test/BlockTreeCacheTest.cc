@@ -3055,7 +3055,11 @@ TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     auto cache     = makeHostOnlyLoadCache(makeStructuralDevicePools(1, "event_host"));
     auto publisher = std::make_shared<RecordingCachePublisher>();
     cache->setEventPublisher(publisher, {"group0"});
-    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
+    const auto keys_snapshot = cache->getKeySnapshot();
+    EXPECT_EQ(keys_snapshot.keys, (CacheKeysType{200}));
+    EXPECT_TRUE(cache->getKeySnapshot(keys_snapshot.version).keys.empty());
+    EXPECT_EQ(cache->getKeySnapshot(-1).keys, keys_snapshot.keys);
+    EXPECT_EQ(cache->getKeySnapshot(keys_snapshot.version + 1).keys, keys_snapshot.keys);
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
     auto result  = cache->match({200});
     auto context = takeLoadContext(result);

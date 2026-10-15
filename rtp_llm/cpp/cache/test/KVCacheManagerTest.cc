@@ -2158,6 +2158,11 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/tree_snapshot.version, /*need_cache_keys=*/true);
     EXPECT_EQ(same.version, tree_snapshot.version);
     EXPECT_TRUE(same.cached_keys.empty());
+    EXPECT_EQ(same.total_kv_cache, changed.total_kv_cache);
+    EXPECT_EQ(same.available_kv_cache, changed.available_kv_cache);
+    EXPECT_EQ(same.block_size, changed.block_size);
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(-1, true).cached_keys, tree_snapshot.keys);
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(tree_snapshot.version + 1, true).cached_keys, tree_snapshot.keys);
 
     const KVCacheInfo version_only =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/false);
