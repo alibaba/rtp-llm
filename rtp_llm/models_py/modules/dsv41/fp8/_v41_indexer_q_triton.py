@@ -10,9 +10,9 @@ Necessary RTP differences: complex64 interleaved frequency storage, the
 existing CUDA complex-multiply FMA order, the exact existing quantizer, and
 one combined 1/64 weight multiplier (not two separately rounded factors).
 Those operations reuse RTP helpers. FP4 block scales remain separate.
-Dense scoring consumes FP32 weights; sparse scoring consumes BF16. The
-output pointer dtype fuses the sparse consumer's final rounding into the
-same launch without changing the FP32 scale arithmetic.
+Native dense/sparse prefill scoring consumes BF16 weights; compatibility
+consumers may request FP32. The output pointer dtype fuses the consumer's
+final rounding into the same launch without changing FP32 scale arithmetic.
 """
 
 from __future__ import annotations
@@ -56,8 +56,12 @@ def _fused_indexer_q_rope_fp4_kernel(
     payload_ptr,
     sf_ptr,
     weights_out_ptr,
+    selection_ptr,
+    candidates_ptr,
     q_token_stride,
     MAX_POSITION: tl.constexpr,
+    SELECTION_WIDTH: tl.constexpr,
+    CANDIDATE_WIDTH: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     token = row // 32
@@ -84,6 +88,36 @@ def _fused_indexer_q_rope_fp4_kernel(
     tl.store(sf_bytes + tl.arange(0, 4), scale_bytes)
     weight = tl.load(weights_ptr + row).to(tl.float32)
     tl.store(weights_out_ptr + row, weight * (1.0 / 64.0))
+    # The selector may write only a short causal prefix or skip CP padding.
+    # Initialize every output column here, sharing the existing Q launch.
+    # Heads own adjacent column ranges, including non-multiple-of-32 widths.
+    if SELECTION_WIDTH:
+        _initialize_selection_row(selection_ptr, token, row % 32, SELECTION_WIDTH)
+    if CANDIDATE_WIDTH:
+        _initialize_selection_row(candidates_ptr, token, row % 32, CANDIDATE_WIDTH)
+
+
+@triton.jit
+def _initialize_selection_row(output, token, head, WIDTH: tl.constexpr):
+    CHUNK: tl.constexpr = triton.cdiv(WIDTH, 32)
+    offsets = tl.arange(0, triton.next_power_of_2(CHUNK))
+    columns = head * CHUNK + offsets
+    tl.store(
+        output + token * WIDTH + columns, -1, (offsets < CHUNK) & (columns < WIDTH)
+    )
+
+
+def _selection_output_supported(output, q):
+    return output is None or (
+        output.device == q.device
+        and output.dtype == torch.int32
+        and output.ndim == 2
+        and output.shape[0] == q.shape[0] * q.shape[1]
+        and 0 < output.shape[1] <= 65536
+        and output.is_contiguous()
+        and not output.is_conj()
+        and not output.is_neg()
+    )
 
 
 def is_supported(
@@ -143,14 +177,19 @@ def try_fused_indexer_q(
     rope_head_dim: int = 64,
     *,
     weights_out_dtype: torch.dtype = torch.float32,
+    selection_out: torch.Tensor | None = None,
+    candidates_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """Return (int8 Q, packed-int32 SF, scaled weights), or None to fall back.
 
     Weights are the unscaled BF16/FP32 projection. Frequencies are the complete
     complex64 lookup table, positions contain one index for each B*S token.
-    ``weights_out_dtype`` must match the scoring consumer: FP32 for dense
-    prefill/paged decode, BF16 for sparse prefill. Scaling always runs in FP32,
+    ``weights_out_dtype`` must match the scoring consumer: BF16 for native
+    prefill, FP32 for compatibility callers. Scaling always runs in FP32,
     then the final store rounds once to the requested dtype.
+    Optional selection buffers are initialized to -1 in the same launch. Pass
+    only newly produced candidates, never candidates reused by another layer.
+    Unsupported output layouts return None without writing either output.
     Inputs are never modified. Execution/compilation errors are not swallowed.
     """
     if not is_supported(
@@ -160,6 +199,11 @@ def try_fused_indexer_q(
         positions,
         rope_head_dim,
         weights_out_dtype=weights_out_dtype,
+    ):
+        return None
+    if not all(
+        _selection_output_supported(output, q)
+        for output in (selection_out, candidates_out)
     ):
         return None
     payload = torch.empty(*q.shape[:-1], 64, dtype=torch.int8, device=q.device)
@@ -173,8 +217,12 @@ def try_fused_indexer_q(
         payload,
         sf,
         scaled_weights,
+        selection_out,
+        candidates_out,
         q.stride(1) if q.shape[1] > 1 else q.stride(0),
         freqs_cis.shape[0],
+        selection_out.shape[1] if selection_out is not None else 0,
+        candidates_out.shape[1] if candidates_out is not None else 0,
         num_warps=4,
         enable_fp_fusion=False,
     )

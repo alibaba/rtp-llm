@@ -65,6 +65,7 @@ class CPUFallbackTest(unittest.TestCase):
         result = workspace.combine_kv({}, globals_by_req, rows)
         self.assertTrue(torch.equal(result, reference(globals_by_req, rows)))
         self.assertIsInstance(workspace.split_swa_rows(source, (2, 1)), list)
+        self.assertIsNone(workspace.prepare_global_workspace(rows, (3, 5)))
 
     def test_cpu_never_retains_batch_workspace(self):
         shared = {}
@@ -98,6 +99,122 @@ class CUDAWorkspaceTest(unittest.TestCase):
         patcher = patch.object(workspace, "_refresh_backend", return_value=cls.refresh)
         patcher.start()
         cls.addClassCleanup(patcher.stop)
+
+    def prepared(self, rows, counts):
+        plan = workspace.prepare_global_workspace(rows, counts)
+        self.assertIsNotNone(plan)
+        gs = [
+            (
+                plan.output.as_strided(
+                    (count, rows.flat.shape[1]),
+                    plan.output.stride(),
+                    start * rows.flat.shape[1],
+                ),
+                None,
+            )
+            for count, start in zip(counts, plan.global_starts)
+        ]
+        for g, _ in gs:
+            g.view(torch.int16).random_(-32768, 32767)
+        return plan, plan.publish(gs)
+
+    def test_direct_producer_ragged_bits_no_cat_or_request_views(self):
+        for counts, sizes, starts in (
+            ((0, 1, 257), (31, 0, 129), (0, 64, 128)),
+            ((8191,), (257,), None),
+            ((17, 1021, 8193, 7, 0), (0, 1, 127, 255, 33), None),
+        ):
+            total = (
+                sum(sizes)
+                if starts is None
+                else max(start + size for start, size in zip(starts, sizes))
+            )
+            flat = torch.empty((total, 516), device="cuda", dtype=torch.bfloat16)[
+                :, :512
+            ]
+            flat.view(torch.int16).random_(-32768, 32767)
+            rows = workspace.SwaRows(flat, sizes, starts)
+            plan, gs = self.prepared(rows, counts)
+            expected = reference(gs, rows)
+            rows._views = None
+            source_ref = weakref.ref(flat)
+            with patch.object(torch, "cat", side_effect=AssertionError("direct cat")):
+                output = workspace.combine_kv({}, gs, rows)
+            self.assertIs(output, plan.output)
+            self.assertIsNone(rows._views)
+            self.assertTrue(
+                torch.equal(output.view(torch.uint8), expected.view(torch.uint8))
+            )
+            del rows, flat
+            self.assertIsNone(source_ref())
+
+    def test_direct_producer_geometry_change_cache_clear_and_request_count(self):
+        flat = torch.zeros((256 + 127 + 31, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (256, 127, 31))
+        plan, gs = self.prepared(rows, (8192, 16381, 8193))
+        with self.assertRaises(ValueError):
+            plan.publish(gs[:-1])
+        shared = {}
+        first = workspace.combine_kv(shared, gs, rows)
+        # CED clears shared caches and shortens every SWA range. The producer's
+        # plan must not be selected just because the global aliases are equal.
+        shared.clear()
+        shorter = workspace.SwaRows(flat, (128, 127, 31), (0, 256, 383))
+        current = workspace.combine_kv(shared, gs, shorter)
+        self.assertIsNot(current, first)
+        self.assertTrue(
+            torch.equal(
+                current.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
+            )
+        )
+        flat.fill_(97)
+        self.assertIs(workspace.combine_kv(shared, gs, shorter), current)
+        self.assertTrue(
+            torch.equal(
+                current.view(torch.uint8), reference(gs, shorter).view(torch.uint8)
+            )
+        )
+
+    def test_direct_producer_nondefault_stream_graph_and_lifetime(self):
+        flat = torch.zeros((129 + 33, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (129, 33, 0))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            plan, gs = self.prepared(rows, (3, 257, 1021))
+            output = workspace.combine_kv({}, gs, rows)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            workspace.combine_kv({}, gs, rows)
+        for value in (17, -13):
+            flat.fill_(value)
+            graph.replay()
+            self.assertTrue(
+                torch.equal(
+                    output.view(torch.uint8), reference(gs, rows).view(torch.uint8)
+                )
+            )
+        plan_ref, output_ref = weakref.ref(plan), weakref.ref(output)
+        del plan, output, graph
+        self.assertIsNotNone(plan_ref())
+        del gs
+        self.assertIsNone(plan_ref())
+        self.assertIsNone(output_ref())
+
+    def test_direct_producer_unsupported_unwarmed_and_invalid_ranges(self):
+        flat = torch.ones((3, 512), device="cuda", dtype=torch.bfloat16)
+        rows = workspace.SwaRows(flat, (1, 2))
+        for counts in ((), (1,), (-1, 2), (1.5, 2)):
+            self.assertIsNone(workspace.prepare_global_workspace(rows, counts))
+        with patch.object(self.refresh, "_READY", {}):
+            self.assertIsNone(workspace.prepare_global_workspace(rows, (2, 3)))
+        bad = torch.ones(3 * 512 + 1, device="cuda", dtype=torch.bfloat16)[1:].view(
+            3, 512
+        )
+        self.assertIsNone(
+            workspace.prepare_global_workspace(workspace.SwaRows(bad, (1, 2)), (2, 3))
+        )
 
     def test_ragged_slab_bitwise_refresh_retention_and_padded_storage(self):
         shared = {}

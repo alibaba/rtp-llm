@@ -495,7 +495,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             _v41_indexer_q_triton=SimpleNamespace(
                 is_supported=lambda *args, **kwargs: True,
                 try_fused_indexer_q=Mock(
-                    side_effect=lambda *args, weights_out_dtype=torch.float32: (
+                    side_effect=lambda *args, weights_out_dtype=torch.float32, **kwargs: (
                         torch.zeros(1, 1, 32, 64),
                         torch.ones(1, 1, 32),
                         torch.ones(1, 1, 32, dtype=weights_out_dtype),
@@ -562,8 +562,11 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                     call.kwargs.get("weights_out_dtype", torch.float32)
                     for call in fused_calls
                 ],
-                [torch.float32, torch.bfloat16],
+                [torch.float32, torch.bfloat16, torch.bfloat16, torch.bfloat16],
             )
+            self.assertEqual(fused_calls[2].kwargs["selection_out"].shape, (1, 512))
+            self.assertIsNone(fused_calls[2].kwargs["candidates_out"])
+            self.assertEqual(fused_calls[3].kwargs["candidates_out"].shape, (1, 2048))
             self.assertEqual(
                 [
                     c.kwargs["return_bf16"]

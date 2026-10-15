@@ -92,16 +92,9 @@ def split_swa_rows(flat, sizes, *, row_starts=None):
     return list(descriptor)
 
 
-def _combine_swa_rows(shared, globals_by_req, swa):
-    """Refresh request tails through one startup-warmed ragged copy kernel."""
-    sources = tuple(g for g, _ in globals_by_req)
+def _row_geometry(swa):
     flat = swa.flat
-    if not flat.is_cuda:
-        return None
-    refresh = _refresh_backend()
-    if not sources or len(sources) != len(swa) or not refresh.is_supported(flat):
-        return None
-    geometry = (
+    return (
         swa.sizes,
         swa.row_starts,
         flat.shape[1],
@@ -109,6 +102,105 @@ def _combine_swa_rows(shared, globals_by_req, swa):
         flat.dtype,
         flat.device,
     )
+
+
+class PreparedGlobalRows(tuple):
+    """Immutable producer results owning their interleaved destination plan."""
+
+    def __new__(cls, values, workspace):
+        result = super().__new__(cls, values)
+        result.workspace = workspace
+        return result
+
+
+class PreparedGlobalWorkspace:
+    """One source group's global destination plus current-layer SWA ranges.
+
+    Global aliases own this plan; it never retains a layer's SWA activation.
+    Producer kernels write only global ranges, and the consumer refreshes SWA
+    on the same forward stream before reading the complete interleaved output.
+    """
+
+    def __init__(self, swa, global_sizes, refresh):
+        self.global_sizes = global_sizes
+        self.geometry = _row_geometry(swa)
+        starts, layout, offset, tiles = [], [], 0, 0
+        for count, start, size in zip(global_sizes, swa.row_starts, swa.sizes):
+            starts.append(offset)
+            offset += count
+            tiles += (
+                size * (swa.flat.shape[1] // 4) + refresh._BLOCK - 1
+            ) // refresh._BLOCK
+            layout.extend((start, offset, size, tiles))
+            offset += size
+        self.global_starts = tuple(starts)
+        self.output = torch.empty(
+            (offset, swa.flat.shape[1]), dtype=swa.flat.dtype, device=swa.flat.device
+        )
+        # One small asynchronous upload supplies both the producer mapping and
+        # SWA refresh. Keep its pinned source alive with the global aliases.
+        self.pinned_holder = torch.tensor(
+            starts + layout, dtype=torch.int64, pin_memory=True
+        )
+        device = self.pinned_holder.to(device=swa.flat.device, non_blocking=True)
+        self.device_offsets = device[: len(starts)]
+        self.refresh_layout = device[len(starts) :].view(len(starts), 4)
+        self.refresh_tiles = tiles
+
+    def publish(self, globals_by_req):
+        """Attach aliases created by the direct producer after all its writes.
+
+        The producer constructs exact aliases from global_starts/global_sizes.
+        Rechecking every Tensor's storage here would add per-request CPU work
+        to an internal contract already covered by the producer's byte tests.
+        """
+        values = tuple(globals_by_req)
+        if len(values) != len(self.global_sizes):
+            raise ValueError("Producer globals must cover every prepared request")
+        return PreparedGlobalRows(values, self)
+
+
+def prepare_global_workspace(swa, global_sizes):
+    """Reserve exact request ranges for direct producer output when supported.
+
+    This is independent of batch size or equal request lengths. The caller must
+    use the original producer path if this returns None, and must publish the
+    returned plan only when the direct producer actually ran successfully.
+    """
+    if not isinstance(swa, SwaRows) or not swa.flat.is_cuda:
+        return None
+    global_sizes = tuple(global_sizes)
+    if (
+        not global_sizes
+        or len(global_sizes) != len(swa)
+        or any(type(size) is not int or size < 0 for size in global_sizes)
+    ):
+        return None
+    refresh = _refresh_backend()
+    if not refresh.is_supported(swa.flat):
+        return None
+    return PreparedGlobalWorkspace(swa, global_sizes, refresh)
+
+
+def _combine_swa_rows(shared, globals_by_req, swa):
+    """Refresh request tails through one startup-warmed ragged copy kernel."""
+    flat = swa.flat
+    if not flat.is_cuda:
+        return None
+    refresh = _refresh_backend()
+    if not refresh.is_supported(flat):
+        return None
+    if isinstance(globals_by_req, PreparedGlobalRows):
+        plan = globals_by_req.workspace
+        if plan.geometry == _row_geometry(swa):
+            refresh.copy_rows(
+                flat, plan.output, plan.refresh_layout, plan.refresh_tiles
+            )
+            return plan.output
+    sources = tuple(g for g, _ in globals_by_req)
+    if not sources or len(sources) != len(swa):
+        return None
+    geometry = _row_geometry(swa)
     cached = shared.get("prefill_kv_workspace")
     if cached is not None:
         previous, metadata, output = cached

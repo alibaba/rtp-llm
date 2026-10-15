@@ -8,9 +8,12 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 
-# Excludes the returned keys, which the original per-request path also retains.
+# Excludes the final BF16 KV workspace, which the original path also retains.
+# Joint direct output keeps packet (356), index outputs (68), and three int64
+# slot planes (24) alive through dequant. Use this common bound for every rank
+# and both output layouts, never choose collective groups from local readiness.
 _MAX_TEMP_BYTES = 256 * 1024 * 1024
-_BYTES_PER_ROW = 288 + 64 + 4 + 8 * 8
+_BYTES_PER_ROW = 288 + 64 + 4 + 64 + 4 + 3 * 8
 _MAX_ROWS = _MAX_TEMP_BYTES // _BYTES_PER_ROW
 _KEY_ALIGNMENT = 256
 _MAX_REQUESTS = 128
@@ -85,7 +88,9 @@ def _request_groups(counts):
     return groups
 
 
-def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
+def try_gather_prefill_pools(
+    attn, main_pool, index_pool, ends, seq_ends, *, workspace=None, swa=None
+):
     """Return the existing [(BF16 global keys, FP4 index keys)] representation.
 
     Each logical slot has one CP owner. Other ranks contribute zero bytes, so
@@ -121,7 +126,14 @@ def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool
 
         joint = _v41_joint_pool.try_gather(
-            attn, main_pool, index_pool, ends, seq_ends, groups=groups
+            attn,
+            main_pool,
+            index_pool,
+            ends,
+            seq_ends,
+            groups=groups,
+            workspace=workspace,
+            swa=swa,
         )
         if joint is not None:
             return joint
