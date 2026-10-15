@@ -386,10 +386,28 @@ void FlashInferMlaAttnParams::refreshBuffer(
     // Get current CUDA stream
     cudaStream_t stream = GET_CURRENT_STREAM();
 
-    // Single async copy from HOST to DEVICE for the entire buffer
-    // Since all tensors are in continuous memory, we can copy the entire buffer at once
-    size_t total_bytes = buf_h.numel() * sizeof(int32_t);
-    cudaMemcpyAsync(buf_d.data_ptr(), buf_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+    // Copy only the live element counts of each member tensor instead of
+    // the whole max-capacity buffer: the members are 32-aligned slots of
+    // one contiguous pair, and every consumer reads them through the
+    // shape-updated views below (the padded tails are never read). At
+    // decode batch 1 this moves ~130 live elements instead of the full
+    // ~1M-element buffer (~4MB pinned H2D per step).
+    auto copy_live = [&](const torch::Tensor& h, const torch::Tensor& d) {
+        size_t bytes = static_cast<size_t>(h.numel()) * sizeof(int32_t);
+        if (bytes > 0) {
+            cudaMemcpyAsync(d.data_ptr(), h.data_ptr(), bytes, cudaMemcpyHostToDevice, stream);
+        }
+    };
+    copy_live(decode_page_indptr_h, decode_page_indptr_d);
+    copy_live(prefill_ragged_kv_len_indptr_h, prefill_ragged_kv_len_indptr_d);
+    copy_live(qo_indptr_h, qo_indptr_d);
+    copy_live(batch_indice_h, batch_indice_d);
+    copy_live(positions_h, positions_d);
+    copy_live(kvlen_h, kvlen_d);
+    copy_live(paged_kv_last_page_len_h, paged_kv_last_page_len_d);
+    copy_live(page_indice_h, page_indice_d);
+    copy_live(reuse_cache_page_indice_h, reuse_cache_page_indice_d);
+    copy_live(batch_reuse_info_vec_h, batch_reuse_info_vec_d);
 
     // Update tensor shapes (without reallocating memory)
     // Use vector<int64_t> which can be implicitly converted to c10::IntArrayRef
