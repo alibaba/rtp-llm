@@ -30,6 +30,7 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 if TYPE_CHECKING:
@@ -360,7 +361,10 @@ def parse_ds_header_attributes(
         return {}
     if not isinstance(attrs, dict):
         return {}
-    return {str(k).lower(): v for k, v in attrs.items()}
+    normalized = {str(k).lower(): v for k, v in attrs.items()}
+    # Empty aliases from upstream must not erase a real request identity.
+    normalized.update(extract_request_headers(attrs))
+    return normalized
 
 
 def _dict_get_case_insensitive(value: Any, key: str) -> Any:
