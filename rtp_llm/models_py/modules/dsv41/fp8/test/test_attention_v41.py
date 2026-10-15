@@ -154,8 +154,8 @@ class AttentionV41Test(unittest.TestCase):
                 original = _v41_prefill_metadata.try_chunk_metadata
                 calls = []
 
-                def checked(*args):
-                    value = original(*args)
+                def checked(*args, **kwargs):
+                    value = original(*args, **kwargs)
                     self.assertIsNotNone(value)
                     calls.append(value)
                     return value
@@ -175,6 +175,110 @@ class AttentionV41Test(unittest.TestCase):
                 )
                 for got, want in zip(actual, expected):
                     torch.testing.assert_close(got.cpu(), want, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_compacted_metadata_and_kv_share_physical_offsets(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_prefill_kv_workspace as workspace,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_prefill_metadata as metadata,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_swa_refresh_triton as refresh,
+        )
+
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("SWA refresh requires Blackwell")
+        refresh.warmup(torch.device("cuda"))
+        prefixes, lengths = [17, 128, 2049], [33, 129, 257]
+        current_sizes = [min(n, 128) for n in lengths]
+        starts = [p + n - s for p, n, s in zip(prefixes, lengths, current_sizes)]
+        common = SimpleNamespace(
+            cp_on=True,
+            prefix_lengths=torch.tensor(prefixes, device="cuda", dtype=torch.int64),
+            cp_ctx=SimpleNamespace(
+                input_lengths_global=torch.tensor(
+                    lengths, device="cuda", dtype=torch.int32
+                ),
+                swa_replay_starts_host=tuple(starts),
+            ),
+        )
+        requests = torch.tensor([2, 0, 1, 2, 1, 0], device="cuda", dtype=torch.int64)
+        original = metadata.try_chunk_metadata
+        for ratio in (1, 2):
+            counts = [(p + n) // ratio for p, n in zip(prefixes, lengths)]
+            for fused_meta in (False, True):
+                with self.subTest(ratio=ratio, fused_meta=fused_meta):
+                    attn = self._chunk_meta_fixture(ratio, 128)
+                    attn.swa_bounded_replay = True
+                    source_swa = workspace.SwaRows(
+                        torch.empty(
+                            (sum(lengths), 512), device="cuda", dtype=torch.bfloat16
+                        ),
+                        lengths,
+                    )
+                    plan = workspace.prepare_global_workspace(source_swa, counts)
+                    plan.output.fill_(float("nan"))
+                    globals_ = []
+                    for i, (count, offset) in enumerate(
+                        zip(counts, plan.global_starts)
+                    ):
+                        value = plan.output[offset : offset + count]
+                        value.fill_(i + 1)
+                        globals_.append((value, None))
+                    globals_ = plan.publish(globals_)
+                    current = workspace.SwaRows(
+                        torch.randn(
+                            (sum(current_sizes), 512),
+                            device="cuda",
+                            dtype=torch.bfloat16,
+                        ),
+                        current_sizes,
+                    )
+                    with patch.object(
+                        metadata,
+                        "try_chunk_metadata",
+                        side_effect=original if fused_meta else lambda *a, **k: None,
+                    ):
+                        offsets, sizes, swstarts = attn._prefill_chunk_meta(
+                            globals_,
+                            current,
+                            starts,
+                            requests,
+                            torch.device("cuda"),
+                            common=common,
+                        )
+                    combined = workspace.combine_kv(
+                        attn._shared_attention, globals_, current
+                    )
+                    self.assertIs(combined, plan.output)
+                    expected_offsets = torch.tensor(plan.global_starts, device="cuda")[
+                        requests, None
+                    ]
+                    torch.testing.assert_close(
+                        offsets, expected_offsets, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        sizes,
+                        torch.tensor(counts, device="cuda")[requests, None],
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        swstarts,
+                        torch.tensor(starts, device="cuda")[requests, None],
+                        rtol=0,
+                        atol=0,
+                    )
+                    for (g, _), sw, start in zip(globals_, current, plan.global_starts):
+                        packed = torch.cat((g, sw))
+                        torch.testing.assert_close(
+                            combined[start : start + packed.shape[0]],
+                            packed,
+                            rtol=0,
+                            atol=0,
+                        )
 
     @staticmethod
     def _chunk_meta_fixture(ratio, window_size, *, pool_bound=True):
@@ -874,7 +978,17 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         expected_ids = torch.tensor([[0, 1], [2, 4], [6, 8]], dtype=torch.int32)
         expected_flags = torch.tensor([[3, 0, 0], [20, 0, 0], [320, 0, 0]])
 
-        def select(logits, visible, block_size, topk, *, out, flags, build_bitmap=True):
+        def select(
+            logits,
+            visible,
+            block_size,
+            topk,
+            *,
+            out,
+            flags,
+            build_bitmap=True,
+            mask_tail=False
+        ):
             self.assertEqual(
                 out.untyped_storage().data_ptr(),
                 candidates.untyped_storage().data_ptr(),
@@ -934,7 +1048,17 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
         expected_ids = torch.tensor([[0, 2], [1, 3], [4, 5]], dtype=torch.int32)
         expected_flags = torch.tensor([[5, 0, 0], [10, 0, 0], [48, 0, 0]])
 
-        def select(logits, visible, block_size, topk, *, out, flags, build_bitmap=True):
+        def select(
+            logits,
+            visible,
+            block_size,
+            topk,
+            *,
+            out,
+            flags,
+            build_bitmap=True,
+            mask_tail=False
+        ):
             self.assertNotEqual(
                 out.untyped_storage().data_ptr(),
                 candidates.untyped_storage().data_ptr(),
@@ -1041,7 +1165,7 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                     )
                     selections = []
 
-                    def score(q, q_sf, k, k_sf, weights, visible):
+                    def score(q, q_sf, k, k_sf, weights, visible, **kwargs):
                         sign = torch.where(q[:, 0, 0].long() % 2 == 0, 1.0, -1.0)
                         columns = torch.arange(k.shape[0])
                         logits = (columns[None] + 1) * sign[:, None]
@@ -1053,10 +1177,21 @@ class PrefillCandidatesIntegrationTest(unittest.TestCase):
                         if not use_fused_topk:
                             return None
                         values, ids = logits.topk(topk, dim=-1)
-                        return torch.where(values.isfinite(), ids, -1).int()
+                        result = torch.where(values.isfinite(), ids, -1).int()
+                        destination = kwargs.get("out")
+                        return (
+                            result if destination is None else destination.copy_(result)
+                        )
 
                     def candidates(
-                        shared, logits, visible, rows, block_size, topk, publish
+                        shared,
+                        logits,
+                        visible,
+                        rows,
+                        block_size,
+                        topk,
+                        publish,
+                        **kwargs
                     ):
                         self.assertTrue(publish)
                         selections.append(rows)

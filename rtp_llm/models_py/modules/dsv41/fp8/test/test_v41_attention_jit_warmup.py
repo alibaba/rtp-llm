@@ -48,6 +48,11 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             self.assertEqual(prefixes.shape, (3,))
             self.assertEqual(lengths.shape, (3,))
             self.assertEqual(requests.dtype, torch.int64)
+            physical = call.kwargs["physical_offsets"]
+            if physical is not None:
+                self.assertEqual(physical.shape, (3,))
+                self.assertEqual(physical.dtype, torch.int64)
+                self.assertTrue(physical.is_contiguous())
             observed.add(
                 (
                     prefixes.dtype,
@@ -57,6 +62,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                     requests.storage_offset(),
                     replay,
                     call.kwargs["compact_replay"],
+                    physical is not None,
                 )
             )
         expected = set(
@@ -66,6 +72,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 (0, 1),
                 (0, 1),
                 (0, 1),
+                (False, True),
                 (False, True),
                 (False, True),
             )
