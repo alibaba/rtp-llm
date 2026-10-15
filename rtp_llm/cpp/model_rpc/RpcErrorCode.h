@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
+#include <unordered_map>
 
 namespace rtp_llm {
 

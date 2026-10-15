@@ -42,6 +42,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:error_code",
+        "@grpc//:grpc++",
     ],
 )
 
