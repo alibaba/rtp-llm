@@ -703,6 +703,7 @@ def _image_download_chunks(response, deadline):
 
 
 def _prepare_v41_image_request(request, input_ids, processor_config, images=None):
+    from rtp_llm.multimodal.greennet_hook import greennet_enabled
     from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
         prepare_vl_inputs_from_token_ids,
     )
@@ -808,6 +809,7 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
             processor_config,
             url_loader=load_url,
             max_image_bytes=10 * 1024 * 1024,
+            retain_source_bytes=greennet_enabled(),
         )
     except (TypeError, ValueError) as error:
         raise FtRuntimeException(ExceptionType.INVALID_PARAMS, str(error)) from error

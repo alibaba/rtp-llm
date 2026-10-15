@@ -721,7 +721,9 @@ TEST_F(QueryConverterTest, RejectUnsupportedV41SchemaBeforeConvertingImages) {
 }
 
 TEST_F(QueryConverterTest, V41TypedMetadataRoundTripPreservesCanonicalTokensAndPatches) {
-    auto wire  = v41ImageRequest();
+    auto              wire = v41ImageRequest();
+    const std::string source_bytes("\x89PNG\0\xff", 6);
+    wire.mutable_v41_inputs()->mutable_images(0)->set_source_bytes(source_bytes);
     auto input = QueryConverter::transQuery(&wire);
     ASSERT_TRUE(input->v41_inputs);
     EXPECT_EQ(input->input_ids.numel(), wire.token_ids_size());
@@ -730,6 +732,7 @@ TEST_F(QueryConverterTest, V41TypedMetadataRoundTripPreservesCanonicalTokensAndP
     const auto& image = input->v41_inputs->images[0];
     EXPECT_EQ(image.content_sha256, std::string(64, 'a'));
     EXPECT_EQ(image.processor_identity, std::string(64, 'b'));
+    EXPECT_EQ(image.source_bytes, source_bytes);
     EXPECT_EQ(image.patches.scalar_type(), torch::kBFloat16);
     EXPECT_TRUE(torch::equal(image.types, torch::tensor({0, 1, 2, 3}, torch::kInt32)));
     EXPECT_TRUE(torch::equal(input->v41_inputs->image_mask, input->v41_inputs->token_types.ne(-1)));

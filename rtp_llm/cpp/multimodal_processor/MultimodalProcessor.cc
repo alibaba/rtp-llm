@@ -8,6 +8,7 @@
 #include <torch/python.h>
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
@@ -164,8 +165,11 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
-ErrorResult<MultimodalOutput> MultimodalProcessor::V41MultimodalEmbedding(
-    const V41RequestInputs& inputs, const std::string&, int64_t timeout_ms, int64_t, grpc::ServerContext*) {
+ErrorResult<MultimodalOutput> MultimodalProcessor::V41MultimodalEmbedding(const V41RequestInputs& inputs,
+                                                                          const std::string&,
+                                                                          int64_t              timeout_ms,
+                                                                          int64_t              request_id,
+                                                                          grpc::ServerContext* server_context) {
     py::gil_scoped_acquire acquire;
     if (mm_process_engine_.is_none()) {
         return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "V4.1 prepared images require a local ViT engine");
@@ -181,15 +185,27 @@ ErrorResult<MultimodalOutput> MultimodalProcessor::V41MultimodalEmbedding(
             record["types"]              = image.types;
             record["content_sha256"]     = image.content_sha256;
             record["processor_identity"] = image.processor_identity;
+            record["source_bytes"]       = py::bytes(image.source_bytes);
             images.append(std::move(record));
         }
-        auto             result = mm_process_engine_.attr("submit_v41")(images, timeout_ms);
+        auto             result = mm_process_engine_.attr("submit_v41")(images,
+                                                            timeout_ms,
+                                                            request_id,
+                                                            dashScopeMetadata(server_context, "x-dashscope-uid"),
+                                                            dashScopeMetadata(server_context, "x-dashscope-service"));
         MultimodalOutput output;
         for (auto item : result.attr("embeddings")) {
             output.mm_features.push_back(py::cast<torch::Tensor>(item));
         }
         return output;
     } catch (const py::error_already_set& error) {
+        py::object exception = py::reinterpret_borrow<py::object>(error.value());
+        if (exception && py::hasattr(exception, "exception_type")) {
+            const auto code = exception.attr("exception_type").cast<int>();
+            if (auto mapped = parseMultimodalErrorCode(code)) {
+                return ErrorInfo(*mapped, py::str(exception).cast<std::string>());
+            }
+        }
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
     }
 }
