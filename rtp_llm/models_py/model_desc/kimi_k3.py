@@ -25,7 +25,7 @@ from rtp_llm.models_py.model_desc.block_map import (
 )
 from rtp_llm.models_py.modules import KdaMetadata
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import Embedding, RMSNorm
+from rtp_llm.models_py.modules import Embedding, MultimodalEmbeddingInjector, RMSNorm
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.kimi_k3.attention import (
     KimiK3KDA,
@@ -39,7 +39,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d.paged_short_conv_prefill imp
 )
 from rtp_llm.models_py.triton_kernels.moe.activation import situ_and_mul
 from rtp_llm.ops import HybridAttentionType, RoleType
-from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -295,6 +295,7 @@ class KimiK3Model(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             KimiK3DecoderLayer(
                 model_config,
@@ -436,6 +437,30 @@ class KimiK3Model(GptModelBase):
             )
         )
 
+    def _embed_inputs(self, inputs: PyModelInputs, *, tp_gather=None) -> torch.Tensor:
+        """Gather token embeddings and inject image features before SP slicing."""
+        multimodal_inputs = inputs.multimodal_inputs
+        features = multimodal_inputs.multimodal_features
+        text_mask = inputs.embedding_inputs.text_tokens_mask
+        if features and (
+            text_mask is None or text_mask.shape != inputs.input_ids.shape
+        ):
+            raise ValueError(
+                "K3 image features require one text mask entry per input token"
+            )
+        # Image rows contain cache hashes, so the embedding kernel must skip
+        # those rows before looking up vocabulary weights.
+        embeddings = self.embed_tokens(
+            inputs.input_ids, text_tokens_mask=text_mask, tp_gather=tp_gather
+        )
+        if not features:
+            return embeddings
+        # Features span the full hidden dimension: inject after TP gather and
+        # before the caller slices token rows for sequence parallelism.
+        return self.multimodal_embedding_injector(
+            embeddings, features, multimodal_inputs.mm_features_locs
+        )
+
     def _forward_layers(
         self,
         hidden,
@@ -449,7 +474,7 @@ class KimiK3Model(GptModelBase):
             # full-token tensor from the caller keeps its storage alive until
             # all layers return, even after SP narrows it to local rows.
             # feat/k3_dev releases that storage during the layer loop.
-            hidden = self.embed_tokens(inputs.input_ids)
+            hidden = self._embed_inputs(inputs)
         physical_rows = inputs.input_ids.shape[0]
         local_rows = physical_rows // self.tp_size
         if not sequence_parallel_input:
