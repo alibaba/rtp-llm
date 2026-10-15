@@ -182,13 +182,13 @@ const coloredSeries=[
 assert.equal(FlexMultiCurve.presetColor(['A qps'],coloredSeries),'#1677ff');
 assert.equal(FlexMultiCurve.presetColor(['B qps'],coloredSeries),'#1677ff');
 assert.equal(FlexMultiCurve.presetColor(['B latency'],coloredSeries),'#fa8c16');
-assert.equal(FlexMultiCurve.presetColor([],coloredSeries),'#94a3b8');
+assert.equal(FlexMultiCurve.presetColor([],coloredSeries),null);
 assert.equal(densePresets.children[0].children[1].textContent,'快捷选择：run / 指标组');
 const presetPopup=densePresets.children[1],presetSearch=presetPopup.children[0],presetRows=presetPopup.children[1].children;
 densePresets.children[0].onclick();assert.equal(presetPopup.hidden,false);assert.equal(documentClicks.size,1);
 presetSearch.value='199';presetSearch.oninput();
 assert.equal(presetRows.filter(row=>!row.hidden).length,1);
-assert.equal(presetRows[199].children[0].style.backgroundColor,'#123456');
+assert.equal(presetRows[199].children[0].hidden,true);
 densePresets.events.keydown({key:'ArrowDown',preventDefault(){}});assert.equal(presetRows[199].focused,true);
 presetRows[199].onclick();assert.equal(presetPopup.hidden,true);assert.equal(documentClicks.size,0);
 assert.equal(presetRows[199].attributes['aria-pressed'],'true');
@@ -204,3 +204,29 @@ densePresets.children[0].onclick();densePresets.onkeydown({key:'Escape'});assert
 presetSearch.value='';densePresets.children[0].onclick();
 assert.equal(presetRows.filter(row=>!row.hidden).length,200);assert.equal(presetPopup.children[2].hidden,true);
 densePresets.onkeydown({key:'Escape'});
+
+
+// One run with multiple metrics is uncolored; one metric across runs uses the shared hue.
+assert.equal(FlexMultiCurve.presetColor(['A qps','A latency'],coloredSeries),null);
+assert.equal(FlexMultiCurve.presetColor(['A qps','B qps'],coloredSeries),'#1677ff');
+const sameAxis=[coloredSeries[0],{...coloredSeries[0],name:'A success',metric_id:'success_qps'}];
+assert.equal(FlexMultiCurve.presetColor(['A qps','A success'],sameAxis),null);
+assert.equal(FlexMultiCurve.presetColor(['A qps','B qps'],[coloredSeries[0],{...coloredSeries[1],role:'gate_reference'}]),null);
+assert.equal(FlexMultiCurve.presetColor(['A qps','B qps'],[coloredSeries[0],{...coloredSeries[1],metric_color:'#fa8c16'}]),null);
+const groupRoot=new Element('root');
+FlexMultiCurve.mount(groupRoot,{title:'group colors',caption:'',axes:{qps:{title:'QPS'},ms:{title:'ms'}},
+ series:coloredSeries.map(s=>({...s,points:[{x:0,y:1}]})),
+ presets:{'run A':['A qps','A latency'],'run B':['B qps','B latency'],'QPS across runs':['A qps','B qps'],'A QPS':['A qps'],'B QPS':['B qps']}},
+ {timeAxis:{min:0,max:10},events:[]});
+const groupToolbar=groupRoot.children[0].children.find(e=>e.className==='multi-toolbar');
+const groupMenu=groupToolbar.children.find(e=>e.className==='multi-presets');
+const groupDot=groupMenu.children[0].children[0],groupRows=groupMenu.children[1].children[1].children;
+assert.equal(groupDot.hidden,true);
+assert.equal(groupRows[0].children[0].hidden,true);assert.equal(groupRows[1].children[0].hidden,true);
+assert.equal(groupRows[2].children[0].hidden,false);
+assert.equal(groupRows[3].children[0].style.backgroundColor,groupRows[4].children[0].style.backgroundColor);
+groupRows[0].onclick();assert.equal(groupDot.hidden,true);
+groupRows[2].onclick();assert.equal(groupDot.hidden,false);assert.equal(groupDot.style.backgroundColor,'#1677ff');
+groupToolbar.children.find(e=>e.textContent==='全选').onclick();assert.equal(groupDot.hidden,true);
+
+assert.equal(FlexMultiCurve.presetColor(['unknown'],[{name:'unknown',metric_id:'unknown'}]),null);

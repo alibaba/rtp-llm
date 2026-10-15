@@ -14,11 +14,11 @@
   }
   function presetColor(names, series) {
     const selected=series.filter(s=>names.includes(s.name));
-    if(!selected.length)return '#94a3b8';
-    const first=selected[0], oneMetric=first.metric_id&&selected.every(s=>s.metric_id===first.metric_id&&s.role===first.role);
-    const family=s=>JSON.stringify([s.axis||'y',s.unit||'']);
-    const source=!oneMetric&&selected.every(s=>family(s)===family(first)) ? series.find(s=>family(s)===family(first)) : first;
-    return source.metric_color||source.color||'#94a3b8';
+    if(!selected.length)return null;
+    const first=selected[0],color=first.metric_color||first.color;
+    if(!color)return null;
+    return first.metric_id&&selected.every(s=>s.metric_id===first.metric_id&&s.role===first.role
+      &&(s.metric_color||s.color)===color)?color:null;
   }
   function popupPicker(container,button,popup,search,beforeOpen) {
     function closeOutside(event){if(!container.contains(event.target))setOpen(false);}
@@ -169,7 +169,7 @@
       presetEntries.forEach(entry=>{entry.active=datasets.every((d,i)=>chart.isDatasetVisible(i)===entry.selected.includes(d.label));entry.button.classList.toggle('is-active',entry.active);entry.button.setAttribute('aria-pressed',String(entry.active));});
       const active=presetEntries.find(entry=>entry.name===activePreset&&entry.active);
       presetLabel.textContent=active?active.name:'快捷选择：run / 指标组';presetButton.title=active?active.name:'快捷选择 run 或指标组';
-      presetDot.style.backgroundColor=active?active.color:'#94a3b8';if(!active)activePreset=null;
+      presetDot.hidden=!active||!active.color;presetDot.style.backgroundColor=active&&active.color||'';if(!active)activePreset=null;
       focus(focused);fillHover(lastHover,focused);}
 
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
@@ -185,7 +185,7 @@
     const setPresetsOpen=popupPicker(presets,presetButton,presetMenu,presetSearch,()=>{setPickerOpen(false);filterPresets();});
     Object.entries(panel.presets||{}).forEach(([name,selected])=>{
       const button=document.createElement('button');button.type='button';button.className='multi-preset-choice';button.title=name;
-      const color=presetColor(selected,panel.series),dot=document.createElement('i');dot.className='multi-preset-dot';dot.style.backgroundColor=color;dot.setAttribute('aria-hidden','true');button.appendChild(dot);
+      const color=presetColor(selected,panel.series),dot=document.createElement('i');dot.className='multi-preset-dot';dot.hidden=!color;dot.style.backgroundColor=color||'';dot.setAttribute('aria-hidden','true');button.appendChild(dot);
       const label=document.createElement('span');label.textContent=name;button.appendChild(label);
       button.onclick=()=>{activePreset=name;datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));refresh();setPresetsOpen(false);presetButton.focus();};
       presetList.appendChild(button);presetEntries.push({name,selected,color,button});
