@@ -86,6 +86,7 @@ load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
 
+
 h20_oss_suites()
 cuda13_suites()
 sm8x_suites()

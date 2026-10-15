@@ -235,3 +235,8 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+exports_files(
+    ["model_desc/cp_mtp_hidden_handoff.py"],
+    visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)

@@ -30,7 +30,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
@@ -61,6 +61,18 @@ void cudaCheckLastError();
 bool getEnableCommOverlap();
 
 // ===================================================================
+// CUDA graph forward phase flags
+// ===================================================================
+
+void pushCudaGraphWarmupForwardFlag();
+void popCudaGraphWarmupForwardFlag();
+bool cudaGraphWarmupForwardEnabled();
+
+void pushCudaGraphCaptureForwardFlag();
+void popCudaGraphCaptureForwardFlag();
+bool cudaGraphCaptureForwardEnabled();
+
+// ===================================================================
 // Profiling
 // ===================================================================
 
@@ -71,8 +83,8 @@ void cudaProfilerEnd();
 // Status queries
 // ===================================================================
 
-ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
+ExecStatus    getGpuExecStatus();
 void          setTraceMemory(bool trace_memory);
 
 // ===================================================================

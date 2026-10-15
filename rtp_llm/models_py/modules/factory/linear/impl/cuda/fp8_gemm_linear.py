@@ -3,7 +3,6 @@
 from typing import Optional
 
 import torch
-
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -33,7 +32,21 @@ class CudaFp8GEMMLinear(LinearBase):
             return False
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
             return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        method = quant_config.get_method()
+        if method == "FP8_PER_BLOCK":
+            return True
+        # MODELOPT_FP4 hybrid: attention/non-MoE atomic weights are stored as FP8
+        # per-block; FP4-only weights have weight_scale_2/input_scale set, so they
+        # still go to the FP4 dispatch path.
+        if (
+            method == "modelopt_fp4"
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+            and weight_scale_2 is None
+            and input_scale is None
+        ):
+            return True
+        return False
 
     @torch.inference_mode()
     def __init__(
@@ -131,12 +144,15 @@ class CudaFp8GEMMLinear(LinearBase):
         return False
 
     def forward(
-        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+        self,
+        input: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # DeepGEMM supports caller-provided output buffers; the small-M
         # FlashInfer path currently does not.
-        if out is not None:
-            return self._deepgemm_linear(input, out=out)
+        if out is not None or input_scales is not None:
+            return self._deepgemm_linear(input, out=out, input_scales=input_scales)
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

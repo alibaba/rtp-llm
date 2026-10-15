@@ -223,6 +223,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.skip_run                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
+    inputs.is_draft_extend           = true;
     inputs.pd_separation             = true;
     inputs.decode_entrance           = true;
     inputs.use_opaque_kv_cache_store = true;
@@ -242,6 +243,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDraftExtend));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));
@@ -407,9 +409,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
-    invalid.kv_cache_group_tags      = {"first", "second"};
-    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
-    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    invalid.kv_cache_group_tags     = {"first", "second"};
+    invalid.kv_cache_block_id       = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     broadcaster.reset();
     ::alarm(0);

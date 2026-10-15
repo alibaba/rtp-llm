@@ -10,7 +10,6 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import torch.distributed
-
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -185,6 +184,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_glm5_cp_comm(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -220,6 +220,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_glm5_cp_comm(parallelism_config)
         return
 
     logging.info(
@@ -259,6 +260,7 @@ def init_distributed_environment(
     _register_process_groups_to_cpp()
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+    _init_glm5_cp_comm(parallelism_config)
     init_user_buffers_environment(parallelism_config)
     _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
 
@@ -345,6 +347,24 @@ def _create_process_groups(
             torch.distributed.group.WORLD,
             disable_custom_all_reduce=disable_custom_all_reduce,
         )
+
+
+def _init_glm5_cp_comm(parallelism_config: ParallelismConfig) -> None:
+    """Create optional GLM5 pynccl/symmetric resources during startup."""
+    if parallelism_config.tp_size <= 1 or not torch.cuda.is_available():
+        return
+
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    if not pynccl_cp.enabled():
+        return
+    process_group = _get_group(Group.TP)
+    device = torch.device("cuda", parallelism_config.local_rank)
+    pynccl_cp.init(process_group, device)
+    logging.info(
+        "[rank: %s] initialized GLM5 pynccl CP resources",
+        parallelism_config.world_rank,
+    )
 
 
 def _register_process_groups_to_cpp():
@@ -653,6 +673,12 @@ def destroy_distributed_environment():
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
+
+    # Direct GLM5 NCCL communicators must be released while the underlying
+    # torch process groups and CUDA runtime are still alive.
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    pynccl_cp.destroy()
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

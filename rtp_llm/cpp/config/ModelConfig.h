@@ -129,6 +129,9 @@ public:
 
     bool reverse_e_h_norm = false;
 
+    // Reuse DSA top-k indices within one MTP proposal cycle.
+    bool index_share_for_mtp_iteration = false;
+
     // Model loading and quantization
     std::string   tokenizer_path = "";
     std::string   ckpt_path      = "";

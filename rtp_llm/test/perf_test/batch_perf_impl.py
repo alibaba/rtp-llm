@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import requests
 
@@ -22,9 +22,7 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     return min(decode_test_length, profile_steps) if is_decode else 1
 
 
-def _wait_for_trace_flush(
-    log_path: str, offset: int, budget_s: int
-) -> int:
+def _wait_for_trace_flush(log_path: str, offset: int, budget_s: int) -> int:
     """Wait for the engine's async trace save to complete.
 
     The save worker exports each profiled window on a background thread
@@ -55,9 +53,7 @@ def _wait_for_trace_flush(
         except OSError:
             pass
         time.sleep(0.25)
-    logging.warning(
-        "[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s
-    )
+    logging.warning("[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s)
     return offset
 
 
@@ -149,6 +145,10 @@ def _curl_server_batch_worker(
 
 
 class BatchPerfImpl(object):
+    # Optional process-local validation policy, installed by a specialized entry.
+    # The default leaves existing perf behavior unchanged.
+    response_validator: Optional[Callable[[List[ResponseInfo], int], None]] = None
+
     def __init__(
         self,
         base_port: int,
@@ -387,6 +387,10 @@ class BatchPerfImpl(object):
         all_responses: List[ResponseInfo] = []
         for future in futures:
             all_responses.extend(future.result())
+
+        validator = type(self).response_validator
+        if validator is not None:
+            validator(all_responses, self.batch_size)
 
         return all_responses
 

@@ -194,7 +194,16 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str,
         # Backend hooks append out-of-tree strategy names to this parser.
         # Give each parser its own mutable list instead of sharing the tuple.
-        choices=list(MOE_STRATEGY_CHOICES),
+        choices=list(
+            dict.fromkeys(
+                (
+                    *MOE_STRATEGY_CHOICES,
+                    "mega_moe_fp8",
+                    "mega_moe_fp8_se",
+                    "mega_moe_fused",
+                )
+            )
+        ),
         default="auto",
         help=(
             "指定 MoE strategy，默认为 auto。具体策略的适用性由当前模型配置、"

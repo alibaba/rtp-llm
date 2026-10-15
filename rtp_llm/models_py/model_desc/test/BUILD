@@ -145,3 +145,16 @@ py_test(
         "gpu_count": "1",
     },
 )
+
+py_test(
+    name = "cp_mtp_hidden_handoff_test",
+    srcs = ["cp_mtp_hidden_handoff_test.py"],
+    data = ["//rtp_llm/models_py:model_desc/cp_mtp_hidden_handoff.py"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "glm5_fmha_dispatch_test",
+    srcs = ["glm5_fmha_dispatch_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+)

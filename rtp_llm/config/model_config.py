@@ -9,6 +9,7 @@ import torch
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
@@ -88,6 +89,7 @@ class ModelConfig(CppModelConfig):
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
         "capture_aux_hidden_layer_ids",
+        "mtp_layer_offset",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
@@ -113,6 +115,10 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "index_topk_freq",
+        "index_skip_topk_offset",
+        "index_topk_pattern",
+        "indexer_types",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -164,6 +170,7 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "index_share_for_mtp_iteration",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -587,6 +594,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_sample_from_anchor: bool = True
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
+        self.mtp_layer_offset: int = 0
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.enable_output_vocab_pruning: bool = False
@@ -750,6 +758,18 @@ class ModelConfig(CppModelConfig):
             logging.info(
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because fp8_block_wise quantization only supports BF16"
+            )
+        elif (
+            quant_config
+            and isinstance(quant_config, ModelOptFp4Config)
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+        ):
+            original_data_type = data_type
+            data_type = WEIGHT_TYPE.BF16
+            logging.info(
+                f"Overriding data_type from {original_data_type} to {data_type} "
+                f"because MODELOPT_FP4 hybrid mode with FP8_PER_BLOCK only supports BF16"
             )
         elif quant_config and quant_config.get_method().lower() in [
             "smooth_quant",
@@ -1056,3 +1076,4 @@ def build_model_config(
     # JSON model overrides are applied first; the dedicated operational switch
     # is the final override when it was explicitly supplied by CLI or env.
     _apply_model_override_args(model_config, model_args)
+

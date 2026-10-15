@@ -28,9 +28,11 @@ private:
     size_t max_i64_elements_     = 0;
 
     // Private slot_mapping tensors
+protected:
     torch::Tensor slot_mapping_h_;
     torch::Tensor slot_mapping_d_;
 
+private:
     // Helper method to refresh buffer shapes and copy to device (single memcpy)
     void
     refreshBuffer(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
@@ -57,6 +59,11 @@ private:
                           bool forbid_realloc = false);
 
 protected:
+    void fillDecodeCudaGraphParamsImpl(torch::Tensor sequence_lengths_plus_1_d,
+                                       torch::Tensor kv_cache_block_id_device,
+                                       int           seq_size_per_block,
+                                       bool          include_slot_mapping);
+
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
         const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype = torch::kInt32);
 
