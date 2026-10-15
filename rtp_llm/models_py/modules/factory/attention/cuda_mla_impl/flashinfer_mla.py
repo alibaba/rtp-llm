@@ -172,7 +172,8 @@ def _use_trtllm_gen_prefill() -> bool:
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
     _trtllm_gen_workspace = None  # class-level lazy workspace (uint8, 128 MiB)
-    _trtllm_lens_cache = None  # (key, (bs, max_q, max_kv), qo_indptr, kv_indptr)
+    _trtllm_lens_cache = None  # (key, (bs, max_q, max_kv), qo_indptr, kv_indptr
+    _kv_b_proj_cache = None  # {(weights_id, layer_id): linear} — forward rebuilt per call
 
     def __init__(
         self,
@@ -403,6 +404,33 @@ class MlaFlashInferPrefillOp(object):
         )
         return compatible
 
+    def _kv_b_proj_for(self, layer_id: int):
+        """Per-layer kv_b projection, constructed once and reused.
+
+        ``forward`` used to rebuild the LinearFactory object every call
+        (weight lookup + linear construction + quant resolution) x40 layers
+        x every prefill — a pure host-side cost on the host-bound path.
+        """
+        cache = MlaFlashInferPrefillOp._kv_b_proj_cache
+        if cache is None:
+            cache = {}
+            MlaFlashInferPrefillOp._kv_b_proj_cache = cache
+        # Key on the weights-dict identity as well: the target model and the
+        # MTP draft each build their own op with their own weights, and a
+        # layer_id-only key would hand the draft the target's cached linear.
+        key = (id(self.weights), layer_id)
+        linear = cache.get(key)
+        if linear is None:
+            linear = LinearFactory.create_linear_from_weights(
+                self.weights[layer_id],
+                W.mla_kv_b_w,
+                W.mla_kv_b_s,
+                None,
+                self.quant_config,
+            )
+            cache[key] = linear
+        return linear
+
     def forward(
         self,
         q: torch.Tensor,
@@ -417,15 +445,8 @@ class MlaFlashInferPrefillOp(object):
         )
 
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        self.kv_b_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id],
-            W.mla_kv_b_w,
-            W.mla_kv_b_s,
-            None,
-            self.quant_config,
-        )
 
-        kv = self.kv_b_proj(compressed_kv)
+        kv = self._kv_b_proj_for(layer_id)(compressed_kv)
         kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope = kv[:, :, : self.qk_nope_head_dim]
         value_states = kv[:, :, self.qk_nope_head_dim :]
