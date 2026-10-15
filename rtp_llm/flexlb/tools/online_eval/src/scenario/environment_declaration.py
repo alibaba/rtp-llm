@@ -17,20 +17,54 @@ def variant_environment_fields():
     return environment_fields() - {"backend"}
 
 
+def scalar_field(kind, default=_ABSENT, minimum=None, *, startup=False, reconfigure=False, validate=None, capture=None):
+    """Declare authored admission, startup forwarding and replacement in one place."""
+    return field(default=None if default is _ABSENT else default, metadata={
+        "scalar": (kind, default, minimum), "startup": startup, "reconfigure": reconfigure, "validate": validate, "capture": capture})
+
+
+def validate_scalar(value, kind, minimum, path):
+    if kind is bool:
+        if type(value) is not bool:
+            fail(path, "expected boolean")
+        return value
+    if kind is str:
+        if type(value) is not str:
+            fail(path, "expected string")
+        return value
+    return number(value, path, minimum=minimum, integer=kind is int)
+
+
+def heap_size(value, path):
+    import re
+    if not re.fullmatch(r"[1-9][0-9]*[mMgG]", value):
+        fail(path, "requires a positive JVM heap with m/g units")
+
+
 def optional_scalars(value, path, result, declarations=None):
-    """Apply simple scalar rules; retain each field's old omission semantics."""
+    """Decode scalar fields from their declaration, preserving absent defaults."""
     if declarations is None:
         declarations = OPTIONAL_SCALARS
     for key, (kind, default, minimum) in declarations.items():
         if key not in value and default is _ABSENT:
             continue
-        val = value.get(key, default)
-        if kind is bool:
-            if type(val) is not bool:
-                fail(path + "." + key, "expected boolean")
-            result[key] = val
-        else:
-            result[key] = number(val, path + "." + key, minimum=minimum, integer=True)
+        result[key] = validate_scalar(value.get(key, default), kind, minimum, path + "." + key)
+
+
+def startup_options(plan):
+    """Only explicitly authored startup fields cross into the backend specification."""
+    return {item.name: copy.deepcopy(plan[item.name]) for item in fields(EnvironmentDeclaration)
+            if item.metadata.get("startup") and item.name in plan}
+
+
+def captured_fields():
+    return {item.name: item.metadata["capture"] for item in fields(EnvironmentDeclaration)
+            if item.metadata.get("capture")}
+
+
+def reconfigurable_fields():
+    return {item.name for item in fields(EnvironmentDeclaration) if item.metadata.get("reconfigure")}
+
 
 @dataclass(frozen=True)
 class PrefillCachePolicy:
@@ -84,35 +118,31 @@ class PrefillPerformance:
 @dataclass(frozen=True)
 class EnvironmentDeclaration:
     backend: str
-    n_prefill: int
-    n_decode: int
+    n_prefill: int = field(metadata={"startup": True, "reconfigure": True, "capture": "n_prefill"})
+    n_decode: int = field(metadata={"startup": True, "reconfigure": True, "capture": "n_decode"})
     discovery: str
     perf_preset: str
     master_layout: str
     master_stable_window_s: float
     debug_enabled: bool = field(metadata={"scalar": (bool, False, None)})
     master_sync_log: bool = field(metadata={"scalar": (bool, False, None)})
-    prefill_cache_blocks: int | None = None
-    decode_cache_blocks: int | None = None
-    mock_auto_fetch: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
-    master_debug_log: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
-    mock_fetch_attach_timeout_ms: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 1)})
-    prefill_max_waiting_batches: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 0)})
-    master_test_control: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
-    master_jvm_heap: str | None = None
-    mock_heap: str | None = None
-    metric_whitelist: str | None = None
+    prefill_cache_blocks: int | None = scalar_field(int, minimum=1, startup=True, capture="prefill_kv_pool_blocks")
+    decode_cache_blocks: int | None = scalar_field(int, minimum=1, startup=True, capture="decode_kv_pool_blocks")
+    mock_auto_fetch: bool | None = scalar_field(bool, minimum=None, startup=True, reconfigure=True)
+    master_debug_log: bool | None = scalar_field(bool, minimum=None, startup=True, reconfigure=False)
+    mock_fetch_attach_timeout_ms: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
+    prefill_max_waiting_batches: int | None = scalar_field(int, minimum=0, startup=False, reconfigure=False)
+    master_test_control: bool | None = scalar_field(bool, minimum=None, startup=False, reconfigure=False)
+    master_jvm_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
+    mock_heap: str | None = scalar_field(str, startup=True, validate=heap_size)
+    event_loop_threads: int | None = scalar_field(int, minimum=1, startup=True, reconfigure=True)
+    metric_whitelist: str | None = field(default=None, metadata={"reconfigure": True})
     zookeeper: ZooKeeperConfig | None = None
     model_override: ModelDeviation | None = None
     prefill_perf: PrefillPerformance | None = None
     prefill_cache_policy: PrefillCachePolicy | None = None
 
     def __post_init__(self):
-        import re
-        for name in ("master_jvm_heap", "mock_heap"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not str or not re.fullmatch(r"[1-9][0-9]*[mMgG]", value)):
-                raise ValueError("environment." + name + " requires a positive JVM heap with m/g units")
         if self.backend != "java_mock" or self.discovery not in {"file", "discovery_file"}:
             raise ValueError("invalid environment backend/discovery")
         if self.master_layout not in {"single", "dual_standalone", "dual_zookeeper"}:
@@ -129,10 +159,9 @@ class EnvironmentDeclaration:
             if rule is None or value is None:
                 continue
             kind, _, minimum = rule
-            if kind is bool and type(value) is not bool:
-                raise ValueError("environment." + item.name + " requires a boolean")
-            if kind is int:
-                number(value, "environment." + item.name, minimum=minimum, integer=True)
+            validate_scalar(value, kind, minimum, "environment." + item.name)
+            if item.metadata.get("validate") is not None:
+                item.metadata["validate"](value, "environment." + item.name)
         number(self.master_stable_window_s, "environment.master_stable_window_s")
         if self.master_sync_log and self.master_layout != "single":
             raise ValueError("isolated sync log requires single master")

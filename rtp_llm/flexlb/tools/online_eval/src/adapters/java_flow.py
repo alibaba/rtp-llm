@@ -12,8 +12,6 @@ from adapters.playback_evidence import PlaybackEvidence
 from file_digest import sha256_file
 from adapters.load_client import client_environment, collection_environment, bind_environment
 
-JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
-
 RUN_LOCAL_ENVIRONMENT = frozenset({"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
     "GRPC_TARGET", "GRPC_TARGETS", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"})
 

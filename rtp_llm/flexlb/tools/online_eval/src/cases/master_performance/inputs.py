@@ -1,10 +1,9 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
 from case_api.metric_inputs import metric_fields
+from case_api.criteria import CriteriaContract
 from input_contract import finite_number as finite
-from case_api.numeric_parameters import SOURCE_NUMBERS
 from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
-from case_api.numeric_parameters import JAVA_FLOW_NUMBERS
 from case_api.numeric_parameters import CAPTURE_NUMBERS
 from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import FRACTION
@@ -12,7 +11,7 @@ from case_api.numeric_parameters import COUNT
 from case_api.numeric_parameters import OFFSET
 
 OBSERVATION_INPUTS = {'sample_s': NONNEGATIVE, 'max_gap_s': NONNEGATIVE}
-OBSERVATION_FIELDS = frozenset(OBSERVATION_INPUTS)
+SLO_INPUTS = dict.fromkeys(('ttft_ms', 'e2e_ms', 'tpot_ms'), COUNT)
 
 
 def engine_tps(spec, bounds=None):
@@ -59,7 +58,13 @@ CHECKS = CheckSet('performance_gate', {
 })
 RULES = CHECKS.rules
 
-CHECK_FIELDS = CHECKS.fields | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
+CRITERIA = CriteriaContract({
+    'observation': OBSERVATION_INPUTS,
+    'windows': dict.fromkeys(('warmup_s', 'measure_s'), NONNEGATIVE),
+    'checks': CHECKS.criteria_fields,
+    'slo': {'slo_' + name: NONNEGATIVE for name in SLO_INPUTS},
+    'runtime': {'qps': NONNEGATIVE},
+}, optional={'engine_tps': None, 'engine_tps_by_profile': None})
 
 
 def compile_checks(case, checks, inputs):
@@ -99,17 +104,11 @@ def observation_contract(data):
     return dict(warmup_s=bounds["from"], measure_s=bounds["until"]-bounds["from"])
 
 
-NUMERIC = OBSERVATION_FIELDS | CHECK_FIELDS | {"qps", "warmup_s", "measure_s"}
+NUMERIC = CRITERIA.fields
 
 
 def validate(criteria, gate_input=None):
-    if not isinstance(criteria, dict) or set(criteria) - {"engine_tps", "engine_tps_by_profile"} != NUMERIC:
-        raise ValueError(
-            "performance criteria must explicitly supply every contract field"
-        )
-    for k in NUMERIC:
-        if not finite(criteria[k]) or criteria[k] < 0:
-            raise ValueError(k + " must be finite and nonnegative")
+    CRITERIA.read(criteria)
     for k in (
         "qps",
         "measure_s",
@@ -168,11 +167,11 @@ def effective_profile(criteria, profile):
 
 
 from case_api.input_contract import InputContract, section_fields
-from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
+from case_api.traffic_inputs import java_flow_inputs
 
 INPUTS = InputContract.from_fields({
-    'traffic': section_fields('traffic', JAVA_FLOW_INPUT_FIELDS | {'kind'}, {
-        **SOURCE_NUMBERS, **OUTPUT_DISTRIBUTION_NUMBERS, **JAVA_FLOW_NUMBERS,
+    'traffic': java_flow_inputs(numbers={
+        **OUTPUT_DISTRIBUTION_NUMBERS,
         'traffic.client.playback.ramp_up_seconds': NONNEGATIVE,
         'traffic.source.parameters.max_input_tokens': COUNT,
     }),
@@ -182,7 +181,7 @@ INPUTS = InputContract.from_fields({
         'windows': {'measurement': {boundary: {'offset_s': OFFSET} for boundary in ('from', 'until')}},
         'capture': section_fields('observation', {'capture'}, CAPTURE_NUMBERS)['capture'],
     },
-    'analysis': {'slo': dict.fromkeys(('ttft_ms', 'e2e_ms', 'tpot_ms'), COUNT)},
+    'analysis': {'slo': SLO_INPUTS},
     'checks': {**CHECKS.input_fields, 'engine_tps': {
         name: {'expected': NONNEGATIVE} for name in
         ('rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'mock_decode_wall_tps')

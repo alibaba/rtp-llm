@@ -1,15 +1,13 @@
 """Java-generated traffic groups with Python-owned preconditions and checkpoints."""
 
 import json
-import math
-import re
 import time
 from pathlib import Path
 
 from adapters.client_journal import MAX_EVIDENCE_EVENTS
-from adapters.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
-from adapters.load_client import client_environment
-from traffic.traffic_source import materialize, SourceSpecification
+from adapters.java_flow import JavaFlowGroup
+from adapters.java_flow_spec import JavaFlowSpec
+from traffic.traffic_source import materialize
 from traffic.contracts import source_priority
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
@@ -18,30 +16,10 @@ from scenario.parameters import validate_fields
 from adapters.mock_control import engine_snapshot
 
 def _start_validate(params, plan):
-    fields = JAVA_FLOW_INPUT_FIELDS | {"trace", "max_requests"}
-    p = validate_fields(params, plan, fields, fields - {"source", "trace", "max_requests"})
-    if ("source" in p) == ("trace" in p):
-        raise ValueError("specify exactly one traffic source")
-    if "trace" in p:
+    if isinstance(params, dict) and "trace" in params:
         raise ValueError("legacy trace shorthand retired; use trace/prefix_lineage")
-    if not all(
-        isinstance(p[k], str) and p[k]
-        for k in ("group_id", "phase_id", "jvm_xms", "jvm_xmx")
-    ):
-        raise ValueError("flow identity and JVM sizing must be explicit")
-    if re.fullmatch(r"[A-Za-z0-9_-]+", p["group_id"]) is None:
-        raise ValueError("group_id must be a safe directory component")
-    if (
-        type(p["poll_s"]) not in (int, float)
-        or not math.isfinite(p["poll_s"])
-        or p["poll_s"] <= 0
-    ):
-        raise ValueError("invalid flow polling interval")
-    if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
-        raise ValueError("max_requests must be a positive bounded request count")
-    SourceSpecification.read(p["source"])
-    client_environment(p["client"], priority=source_priority(p["source"]))
-    return p
+    JavaFlowSpec.read(params)
+    return params
 
 
 def _start(ctx, p, deadline):

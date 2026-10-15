@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -83,28 +83,24 @@ class MasterSpec:
         )
 
     def fingerprint(self) -> dict:
-        return {
-            "name": self.name,
-            "http_port": self.http_port,
-            "management_port": self.management(),
-            "bind_ip": self.bind_ip,
-            "advertised_ip": self.advertised_ip,
-            "hippo_role": self.hippo_role,
-            "extra_env": self.extra_env,
-            "extra_args": self.extra_args,
-        }
+        result = _fingerprint_value(self)
+        result["management_port"] = self.management()
+        return result
 
 
-def _override_fingerprint(overrides: Optional[ConfigOverride]) -> Optional[dict]:
-    """Stable JSON-serializable snapshot of a ConfigOverride (the OMIT
-    sentinel serializes as its own token) — EnvSpec.fingerprint input."""
-    if overrides is None:
-        return None
-    snapshot: dict = {}
-    for f in fields(overrides):
-        value = getattr(overrides, f.name)
-        snapshot[f.name] = "OMIT" if value is OMIT else value
-    return snapshot
+def _fingerprint_value(value):
+    """Include every specification field; adapters own protocol normalization."""
+    if value is OMIT:
+        return "OMIT"
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return {item.name: _fingerprint_value(getattr(value, item.name)) for item in fields(value)}
+    if isinstance(value, dict):
+        return {key: _fingerprint_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    return value
 
 
 @dataclass
@@ -182,38 +178,6 @@ class EnvSpec:
             raise ValueError("master_profile='none' disables Master; raw_config is required for mock scheduler configuration")
 
     def fingerprint(self) -> str:
-        return json.dumps(
-            {
-                "run_dir": str(self.run_dir) if self.run_dir is not None else None,
-                "n_prefill": self.n_prefill,
-                "runtime_mode": self.runtime_mode,
-                "n_decode": self.n_decode,
-                "perf": self.perf,
-                "mock_extra_args": self.mock_extra_args,
-                "mock_heap": self.mock_heap,
-                "master_jvm_args": self.master_jvm_args,
-                "master_log_name": self.master_log_name,
-                "master_jvm_heap": self.master_jvm_heap,
-                "master_pv_log": self.master_pv_log,
-                "master_profile": self.master_profile,
-                "master_env": self.master_env,
-                # config axes: overrides serialized field-by-field (OMIT as
-                # its own token) so distinct override specs never collide;
-                # raw_config contributes its exact string.
-                "config_overrides": _override_fingerprint(self.config_overrides),
-                "raw_config": self.raw_config,
-                "discovery": self.discovery,
-                "domain_addrs": self.domain_addrs,
-                "prefill_cache_blocks": self.prefill_cache_blocks,
-                "decode_cache_blocks": self.decode_cache_blocks,
-                "spring_profile": self.spring_profile,
-                "master_stable_window_s": self.master_stable_window_s,
-                # HA axes: absent-equivalent ([], None) for every legacy
-                # spec — the fingerprint VALUE changes (new keys) but stays
-                # stable within a process, so ensure() reuse semantics are
-                # unchanged and the legacy path never takes the new branch.
-                "masters": [m.fingerprint() for m in self.masters],
-                "zk_consistency": self.zk_consistency.to_dict() if self.zk_consistency is not None else None,
-            },
-            sort_keys=True,
-        )
+        result = _fingerprint_value(self)
+        result["masters"] = [master.fingerprint() for master in self.masters]
+        return json.dumps(result, sort_keys=True)

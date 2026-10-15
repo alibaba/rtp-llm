@@ -5,8 +5,9 @@ import math
 from adapters.master_control import master_url
 
 
-STATE_FIELDS = {"http_up", "scheduler_inflight", "prefill_inflight_requests",
-                "decode_master_queued", "decode_confirmed_running"}
+from cases.master_ha_failover.state_contract import STATE_FIELDS
+
+STATE_FIELDS = frozenset(STATE_FIELDS)
 
 
 def master_state_fields(data, fields=STATE_FIELDS - {"http_up"}):

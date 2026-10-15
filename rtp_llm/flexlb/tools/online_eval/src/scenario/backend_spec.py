@@ -4,6 +4,7 @@ def make_env_spec(plan, profile, lease):
     """Controlled environment rendering; no JVM is started by this function."""
     from flexlb_cfg import OMIT, ConfigOverride
     from adapters.environment_config import EnvSpec, MasterSpec
+    from scenario.environment_declaration import startup_options
 
     kwargs = {
         k: OMIT if v == {"omit": True} else v
@@ -17,8 +18,6 @@ def make_env_spec(plan, profile, lease):
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
-        n_prefill=plan["n_prefill"],
-        n_decode=plan["n_decode"],
         master_profile=profile,
         config_overrides=ConfigOverride(**kwargs),
         raw_config=snapshot.master_json,
@@ -37,25 +36,15 @@ def make_env_spec(plan, profile, lease):
         zk_consistency=ZooKeeperConfig.read(plan["zookeeper"]) if elected else None,
         perf=preset_perf,
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
-        master_debug_log=plan.get("master_debug_log", False),
+        **startup_options(plan),
     )
     if plan.get("master_test_control", False):
         # A per-environment token opts the isolated Master into test controls.
         import secrets
         spec.master_env["FLEXLB_TEST_CONTROL_TOKEN"] = secrets.token_hex(32)
-    if "mock_heap" in preset_runtime:
+    if "mock_heap" in preset_runtime and "mock_heap" not in plan:
         spec.mock_heap = preset_runtime["mock_heap"]
     spec.mock_extra_args.extend(preset_runtime.get("mock_extra_args", []))
-    for key in (
-        "master_jvm_heap",
-        "mock_heap",
-        "prefill_cache_blocks",
-        "decode_cache_blocks",
-        "mock_auto_fetch",
-        "mock_fetch_attach_timeout_ms",
-    ):
-        if key in plan:
-            setattr(spec, key, plan[key])
     if plan["debug_enabled"]:
         spec.master_extra_args.append("--flexlb.debug.enabled=true")
     if "metric_whitelist" in plan:

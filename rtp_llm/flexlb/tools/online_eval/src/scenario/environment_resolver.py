@@ -8,7 +8,7 @@ from adapters.perf_presets import load_preset_bundle
 from document_io import DocumentError as ScenarioError
 from scenario.validation import fail, mapping
 from scenario.master_patch import MasterPatch
-from scenario.environment_declaration import EnvironmentDeclaration
+from scenario.environment_declaration import EnvironmentDeclaration, captured_fields
 from scenario.environment_snapshot import EnvironmentSnapshot
 
 CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
@@ -109,11 +109,7 @@ class EnvironmentResolver:
         paired_master, declared_overrides = baseline.declared, declared.declared
         captured = self.captured
         if captured:
-            changed = [field for field, source_field in (
-                ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-                ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-                ("decode_cache_blocks", "decode_kv_pool_blocks"),
-            ) if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]]
+            changed = [field for field, source_field in captured_fields().items() if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]]
             if (declared_overrides.get("prefill_expression") is not None and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or declaration.prefill_perf is not None:
                 changed.append("prefill model")
             changed.extend("master." + key for key, val in declared_overrides.items()

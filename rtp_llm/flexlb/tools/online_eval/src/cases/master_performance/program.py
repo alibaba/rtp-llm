@@ -8,7 +8,7 @@ from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 from case_api.builder import output
 from cases.master_performance.inputs import INPUTS
 from adapters.client_configuration import ClientConfiguration
-from cases.master_performance.inputs import OBSERVATION_FIELDS, compile_checks, observation_contract
+from cases.master_performance.inputs import CRITERIA, SLO_INPUTS, compile_checks, observation_contract
 from traffic.contracts import driver, uniform_gate_flow
 from case_api.metric_inputs import bind_mock_engine_metrics
 
@@ -25,12 +25,12 @@ def default(case):
     flow = driver(data.traffic, "java_flow")
     client = ClientConfiguration.read(flow["client"])
     from case_api.inputs import fields
-    slo = fields(data.analysis["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.analysis.slo")
-    c = dict({k: data.observation[k] for k in OBSERVATION_FIELDS},
-                      **observation_contract(data.observation),
-                      **compile_checks(case, data.checks, inputs["engine_tps"]),
-                      **{"slo_"+key: value for key, value in slo.items()},
-                      qps=client.playback.qps)
+    slo = fields(data.analysis["slo"], SLO_INPUTS, "parameters.analysis.slo")
+    c = CRITERIA.project(observation=data.observation,
+                         windows=observation_contract(data.observation),
+                         checks=compile_checks(case, data.checks, inputs["engine_tps"]),
+                         slo={"slo_" + key: value for key, value in slo.items()},
+                         runtime={"qps": client.playback.qps})
     allowed = c["qps"] * (1 + c["qps_tolerance"])
     if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
         raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")

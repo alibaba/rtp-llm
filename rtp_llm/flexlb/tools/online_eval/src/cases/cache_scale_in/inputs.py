@@ -2,9 +2,7 @@
 
 from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 
-from input_contract import finite_number, NumberRule
-from case_api.numeric_parameters import SOURCE_NUMBERS
-from case_api.numeric_parameters import JAVA_FLOW_NUMBERS
+from input_contract import NumberRule
 from case_api.numeric_parameters import CAPTURE_NUMBERS
 from case_api.numeric_parameters import FRACTION
 from case_api.numeric_parameters import NONNEGATIVE
@@ -12,6 +10,7 @@ from case_api.numeric_parameters import COUNT
 from case_api.numeric_parameters import OFFSET
 from scenario.parameters import validate_fields
 from case_api.metric_inputs import metric_fields
+from case_api.criteria import CriteriaContract
 
 PROCEDURE_INPUTS = {
     'target_p': COUNT, 'removal_mode': None, 'drain_timeout_ms': COUNT,
@@ -20,8 +19,9 @@ PROCEDURE_INPUTS = {
     'analysis_timeout_s': NONNEGATIVE, 'startup_timeout_s': NONNEGATIVE,
 }
 OBSERVATION_INPUTS = dict.fromkeys(('warmup_timeout_s', 'sample_s', 'window_s', 'step_s', 'max_gap_s'), NONNEGATIVE)
-PROCEDURE_FIELDS = frozenset(PROCEDURE_INPUTS) - {'analysis_timeout_s', 'startup_timeout_s'}
-OBSERVATION_FIELDS = frozenset(OBSERVATION_INPUTS)
+PROCEDURE_CRITERIA = {name: rule for name, rule in PROCEDURE_INPUTS.items()
+                      if name not in {'analysis_timeout_s', 'startup_timeout_s'}}
+COLLAPSE_INPUTS = dict.fromkeys(('absolute_min_hit', 'max_drop', 'sustain_s'), NONNEGATIVE)
 
 
 ENGINE_FIELDS = {"worker_status_qps": "requests/s", "worker_status_rt_us": "us",
@@ -61,7 +61,13 @@ CHECKS = CheckSet('cache_gate', {
 })
 RULES = CHECKS.rules
 
-CHECK_FIELDS = CHECKS.fields | {'sustain_s', 'absolute_min_hit', 'max_drop'}
+CRITERIA = CriteriaContract({
+    'procedure': PROCEDURE_CRITERIA,
+    'observation': OBSERVATION_INPUTS,
+    'windows': dict.fromkeys(('baseline_s', 'observe_s'), NONNEGATIVE),
+    'checks': {**CHECKS.criteria_fields, **COLLAPSE_INPUTS, 'expected_behavior': None},
+    'runtime': {'qps': NONNEGATIVE},
+})
 
 
 def compile_checks(case, checks, policy):
@@ -93,7 +99,7 @@ def observation_contract(data):
     return dict(baseline_s=-base["from"], observe_s=post["until"])
 
 
-FIELDS = PROCEDURE_FIELDS | OBSERVATION_FIELDS | {"baseline_s", "observe_s"} | CHECK_FIELDS | {"flow", "qps", "expected_behavior"}
+FIELDS = CRITERIA.fields | {"flow"}
 
 
 def validate_criteria(params, plan):
@@ -107,9 +113,7 @@ def validate_criteria(params, plan):
     plan.reference(p["flow"], "java_flow")
     if plan.env.discovery != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
-    for k in FIELDS - {"flow", "removal_mode", "expected_behavior"}:
-        if not finite_number(p[k]) or p[k] < 0:
-            raise ValueError(k + " must be finite and nonnegative")
+    CRITERIA.read({key: value for key, value in p.items() if key in CRITERIA.fields})
     if not 0 <= p["warmup_min_s"] <= p["warmup_timeout_s"]:
         raise ValueError("warmup_min_s must fit the warmup budget")
     if type(p["post_affinity_ms"]) is not int or not 0 <= p["post_affinity_ms"] <= 9223372036854775807:
@@ -159,12 +163,10 @@ def validate_criteria(params, plan):
 
 
 from case_api.input_contract import InputContract, section_fields
-from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
+from case_api.traffic_inputs import java_flow_inputs
 
 INPUTS = InputContract.from_fields({
-    'traffic': section_fields('traffic', JAVA_FLOW_INPUT_FIELDS | {'kind', 'max_requests'},
-        {**SOURCE_NUMBERS, **JAVA_FLOW_NUMBERS,
-         'traffic.max_requests': NumberRule(integer=True, minimum=1, maximum=1000000)}),
+    'traffic': java_flow_inputs(max_requests=True),
     'procedure': PROCEDURE_INPUTS,
     'observation': {
         **OBSERVATION_INPUTS, 'inputs': None,
@@ -172,6 +174,6 @@ INPUTS = InputContract.from_fields({
                     for name in ('baseline', 'post')},
         'capture': section_fields('observation', {'capture'}, CAPTURE_NUMBERS)['capture'],
     },
-    'analysis': {'collapse': dict.fromkeys(('absolute_min_hit', 'max_drop', 'sustain_s'), NONNEGATIVE)},
+    'analysis': {'collapse': COLLAPSE_INPUTS},
     'checks': {**CHECKS.input_fields, 'collapse': {'expected': NONNEGATIVE}},
 })
