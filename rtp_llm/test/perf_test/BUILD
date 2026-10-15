@@ -1876,8 +1876,8 @@ py_test(
 
 py_test(
     name = "xing4_0_fp8_tps20_p5k_65536",
-    main = "batch_decode_test.py",
-    srcs = ["batch_decode_test.py"],
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
     timeout = "eternal",
     deps = [
         "//rtp_llm:pyodps",
@@ -1909,8 +1909,8 @@ py_test(
 
 py_test(
     name = "xing4_0_fp8_tps20_p5k_131072",
-    main = "batch_decode_test.py",
-    srcs = ["batch_decode_test.py"],
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
     timeout = "eternal",
     deps = [
         "//rtp_llm:pyodps",
@@ -1942,8 +1942,8 @@ py_test(
 
 py_test(
     name = "xing4_0_fp8_tps15_p5k_65536",
-    main = "batch_decode_test.py",
-    srcs = ["batch_decode_test.py"],
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
     timeout = "eternal",
     deps = [
         "//rtp_llm:pyodps",
@@ -1975,8 +1975,8 @@ py_test(
 
 py_test(
     name = "xing4_0_fp8_tps15_p5k_131072",
-    main = "batch_decode_test.py",
-    srcs = ["batch_decode_test.py"],
+    main = "xing4_remote_perf_test.py",
+    srcs = ["xing4_remote_perf_test.py"],
     timeout = "eternal",
     deps = [
         "//rtp_llm:pyodps",
