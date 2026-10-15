@@ -314,6 +314,57 @@ class GrpcCacheStatusCheckRunnerTest {
                 .updateEngineBlockCache(eq(oldStatus), any(EndpointTrace.Poll.class));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void unchangedVersionKeepsOwnedKeysAndRefreshesCapacityWithoutFullConversion(boolean omitKeys) {
+        WorkerStatus status = workerStatus();
+        WorkerDirectory directory = directory(status);
+        var full = EngineRpcService.CacheStatusPB.newBuilder().setVersion(7)
+                .putCacheKeys(11L, true).putCacheKeys(22L, true)
+                .setAvailableKvCache(100).setTotalKvCache(200).setBlockSize(16).build();
+        var unchangedBuilder = full.toBuilder().setAvailableKvCache(80);
+        if (omitKeys) unchangedBuilder.clearCacheKeys();
+        var unchanged = unchangedBuilder.build();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(full),
+                        CompletableFuture.completedFuture(unchanged));
+        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class)))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).cacheVersion(7).build());
+        runCachePoll(status.getIpPort(), status, directory, false);
+        var ownedKeys = status.getCacheStatus().getCachedKeys();
+        try (var converter = Mockito.mockStatic(org.flexlb.service.grpc.EngineStatusConverter.class,
+                Mockito.CALLS_REAL_METHODS)) {
+            runCachePoll(status.getIpPort(), status, directory, false);
+            converter.verify(() -> org.flexlb.service.grpc.EngineStatusConverter
+                    .convertToCacheStatus(unchanged), never());
+        }
+        org.junit.jupiter.api.Assertions.assertSame(ownedKeys, status.getCacheStatus().getCachedKeys());
+        assertEquals(java.util.Set.of(11L, 22L), status.getCacheStatus().getCachedKeys());
+        assertEquals(80, status.getCacheStatus().getAvailableKvCache());
+        assertEquals(7, status.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(1)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
+    }
+
+    @Test
+    void changedVersionWithEmptyKeysIsARealEmptySnapshot() {
+        WorkerStatus status = workerStatus();
+        WorkerDirectory directory = directory(status);
+        var first = EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).putCacheKeys(11L, true).build();
+        var emptied = EngineRpcService.CacheStatusPB.newBuilder().setVersion(8).build();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(first), CompletableFuture.completedFuture(emptied));
+        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class)))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).cacheVersion(7).build(),
+                        WorkerCacheUpdateResult.builder().success(true).cacheVersion(8).build());
+        runCachePoll(status.getIpPort(), status, directory, false);
+        runCachePoll(status.getIpPort(), status, directory, false);
+        org.junit.jupiter.api.Assertions.assertTrue(status.getCacheStatus().getCachedKeys().isEmpty());
+        assertEquals(8, status.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(2)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
+    }
+
     private void runCachePoll(
             String ipPort,
             WorkerStatus workerStatus,

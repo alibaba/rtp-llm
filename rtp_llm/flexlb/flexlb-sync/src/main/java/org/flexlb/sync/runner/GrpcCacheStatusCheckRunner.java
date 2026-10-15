@@ -125,7 +125,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             rpc.whenComplete((response, failure) -> pollTrace.record(Stage.RPC_COMPLETED, failure))
                     .thenApply(response -> {
                         pollTrace.record(Stage.CONVERSION_STARTED);
-                        return EngineStatusConverter.convertToCacheStatus(response);
+                        return convertCacheStatusResponse(response);
                     })
                     // Readiness precedes executor handoff; it is not an internal gRPC queue timestamp.
                     .whenComplete((response, failure) -> pollTrace.record(Stage.CALLBACK_READY, failure))
@@ -173,6 +173,23 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         }
     }
 
+    private CacheStatus convertCacheStatusResponse(EngineRpcService.CacheStatusPB response) {
+        if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                || !workerStatus.isActiveGeneration()) {
+            return CacheStatus.builder().message("stale worker generation").build();
+        }
+        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+        CacheStatus previous = current.cacheStatus();
+        // Check before copying protobuf keys. Empty keys on an unchanged version
+        // mean "keep the indexed snapshot", not "clear this worker's cache".
+        if (!debug && current.indexInitialized() && previous != null
+                && current.indexedVersion() == response.getVersion()
+                && previous.getVersion() == response.getVersion()) {
+            return EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
+        }
+        return EngineStatusConverter.convertToCacheStatus(response);
+    }
+
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
 
         try {
@@ -202,6 +219,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
                     if (updateRequired) {
                         workerStatus.publishCacheStatus(newCacheStatus);
+                    } else {
+                        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+                        if (current.indexInitialized() && current.cacheStatus() != null
+                                && current.indexedVersion() == newCacheStatus.getVersion()
+                                && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
+                            workerStatus.publishCacheStatus(newCacheStatus);
+                        }
                     }
                 } finally {
                     workerStatus.lock.unlock();
