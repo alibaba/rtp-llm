@@ -47,6 +47,48 @@ class RouterPaddingFusionTest(TestCase):
                 torch.equal(padded.view(torch.uint8), expected.view(torch.uint8))
             )
 
+    def test_padding_preserves_every_bfloat16_bit_pattern(self) -> None:
+        source = (
+            torch.arange(65536, device="cuda", dtype=torch.int32)
+            .to(torch.uint16)
+            .view(torch.bfloat16)
+            .reshape(256, 256)
+        )
+        expected = torch.zeros((257, 256), device="cuda", dtype=torch.bfloat16)
+        expected[:256].copy_(source)
+
+        actual = try_pad_rows(source, 257)
+
+        self.assertIsNotNone(actual)
+        assert actual is not None
+        self.assertTrue(
+            torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+        )
+
+    def test_cuda_fallbacks_and_multiple_chunks_match_reference(self) -> None:
+        for rows in (1, 8, 9, 17):
+            for strided, gradients in ((False, False), (True, False), (False, True)):
+                with self.subTest(rows=rows, strided=strided, gradients=gradients):
+                    source = torch.randn(rows, 34, device="cuda")
+                    source = source[:, ::2] if strided else source[:, :17].contiguous()
+                    source.requires_grad_(gradients)
+                    weight = torch.randn(11, 17, device="cuda")
+
+                    def linear(value: torch.Tensor) -> torch.Tensor:
+                        return torch.nn.functional.linear(value, weight)
+
+                    with patch.dict(os.environ, {"RTP_LLM_FUSED_ROUTER_PAD": "0"}):
+                        expected = fixed_m_linear(linear, source, 8)
+                    actual = fixed_m_linear(linear, source, 8)
+
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    if gradients:
+                        expected_grad = torch.autograd.grad(expected.sum(), source)[0]
+                        actual_grad = torch.autograd.grad(actual.sum(), source)[0]
+                        torch.testing.assert_close(
+                            actual_grad, expected_grad, atol=0, rtol=0
+                        )
+
     def test_fixed_m_outputs_preserve_router_gemm(self) -> None:
         source = torch.randn(1252, 6144, device="cuda", dtype=torch.bfloat16)
         weight = torch.randn(256, 6144, device="cuda", dtype=torch.bfloat16)
@@ -80,8 +122,10 @@ class RouterPaddingFusionTest(TestCase):
     def test_measure_padding_launch_reduction(self) -> None:
         source = torch.randn(1252, 6144, device="cuda", dtype=torch.bfloat16)
         results: list[Measurement] = []
-        for enabled in ("0", "1"):
+        for enabled in ("0", "1", "unset"):
             with patch.dict(os.environ, {"RTP_LLM_FUSED_ROUTER_PAD": enabled}):
+                if enabled == "unset":
+                    os.environ.pop("RTP_LLM_FUSED_ROUTER_PAD")
                 for _ in range(10):
                     fixed_m_linear(lambda value: value, source, 8192)
                 torch.cuda.synchronize()
@@ -133,6 +177,7 @@ class RouterPaddingFusionTest(TestCase):
         )
         self.assertEqual(len(results[0]["gpu_events"]), 2)
         self.assertEqual(len(results[1]["gpu_events"]), 1)
+        self.assertEqual(len(results[2]["gpu_events"]), 1)
 
 
 if __name__ == "__main__":

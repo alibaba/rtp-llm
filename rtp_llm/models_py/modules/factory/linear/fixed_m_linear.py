@@ -34,7 +34,7 @@ def fixed_m_linear(
         valid_rows = end - begin
         if valid_rows != chunk_rows:
             padded = None
-            if os.environ.get("RTP_LLM_FUSED_ROUTER_PAD", "0") == "1" and chunk.is_cuda:
+            if os.environ.get("RTP_LLM_FUSED_ROUTER_PAD", "1") == "1" and chunk.is_cuda:
                 from rtp_llm.models_py.modules.factory.linear.fixed_m_pad_triton import (
                     try_pad_rows,
                 )
