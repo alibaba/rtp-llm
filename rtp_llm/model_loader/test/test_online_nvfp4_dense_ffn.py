@@ -90,6 +90,8 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         self.assertEqual(scale_2.numel(), 1)
 
         # Dequantize: e2m1 ordinal -> value, then per-block scale * scale2.
+        # The magnitude of ordinal 15 is 6 (not 5), so index the LUT with the
+        # full 4-bit ordinal instead of masking off the sign bit.
         low = (packed & 0x0F)
         high = (packed >> 4)
         lut = torch.tensor(
@@ -97,7 +99,7 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
             device=packed.device,
         )
         sign = lambda q: torch.where(q >= 8, -1.0, 1.0)
-        magnitude = lambda q: lut[(q & 0x07).long()]
+        magnitude = lambda q: lut[q.long()]
         unpacked = torch.stack(
             [sign(low) * magnitude(low), sign(high) * magnitude(high)], dim=-1
         ).view(64, 128)
@@ -113,7 +115,8 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
         torch.manual_seed(13)
-        weight = (torch.randn(32, 96, device="cuda") * 0.1).to(torch.bfloat16)
+        # K must be a multiple of the 128-wide NVFP4 block.
+        weight = (torch.randn(32, 256, device="cuda") * 0.1).to(torch.bfloat16)
         src = _ffn_weight(W.ffn_w2)
         quant_weight = OnlineModelOptFp4DenseWeight(src, _quant_config(True))
 

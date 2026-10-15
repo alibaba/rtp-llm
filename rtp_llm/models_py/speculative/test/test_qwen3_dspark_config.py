@@ -127,7 +127,14 @@ class Qwen3DSparkConfigTest(unittest.TestCase):
                 )
                 ModelFactory._reset_draft_fp8_kv_cache(draft, "Qwen3DSparkModel")
                 self.assertEqual(draft.attn_config.fp8_kv_cache_mode, 0)
-                self.assertEqual(draft.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+                if mode == 0:
+                    # Early return: nothing to reset, the draft config is
+                    # left exactly as-is.
+                    self.assertEqual(draft.attn_config.kv_cache_dtype, "base")
+                else:
+                    self.assertEqual(
+                        draft.attn_config.kv_cache_dtype, KvCacheDataType.BASE
+                    )
 
 
 if __name__ == "__main__":

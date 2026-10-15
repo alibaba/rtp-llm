@@ -1221,7 +1221,7 @@ class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp
         )
         self._enable_qwen35_mrope_mode1(config)
         inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths), prefix_lengths, input_lengths, page_size
+            input_lengths, prefix_lengths, page_size
         )
         position_ids = self._add_qwen35_mrope_inputs(
             inputs, input_lengths, prefix_lengths
