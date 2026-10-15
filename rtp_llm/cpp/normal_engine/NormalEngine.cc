@@ -27,6 +27,7 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <string>
 #include <thread>
 #include <random>
 #include <stdexcept>
@@ -226,6 +227,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             CodebookLogitsProcessor::createMasks(model_config_.output_vocab_groups,
                                                  model_config_.output_vocab_ids.size())
                 .to(torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
+        std::string group_sizes;
+        for (const auto& group : model_config_.output_vocab_groups) {
+            if (!group_sizes.empty()) {
+                group_sizes += ",";
+            }
+            group_sizes += std::to_string(group.size());
+        }
+        RTP_LLM_LOG_INFO("codebook level mask enabled: levels=%zu, group_sizes=[%s], union_vocab_size=%zu",
+                         model_config_.output_vocab_groups.size(),
+                         group_sizes.c_str(),
+                         model_config_.output_vocab_ids.size());
     }
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
