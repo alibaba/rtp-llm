@@ -119,7 +119,8 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
             self.skipTest("CUDA is not available")
         torch.manual_seed(13)
         # K must be a multiple of the 128-wide NVFP4 block.
-        weight = (torch.randn(32, 256, device="cuda") * 0.1).to(torch.bfloat16)        src = _ffn_weight(W.ffn_w2)
+        weight = (torch.randn(32, 256, device="cuda") * 0.1).to(torch.bfloat16)
+        src = _ffn_weight(W.ffn_w2)
         quant_weight = OnlineModelOptFp4DenseWeight(src, _quant_config(True))
 
         with mock.patch.object(
