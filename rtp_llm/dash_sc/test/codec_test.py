@@ -35,6 +35,7 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateOutput,
@@ -975,6 +976,54 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_request_identity_survives_empty_case_aliases(self) -> None:
+        for empty in ("", None, " \t "):
+            with self.subTest(empty=empty):
+                attrs = {
+                    "x-dashscope-service": "recorded-service",
+                    "X-DashScope-Service": empty,
+                    "x-dashscope-uid": "recorded-uid",
+                    "X-DashScope-Uid": empty,
+                    "parameters": {"enable_thinking": True},
+                    "PARAMETERS": None,
+                }
+                request = predict_v2_pb2.ModelInferRequest()
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    attrs
+                )
+                controls = parse_request_controls(request)
+                expected = (
+                    ("x-dashscope-uid", "recorded-uid"),
+                    ("x-dashscope-service", "recorded-service"),
+                )
+                self.assertEqual(dict(expected), controls.request_headers)
+                self.assertEqual(
+                    dashscope_greennet_metadata(controls.request_headers), expected
+                )
+                self.assertEqual(dashscope_greennet_metadata(attrs), expected)
+                self.assertIsNone(
+                    codec.parse_ds_header_attributes(request)["parameters"]
+                )
+
+    def test_request_identity_keeps_last_nonempty_value_without_fallback(self) -> None:
+        for override in ("last-service", "", None):
+            with self.subTest(override=override):
+                attrs = {
+                    "x-dashscope-service": "first-service" if override else "",
+                    "X-DashScope-Service": override,
+                }
+                request = predict_v2_pb2.ModelInferRequest()
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    attrs
+                )
+                expected = (
+                    (("x-dashscope-service", "last-service"),) if override else ()
+                )
+                self.assertEqual(dashscope_greennet_metadata(attrs), expected)
+                self.assertEqual(
+                    parse_request_controls(request).request_headers, dict(expected)
+                )
 
     def test_parse_request_controls_enable_thinking_only_from_parameter(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
