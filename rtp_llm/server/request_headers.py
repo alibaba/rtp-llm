@@ -45,16 +45,17 @@ def extract_request_headers(
         return {}
 
     try:
-        lookup = {str(key).lower(): value for key, value in headers.items()}
+        lookup: Dict[str, str] = {}
+        for key, value in headers.items():
+            name = str(key).lower()
+            if name in REQUEST_HEADER_NAMES:
+                normalized = _normalize_header_value(value)
+                if normalized is not None:
+                    lookup[name] = normalized
     except Exception:
         return {}
 
-    result: Dict[str, str] = {}
-    for header_name in REQUEST_HEADER_NAMES:
-        value = _normalize_header_value(lookup.get(header_name))
-        if value is not None:
-            result[header_name] = value
-    return result
+    return {name: lookup[name] for name in REQUEST_HEADER_NAMES if name in lookup}
 
 
 def normalize_request_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:
