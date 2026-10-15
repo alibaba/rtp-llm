@@ -149,7 +149,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // through num_return_sequences or variable beams. Preallocate the common case and grow safely.
     const auto initial_sampler_batch_size =
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
-    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
+    sampler_.reset(new Sampler(
+        SamplerInitParams{initial_sampler_batch_size, false, !params.model_config_.output_vocab_groups.empty()}));
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

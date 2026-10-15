@@ -41,6 +41,7 @@ private:
     static constexpr size_t kGreedySamplingBufferSlots = 3;
 
     bool                                                             fixed_max_batch_size_         = false;
+    bool                                                             force_beam_search_v2_         = false;
     size_t                                                           max_batch_size_               = 0;
     size_t                                                           greedy_sampling_buffer_index_ = 0;
     GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
