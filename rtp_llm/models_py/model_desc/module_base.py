@@ -136,7 +136,7 @@ class GptModelBase(nn.Module):
         raise NotImplementedError("forward method must be implemented in subclass")
 
     def prepare_decoder_layer(
-        self, attention_inputs: PyAttentionInputs, layer_idx: int
+        self, attention_inputs: PyAttentionInputs, layer_idx: int, layer_group_ids: Optional[list[int]] = None
     ) -> Optional[LayerKVCache]:
-        select_block_map_for_layer(attention_inputs, layer_idx)
+        select_block_map_for_layer(attention_inputs, layer_idx, layer_group_ids)
         return self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None

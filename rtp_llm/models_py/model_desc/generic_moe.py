@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import cpu_layer_group_ids
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -347,6 +348,7 @@ class GenericMoeLayer(nn.Module):
                     "HY V4 correction bias must contain one value per expert, got "
                     f"{self.correction_bias.numel()} for {config.expert_num} experts"
                 )
+        self.group_topk = GroupTopK() if self.correction_bias is not None else None
 
     def clone_for_cuda_graph(
         self, *, share_mega_buf: bool = False
@@ -386,6 +388,7 @@ class GenericMoeLayer(nn.Module):
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
+        clone.group_topk = getattr(self, "group_topk", None)
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
@@ -438,23 +441,17 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
+            assert self.group_topk is not None
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 scores=router_logits_fp32,
                 correction_bias=self.correction_bias,
-                n_group=self.num_expert_group,
-                topk_group=self.topk_group,
+                n_group=self.config.moe_n_group,
+                topk_group=self.config.moe_topk_group,
                 topk=self.top_k,
-                renormalize=self.renormalize,
-                routed_scaling_factor=self.routed_scaling_factor,
+                renormalize=self.config.has_moe_norm,
+                routed_scaling_factor=self.config.routed_scaling_factor,
             )
         else:
             # Top-K selection using C++ SelectTopkOp
@@ -973,8 +970,9 @@ class GenericMoeModel(GptModelBase):
             fmha_impl,
             self.kv_cache,
         )
+        layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i)
+            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i, layer_group_ids)
             output = decoder_layer(
                 hidden_states,
                 residual,
