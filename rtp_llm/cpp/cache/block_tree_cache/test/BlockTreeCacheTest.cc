@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -344,6 +345,150 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     const size_t direction_index =
         static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier::DEVICE, Tier::HOST));
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
+}
+
+TEST(BlockTreeCacheMetricsTest, PoolIOMetricsUseCumulativeBytesAndElapsedTime) {
+    auto  io     = std::make_unique<block_transfer_engine_test::StatusDiskBlockIO>(DiskBlockIOStatus::OK);
+    auto* io_ptr = io.get();
+    auto  pool   = makeDiskPool(6000, 4, std::move(io));
+    const std::vector<GroupSetPtr> groups = {
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, pool)};
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    const auto                    start = std::chrono::steady_clock::time_point{};
+    std::vector<char>             buffer(pool->strideBytes());
+    ASSERT_EQ(pool->strideBytes(), 8192u);
+    ASSERT_EQ(pool->read(1, buffer.data(), buffer.size()), BlockIOStatus::OK);
+
+    auto snapshots = reporter.collectPoolMetricsSnapshots(groups, start);
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 8192);
+    EXPECT_EQ(snapshots[0].write_bytes, 0);
+    EXPECT_EQ(snapshots[0].tier, Tier::DISK);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 0);
+    EXPECT_EQ(snapshots[0].write_bandwidth_bytes_per_sec, 0);
+
+    ASSERT_EQ(pool->read({1, 2}, {buffer.data(), buffer.data()}, buffer.size()), BlockIOStatus::OK);
+    ASSERT_EQ(pool->write(1, buffer.data(), buffer.size()), BlockIOStatus::OK);
+    snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::seconds(2));
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 24576);
+    EXPECT_EQ(snapshots[0].write_bytes, 8192);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 8192);
+    EXPECT_EQ(snapshots[0].write_bandwidth_bytes_per_sec, 4096);
+
+    snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::milliseconds(2500));
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 24576);
+    EXPECT_EQ(snapshots[0].write_bytes, 8192);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 0);
+    EXPECT_EQ(snapshots[0].write_bandwidth_bytes_per_sec, 0);
+
+    io_ptr->setStatus(DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(pool->read(1, buffer.data(), buffer.size()), BlockIOStatus::IO_ERROR);
+    EXPECT_EQ(pool->write(1, buffer.data(), buffer.size()), BlockIOStatus::IO_ERROR);
+    snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::seconds(3));
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 24576);
+    EXPECT_EQ(snapshots[0].write_bytes, 8192);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 0);
+    EXPECT_EQ(snapshots[0].write_bandwidth_bytes_per_sec, 0);
+
+    io_ptr->setStatus(DiskBlockIOStatus::OK);
+    ASSERT_EQ(pool->read(1, buffer.data(), buffer.size()), BlockIOStatus::OK);
+    snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::seconds(3));
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 32768);
+    EXPECT_EQ(snapshots[0].write_bytes, 8192);
+    EXPECT_EQ(snapshots[0].total_blocks, 4u);
+    EXPECT_FALSE(snapshots[0].read_bandwidth_bytes_per_sec.has_value());
+    EXPECT_FALSE(snapshots[0].write_bandwidth_bytes_per_sec.has_value());
+    snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::seconds(4));
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].read_bytes, 32768);
+    EXPECT_EQ(snapshots[0].write_bytes, 8192);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 8192);
+}
+
+TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyPopulateDiskWithIndependentPools) {
+    auto first_pool =
+        block_transfer_engine_test::makeDiskPool(6000, 4, "/tmp", std::make_unique<MemoryDiskBlockIO>(), "first_disk");
+    auto second_pool =
+        block_transfer_engine_test::makeDiskPool(3000, 4, "/tmp", std::make_unique<MemoryDiskBlockIO>(), "second_disk");
+    auto first_group  = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, first_pool);
+    auto second_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, second_pool);
+    auto host_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, makeHostPool(3000, 4), nullptr);
+    const std::vector<GroupSetPtr> groups = {first_group, second_group, host_group};
+    BlockTreeCacheMetricsReporter  reporter(nullptr);
+    const auto                     start             = std::chrono::steady_clock::time_point{};
+    const auto                     initial_snapshots = reporter.collectPoolMetricsSnapshots(groups, start);
+    ASSERT_EQ(initial_snapshots.size(), 3u);
+    for (size_t i = 0; i < 2; ++i) {
+        EXPECT_EQ(initial_snapshots[i].read_bytes, 0);
+        EXPECT_EQ(initial_snapshots[i].write_bytes, 0);
+    }
+
+    std::vector<char> buffer(first_pool->strideBytes());
+    ASSERT_EQ(first_pool->read(1, buffer.data(), first_pool->strideBytes()), BlockIOStatus::OK);
+    ASSERT_EQ(second_pool->write(1, buffer.data(), second_pool->strideBytes()), BlockIOStatus::OK);
+    const auto snapshots = reporter.collectPoolMetricsSnapshots(groups, start + std::chrono::milliseconds(500));
+    ASSERT_EQ(snapshots.size(), 3u);
+    EXPECT_EQ(snapshots[0].pool_name, "first_disk");
+    EXPECT_EQ(snapshots[0].read_bytes, 8192);
+    EXPECT_EQ(snapshots[0].write_bytes, 0);
+    EXPECT_EQ(snapshots[0].read_bandwidth_bytes_per_sec, 16384);
+    EXPECT_EQ(snapshots[0].write_bandwidth_bytes_per_sec, 0);
+    EXPECT_EQ(snapshots[1].pool_name, "second_disk");
+    EXPECT_EQ(snapshots[1].read_bytes, 0);
+    EXPECT_EQ(snapshots[1].write_bytes, 4096);
+    EXPECT_EQ(snapshots[1].read_bandwidth_bytes_per_sec, 0);
+    EXPECT_EQ(snapshots[1].write_bandwidth_bytes_per_sec, 8192);
+    EXPECT_EQ(snapshots[2].tier, Tier::HOST);
+    EXPECT_FALSE(snapshots[2].read_bytes.has_value());
+    EXPECT_FALSE(snapshots[2].write_bytes.has_value());
+    EXPECT_FALSE(snapshots[2].read_bandwidth_bytes_per_sec.has_value());
+    EXPECT_FALSE(snapshots[2].write_bandwidth_bytes_per_sec.has_value());
+}
+
+TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        RtpLLMCachePoolMetricsCollector collector;
+        if (tier == Tier::DISK) {
+            collector.read_bytes                    = 24576;
+            collector.write_bytes                   = 8192;
+            collector.read_bandwidth_bytes_per_sec  = 8192;
+            collector.write_bandwidth_bytes_per_sec = 4096;
+        }
+        kmonitor::MetricsTags tags("pool_name", tierName(tier));
+        tags.AddTag("tier", tierName(tier));
+        ASSERT_TRUE(
+            (metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    }
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(metrics->total_blocks_metric), 3u);
+    EXPECT_EQ(metricSeriesCount(metrics->read_bytes_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->write_bytes_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->read_bandwidth_bytes_per_sec_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->write_bandwidth_bytes_per_sec_metric), 1u);
+    kmonitor::MetricsTags tags("pool_name", "DISK");
+    tags.AddTag("tier", "DISK");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, tags), 24576);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 4096);
+
+    RtpLLMCachePoolMetricsCollector idle_collector;
+    idle_collector.read_bytes                    = 24576;
+    idle_collector.write_bytes                   = 8192;
+    idle_collector.read_bandwidth_bytes_per_sec  = 0;
+    idle_collector.write_bandwidth_bytes_per_sec = 0;
+    ASSERT_TRUE(
+        (metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &idle_collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bytes_metric, tags), 24576);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, tags), 8192);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
 }
 
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {

@@ -57,8 +57,8 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 
     auto init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {
-        const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-        init_result.block_aligned_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
+        const CacheKeysType& cache_keys = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+        init_result.device_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
     }
     if (!init_result.success) {
         return finalize_init_failure(init_result);
@@ -75,10 +75,10 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
             }
             pending_async_context.reset();
             load_context.reset();
-            incr_result.match_cost_time_us         = init_result.match_cost_time_us;
-            incr_result.match_end_time_us          = init_result.match_end_time_us;
-            incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
-            incr_result.load_attempted             = init_result.load_attempted;
+            incr_result.match_cost_time_us  = init_result.match_cost_time_us;
+            incr_result.match_end_time_us   = init_result.match_end_time_us;
+            incr_result.device_input_length = init_result.device_input_length;
+            incr_result.load_attempted      = init_result.load_attempted;
             return finalize_init_failure(std::move(incr_result));
         }
         if (pending_async_context != nullptr) {
@@ -563,10 +563,10 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
         snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
-        snapshot.used_ratio =
-            snapshot.total_blocks == 0 ?
-                0.0f :
-                static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+        snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
+                                                  0.0f :
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                     / static_cast<double>(snapshot.total_blocks));
         snapshots.push_back(std::move(snapshot));
     }
     return snapshots;

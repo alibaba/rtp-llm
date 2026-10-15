@@ -543,21 +543,26 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(block_size_bytes_metric, "rtp_llm_kv_cache_pool_block_size_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_pool_free_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(used_blocks_metric, "rtp_llm_kv_cache_pool_used_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(available_blocks_metric, "rtp_llm_kv_cache_pool_available_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(active_blocks_metric, "rtp_llm_kv_cache_pool_active_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(total_blocks_metric, "rtp_llm_kv_cache_pool_total_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(reserve_blocks_metric, "rtp_llm_kv_cache_pool_reserve_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(request_ref_blocks_metric, "rtp_llm_kv_cache_pool_request_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_pool_block_cache_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_pool_load_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric,
-                                  "rtp_llm_kv_cache_pool_eviction_target_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_pool_eviction_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_pool_store_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_pool_used_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(block_size_bytes_metric, "rtp_llm_kv_cache_block_size_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_free_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(used_blocks_metric, "rtp_llm_kv_cache_used_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(available_blocks_metric, "rtp_llm_kv_cache_available_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(active_blocks_metric, "rtp_llm_kv_cache_active_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_blocks_metric, "rtp_llm_kv_cache_total_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(reserve_blocks_metric, "rtp_llm_kv_cache_reserve_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(request_ref_blocks_metric, "rtp_llm_kv_cache_request_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_block_cache_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_load_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric, "rtp_llm_kv_cache_eviction_target_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_store_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(write_bytes_metric, "rtp_llm_kv_cache_disk_cache_write_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(read_bandwidth_bytes_per_sec_metric,
+                                  "rtp_llm_kv_cache_disk_cache_read_bandwidth_bytes_per_sec");
+    REGISTER_GAUGE_MUTABLE_METRIC(write_bandwidth_bytes_per_sec_metric,
+                                  "rtp_llm_kv_cache_disk_cache_write_bandwidth_bytes_per_sec");
     return true;
 }
 
@@ -578,6 +583,18 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     }
     REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
+    if (collector->read_bytes.has_value()) {
+        REPORT_MUTABLE_METRIC(read_bytes_metric, *collector->read_bytes);
+    }
+    if (collector->write_bytes.has_value()) {
+        REPORT_MUTABLE_METRIC(write_bytes_metric, *collector->write_bytes);
+    }
+    if (collector->read_bandwidth_bytes_per_sec.has_value()) {
+        REPORT_MUTABLE_METRIC(read_bandwidth_bytes_per_sec_metric, *collector->read_bandwidth_bytes_per_sec);
+    }
+    if (collector->write_bandwidth_bytes_per_sec.has_value()) {
+        REPORT_MUTABLE_METRIC(write_bandwidth_bytes_per_sec_metric, *collector->write_bandwidth_bytes_per_sec);
+    }
 }
 
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -793,21 +810,17 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(block_aligned_input_length_metric, "rtp_llm_kv_cache_block_aligned_input_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(device_input_length_metric, "rtp_llm_device_input_length");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length_metric, "rtp_llm_kv_cache_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(device_reuse_length_metric, "rtp_llm_kv_cache_device_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(host_reuse_length_metric, "rtp_llm_kv_cache_host_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(disk_reuse_length_metric, "rtp_llm_kv_cache_disk_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(remote_reuse_length_metric, "rtp_llm_kv_cache_remote_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_hit_rate_metric, "rtp_llm_kv_cache_hit_rate");
-    REGISTER_GAUGE_MUTABLE_METRIC(device_hit_rate_metric, "rtp_llm_kv_cache_device_hit_rate");
-    REGISTER_GAUGE_MUTABLE_METRIC(host_hit_rate_metric, "rtp_llm_kv_cache_host_hit_rate");
-    REGISTER_GAUGE_MUTABLE_METRIC(disk_hit_rate_metric, "rtp_llm_kv_cache_disk_hit_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_device_reuse_length_metric, "rtp_llm_stream_cache_device_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_memory_reuse_length_metric, "rtp_llm_stream_cache_memory_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_disk_reuse_length_metric, "rtp_llm_stream_cache_disk_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_remote_reuse_length_metric, "rtp_llm_stream_cache_remote_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(reuse_interval_avg_ms_metric, "rtp_llm_kv_cache_reuse_interval_avg_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(reuse_interval_max_ms_metric, "rtp_llm_kv_cache_reuse_interval_max_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, "rtp_llm_kv_cache_hit_entry_age_avg_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_max_ms_metric, "rtp_llm_kv_cache_hit_entry_age_max_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(match_latency_us_metric, "rtp_llm_kv_cache_match_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us_metric, "rtp_llm_match_cost_time_us");
     REGISTER_QPS_MUTABLE_METRIC(load_qps_metric, "rtp_llm_kv_cache_load_qps");
     REGISTER_QPS_MUTABLE_METRIC(load_fail_qps_metric, "rtp_llm_kv_cache_load_fail_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(load_prepare_latency_us_metric, "rtp_llm_kv_cache_load_prepare_latency_us");
@@ -821,21 +834,15 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
     if (collector->report_reuse_metrics) {
-        REPORT_MUTABLE_METRIC(block_aligned_input_length_metric, collector->block_aligned_input_length);
+        REPORT_MUTABLE_METRIC(device_input_length_metric, collector->device_input_length);
         REPORT_MUTABLE_METRIC(kv_cache_reuse_length_metric, collector->kv_cache_reuse_length);
-        REPORT_MUTABLE_METRIC(device_reuse_length_metric, collector->device_reuse_length);
-        REPORT_MUTABLE_METRIC(host_reuse_length_metric, collector->host_reuse_length);
-        REPORT_MUTABLE_METRIC(disk_reuse_length_metric, collector->disk_reuse_length);
-        REPORT_MUTABLE_METRIC(remote_reuse_length_metric, collector->remote_reuse_length);
-        if (collector->report_match_latency) {
-            REPORT_MUTABLE_METRIC(match_latency_us_metric, collector->match_latency_us);
+        REPORT_MUTABLE_METRIC(stream_cache_device_reuse_length_metric, collector->stream_cache_device_reuse_length);
+        REPORT_MUTABLE_METRIC(stream_cache_memory_reuse_length_metric, collector->stream_cache_memory_reuse_length);
+        REPORT_MUTABLE_METRIC(stream_cache_disk_reuse_length_metric, collector->stream_cache_disk_reuse_length);
+        REPORT_MUTABLE_METRIC(stream_cache_remote_reuse_length_metric, collector->stream_cache_remote_reuse_length);
+        if (collector->report_match_cost_time) {
+            REPORT_MUTABLE_METRIC(match_cost_time_us_metric, collector->match_cost_time_us);
         }
-    }
-    if (collector->report_hit_rates) {
-        REPORT_MUTABLE_METRIC(kv_cache_hit_rate_metric, collector->kv_cache_hit_rate);
-        REPORT_MUTABLE_METRIC(device_hit_rate_metric, collector->device_hit_rate);
-        REPORT_MUTABLE_METRIC(host_hit_rate_metric, collector->host_hit_rate);
-        REPORT_MUTABLE_METRIC(disk_hit_rate_metric, collector->disk_hit_rate);
     }
     if (collector->report_reuse_time_metrics) {
         REPORT_MUTABLE_METRIC(reuse_interval_avg_ms_metric, collector->reuse_interval_avg_ms);

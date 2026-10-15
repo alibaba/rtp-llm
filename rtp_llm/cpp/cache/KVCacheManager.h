@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -22,7 +21,6 @@
 
 namespace rtp_llm {
 
-class RtpLLMCacheReuseMetricsCollector;
 class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
@@ -132,7 +130,6 @@ public:
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void stopMetricsReporter();
-    void recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics);
 
     // CacheStore ownership (set by RemoteRpcServer, read during model forward)
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
@@ -175,7 +172,6 @@ private:
     void                  allocateAndSync();
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
-    bool collectCacheHitRates(std::chrono::steady_clock::time_point now, RtpLLMCacheReuseMetricsCollector& metrics);
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
@@ -197,14 +193,6 @@ private:
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
-
-    std::mutex                            cache_hit_mutex_;
-    std::chrono::steady_clock::time_point cache_hit_window_start_  = std::chrono::steady_clock::now();
-    int64_t                               cache_hit_input_tokens_  = 0;
-    int64_t                               cache_hit_reuse_tokens_  = 0;
-    int64_t                               cache_hit_device_tokens_ = 0;
-    int64_t                               cache_hit_host_tokens_   = 0;
-    int64_t                               cache_hit_disk_tokens_   = 0;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
