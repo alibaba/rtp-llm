@@ -10,6 +10,8 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <thread>
+#include <functional>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -42,6 +44,10 @@ struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
+    grpc::StatusCode                      grpc_code{grpc::StatusCode::OK};
+    RemoteTransferStatusPB                transfer_status{REMOTE_TRANSFER_STATUS_SUCCESS};
+    bool                                  omit_response{false};
+    std::function<void()>                 worker_action;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -59,11 +65,21 @@ public:
             std::lock_guard<std::mutex> lock(state_->mutex);
             state_->requests.push_back(remote_request);
         }
+        if (state_->worker_action) {
+            state_->worker_action();
+        }
+        if (state_->grpc_code != grpc::StatusCode::OK) {
+            return grpc::Status(state_->grpc_code, "injected KVCM status");
+        }
         if (state_->fail) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
         }
+        if (state_->omit_response) {
+            return grpc::Status::OK;
+        }
+        auto* remote_response = response->mutable_remote_response();
+        remote_response->set_transfer_status(state_->transfer_status);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
-            auto* remote_response = response->mutable_remote_response();
             for (int index = 0; index < remote_request.uris_size(); ++index) {
                 remote_response->add_actual_uris("actual_rank_" + std::to_string(rank_) + "_" + std::to_string(index));
             }
@@ -114,7 +130,25 @@ snapshotRequests(const std::shared_ptr<KVCMBroadcastState>& state) {
 
 class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
-    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
+    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {
+        ON_CALL(*this, loadKvCachesForTagWithStatus(_, _, _, _))
+            .WillByDefault(Invoke([this](const std::string&                                          tag,
+                                         const kv_cache_manager::UriStrVec&                          uris,
+                                         kv_cache_manager::BlockBuffers&                             buffers,
+                                         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+                return loadKvCachesForTag(tag, uris, buffers, trace) ? kv_cache_manager::ER_OK :
+                                                                       kv_cache_manager::ER_SDKREAD_ERROR;
+            }));
+        ON_CALL(*this, saveKvCachesForTagWithStatus(_, _, _, _))
+            .WillByDefault(Invoke([this](const std::string&                                          tag,
+                                         const kv_cache_manager::UriStrVec&                          uris,
+                                         const kv_cache_manager::BlockBuffers&                       buffers,
+                                         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+                auto result = saveKvCachesForTag(tag, uris, buffers, trace);
+                return std::make_pair(result.first ? kv_cache_manager::ER_OK : kv_cache_manager::ER_SDKWRITE_ERROR,
+                                      std::move(result.second));
+            }));
+    }
 
     MOCK_METHOD(bool,
                 initForPools,
@@ -159,6 +193,20 @@ public:
                 (override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::UriStrVec>),
                 saveKvCachesForTag,
+                (const std::string&,
+                 const kv_cache_manager::UriStrVec&,
+                 const kv_cache_manager::BlockBuffers&,
+                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
+                (override));
+    MOCK_METHOD(kv_cache_manager::ClientErrorCode,
+                loadKvCachesForTagWithStatus,
+                (const std::string&,
+                 const kv_cache_manager::UriStrVec&,
+                 kv_cache_manager::BlockBuffers&,
+                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
+                (override));
+    MOCK_METHOD((std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>),
+                saveKvCachesForTagWithStatus,
                 (const std::string&,
                  const kv_cache_manager::UriStrVec&,
                  const kv_cache_manager::BlockBuffers&,
@@ -350,9 +398,12 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
 [[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
                                            const ParallelismConfig&                  parallelism_config,
                                            const std::shared_ptr<MockClientWrapper>& client_wrapper,
-                                           std::shared_ptr<BroadcastManager>         broadcast_manager = nullptr) {
+                                           std::shared_ptr<BroadcastManager>         broadcast_manager   = nullptr,
+                                           int                                       transfer_timeout_ms = 1000) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.kvcm_server_address = "unused-test-address";
+    kv_cache_config.kvcm_get_broadcast_timeout = transfer_timeout_ms;
+    kv_cache_config.kvcm_put_broadcast_timeout = transfer_timeout_ms;
     RuntimeConfig runtime_config;
     runtime_config.model_name = "kvcm_test_model";
     return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
@@ -430,7 +481,8 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
 read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
     auto promise = std::make_shared<std::promise<bool>>();
     auto future  = promise->get_future();
-    backend.read(std::move(request), std::move(match_meta), [promise](bool success) { promise->set_value(success); });
+    backend.read(
+        std::move(request), std::move(match_meta), [promise](ErrorInfo error) { promise->set_value(error.ok()); });
     return await(future);
 }
 

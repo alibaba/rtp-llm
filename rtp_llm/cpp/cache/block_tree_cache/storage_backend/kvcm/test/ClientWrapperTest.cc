@@ -213,6 +213,53 @@ TEST(ClientWrapperTest, TagRoutingUsesRegistrationOrderAndFailedInitPublishesNoR
     }
 }
 
+TEST(ClientWrapperTest, TransferStatusPreservesSdkCodesAndLegacyWrappers) {
+    std::array<char, 32>                  data{};
+    kv_cache_manager::RegistSpan          registration{data.data(), data.size()};
+    InitObservation                       observation;
+    auto                                  destroyed = std::make_shared<int>(0);
+    kv_cache_manager::MockTransferClient* transfer  = nullptr;
+    auto wrapper = initializeClient(false, "direct", registration, observation, destroyed, nullptr, nullptr, &transfer);
+    ASSERT_NE(wrapper, nullptr);
+    ASSERT_NE(transfer, nullptr);
+    const kv_cache_manager::UriStrVec uris{"requested_uri"};
+    const kv_cache_manager::UriStrVec actual{"actual_uri"};
+    kv_cache_manager::BlockBuffers    buffers;
+    auto                              trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    for (const auto code : {kv_cache_manager::ClientErrorCode::ER_OK,
+                            kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS,
+                            kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        EXPECT_CALL(*transfer, LoadKvCaches(uris, _, trace)).Times(2).WillRepeatedly(Return(code));
+        EXPECT_CALL(*transfer, SaveKvCaches(uris, _, trace))
+            .Times(2)
+            .WillRepeatedly(Return(std::make_pair(code, actual)));
+
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, trace), code);
+        EXPECT_EQ(wrapper->loadKvCachesForTag("default", uris, buffers, trace),
+                  code == kv_cache_manager::ClientErrorCode::ER_OK);
+        const auto status = wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, trace);
+        EXPECT_EQ(status.first, code);
+        EXPECT_EQ(status.second, actual);
+        const auto legacy = wrapper->saveKvCachesForTag("default", uris, buffers, trace);
+        EXPECT_EQ(legacy.first, code == kv_cache_manager::ClientErrorCode::ER_OK);
+        EXPECT_EQ(legacy.second,
+                  code == kv_cache_manager::ClientErrorCode::ER_OK ? actual : kv_cache_manager::UriStrVec{});
+    }
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers),
+              kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    const auto missing = wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers);
+    EXPECT_EQ(missing.first, kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    EXPECT_TRUE(missing.second.empty());
+    wrapper->shutdown();
+    EXPECT_EQ(*destroyed, 1);
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers),
+              kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    const auto stopped = wrapper->saveKvCachesForTagWithStatus("default", uris, buffers);
+    EXPECT_EQ(stopped.first, kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    EXPECT_TRUE(stopped.second.empty());
+}
+
 TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
     auto                         valid      = makeConfig(false, "endpoint");
     auto                         serialized = autil::legacy::ToJsonString(valid);
