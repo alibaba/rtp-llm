@@ -209,7 +209,6 @@ cc_test(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
-        "//rtp_llm/cpp/normal_engine",
         "@havenask//aios/autil:net",
     ],
     env = {
@@ -229,7 +228,6 @@ cc_test(
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
-        "//rtp_llm/cpp/normal_engine",
         "@havenask//aios/autil:net",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
