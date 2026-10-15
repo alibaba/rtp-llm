@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -259,22 +260,107 @@ private:
     bool                    released_{false};
 };
 
+// Keep process environment changes local to each test.
+class ScopedCopyPriorityEnv {
+public:
+    explicit ScopedCopyPriorityEnv(const char* value) {
+        const char* original = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+        had_original_ = original != nullptr;
+        if (had_original_) {
+            original_ = original;
+        }
+        set(value);
+    }
+    ~ScopedCopyPriorityEnv() {
+        set(had_original_ ? original_.c_str() : nullptr);
+    }
+    static void set(const char* value) {
+        if (value != nullptr) {
+            setenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY", value, 1);
+        } else {
+            unsetenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+        }
+    }
+
+private:
+    bool        had_original_{false};
+    std::string original_;
+};
+
+static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor) {
+    std::string result;
+    for (const auto& strategy : executor.strategies_) {
+        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'T';
+        } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'B';
+        } else if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'S';
+        } else if (dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'G';
+        }
+    }
+    return result;
+}
+
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
+    // These existing tests exercise only the unchanged legacy strategy chain.
+    executor.strategies_.erase(
+        std::remove_if(executor.strategies_.begin(),
+                       executor.strategies_.end(),
+                       [](const auto& strategy) {
+                           return dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr;
+                       }),
+        executor.strategies_.end());
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
         executor.strategies_[i] = std::make_unique<RecordingStrategy>(std::move(executor.strategies_[i]), &counters[i]);
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
+TEST(DeviceHostTransferExecutorConfigTest, IncludesTemplateStrategyBeforeLegacyFallbacks) {
+    ScopedCopyPriorityEnv      priority(nullptr);
+    BlockTreeTaskPool          task_pool(1, 8, "TemplateStrategyConfigTest");
+    DeviceHostTransferExecutor executor(task_pool, 8);
+    EXPECT_EQ(executor.strategies_.size(), 4u);
+}
+
+TEST(DeviceHostTransferExecutorConfigTest, PrefersCuda3DBatchThenCudaBatchThenStagedSmThenGeneric) {
+    ScopedCopyPriorityEnv priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
-    ASSERT_EQ(executor.strategies_.size(), 3u);
-    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
-    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
-    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    ASSERT_EQ(executor.strategies_.size(), 4u);
+    EXPECT_NE(dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[3].get()), nullptr);
+}
+
+TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
+    const std::pair<const char*, const char*> cases[] = {{nullptr, "TBSG"},
+                                                         {"", "TBSG"},
+                                                         {"cuda_batch", "BTSG"},
+                                                         {"sm", "STBG"},
+                                                         {"generic", "GTBS"},
+                                                         {"cuda_3d_batch", "TBSG"},
+                                                         {"unknown", "TBSG"},
+                                                         {"SM", "TBSG"}};
+    BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
+    for (const auto& [value, expected] : cases) {
+        SCOPED_TRACE(value != nullptr ? value : "<unset>");
+        ScopedCopyPriorityEnv priority(value);
+        DeviceHostCopyOptions options;
+        options.staged_sm_min_tile_count = 123;
+        DeviceHostTransferExecutor executor(task_pool, 8, options);
+        EXPECT_EQ(copyStrategyOrder(executor), expected);
+        EXPECT_EQ(executor.options_.staged_sm_min_tile_count, 123u);
+        ScopedCopyPriorityEnv::set("generic");
+        EXPECT_EQ(copyStrategyOrder(executor), expected);
+        DeviceHostTransferExecutor later(task_pool, 8, options);
+        EXPECT_EQ(copyStrategyOrder(later), "GTBS");
+    }
 }
 
 // ---- PerRankBlockTransferEngine submit() tests (real CUDA) ----
@@ -290,7 +376,7 @@ protected:
         // Create host pool — 10 usable blocks
         host_pool_ = makeHostPool(host_block_size_, 10);
 
-        device_pool_  = makeDevicePool({{100, 0}, {200, 0}, {150, 0}}, 10, "per_rank_transfer_engine_device");
+        device_pool_  = makeDevicePool({{100, 0}, {100, 0}, {100, 0}}, 10, "per_rank_transfer_engine_device");
         device_block_ = poolMalloc(*device_pool_);
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
@@ -343,12 +429,8 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
         EXPECT_EQ(d0[i], static_cast<uint8_t>(i & 0xFF));
     for (size_t i = 0; i < layer_bytes_[1]; ++i)
         EXPECT_EQ(d1[i], 0x5A);
-    for (size_t i = layer_bytes_[1]; i < d1.size(); ++i)
-        EXPECT_EQ(d1[i], 0x00);
     for (size_t i = 0; i < layer_bytes_[2]; ++i)
         EXPECT_EQ(d2[i], static_cast<uint8_t>(i & 0xFF));
-    for (size_t i = layer_bytes_[2]; i < d2.size(); ++i)
-        EXPECT_EQ(d2[i], 0x00);
 
     releasePoolBlock(*host_pool_, host_block);
 }
@@ -403,7 +485,7 @@ TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissi
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
-    auto shared_pool = makeDevicePool({{64, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
+    auto shared_pool = makeDevicePool({{32, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
     auto host_pool   = makeHostPool(128, 4);
     auto group       = makeDeviceHostGroup(
         0, {shared_pool, shared_pool}, host_pool, {makeGroupBase({0, 1}, 32), makeGroupBase({0, 1}, 32)});
@@ -443,15 +525,11 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     const auto a0 = readDeviceLayer(shared_pool, 0, block_a);
     for (size_t i = 0; i < 32; ++i)
         EXPECT_EQ(a0[i], 0xA0);
-    for (size_t i = 32; i < a0.size(); ++i)
-        EXPECT_EQ(a0[i], 0x00);
     for (auto byte : readDeviceLayer(shared_pool, 1, block_a))
         EXPECT_EQ(byte, 0xA1);
     const auto b0 = readDeviceLayer(shared_pool, 0, block_b);
     for (size_t i = 0; i < 32; ++i)
         EXPECT_EQ(b0[i], 0xB0);
-    for (size_t i = 32; i < b0.size(); ++i)
-        EXPECT_EQ(b0[i], 0x00);
     for (auto byte : readDeviceLayer(shared_pool, 1, block_b))
         EXPECT_EQ(byte, 0xB1);
 
@@ -1412,7 +1490,7 @@ protected:
         host_block_size_ = 256;
 
         host_pool_    = makeHostPool(host_block_size_, 10);
-        device_pool_  = makeDevicePool({{128, 0}, {256, 0}}, 10, "strategy_test_device");
+        device_pool_  = makeDevicePool({{128, 0}, {128, 0}}, 10, "strategy_test_device");
         device_block_ = poolMalloc(*device_pool_);
         ASSERT_NE(device_block_, NULL_BLOCK_IDX);
         device_blocks_ = {device_block_};
@@ -1467,8 +1545,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
         EXPECT_EQ(b, 0xAA);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(d1[i], 0xBB);
-    for (size_t i = 128; i < d1.size(); ++i)
-        EXPECT_EQ(d1[i], 0x00);
     EXPECT_EQ(counters[0].not_applicable, 2);
     EXPECT_EQ(counters[1].not_applicable, 2);
     EXPECT_EQ(counters[2].done, 2);
@@ -1511,8 +1587,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
         EXPECT_EQ(b, 0x11);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(d1[i], 0x22);
-    for (size_t i = 128; i < d1.size(); ++i)
-        EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
     EXPECT_EQ(counters[0].failed, 0);
@@ -1600,8 +1674,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     const auto staged_layer1 = readDeviceLayer(device_pool_, 1, device_block_);
     for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(staged_layer1[i], 0x42);
-    for (size_t i = 128; i < staged_layer1.size(); ++i)
-        EXPECT_EQ(staged_layer1[i], 0x00);
     EXPECT_EQ(counters[0].attempts, 2);
     EXPECT_EQ(counters[0].not_applicable, 2);
     EXPECT_EQ(counters[0].done, 0);

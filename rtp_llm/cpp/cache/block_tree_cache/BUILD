@@ -75,6 +75,7 @@ cc_library(
         "transfer/TransferExecutor.cc",
         "transfer/TransferBatchAsyncContext.cc",
         "transfer/DeviceHostCopyStrategy.cc",
+        "transfer/Cuda3DBatchDeviceHostCopyStrategy.cc",
         "transfer/DeviceHostTransferExecutor.cc",
         "transfer/HostDiskTransferExecutor.cc",
         "transfer/DeviceDiskTransferExecutor.cc",

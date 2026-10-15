@@ -85,6 +85,10 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
 
+    const std::vector<MemoryLayoutConfig>& memoryLayouts() const {
+        return config().memory_layouts;
+    }
+
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
