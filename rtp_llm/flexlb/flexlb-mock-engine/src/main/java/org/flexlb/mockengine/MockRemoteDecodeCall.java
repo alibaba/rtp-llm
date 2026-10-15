@@ -19,6 +19,7 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
         boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> outputs);
         void cancel();
         void completed();
+        default void completePrefill() { cancel(); }
     }
 
     private enum Stage { ALLOCATE, LOAD, GENERATE, RUNNING, CLOSED }
@@ -30,6 +31,7 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
     private Stage stage = Stage.ALLOCATE;
     private Lease lease;
     private long requestId;
+    private String clientId;
 
     MockRemoteDecodeCall(Backend backend, StreamObserver<EngineRpcService.GenerateOutputsPB> response,
                          Executor executor) {
@@ -53,6 +55,7 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
                     throw Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE identity").asRuntimeException();
                 }
                 requestId = request.getRequestId();
+                clientId = request.getClientId();
                 lease = backend.allocate(request.getInput(), request.getClientId(),
                         () -> executor.execute(() -> engineStopped()));
                 if (lease == null) {
@@ -60,7 +63,7 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
                             .asRuntimeException();
                 }
                 stage = Stage.LOAD;
-                response.onNext(EngineRpcService.GenerateOutputsPB.getDefaultInstance());
+                response.onNext(EngineRpcService.GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build());
             } else if (request.getRequestId() != requestId) {
                 throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed")
                         .asRuntimeException();
@@ -69,6 +72,12 @@ final class MockRemoteDecodeCall implements StreamObserver<EngineRpcService.Gene
                 // are real; no GPU/RDMA transfer performance is claimed here.
                 stage = Stage.GENERATE;
                 response.onNext(EngineRpcService.GenerateOutputsPB.getDefaultInstance());
+            } else if (stage == Stage.GENERATE && request.getStage() == EngineRpcService.RemoteStage.PREFILL_COMPLETE) {
+                if (!clientId.equals(request.getClientId()))
+                    throw Status.INVALID_ARGUMENT.withDescription("Prefill completion identity mismatch").asRuntimeException();
+                lease.completePrefill();
+                stage = Stage.CLOSED;
+                response.onCompleted();
             } else if (stage == Stage.GENERATE && request.getStage() == EngineRpcService.RemoteStage.GENERATE) {
                 stage = Stage.RUNNING;
                 if (!lease.start(new LinkedBlockingQueue<>() {

@@ -313,41 +313,29 @@ class MockMemoryBlockCacheTest {
         assertEquals(3, c.availableBlocks());
     }
 
-    @Test void nativePrefillCompletionHonorsDeviceAndMemoryWriteFlags() throws Exception {
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10}");
-        m.nativeTokenCacheKeys = true;
-        try (var cluster = MockEngineTestCluster.create(m, 61060, 1, 0)) {
-            var p = cluster.prefill(0);
-            var gpu = (MockLruBlockCache) field(p, "cache");
-            var mem = (MockMemoryBlockCache) field(p, "memoryCache");
-            for (int mode = 0; mode < 4; mode++) {
-                gpu.clear(); mem.clear();
-                var cfg = EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1);
-                // Descriptors preserve compatibility with the pinned master's proto jar.
-                for (String name : List.of("reuse_cache", "enable_device_cache", "enable_memory_cache")) {
-                    boolean enabled = name.equals("reuse_cache") ? mode != 0
-                            : name.equals("enable_device_cache") ? mode == 1 || mode == 3 : mode >= 2;
-                    cfg.setField(cfg.getDescriptorForType().findFieldByName(name), enabled);
-                }
+    @Test void nativePrefillUsesDeploymentTiersAndRequestReuseSwitch() throws Exception {
+        for (int mode = 0; mode < 4; mode++) {
+            boolean device = mode == 1 || mode == 3;
+            boolean memory = mode >= 2;
+            var m = model("{\"enabled\":" + memory + ",\"capacity_blocks\":10}");
+            m.nativeTokenCacheKeys = true;
+            m.prefillDeviceCache = device;
+            try (var cluster = MockEngineTestCluster.create(m, 61060, 1, 0)) {
+                var p = cluster.prefill(0);
+                var gpu = (MockLruBlockCache) field(p, "cache");
+                var mem = (MockMemoryBlockCache) field(p, "memoryCache");
+                // Wire tier flags deliberately contradict deployment policy.
+                var cfg = EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
+                        .setReuseCache(mode != 0).setEnableDeviceCache(!device).setEnableMemoryCache(!memory);
                 var input = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(900 + mode)
                         .addAllTokenIds(java.util.Collections.nCopies(128, 19 + mode)).setGenerateConfig(cfg).build();
-                var done = new java.util.concurrent.CountDownLatch(1);
-                var error = new java.util.concurrent.atomic.AtomicReference<Throwable>();
-                p.generateStreamCall(input, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
-                    public void onNext(EngineRpcService.GenerateOutputsPB v) {
-                        if (v.hasErrorInfo()) error.set(new AssertionError(v.getErrorInfo()));
-                    }
-                    public void onError(Throwable t) { error.set(t); done.countDown(); }
-                    public void onCompleted() { done.countDown(); }
-                });
-                assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS));
-                assertNull(error.get());
-                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
-                while (gpu.availableBlocks() != gpu.totalBlocks() && System.nanoTime() < deadline) Thread.sleep(5);
-                assertEquals(gpu.totalBlocks(), gpu.availableBlocks());
-                assertEquals(mode == 1 || mode == 3 ? 2 : 0, gpu.lruKeyBlocks());
-                assertEquals(mode >= 2 ? 2 : 0, mem.size());
-                assertEquals(0, mem.pendingBlocks());
+                var output = new RealBehaviorParityTest.Output();
+                p.generateStreamCall(input, output);
+                assertTrue(output.done.await(3, java.util.concurrent.TimeUnit.SECONDS));
+                assertNull(output.failure);
+                assertEquals(device ? 2 : 0, gpu.lruKeyBlocks());
+                if (memory) { assertEquals(2, mem.size()); assertEquals(0, mem.pendingBlocks()); }
+                else assertNull(mem);
             }
         }
     }

@@ -158,7 +158,7 @@ class StreamCancelAutonomousTest {
         long rid = 7002L;
 
         try (ClientStream stream = ClientStream.generateStream(
-                prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))) {
+                prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort(), 2))) {
             awaitCondition(() -> decode.getActiveDecodeCount() >= 1, 2_000,
                     "decode should run the request after the P->D hand-off");
 
@@ -205,7 +205,7 @@ class StreamCancelAutonomousTest {
         // Fetch stream. NON_BATCH GenerateStream cannot be followed by Fetch.
         var ack = MockEngineTestSupport.enqueue(prefill,
                 MockEngineTestSupport.batch(7003, MockEngineTestSupport.slot(0,
-                        MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))));
+                        MockEngineTestSupport.inputWithDecode(rid, 16, decodePort(), 2))));
         assertEquals(1, ack.getSuccessesCount());
         try (ClientStream fetch = ClientStream.fetchResponse(prefillPort(),
                 EngineRpcService.FetchRequestPB.newBuilder().setRequestId(rid).build())) {
@@ -329,7 +329,7 @@ class StreamCancelAutonomousTest {
         long rid = 7007L;
 
         try (ClientStream stream = ClientStream.generateStream(
-                prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort()))) {
+                prefillPort(), MockEngineTestSupport.inputWithDecode(rid, 16, decodePort(), 2))) {
             assertTrue(stream.closed.await(10, TimeUnit.SECONDS),
                     "healthy stream must complete");
             assertEquals(Status.Code.OK, stream.closeStatus.getCode(),

@@ -80,6 +80,12 @@ final class MockLruBlockCache {
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
+    private long allocationGeneration;
+    synchronized long allocationGeneration() { return allocationGeneration; }
+    synchronized void capacityChanged() { allocationGeneration++; notifyAll(); }
+    synchronized void awaitCapacityChange(long observed, long waitMs) throws InterruptedException {
+        if (allocationGeneration == observed) wait(Math.max(1, waitMs));
+    }
     private java.util.function.DoubleConsumer evictionLifetimeListener = ignored -> {};
 
     synchronized void setEvictionLifetimeListener(java.util.function.DoubleConsumer listener) {
@@ -348,6 +354,7 @@ final class MockLruBlockCache {
         evictChains(blocks.size() + heldBlocks - totalBlocks, "completion");
         long beforeTrim = retentionEvictions;
         trimRetention();
+        capacityChanged();
         return changed || retentionEvictions != beforeTrim;
     }
 
@@ -379,6 +386,7 @@ final class MockLruBlockCache {
             retained.add(key);
         }
         indexSequence(retained);
+        capacityChanged();
         return new BlockLease(retained, naked);
     }
 
@@ -387,6 +395,7 @@ final class MockLruBlockCache {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
         trimRetention();
+        capacityChanged();
     }
 
     /**

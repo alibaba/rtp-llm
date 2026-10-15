@@ -210,7 +210,7 @@ class PrefillFetchLifecycleTest {
                     .build();
             var ack = enqueue(c.prefill(0), batch(9, slot(0, input)));
             assertEquals(0, ack.getSuccessesCount());
-            assertEquals(8211, ack.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
             assertEquals(0, value(c.prefill(0), "prefill_batches"));
             assertEquals(0, c.decode(0).getAcceptedCount());
             released(c);

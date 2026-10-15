@@ -18,9 +18,12 @@ import java.util.function.Consumer;
  * or substitutes a decode engine. Closing the stream cancels its D-side lease.
  */
 final class MockRemoteDecodeStream implements AutoCloseable {
-    private enum Stage { ALLOCATE, ALLOCATED, LOAD, LOADED, GENERATE, CLOSED }
+    private enum Stage { ALLOCATE, ALLOCATED, LOAD, LOADED, GENERATE, PREFILL_COMPLETE, CLOSED }
 
     private final long requestId;
+    private final String clientId;
+    private boolean supportsPrefillCompletion;
+    private final CompletableFuture<Void> settled = new CompletableFuture<>();
     private final Consumer<EngineRpcService.GenerateOutputsPB> output;
     private final Consumer<Throwable> failure;
     private final Runnable completed;
@@ -28,16 +31,15 @@ final class MockRemoteDecodeStream implements AutoCloseable {
     private final CompletableFuture<Void> allocated = new CompletableFuture<>();
     private final CompletableFuture<Void> loaded = new CompletableFuture<>();
     private ClientCallStreamObserver<EngineRpcService.GenerateRequestPB> request;
-    private Stage stage = Stage.ALLOCATE;
+    private volatile Stage stage = Stage.ALLOCATE;
 
     MockRemoteDecodeStream(Channel channel, EngineRpcService.GenerateInputPB input,
                            String clientId, long deadlineMs,
                            Consumer<EngineRpcService.GenerateOutputsPB> output,
                            Consumer<Throwable> failure, Runnable completed) {
-        if (deadlineMs <= 0) {
-            throw new IllegalArgumentException("RemoteGenerate deadline must be positive");
-        }
+        if (deadlineMs < 0) throw new IllegalArgumentException("negative RemoteGenerate deadline");
         this.requestId = input.getRequestId();
+        this.clientId = clientId;
         this.output = output;
         this.failure = failure;
         this.completed = completed;
@@ -46,8 +48,9 @@ final class MockRemoteDecodeStream implements AutoCloseable {
         io.grpc.Context leaseContext = io.grpc.Context.current().fork();
         io.grpc.Context previous = leaseContext.attach();
         try {
-        RpcServiceGrpc.newStub(channel).withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
-                .remoteGenerate(new ClientResponseObserver<EngineRpcService.GenerateRequestPB,
+        var stub = RpcServiceGrpc.newStub(channel);
+        if (deadlineMs > 0 && deadlineMs != Long.MAX_VALUE) stub = stub.withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS);
+        stub.remoteGenerate(new ClientResponseObserver<EngineRpcService.GenerateRequestPB,
                         EngineRpcService.GenerateOutputsPB>() {
                     @Override
                     public void beforeStart(ClientCallStreamObserver<EngineRpcService.GenerateRequestPB> stream) {
@@ -66,7 +69,11 @@ final class MockRemoteDecodeStream implements AutoCloseable {
 
                     @Override
                     public void onCompleted() {
-                        if (!terminal.get()) {
+                        if (stage == Stage.PREFILL_COMPLETE && terminal.compareAndSet(false, true)) {
+                            stage = Stage.CLOSED;
+                            settled.complete(null);
+                            completed.run();
+                        } else if (!terminal.get()) {
                             fail(Status.DATA_LOSS.withDescription(
                                     "RemoteGenerate closed before a terminal output").asRuntimeException());
                         }
@@ -106,6 +113,17 @@ final class MockRemoteDecodeStream implements AutoCloseable {
         // while D runs, just as the real P holds its RemoteGenerate context.
     }
 
+    synchronized CompletableFuture<Void> completePrefill() {
+        if (stage != Stage.LOADED || !supportsPrefillCompletion) {
+            fail(Status.UNIMPLEMENTED.withDescription("PREFILL_COMPLETE not negotiated").asRuntimeException());
+            return settled;
+        }
+        stage = Stage.PREFILL_COMPLETE;
+        request.onNext(EngineRpcService.GenerateRequestPB.newBuilder().setRequestId(requestId)
+                .setClientId(clientId).setStage(EngineRpcService.RemoteStage.PREFILL_COMPLETE).build());
+        return settled;
+    }
+
     private synchronized void receive(EngineRpcService.GenerateOutputsPB value) {
         if (terminal.get()) {
             return;
@@ -116,6 +134,7 @@ final class MockRemoteDecodeStream implements AutoCloseable {
             return;
         }
         if (stage == Stage.ALLOCATE) {
+            supportsPrefillCompletion = value.getSupportsPrefillCompletion();
             stage = Stage.ALLOCATED;
             allocated.complete(null);
         } else if (stage == Stage.LOAD) {
@@ -145,6 +164,7 @@ final class MockRemoteDecodeStream implements AutoCloseable {
             return;
         }
         stage = Stage.CLOSED;
+        settled.completeExceptionally(error);
         allocated.completeExceptionally(error);
         loaded.completeExceptionally(error);
         if (request != null) {
@@ -158,6 +178,7 @@ final class MockRemoteDecodeStream implements AutoCloseable {
         if (terminal.compareAndSet(false, true)) {
             stage = Stage.CLOSED;
             Throwable error = Status.CANCELLED.withDescription("Prefill context closed").asRuntimeException();
+            settled.completeExceptionally(error);
             allocated.completeExceptionally(error);
             loaded.completeExceptionally(error);
             request.cancel("Prefill context closed", error);

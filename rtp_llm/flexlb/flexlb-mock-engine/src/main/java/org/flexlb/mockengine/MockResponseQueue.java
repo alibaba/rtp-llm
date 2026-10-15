@@ -6,6 +6,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 /** One client stream: after its terminal frame, late producers cannot write again. */
 final class MockResponseQueue extends LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> {
+    private final Runnable onTerminal;
+    MockResponseQueue() { this(() -> {}); }
+    MockResponseQueue(Runnable onTerminal) { this.onTerminal = onTerminal; }
     private boolean terminal;
     private long terminalNanos;
 
@@ -14,17 +17,18 @@ final class MockResponseQueue extends LinkedBlockingQueue<EngineRpcService.Gener
     }
 
     @Override
-    public synchronized boolean offer(EngineRpcService.GenerateOutputsPB output) {
-        if (terminal) {
-            return false;
+    public boolean offer(EngineRpcService.GenerateOutputsPB output) {
+        boolean finishes;
+        synchronized (this) {
+            if (terminal) return false;
+            finishes = output.hasErrorInfo() || output.getFlattenOutput().getFinishedList().contains(true);
+            if (!super.offer(output)) return false;
+            if (finishes) {
+                terminal = true;
+                terminalNanos = System.nanoTime();
+            }
         }
-        boolean finishes = output.hasErrorInfo()
-                || output.getFlattenOutput().getFinishedList().contains(true);
-        boolean accepted = super.offer(output);
-        if (accepted && finishes) {
-            terminal = true;
-            terminalNanos = System.nanoTime();
-        }
-        return accepted;
+        if (finishes) onTerminal.run();
+        return true;
     }
 }

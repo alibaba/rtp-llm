@@ -219,11 +219,14 @@ class MockRpcExecutorsTest {
             assertTrue(service.entered.await(2, TimeUnit.SECONDS));
             endpoint.channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             endpoint.server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            endpoint.engine.stop();
+            assertThrows(IllegalStateException.class, () -> endpoint.engine.awaitStopped(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(30)));
             long begin = System.nanoTime();
             assertThrows(IllegalStateException.class, pools::close);
             assertTrue(System.nanoTime() - begin < TimeUnit.SECONDS.toNanos(8));
             service.release.countDown();
             assertTrue(exited.await(2, TimeUnit.SECONDS));
+            endpoint.engine.awaitStopped(System.nanoTime() + TimeUnit.SECONDS.toNanos(2));
             pools.close(); pools.close();
         } finally { service.release.countDown(); pools.close(); }
     }
