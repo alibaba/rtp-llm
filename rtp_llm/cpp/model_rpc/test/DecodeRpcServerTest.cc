@@ -272,11 +272,11 @@ TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAn
         decode.cancelCleanupTick();
         EXPECT_EQ(prefill.calls, 1);
         EXPECT_EQ(prefill.request_id, 203);
-        EXPECT_EQ(prefill.cancel_error_code, code);
+        EXPECT_EQ(prefill.cancel_error_code, static_cast<int64_t>(code));
         EXPECT_TRUE(handle->terminal.load());
         const auto finished = decode.meta_->getEngineScheduleInfo(0);
         ASSERT_EQ(finished.finished_task_info_list.size(), 1);
-        EXPECT_EQ(finished.finished_task_info_list.front().error_code, code);
+        EXPECT_EQ(finished.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
         GenerateInputPB late;
         late.set_request_id(203);
         PDCancelRegistry::Handle late_handle;
