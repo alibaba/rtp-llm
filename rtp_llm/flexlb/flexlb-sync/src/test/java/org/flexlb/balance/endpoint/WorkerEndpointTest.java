@@ -239,7 +239,7 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(resp));
+                    status.freezeStatusResponse(resp), null);
         } finally {
             status.lock.unlock();
         }
@@ -252,7 +252,7 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(true);
+            status.recordSuccessfulPoll(true, null);
         } finally {
             status.lock.unlock();
         }
@@ -295,7 +295,7 @@ class WorkerEndpointTest {
         newStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = newStatus.prepareNewStatus(
-                    newStatus.freezeStatusResponse(resp));
+                    newStatus.freezeStatusResponse(resp), null);
             assertThrows(IllegalArgumentException.class,
                     () -> endpoint.applyPreparedStatus(newStatus, prepared));
         } finally {

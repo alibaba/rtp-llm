@@ -99,7 +99,7 @@ class PdfusionSchedulingTest {
         worker.lock.lock();
         try {
             endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                    worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
         } finally {
             worker.lock.unlock();
         }
@@ -140,7 +140,7 @@ class PdfusionSchedulingTest {
             worker.lock.lock();
             try {
                 projection = endpoint.applyPreparedStatus(worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                        worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
             } finally {
                 worker.lock.unlock();
             }

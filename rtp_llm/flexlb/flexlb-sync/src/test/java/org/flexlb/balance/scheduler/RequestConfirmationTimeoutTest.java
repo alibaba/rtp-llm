@@ -65,7 +65,7 @@ class RequestConfirmationTimeoutTest {
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(prefillWorker.getIpPort(),
                         prefillWorker, prefillWorker.prepareNewStatus(
-                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL)))).endpoint();
+                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL)), null)).endpoint();
             } finally {
                 prefillWorker.lock.unlock();
             }
@@ -197,7 +197,7 @@ class RequestConfirmationTimeoutTest {
         worker.lock.lock();
         try {
             projection = endpoint.applyPreparedStatus(worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                    worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
         } finally {
             worker.lock.unlock();
         }

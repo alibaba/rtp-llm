@@ -1024,7 +1024,8 @@ class FlexlbServiceImplTest {
             assertEquals((long) StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     span.getAttributes().get(
                             io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
-            assertTrue(span.getEvents().isEmpty());
+            assertEquals(1, span.getEvents().size());
+            assertEquals("flexlb.schedule.failed", span.getEvents().getFirst().getName());
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
@@ -1054,7 +1055,8 @@ class FlexlbServiceImplTest {
                     io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
             assertEquals((long) StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), data.getAttributes().get(
                     io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
-            assertTrue(data.getEvents().isEmpty());
+            assertEquals(1, data.getEvents().size());
+            assertEquals("flexlb.schedule.failed", data.getEvents().getFirst().getName());
             verify(routeService, never()).route(any());
         }
     }

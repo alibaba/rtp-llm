@@ -86,7 +86,7 @@ class WorkerBatcherStatusSnapshotTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(status.prepareNewStatus(
-                    status.freezeStatusResponse(response)));
+                    status.freezeStatusResponse(response), null));
         } finally {
             status.lock.unlock();
         }

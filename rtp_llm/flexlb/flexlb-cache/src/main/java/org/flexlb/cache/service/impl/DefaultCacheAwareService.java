@@ -6,6 +6,7 @@ import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -80,7 +81,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
-    public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
+    public WorkerCacheUpdateResult updateEngineBlockCache(
+            WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         String engineIpPort = workerStatus.getIpPort();
         String role = workerStatus.getRole().getCode();
@@ -103,7 +105,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
 
             // Update cache
-            kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
+            kvCacheManager.updateEngineCache(ipPort, role, cachedKeys, pollTrace);
 
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
 
@@ -123,8 +125,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
-    public void removeEngineBlockCache(String engineIpPort) {
-        kvCacheManager.removeEngineCache(engineIpPort);
+    public void removeEngineBlockCache(
+            String engineIpPort, EndpointTrace trace) {
+        kvCacheManager.removeEngineCache(engineIpPort, trace);
     }
 
     /**

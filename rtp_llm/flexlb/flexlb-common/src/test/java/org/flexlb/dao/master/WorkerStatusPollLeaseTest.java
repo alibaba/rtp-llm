@@ -15,27 +15,27 @@ class WorkerStatusPollLeaseTest {
     @Test
     void staleCloseCannotReleaseTheNextStatusPoll() {
         WorkerStatus status = workerStatus();
-        WorkerStatus.PollLease first = status.tryBeginStatusPoll();
+        WorkerStatus.PollLease first = status.tryBeginStatusPoll(1L);
         assertNotNull(first);
         first.close();
 
-        WorkerStatus.PollLease second = status.tryBeginStatusPoll();
+        WorkerStatus.PollLease second = status.tryBeginStatusPoll(1L);
         assertNotNull(second);
         first.close();
 
-        assertNull(status.tryBeginStatusPoll());
+        assertNull(status.tryBeginStatusPoll(1L));
         second.close();
-        assertNotNull(status.tryBeginStatusPoll());
+        assertNotNull(status.tryBeginStatusPoll(1L));
     }
 
     @Test
     void statusAndCacheLeasesAreIndependent() {
         WorkerStatus status = workerStatus();
 
-        assertNotNull(status.tryBeginStatusPoll());
-        assertNotNull(status.tryBeginCachePoll());
-        assertNull(status.tryBeginStatusPoll());
-        assertNull(status.tryBeginCachePoll());
+        assertNotNull(status.tryBeginStatusPoll(1L));
+        assertNotNull(status.tryBeginCachePoll(1L));
+        assertNull(status.tryBeginStatusPoll(1L));
+        assertNull(status.tryBeginCachePoll(1L));
     }
 
     @Test

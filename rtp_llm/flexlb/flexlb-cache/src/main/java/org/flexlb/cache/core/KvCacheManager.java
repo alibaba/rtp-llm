@@ -3,6 +3,7 @@ package org.flexlb.cache.core;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -75,7 +76,8 @@ public class KvCacheManager {
      * @param role           Engine role
      * @param newCacheBlocks New cache block set (blockCacheKeys)
      */
-    public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
+    public void updateEngineCache(
+            String engineIPort, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
         if (engineIPort == null || newCacheBlocks == null) {
             return;
         }
@@ -93,7 +95,7 @@ public class KvCacheManager {
                 // Update local view
                 engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
                 // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
+                globalCacheIndex.addCacheBlock(addedBlock, engineIPort, pollTrace);
             }
         }
 
@@ -102,7 +104,7 @@ public class KvCacheManager {
             // Remove from local view
             engineLocalView.removeCacheBlock(engineIPort, removedBlock);
             // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
+            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock, pollTrace);
         }
 
         // Report metrics
@@ -113,12 +115,12 @@ public class KvCacheManager {
     }
 
     /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) {
+    public void removeEngineCache(String engineIpPort, EndpointTrace trace) {
         if (engineIpPort == null) {
             return;
         }
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, trace);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());

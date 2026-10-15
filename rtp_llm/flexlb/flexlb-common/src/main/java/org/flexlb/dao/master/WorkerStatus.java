@@ -1,6 +1,7 @@
 package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -41,6 +42,13 @@ public class WorkerStatus {
     public final transient ReentrantLock lock = new ReentrantLock();
 
     private final long generationId = NEXT_GENERATION_ID.incrementAndGet();
+
+    private final EndpointTrace trace = new EndpointTrace();
+
+    @JsonIgnore
+    public EndpointTrace trace() {
+        return trace;
+    }
 
     /** Set under {@link #lock}; read lock-free by poll gates. */
     private volatile boolean retiring;
@@ -240,14 +248,17 @@ public class WorkerStatus {
         private final CommittedWorkerStatus baseCommitted;
         private final StatusObservation observation;
         private final CommittedWorkerStatus nextCommitted;
+        private final EndpointTrace.Poll pollTrace;
 
         private PreparedStatus(
                 CommittedWorkerStatus baseCommitted,
                 StatusObservation observation,
-                CommittedWorkerStatus nextCommitted) {
+                CommittedWorkerStatus nextCommitted,
+                EndpointTrace.Poll pollTrace) {
             this.baseCommitted = baseCommitted;
             this.observation = observation;
             this.nextCommitted = nextCommitted;
+            this.pollTrace = pollTrace;
         }
 
         public StatusObservation observation() {
@@ -285,19 +296,27 @@ public class WorkerStatus {
         private final WorkerStatus owner;
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
+        private final EndpointTrace.Poll pollTrace;
 
         private PollLease(
                 WorkerStatus owner,
                 PollKind kind,
-                AtomicReference<PollLease> slot) {
+                AtomicReference<PollLease> slot, long syncCycleId) {
             this.owner = owner;
             this.kind = kind;
             this.slot = slot;
+            this.pollTrace = owner.trace.beginPoll(kind.name(), syncCycleId);
+        }
+
+        public EndpointTrace.Poll pollTrace() {
+            return pollTrace;
         }
 
         @Override
         public void close() {
-            slot.compareAndSet(this, null);
+            if (slot.compareAndSet(this, null)) {
+                pollTrace.record(Stage.LEASE_RELEASED);
+            }
         }
     }
 
@@ -419,8 +438,8 @@ public class WorkerStatus {
                         ? Map.of() : Map.copyOf(finishedTasks));
     }
 
-    /** Bind a strictly newer frozen observation to the current commit holder. */
-    public PreparedStatus prepareNewStatus(StatusObservation observation) {
+    /** Carry poll correlation through the role reducer to the actual commit boundary. */
+    public PreparedStatus prepareNewStatus(StatusObservation observation, EndpointTrace.Poll pollTrace) {
         requireGenerationLock();
         requireActiveGeneration();
         if (observation.owner != this) {
@@ -443,7 +462,8 @@ public class WorkerStatus {
         return new PreparedStatus(
                 current,
                 observation,
-                new CommittedWorkerStatus(observation.engine(), cursor));
+                new CommittedWorkerStatus(observation.engine(), cursor),
+                pollTrace);
     }
 
     /**
@@ -471,18 +491,25 @@ public class WorkerStatus {
             throw new IllegalStateException(
                     "prepared status is stale or has already been published");
         }
+        if (prepared.pollTrace != null) {
+            prepared.pollTrace.record(Stage.STATUS_COMMITTED);
+        }
     }
 
     /** Record one validated status response independently from Engine state. */
-    public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
+    public PollHealth recordSuccessfulPoll(boolean reportedAlive, EndpointTrace.Poll pollTrace) {
         requireGenerationLock();
         requireActiveGeneration();
         long nowUs = System.nanoTime() / 1000;
-        return pollHealth.updateAndGet(current -> new PollHealth(
+        PollHealth updated = pollHealth.updateAndGet(current -> new PollHealth(
                 nowUs,
                 nowUs - current.lastSuccessfulPollUs(),
                 0L,
                 reportedAlive));
+        if (pollTrace != null) {
+            pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
+        }
+        return updated;
     }
 
     /** Record a transport failure without rewriting reported Engine state. */
@@ -536,6 +563,7 @@ public class WorkerStatus {
             return false;
         }
         retiring = true;
+        trace.record(Stage.GENERATION_RETIRING);
         return true;
     }
 
@@ -676,19 +704,8 @@ public class WorkerStatus {
     }
 
     /** Acquire the one in-flight status-poll slot for this generation. */
-    public PollLease tryBeginStatusPoll() {
-        lock.lock();
-        try {
-            if (retiring) {
-                return null;
-            }
-            PollLease lease = new PollLease(
-                    this, PollKind.STATUS, statusPollLease);
-            return statusPollLease.compareAndSet(null, lease)
-                    ? lease : null;
-        } finally {
-            lock.unlock();
-        }
+    public PollLease tryBeginStatusPoll(long syncCycleId) {
+        return tryBeginPoll(PollKind.STATUS, statusPollLease, syncCycleId);
     }
 
     public void requireStatusPollLease(PollLease lease) {
@@ -696,23 +713,34 @@ public class WorkerStatus {
     }
 
     /** Acquire the independent cache-poll slot for this generation. */
-    public PollLease tryBeginCachePoll() {
-        lock.lock();
-        try {
-            if (retiring) {
-                return null;
-            }
-            PollLease lease = new PollLease(
-                    this, PollKind.CACHE, cachePollLease);
-            return cachePollLease.compareAndSet(null, lease)
-                    ? lease : null;
-        } finally {
-            lock.unlock();
-        }
+    public PollLease tryBeginCachePoll(long syncCycleId) {
+        return tryBeginPoll(PollKind.CACHE, cachePollLease, syncCycleId);
     }
 
     public void requireCachePollLease(PollLease lease) {
         requirePollLease(lease, PollKind.CACHE, cachePollLease);
+    }
+
+    private PollLease tryBeginPoll(PollKind kind, AtomicReference<PollLease> slot,
+                                   long syncCycleId) {
+        trace.record(kind == PollKind.CACHE ? Stage.CACHE_LEASE_LOCK_ATTEMPT : Stage.STATUS_LEASE_LOCK_ATTEMPT);
+        lock.lock();
+        try {
+            trace.record(kind == PollKind.CACHE ? Stage.CACHE_LEASE_LOCK_ACQUIRED : Stage.STATUS_LEASE_LOCK_ACQUIRED);
+            if (retiring) {
+                trace.record(kind == PollKind.CACHE ? Stage.CACHE_POLL_SKIPPED : Stage.STATUS_POLL_SKIPPED);
+                return null;
+            }
+            PollLease active = slot.get();
+            if (active != null) {
+                active.pollTrace.skippedBusy();
+                return null;
+            }
+            PollLease lease = new PollLease(this, kind, slot, syncCycleId);
+            return slot.compareAndSet(null, lease) ? lease : null;
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void requirePollLease(

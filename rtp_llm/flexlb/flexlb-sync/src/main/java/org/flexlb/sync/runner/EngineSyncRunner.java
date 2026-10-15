@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -25,7 +26,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
 public class EngineSyncRunner implements Runnable {
@@ -52,7 +52,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final long syncRequestTimeoutMs;
 
-    private final LongAdder syncCount;
+    private final long syncCycleId;
 
     private final Long syncEngineStatusInterval;
 
@@ -70,7 +70,7 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService cacheAwareService,
                             DynamicCacheIntervalService cacheIntervalService,
                             long syncRequestTimeoutMs,
-                            LongAdder syncCount,
+                            long syncCycleId,
                             Long syncEngineStatusInterval,
                             boolean cacheFullSnapshotDebugMode,
                             long statusStaleAfterUs) {
@@ -88,7 +88,7 @@ public class EngineSyncRunner implements Runnable {
         this.cacheIntervalService = Objects.requireNonNull(
                 cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.syncCount = syncCount;
+        this.syncCycleId = syncCycleId;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
         if (statusStaleAfterUs <= 0L) {
@@ -146,6 +146,7 @@ public class EngineSyncRunner implements Runnable {
                         workerIpPort, site, host.getGroup());
 
                 if (!workerStatus.isActiveGeneration()) {
+                    workerStatus.trace().record(Stage.DISCOVERY_POLL_SKIPPED);
                     logger.debug(
                             "Skip retiring WorkerStatus generation {} for {}",
                             workerStatus.getGenerationId(), workerIpPort);
@@ -153,7 +154,7 @@ public class EngineSyncRunner implements Runnable {
                 }
 
                 WorkerStatus.PollLease statusPollLease =
-                        workerStatus.tryBeginStatusPoll();
+                        workerStatus.tryBeginStatusPoll(syncCycleId);
                 if (statusPollLease != null) {
                     boolean handedOff = false;
                     try {
@@ -164,9 +165,11 @@ public class EngineSyncRunner implements Runnable {
                                 engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs,
                                 cacheAwareService, statusCheckExecutor);
+                        statusPollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
+                        statusPollLease.pollTrace().record(Stage.RUNNER_REJECTED, e);
                         logger.debug("Status check rejected for worker: {}, reset flag for retry", workerIpPort);
                     } finally {
                         if (!handedOff) {
@@ -178,7 +181,7 @@ public class EngineSyncRunner implements Runnable {
                 }
 
                 WorkerStatus.PollLease cachePollLease =
-                        workerStatus.tryBeginCachePoll();
+                        workerStatus.tryBeginCachePoll(syncCycleId);
                 if (cachePollLease != null) {
                     boolean handedOff = false;
                     try {
@@ -188,11 +191,13 @@ public class EngineSyncRunner implements Runnable {
                                 workerStatus, cachePollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
                                 cacheAwareService, cacheIntervalService,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
                                 cacheFullSnapshotDebugMode, statusCheckExecutor);
+                        cachePollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
+                        cachePollLease.pollTrace().record(Stage.RUNNER_REJECTED, e);
                         logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
                     } finally {
                         if (!handedOff) {
@@ -325,7 +330,7 @@ public class EngineSyncRunner implements Runnable {
                 // cleanup is generation-scoped and cannot block replacement.
                 generationRole = currentRole == null ? roleType : currentRole;
                 endpointToRetire = workerDirectory.beginRetirement(
-                        generationRole, workerIpPort, workerStatus);
+                        generationRole, workerIpPort, workerStatus, "DISCOVERY_TOPOLOGY_CHANGED", -1L);
                 retirementStarted = true;
             } finally {
                 workerStatus.lock.unlock();
@@ -397,7 +402,8 @@ public class EngineSyncRunner implements Runnable {
 
             generationRole = workerStatus.getRole();
             endpointToRetire = workerDirectory.beginRetirement(
-                    generationRole, workerIpPort, workerStatus);
+                    generationRole, workerIpPort, workerStatus, "DISCOVERY_MISSING_AND_STATUS_EXPIRED",
+                    statusStaleAfterUs);
             retirementStarted = true;
         } finally {
             workerStatus.lock.unlock();
