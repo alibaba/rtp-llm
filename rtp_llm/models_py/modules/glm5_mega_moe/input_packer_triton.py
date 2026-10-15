@@ -21,7 +21,7 @@ except Exception:
 
 if triton is not None:
 
-    @triton.jit(do_not_specialize=["M"])
+    @triton.jit(do_not_specialize=["M", "SHARED_ACTIVE_ROWS"])
     def _pack_mega_moe_inputs_optimized_kernel(
         x_ptr,
         weights_ptr,
@@ -30,6 +30,7 @@ if triton is not None:
         out_sf_ptr,
         out_weights_ptr,
         out_indices_ptr,
+        out_shared_sf_ptr,
         M,
         N: tl.constexpr,
         K: tl.constexpr,
@@ -40,10 +41,17 @@ if triton is not None:
         sf_stride_m: tl.constexpr,
         out_weights_stride_m: tl.constexpr,
         out_indices_stride_m: tl.constexpr,
+        shared_sf_stride_m: tl.constexpr,
+        shared_sf_stride_k: tl.constexpr,
         eps: tl.constexpr,
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        HAS_SHARED_SF: tl.constexpr,
+        SHARED_BLOCK_M: tl.constexpr,
+        SHARED_ALIGNED_BLOCK_M: tl.constexpr,
+        SHARED_ACTIVE_ROWS,
+        SHARED_ZERO_ROWS: tl.constexpr,
     ):
         # Large prefill rows can make row * hidden_stride approach int32 range.
         # Use int64 row offsets for all pointer arithmetic.
@@ -86,6 +94,50 @@ if triton is not None:
             mask=row_mask,
         )
 
+        if HAS_SHARED_SF:
+            # Store the just-computed packed scales directly in DeepGEMM's
+            # UTCCP layout. A second set of stores clears only padding rows;
+            # it never overlaps with the valid-token stores above.
+            within_block = offs_m % SHARED_BLOCK_M
+            shared_row = (
+                offs_m // SHARED_BLOCK_M * SHARED_ALIGNED_BLOCK_M
+                + within_block // 128 * 128
+                + (within_block % 32) * 4
+                + (within_block % 128) // 32
+            )
+            tl.store(
+                out_shared_sf_ptr
+                + shared_row * shared_sf_stride_m
+                + pid_blk * shared_sf_stride_k,
+                packed,
+                mask=row_mask,
+            )
+
+            destination_row = pid_m_blk * SHARED_ZERO_ROWS + tl.arange(
+                0, SHARED_ZERO_ROWS
+            ).to(tl.int64)
+            local_destination_row = destination_row % SHARED_ALIGNED_BLOCK_M
+            row_in_128_tile = local_destination_row % 128
+            row_in_block = (
+                local_destination_row // 128 * 128
+                + (row_in_128_tile % 4) * 32
+                + row_in_128_tile // 4
+            )
+            source_row = (
+                destination_row // SHARED_ALIGNED_BLOCK_M * SHARED_BLOCK_M
+                + row_in_block
+            )
+            padding_mask = (destination_row < SHARED_ACTIVE_ROWS) & (
+                (row_in_block >= SHARED_BLOCK_M) | (source_row >= M)
+            )
+            tl.store(
+                out_shared_sf_ptr
+                + destination_row * shared_sf_stride_m
+                + pid_blk * shared_sf_stride_k,
+                0,
+                mask=padding_mask,
+            )
+
         if pid_blk == 0:
             router_offs = tl.arange(0, BLOCK_K)
             router_mask = row_mask[:, None] & (router_offs[None, :] < K)
@@ -123,6 +175,8 @@ def fused_pack_mega_moe_inputs(
     out_sf: torch.Tensor,
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
+    out_shared_sf: torch.Tensor | None = None,
+    shared_block_m: int = 0,
 ) -> None:
     """Fused packing of MegaMoE inputs into the symm-mem buffer.
 
@@ -141,7 +195,29 @@ def fused_pack_mega_moe_inputs(
 
     if D % 128 != 0:
         raise ValueError(f"fused MegaMoE packer requires D % 128 == 0, got D={D}")
+    if out_shared_sf is not None:
+        if shared_block_m <= 0:
+            raise ValueError(f"shared_block_m must be positive, got {shared_block_m}")
+        if out_sf.dtype != torch.int32 or out_shared_sf.dtype != torch.int32:
+            raise TypeError("shared FP8 input scales must be packed int32 tensors")
+        if out_shared_sf.dim() != 2 or out_shared_sf.size(1) != D // 128:
+            raise ValueError(
+                "shared FP8 input scale width mismatch: "
+                f"expected {D // 128}, got {tuple(out_shared_sf.shape)}"
+            )
+        aligned_shared_block_m = triton.cdiv(shared_block_m, 128) * 128
+        active_shared_rows = triton.cdiv(T, shared_block_m) * aligned_shared_block_m
+        if active_shared_rows > out_shared_sf.size(0):
+            raise ValueError(
+                "shared FP8 input scale buffer is too small: "
+                f"required={active_shared_rows}, available={out_shared_sf.size(0)}"
+            )
+    else:
+        aligned_shared_block_m = 0
+        active_shared_rows = 0
     if T == 0:
+        if out_shared_sf is not None:
+            out_shared_sf.zero_()
         return
 
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
@@ -151,7 +227,13 @@ def fused_pack_mega_moe_inputs(
     if block_m not in (1, 2, 4, 8):
         block_m = 2
 
-    grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
+    pack_programs = triton.cdiv(T, block_m)
+    shared_zero_rows = (
+        triton.next_power_of_2(triton.cdiv(active_shared_rows, pack_programs))
+        if out_shared_sf is not None
+        else 1
+    )
+    grid = (pack_programs, triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
         weights,
@@ -160,6 +242,7 @@ def fused_pack_mega_moe_inputs(
         out_sf,
         out_weights,
         out_indices,
+        out_shared_sf if out_shared_sf is not None else out_sf,
         T,
         D,
         topk,
@@ -170,9 +253,16 @@ def fused_pack_mega_moe_inputs(
         out_sf.stride(0),
         out_weights.stride(0),
         out_indices.stride(0),
+        out_shared_sf.stride(0) if out_shared_sf is not None else 0,
+        out_shared_sf.stride(1) if out_shared_sf is not None else 0,
         1.0e-4,
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        HAS_SHARED_SF=out_shared_sf is not None,
+        SHARED_BLOCK_M=shared_block_m,
+        SHARED_ALIGNED_BLOCK_M=aligned_shared_block_m,
+        SHARED_ACTIVE_ROWS=active_shared_rows,
+        SHARED_ZERO_ROWS=shared_zero_rows,
         num_warps=4,
     )
