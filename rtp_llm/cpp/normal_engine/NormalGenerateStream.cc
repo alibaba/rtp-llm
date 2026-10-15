@@ -5,6 +5,28 @@
 
 namespace rtp_llm {
 
+std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
+                                                  size_t                 reserved_blocks,
+                                                  const ModelConfig&     model_config,
+                                                  const RuntimeConfig&   runtime_config,
+                                                  const ResourceContext& resource_context) {
+    std::shared_ptr<GenerateInput> fake_input   = std::make_shared<GenerateInput>();
+    fake_input->input_ids                       = torch::zeros({1}, torch::kInt32);
+    fake_input->generate_config                 = std::make_shared<GenerateConfig>();
+    fake_input->generate_config->max_new_tokens = max_new_tokens;
+    fake_input->generate_config->top_k          = 1;
+    fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+    fake_input->fake_query                      = true;
+
+    auto fake_stream = std::make_shared<NormalGenerateStream>(
+        fake_input, model_config, runtime_config, resource_context, nullptr, max_new_tokens);
+    fake_stream->setIsFakeStream(true);
+    fake_stream->setMetricsReporter(nullptr);
+    fake_stream->fakeInitKVBlock(reserved_blocks);
+
+    return fake_stream;
+}
+
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
     RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
 
@@ -73,7 +95,10 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
-    generate_results.request_id = request_id_;
+    const auto&     cum_log_probs_ = sampling_state_.cum_log_probs;
+    const auto&     all_probs_     = sampling_state_.all_probs;
+    const auto&     softmax_probs_ = sampling_state_.softmax_probs;
+    generate_results.request_id    = request_id_;
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -257,6 +282,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
     }
+    auto& cum_log_probs_ = sampling_state_.cum_log_probs;
+    auto& all_probs_     = sampling_state_.all_probs;
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();
     }

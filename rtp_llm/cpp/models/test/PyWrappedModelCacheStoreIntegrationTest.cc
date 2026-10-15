@@ -758,6 +758,22 @@ Scenario makeScenario(const std::string& name) {
         scenario.inputs.skip_lm_head = true;
         return scenario;
     }
+    if (name == "pp_boundary") {
+        auto scenario = makeMultiTagScenario();
+        scenario.parallelism.pp_size = 3;
+        scenario.parallelism.pp_rank = 1;
+        const auto rows   = scenario.inputs.combo_tokens.numel();
+        const auto hidden =
+            torch::arange(rows, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)).reshape({rows, 1});
+        scenario.inputs.pp_intermediates = {{"hidden_states", hidden},
+                                             {"residual", hidden + 10},
+                                             {"mtp_aux_hidden_states", torch::cat({hidden + 20, hidden + 30}, 1)}};
+        scenario.inputs.engram_token_windows =
+            torch::arange(rows * 2, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true)).reshape({rows, 2});
+        scenario.inputs.need_all_logits        = false;
+        scenario.inputs.need_all_hidden_states = false;
+        return scenario;
+    }
     if (name == "capture_bf16") {
         return makeCaptureScenario(false, false, true, false);
     }
@@ -917,10 +933,13 @@ py::dict serializeResult(const RecordingCacheStore&              store,
         bases[py::str(tag)] = py::int_(address);
     }
     py::dict result;
-    result["records"]        = std::move(records);
-    result["base_addresses"] = std::move(bases);
-    result["logits_defined"] = output.logits.defined();
-    result["hidden_width"]   = output.all_hidden_states.defined() ? output.all_hidden_states.size(1) : 0;
+    result["records"]          = std::move(records);
+    result["base_addresses"]   = std::move(bases);
+    result["logits_defined"]   = output.logits.defined();
+    result["hidden_width"]     = output.all_hidden_states.defined() ? output.all_hidden_states.size(1) : 0;
+    result["pp_intermediates"] = output.pp_intermediates;
+    result["mtp_target_hidden_states"] =
+        output.mtp_target_hidden_states.defined() ? py::cast(output.mtp_target_hidden_states) : py::none();
     return result;
 }
 

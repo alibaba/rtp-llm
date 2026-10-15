@@ -273,6 +273,7 @@ def _make_qwen_model(layer_ids: list[int]) -> Qwen3Model:
     nn.Module.__init__(model)
     model.config = SimpleNamespace(hidden_state_capture_layer_ids=layer_ids)
     model.layer_num = 3
+    model.pp_layer_ids_list = [0, 1, 2]
     model.kv_cache = None
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_QwenLayer(1), _QwenLayer(2), _QwenLayer(3)])
@@ -320,9 +321,13 @@ def _make_qwen3_next_model(
     model._mtp_aux_capture_buffer = None
     model._mtp_aux_capture_rows = 0
     model._mtp_aux_capture_index = 0
+    model._apply_pp_partition = True
+    model.pp_layer_ids_list = [0, 1]
     model.kv_cache = None
     model.parallelism_config = SimpleNamespace(
-        prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+        pp_size=1,
+        pp_rank=0,
+        prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
     )
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_Qwen3NextLayer(1, 10), _Qwen3NextLayer(2, 20)])

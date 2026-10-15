@@ -52,7 +52,7 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
 
     const std::vector<std::vector<std::string>> memberships = {
         {"group0"}, {"group1", "group2"}, {"group3", "group4"}, {"group5"}, {"group6"}};
-    std::vector<GroupSetPtr>               group_sets;
+    std::vector<GroupSetPtr> group_sets;
     for (size_t group_set_id = 0; group_set_id < memberships.size(); ++group_set_id) {
         const auto& membership = memberships[group_set_id];
         auto        group_set  = makeTestGroupSet(group_set_id,
@@ -85,6 +85,16 @@ std::unordered_map<std::string, BlockIdxType> wireBlocks(const MemoryOperationRe
 
 std::vector<std::string> wireGroupTags(const MemoryOperationRequestPB::CopyItem& item) {
     return {item.group_tags().begin(), item.group_tags().end()};
+}
+
+void appendDeviceToHostItem(MemoryOperationRequestPB& request, const std::string& tag) {
+    request.set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* item = request.add_copy_items();
+    item->add_group_tags(tag);
+    item->set_mem_block(2);
+    auto* group_block = item->add_group_blocks();
+    group_block->set_tag(tag);
+    group_block->set_block_id(3);
 }
 
 void expectDecodeFailure(const MemoryOperationRequestPB& request) {
@@ -354,17 +364,69 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsEmptyRequest) {
     EXPECT_TRUE(descriptors.empty());
 }
 
-TEST(BlockTransferRequestConverterTest, DecodeRejectsUnknownGroupSetMembership) {
+TEST(BlockTransferRequestConverterTest, DecodeSkipsGroupSetAbsentFromThisRankOnlyWhenAllowed) {
     MemoryOperationRequestPB request;
-    request.set_copy_direction(MemoryOperationRequestPB::D2H);
-    auto* item = request.add_copy_items();
-    item->add_group_tags("missing");
-    item->set_mem_block(2);
-    auto* group_block = item->add_group_blocks();
-    group_block->set_tag("missing");
-    group_block->set_block_id(3);
+    appendDeviceToHostItem(request, "missing");
 
-    expectDecodeFailure(request);
+    std::vector<TransferDescriptor> descriptors;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, groupSets()));
+    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
+    EXPECT_TRUE(descriptors.empty());
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeRejectsPartialGroupSetMembership) {
+    MemoryOperationRequestPB request;
+    appendDeviceToHostItem(request, "group1");
+
+    std::vector<TransferDescriptor> descriptors;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
+    EXPECT_TRUE(descriptors.empty());
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeContinuesPastPartialOverlapToUniqueExactMatch) {
+    MemoryOperationRequestPB request;
+    appendDeviceToHostItem(request, "group1");
+    const auto& source  = groupSets()[1];
+    auto        partial = makeTestGroupSet(
+        0, source->topologyPtr(), source->groupTags(), source->devicePools(), source->hostPool(), source->diskPool());
+    auto exact = makeTestGroupSet(
+        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+
+    std::vector<TransferDescriptor> descriptors;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, {partial, exact}, /*allow_absent_group_sets=*/true));
+    ASSERT_EQ(descriptors.size(), 1u);
+    EXPECT_EQ(descriptors.front().group_set_id, 1u);
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeRejectsMultipleExactGroupSetMatches) {
+    MemoryOperationRequestPB request;
+    appendDeviceToHostItem(request, "group1");
+    const auto& source = groupSets()[1];
+    auto        first  = makeTestGroupSet(
+        0, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+    auto second = makeTestGroupSet(
+        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+
+    std::vector<TransferDescriptor> descriptors;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, {first, second}, /*allow_absent_group_sets=*/true));
+    EXPECT_TRUE(descriptors.empty());
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeKeepsMatchedItemsWhenSkippingAbsentGroupSets) {
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        request, makeTransferTask({TransferDescriptor::deviceToHost(0, {1}, 2)}), groupSets()));
+    appendDeviceToHostItem(request, "missing");
+
+    std::vector<TransferDescriptor> descriptors;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true));
+    ASSERT_EQ(descriptors.size(), 1u);
+    EXPECT_EQ(descriptors.front().group_set_id, 0u);
 }
 
 TEST(BlockTransferRequestConverterTest, DecodeRejectsBlocksInvalidForBlockPools) {
@@ -439,8 +501,8 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
                                      source->topologyPtr(),
-                                     {"group4", "group3"},
-                                     {source->devicePools()[1], source->devicePools()[0]},
+                                                                {"group4", "group3"},
+                                                                {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     std::vector<TransferDescriptor> descriptors;

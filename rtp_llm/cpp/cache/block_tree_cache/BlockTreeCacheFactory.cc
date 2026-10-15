@@ -251,7 +251,7 @@ bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_vi
 bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
     for (const GroupBase& group : cache_config.topology().groups()) {
-        if (!group.policy.enable_prefix_reuse) {
+        if (!cacheGroupParticipatesInBlockTree(group.policy)) {
             continue;
         }
 
@@ -341,6 +341,24 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 
 }  // namespace
 
+BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig& cache_config) {
+    auto layout = std::make_shared<BlockTreeCacheLayout>();
+    if (!buildGroupMembers(cache_config, layout->group_members)) {
+        return nullptr;
+    }
+    layout->group_set_payload_bytes.reserve(layout->group_members.size());
+    for (const auto& members : layout->group_members) {
+        const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
+        layout->group_set_payload_bytes.push_back(payload_bytes);
+        const size_t stride = alignUp(payload_bytes, kPoolAlignment);
+        RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() - layout->local_combined_stride_bytes,
+                                "BlockTreeCache combined lower-tier stride overflow");
+        layout->local_combined_stride_bytes += stride;
+    }
+    layout->capacity_stride_bytes = layout->local_combined_stride_bytes;
+    return layout;
+}
+
 size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t combined_stride_bytes) {
     if (combined_stride_bytes == 0) {
         return 0;
@@ -362,13 +380,14 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
     return paths[static_cast<size_t>(local_rank)];
 }
 
-BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
-                                       const KVCacheConfig&                       kv_cache_config,
-                                       const CoordinatorCacheManagerPtr&          coordinator_manager,
-                                       const ParallelismConfig&                   parallelism_config,
-                                       std::shared_ptr<StorageBackend>            storage_backend,
-                                       std::shared_ptr<BroadcastManager>          broadcast_manager,
-                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                          cache_config,
+                                       const KVCacheConfig&                        kv_cache_config,
+                                       const CoordinatorCacheManagerPtr&           coordinator_manager,
+                                       const ParallelismConfig&                    parallelism_config,
+                                       std::shared_ptr<StorageBackend>             storage_backend,
+                                       std::shared_ptr<BroadcastManager>           broadcast_manager,
+                                       std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter,
+                                       std::shared_ptr<const BlockTreeCacheLayout> layout) {
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.memory_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
@@ -427,11 +446,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return nullptr;
     }
 
-    std::vector<GroupSetPtr>              group_sets;
-    std::vector<std::vector<std::string>> group_members;
-    if (!buildGroupMembers(cache_config, group_members)) {
+    if (layout == nullptr) {
+        layout = planBlockTreeCacheLayout(cache_config);
+    }
+    if (layout == nullptr || layout->group_members.size() != layout->group_set_payload_bytes.size()
+        || layout->capacity_stride_bytes < layout->local_combined_stride_bytes) {
+        RTP_LLM_LOG_ERROR("failed to build a consistent BlockTreeCache layout");
         return nullptr;
     }
+    const auto&              group_members           = layout->group_members;
+    const auto&              group_set_payload_bytes = layout->group_set_payload_bytes;
+    const size_t             combined_stride         = layout->capacity_stride_bytes;
+    std::vector<GroupSetPtr> group_sets;
     if (disk_enabled) {
         for (const std::vector<std::string>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
@@ -441,18 +467,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                 return nullptr;
             }
         }
-    }
-
-    std::vector<size_t> group_set_payload_bytes;
-    group_set_payload_bytes.reserve(group_members.size());
-    size_t combined_stride = 0;
-    for (const std::vector<std::string>& members : group_members) {
-        const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
-        group_set_payload_bytes.push_back(payload_bytes);
-        const size_t stride = alignUp(payload_bytes, kPoolAlignment);
-        RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() - combined_stride,
-                                "BlockTreeCache combined lower-tier stride overflow");
-        combined_stride += stride;
     }
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());

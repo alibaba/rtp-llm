@@ -50,10 +50,13 @@ void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::D
 }
 
 RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
-    // An in-model proposer (DSpARK) emits draft tokens, not per-vocab draft
-    // probabilities. In that case draft_probs_d is intentionally undefined and
-    // the kernel treats q(draft_token) == 1, so all shapes must be derived from
-    // draft_token_ids_d / target_probs_d instead of draft_probs_d.
+    /**
+     * Point-mass proposals may leave draft_probs_d undefined because the kernel
+     * reconstructs q from draft_token_ids_d. Requiring a dense q tensor here
+     * would reject valid proposals, including DSpARK handoff padding.
+     * Derive launch dimensions from draft_token_ids_d and the target tensors;
+     * validate draft_probs_d only when the caller supplies a dense proposal q.
+     */
     const bool point_mass = params.draft_probs_point_mass;
 
     checkRejectionSamplingTensor(params.draft_token_ids_d, "draft_token_ids_d", torch::kInt32, 2);
@@ -396,8 +399,9 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             (int64_t)cur_stream);
             if (need_renorm_probs) {
                 torch::Tensor temp_t = torch::zeros_like(sampling_probs_t);
-                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+                /** Joint sampling applies top-p to the original distribution; return the same support. */
+                top_p_renorm_probs(probs_t, temp_t, top_p_t, 1.0, (int64_t)cur_stream);
+                top_k_renorm_probs(temp_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
             }
         }
     }

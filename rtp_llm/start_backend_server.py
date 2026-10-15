@@ -23,6 +23,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -154,8 +155,14 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
     pc = py_env_configs.parallelism_config
     if pc.dp_size > 1:
-        # tp must on one device when dp
-        assert pc.world_rank % pc.tp_size == 0
+        layout = RankLayout.from_parallelism_config(pc)
+        coord = layout.coord_of(pc.world_rank)
+        if coord.tp != 0:
+            raise ValueError(
+                "data-parallel launcher must start at tp_rank 0, got "
+                f"world_rank={pc.world_rank}, tp_rank={coord.tp}, "
+                f"tp_size={pc.tp_size}, dp_size={pc.dp_size}, pp_size={pc.pp_size}"
+            )
 
 
 def _create_rank_processes(

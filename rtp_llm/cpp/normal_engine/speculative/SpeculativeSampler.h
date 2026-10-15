@@ -4,7 +4,7 @@
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 
@@ -47,13 +47,25 @@ private:
     torch::Tensor d2t_map_;
 };
 
+struct SpeculativeSamplingParams {
+    /** CPU bool [B]: stochastic() is do_sample && !top1(), so greedy requests bypass residual sampling. */
+    torch::Tensor do_sample;
+    torch::Tensor force_accept;  // CPU bool [B].
+    std::vector<at::Generator> generators;
+    /** Optional CPU int64 row indices for point-mass candidates within a dense-q batch.
+     * Their q rows are scratch space: batchSample fills target-vocab one-hot in place after
+     * d2t mapping. PP supplies a per-call GPU upload, so this never overwrites stream-owned q.
+     * Undefined keeps the existing all-dense or implicit all-point-mass path. */
+    torch::Tensor draft_point_mass_rows;
+};
+
 class SpeculativeSampler {
 public:
     SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
 
-    virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                             SamplerOutput&                      draft_sampler_output,
-                                             SamplerOutput&                      target_sampler_output);
+    virtual SpeculativeSamplerOutput forward(const SpeculativeSamplingParams& params,
+                                             SamplerOutput&                   draft_sampler_output,
+                                             SamplerOutput&                   target_sampler_output);
 
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
@@ -63,15 +75,10 @@ public:
                                     size_t               draft_vocab_size) const;
 
 private:
-    void batchSample(SpeculativeSamplerOutput&           sample_output,
-                     const std::list<GenerateStreamPtr>& streams,
-                     SamplerOutput&                      draft_sampler_output,
-                     SamplerOutput&                      target_sampler_output) const;
-
-    void streamSample(SpeculativeSamplerOutput&           sample_output,
-                      const std::list<GenerateStreamPtr>& streams,
-                      SamplerOutput&                      draft_sampler_output,
-                      SamplerOutput&                      target_sampler_output) const;
+    void batchSample(SpeculativeSamplerOutput&         sample_output,
+                     const SpeculativeSamplingParams& params,
+                     SamplerOutput&                   draft_sampler_output,
+                     SamplerOutput&                   target_sampler_output) const;
 
 protected:
     torch::Tensor        d2t_map_;

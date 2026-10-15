@@ -395,7 +395,9 @@ void expectFactoryRejects(const CacheConfig&                              config
     CoreDumpGuard guard;
     try {
         EXPECT_EQ(createBlockTreeCache(config, kv_cache_config, allocator), nullptr);
-    } catch (const std::exception&) { SUCCEED(); }
+    } catch (const std::exception&) {
+        SUCCEED();
+    }
     EXPECT_EQ(allocator->blockTreeCache(), nullptr);
 }
 
@@ -487,7 +489,7 @@ void writeDevicePattern(void* address, size_t bytes, uint8_t pattern) {
 void expectDevicePattern(const void* address, size_t bytes, uint8_t pattern) {
     ASSERT_NE(address, nullptr);
     auto        device = torch::from_blob(const_cast<void*>(address),
-                                   {static_cast<int64_t>(bytes)},
+                                          {static_cast<int64_t>(bytes)},
                                    torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
     auto        host   = device.cpu();
     const auto* data   = host.data_ptr<uint8_t>();
@@ -615,6 +617,27 @@ TEST(BlockTreeCacheFactoryUtilityTest, UsableBlockCountReservesBlockZeroWithinBu
     EXPECT_EQ(computeHostUsableBlockCount(4096, 4096), 0u);
     EXPECT_EQ(computeHostUsableBlockCount(100, 4096), 0u);
     EXPECT_EQ(computeHostUsableBlockCount(4096, 0), 0u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesPreplannedCapacityStride) {
+    const auto config = makeSingleConfig();
+    auto       layout = planBlockTreeCacheLayout(config);
+    ASSERT_NE(layout, nullptr);
+    ASSERT_GT(layout->local_combined_stride_bytes, 0u);
+    layout->capacity_stride_bytes = layout->local_combined_stride_bytes * 2;
+
+    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache                           = createBlockTreeCache(
+        config, kv_cache_config, allocator, ParallelismConfig{}, nullptr, nullptr, nullptr, layout);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    ASSERT_NE(cache->groupSets().front()->hostPool(), nullptr);
+    const size_t capacity_bytes = 1024UL * 1024UL;
+    EXPECT_EQ(cache->groupSets().front()->hostPool()->totalBlocksNum(),
+              computeHostUsableBlockCount(capacity_bytes, layout->capacity_stride_bytes));
 }
 
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {

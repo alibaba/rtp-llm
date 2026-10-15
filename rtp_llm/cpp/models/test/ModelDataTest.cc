@@ -221,6 +221,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.need_moe_gating           = true;
     inputs.warmup                    = true;
     inputs.skip_run                  = true;
+    inputs.shutdown                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
     inputs.pd_separation             = true;
@@ -240,6 +241,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedMoeGating));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlWarmup));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlShutdown));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
@@ -394,6 +396,16 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_TRUE(!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.numel() == 0);
     EXPECT_TRUE(!inputs.kv_cache_group_types.defined() || inputs.kv_cache_group_types.numel() == 0);
     EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
+
+    /** Shutdown must reach TP peers before the empty-batch return, including clearing a previous terminal flag. */
+    for (bool shutdown : {false, true, false}) {
+        inputs          = GptModelInputs{};
+        inputs.skip_run = rank == 0;
+        inputs.shutdown = rank == 0 ? shutdown : !shutdown;
+        tpSyncModelInputs(inputs, config);
+        EXPECT_TRUE(inputs.skip_run);
+        EXPECT_EQ(inputs.shutdown, shutdown);
+    }
 
     // Both children exercise sender-side rejection, so malformed metadata cannot strand a peer in a collective.
     config.tp_rank = 0;

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace rtp_llm {
@@ -62,6 +64,15 @@ struct CacheGroupPolicy {
     // Model-derived SWA attention window in tokens. Zero means no bounded
     // window is configured and remains the default for non-SWA groups.
     int sliding_window_size = 0;
+
+    std::string policyFingerprint() const {
+        std::ostringstream oss;
+        oss << static_cast<int>(group_type) << ':' << (enable_prefix_reuse ? 1 : 0) << ':' << (reservable ? 1 : 0)
+            << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
+            << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
+            << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size;
+        return oss.str();
+    }
 };
 
 // One cache-store registration step: pair a cache key from the full logical
@@ -156,13 +167,20 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     return policy;
 }
 
+// BlockTree only creates group sets for groups whose blocks can be reused by
+// later requests. Keep this predicate shared by layout planning and PP
+// topology capture so they cannot disagree about group-set membership.
+inline bool cacheGroupParticipatesInBlockTree(const CacheGroupPolicy& policy) {
+    return policy.enable_prefix_reuse;
+}
+
 // A group belongs to the KV cache event publication completeness set only when
 // it participates in prefix reuse AND materializes every block position.
 // Tail-sparse groups (active_tail_blocks > 0, i.e. LINEAR/SWA keep only their
 // tail blocks) never hold full block chains, so counting them as required
 // would suppress publication for almost every key.
 inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
-    return policy.enable_prefix_reuse && policy.active_tail_blocks == 0;
+    return cacheGroupParticipatesInBlockTree(policy) && policy.active_tail_blocks == 0;
 }
 
 }  // namespace rtp_llm
