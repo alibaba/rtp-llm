@@ -20,6 +20,22 @@ py_test(
 )
 
 py_test(
+    name = "cp_attention_metadata_test",
+    srcs = ["cp_attention_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "cp_offset_plan_graph_test",
+    srcs = ["cp_offset_plan_graph_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "cp_topk_offsets_cuda_test",
     srcs = ["cp_topk_offsets_test.py"],
     main = "cp_topk_offsets_test.py",

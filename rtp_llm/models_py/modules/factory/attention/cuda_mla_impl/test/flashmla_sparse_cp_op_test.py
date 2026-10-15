@@ -19,7 +19,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 from unittest import SkipTest, TestCase, main, skipIf
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -302,6 +302,107 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
 
         self.assertNotIn("fused_kv", _GatherWorkspace.__dataclass_fields__)
+
+    def test_gather_offsets_refresh_for_mixed_batch(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            SparseMlaFp8CPOp,
+        )
+        from rtp_llm.ops import ParallelismConfig
+
+        device = self.device
+        cp_info = SimpleNamespace(
+            prefill_cp_chunk_lengths=[2, 2],
+            prefill_qkv_padding_mask=torch.ones(4, dtype=torch.int32, device=device),
+            prefill_qkv_restore_indice=torch.arange(4, dtype=torch.long, device=device),
+            prefill_actual_input_lengths_cpu=torch.tensor([5, 7], dtype=torch.int32),
+        )
+        attn_inputs = SimpleNamespace(
+            context_parallel_info=cp_info,
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+            is_prefill=True,
+        )
+        block_table = torch.zeros((2, 1), dtype=torch.int32, device=device)
+        mla_params = SimpleNamespace(
+            fill_cp_plan_params=lambda *_args: None,
+            cp_kv_restore_unpad_indices=torch.arange(
+                4, dtype=torch.long, device=device
+            ),
+            cp_total_global_ids=torch.arange(4, dtype=torch.long, device=device),
+            cp_total_local_ids=torch.arange(4, dtype=torch.long, device=device),
+            cp_cu_kv_seqlens_global=torch.tensor(
+                [0, 5, 12], dtype=torch.int32, device=device
+            ),
+            cp_total_kv_len=12,
+            batch_indice_d=torch.tensor([0, 0, 1, 1], dtype=torch.int32, device=device),
+            positions_d=torch.arange(4, dtype=torch.int32, device=device),
+            prefill_ragged_kv_len_indptr_d=torch.tensor(
+                [0, 5, 12], dtype=torch.int32, device=device
+            ),
+        )
+        op = SparseMlaFp8CPOp(
+            num_heads=64,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            qk_nope_head_dim=512,
+            page_size=64,
+            softmax_extra_scale=1.0,
+            top_k=128,
+            parallelism_config=ParallelismConfig(),
+        )
+        with patch.dict(os.environ, {"USE_GATHER_PATH": "1"}), patch.object(
+            op, "_refresh_fp8_kernel_metadata"
+        ):
+            op.plan(mla_params, block_table, attn_inputs)
+            torch.testing.assert_close(
+                op.precomputed_kv_offsets,
+                torch.tensor([0, 0, 5, 5], dtype=torch.int32, device=device),
+            )
+
+            mla_params.batch_indice_d = torch.tensor(
+                [1, 0, 1, 0], dtype=torch.int32, device=device
+            )
+            mla_params.prefill_ragged_kv_len_indptr_d = torch.tensor(
+                [0, 7, 12], dtype=torch.int32, device=device
+            )
+            mla_params.cp_cu_kv_seqlens_global = (
+                mla_params.prefill_ragged_kv_len_indptr_d
+            )
+            op.plan(mla_params, block_table, attn_inputs)
+            torch.testing.assert_close(
+                op.precomputed_kv_offsets,
+                torch.tensor([7, 0, 7, 0], dtype=torch.int32, device=device),
+            )
+
+        topk = torch.tensor(
+            [[[0, 1]], [[0, -1]], [[2, 3]], [[4, 4]]],
+            dtype=torch.int32,
+            device=device,
+        )
+        q = torch.empty((4, 64, 576), dtype=torch.bfloat16, device=device)
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty((1, 64, 656), dtype=torch.uint8, device=device)
+        )
+        unused_starts = MagicMock()
+        unused_starts.__getitem__.side_effect = AssertionError(
+            "workspace offsets must be indexed only during plan"
+        )
+        op._gather.workspace_starts = unused_starts
+        with patch.object(
+            rtp_llm_ops,
+            "cp_gather_and_upconvert_fp8_kv_cache_v2",
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.flash_mla_sparse_fwd",
+            return_value=(q, None, None),
+        ) as sparse_fwd:
+            op._attend_gather(q, kv_cache, topk)
+        torch.testing.assert_close(
+            sparse_fwd.call_args.args[2].squeeze(1),
+            torch.tensor(
+                [[7, 8], [0, -1], [9, 10], [4, 4]],
+                dtype=torch.int32,
+                device=device,
+            ),
+        )
 
     def test_sharded_empty_q_rank_still_joins_kv_all_gather(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
