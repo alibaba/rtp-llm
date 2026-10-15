@@ -602,9 +602,8 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
         self.v41_config = v41_config
-        # Preserve the opt-in rollout while qualifying sparse selection on
-        # this base; dense and sparse MQA now both use BF16 weights/logits.
-        self.decode_sparse_mqa = os.environ.get("DSV41_DECODE_SPARSE_MQA", "0") == "1"
+        # Unsupported configurations still use dense selection; set 0 to opt out.
+        self.decode_sparse_mqa = os.environ.get("DSV41_DECODE_SPARSE_MQA", "1") == "1"
         # Read once: changing this policy in a running cache namespace is unsafe.
         # SWA-only DSpark draft layers have no global-source/CED boundary.
         kv_sources = v41_config.get("kv_source_layer_ids", [])

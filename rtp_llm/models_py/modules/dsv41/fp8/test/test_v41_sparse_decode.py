@@ -17,7 +17,10 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_sparse_decode as sparse
 from rtp_llm.models_py.modules.dsv41.fp8._indexer_score import (
     fp8_fp4_paged_indexer_score,
 )
-from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
+    AttentionFP8,
+    AttentionV41FP8,
+)
 from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import (
     _fixture,
     _original_paged_score,
@@ -83,6 +86,34 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
 
 
 class SparseDecodeSupportCPU(unittest.TestCase):
+    def test_sparse_mqa_defaults_on_with_explicit_override(self):
+        def init_base(attn, *args, **kwargs):
+            torch.nn.Module.__init__(attn)
+            attn.layer_id = 0
+            attn.head_dim = 512
+            attn._pool_spec = {}
+            attn.wo_a_w = torch.empty(0, 1)
+            attn.wo_a_s = torch.empty(0, 1)
+            attn.n_groups = 0
+
+        for switch, expected in ((None, True), ("1", True), ("0", False)):
+            with self.subTest(switch=switch), patch.dict(os.environ), patch.object(
+                AttentionFP8, "__init__", init_base
+            ):
+                os.environ.pop("DSV41_DECODE_SPARSE_MQA", None)
+                if switch is not None:
+                    os.environ["DSV41_DECODE_SPARSE_MQA"] = switch
+                attn = AttentionV41FP8(
+                    compress_ratio=0,
+                    v41_config={},
+                    shared_attention={},
+                    index_topk=512,
+                    index_n_heads=32,
+                    index_head_dim=128,
+                    layer_weights={},
+                )
+                self.assertIs(attn.decode_sparse_mqa, expected)
+
     def test_backend_and_candidate_contract(self):
         candidates = SimpleNamespace(
             is_cuda=True,
