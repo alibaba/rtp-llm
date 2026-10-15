@@ -309,6 +309,7 @@ def _warm_joint_pool(main_layout, index_layout, cp_size, cp_rank, device):
 def _warm_chunk_metadata(meta, ratio, window, device):
     import torch
 
+    physical_offsets = torch.arange(3, dtype=torch.int64, device=device)
     # CP lengths and prefixes may have different integer dtypes. Independently
     # cover their pointer alignment and request offsets, not just equal pairs.
     for prefix_dtype, length_dtype in product((torch.int32, torch.int64), repeat=2):
@@ -322,7 +323,9 @@ def _warm_chunk_metadata(meta, ratio, window, device):
             requests = torch.zeros(
                 3 + request_offset, dtype=torch.int64, device=device
             )[request_offset:]
-            for replay, compact_replay in product((False, True), repeat=2):
+            for replay, compact_replay, offsets in product(
+                (False, True), (False, True), (None, physical_offsets)
+            ):
                 _require_launch(
                     meta.try_chunk_metadata(
                         prefixes,
@@ -332,6 +335,7 @@ def _warm_chunk_metadata(meta, ratio, window, device):
                         window,
                         replay,
                         compact_replay=compact_replay,
+                        physical_offsets=offsets,
                     ),
                     "chunk metadata",
                 )

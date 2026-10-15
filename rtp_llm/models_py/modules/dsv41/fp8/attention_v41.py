@@ -2264,6 +2264,13 @@ class AttentionV41FP8(AttentionFP8):
         cached = shared.get("prefill_chunk_meta")
         if cached is not None:
             return cached
+        physical_offsets = None
+        if isinstance(globals_by_req, prefill_kv_workspace.PreparedGlobalRows):
+            workspace = globals_by_req.workspace
+            # The consumer makes this same capacity/layout decision. CED can
+            # shorten SWA without moving global KV or changing its aliases.
+            if workspace.try_layout(swa) is not None:
+                physical_offsets = workspace.device_offsets
         offsets, global_sizes = [], []
         offset = 0
         swa_sizes = (
@@ -2275,6 +2282,8 @@ class AttentionV41FP8(AttentionFP8):
             offsets.append(offset)
             global_sizes.append(g.shape[0])
             offset += g.shape[0] + swa_rows
+        if physical_offsets is not None:
+            offsets = workspace.global_starts
         if len(offsets) == 1:
             # Single-request prefill: ``req_ids`` is all zeros, so indexing a
             # one-element tensor by it is a pure broadcast. Use the host scalars
@@ -2313,6 +2322,7 @@ class AttentionV41FP8(AttentionFP8):
                     self.window_size,
                     self.swa_bounded_replay,
                     compact_replay=compact_replay,
+                    physical_offsets=physical_offsets,
                 )
                 if meta is not None:
                     shared["prefill_chunk_meta"] = meta
@@ -2333,7 +2343,11 @@ class AttentionV41FP8(AttentionFP8):
                     lengths.clamp(max=self.window_size) if compact_replay else lengths
                 )
                 chunk_sizes = sizes + swa_lengths + tails
-                offsets_d = chunk_sizes.cumsum(0) - chunk_sizes
+                offsets_d = (
+                    chunk_sizes.cumsum(0) - chunk_sizes
+                    if physical_offsets is None
+                    else physical_offsets
+                )
                 starts_d = (
                     prefixes + lengths - swa_lengths
                     if compact_replay

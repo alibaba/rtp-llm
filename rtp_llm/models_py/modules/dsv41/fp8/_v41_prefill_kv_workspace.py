@@ -123,6 +123,7 @@ class PreparedGlobalWorkspace:
 
     def __init__(self, swa, global_sizes, refresh):
         self.global_sizes = global_sizes
+        self.swa_capacity = swa.sizes
         self.geometry = _row_geometry(swa)
         starts, layout, offset, tiles = [], [], 0, 0
         for count, start, size in zip(global_sizes, swa.row_starts, swa.sizes):
@@ -146,6 +147,52 @@ class PreparedGlobalWorkspace:
         self.device_offsets = device[: len(starts)]
         self.refresh_layout = device[len(starts) :].view(len(starts), 4)
         self.refresh_tiles = tiles
+        self._refresh_metadata = (
+            self.refresh_layout,
+            self.pinned_holder,
+            self.refresh_tiles,
+        )
+
+    def try_layout(self, swa):
+        """Select physical global offsets and matching SWA destinations together.
+
+        Shorter SWA tails keep the producer's request gaps, including at CED.
+        Attention metadata must use global_starts/device_offsets whenever this
+        succeeds. Unsupported sources or tails exceeding capacity use the old
+        packed layout. Only geometry and a small host/device table are cached;
+        no source activation survives the layer that owns it.
+        """
+        if not isinstance(swa, SwaRows):
+            return None
+        refresh = _refresh_backend()
+        if not refresh.is_supported(swa.flat):
+            return None
+        geometry = _row_geometry(swa)
+        if geometry == self.geometry:
+            return self._refresh_metadata
+        if (
+            len(swa) != len(self.global_sizes)
+            or swa.flat.device != self.output.device
+            or swa.flat.dtype != self.output.dtype
+            or swa.flat.shape[1] != self.output.shape[1]
+            or any(
+                size > capacity for size, capacity in zip(swa.sizes, self.swa_capacity)
+            )
+        ):
+            return None
+        layout, tiles = [], 0
+        for count, destination, start, size in zip(
+            self.global_sizes, self.global_starts, swa.row_starts, swa.sizes
+        ):
+            tiles += (
+                size * (swa.flat.shape[1] // 4) + refresh._BLOCK - 1
+            ) // refresh._BLOCK
+            layout.append((start, destination + count, size, tiles))
+        host = torch.tensor(layout, dtype=torch.int64, pin_memory=True)
+        device = host.to(device=swa.flat.device, non_blocking=True)
+        self.geometry = geometry
+        self._refresh_metadata = (device, host, tiles)
+        return self._refresh_metadata
 
     def publish(self, globals_by_req):
         """Attach aliases created by the direct producer after all its writes.
@@ -188,15 +235,15 @@ def _combine_swa_rows(shared, globals_by_req, swa):
     if not flat.is_cuda:
         return None
     refresh = _refresh_backend()
-    if not refresh.is_supported(flat):
-        return None
     if isinstance(globals_by_req, PreparedGlobalRows):
         plan = globals_by_req.workspace
-        if plan.geometry == _row_geometry(swa):
-            refresh.copy_rows(
-                flat, plan.output, plan.refresh_layout, plan.refresh_tiles
-            )
+        layout = plan.try_layout(swa)
+        if layout is not None:
+            shared.pop("prefill_kv_workspace", None)
+            refresh.copy_rows(flat, plan.output, layout[0], layout[2])
             return plan.output
+    if not refresh.is_supported(flat):
+        return None
     sources = tuple(g for g, _ in globals_by_req)
     if not sources or len(sources) != len(swa):
         return None
