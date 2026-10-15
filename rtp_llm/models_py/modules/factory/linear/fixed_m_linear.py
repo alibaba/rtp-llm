@@ -38,4 +38,6 @@ def fixed_m_linear(
             padded[:valid_rows].copy_(chunk)
             chunk = padded
         output_chunks.append(linear(chunk)[:valid_rows])
+    if len(output_chunks) == 1:
+        return output_chunks[0]
     return torch.cat(output_chunks, dim=0)
