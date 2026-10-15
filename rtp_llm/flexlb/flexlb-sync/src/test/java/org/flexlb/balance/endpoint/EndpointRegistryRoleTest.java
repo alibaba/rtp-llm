@@ -11,6 +11,8 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -77,6 +79,43 @@ class EndpointRegistryRoleTest {
                 RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT}) {
             assertEquals(1, registry.getEndpointCount(roleType));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 4})
+    void publishesEachPrefillDpRankAtItsOwnAddress(int dpSize) {
+        RoleType role = RoleType.PREFILL;
+        for (int rank = 0; rank < dpSize; rank++) {
+            int port = 8000 + rank * 10;
+            String address = "127.0.0.1:" + port;
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setDpSize(dpSize);
+            response.setDpRank(rank);
+            response.setTpSize(1);
+            response.setAvailableKvCacheTokens(100_000L + rank);
+            WorkerEndpoint endpoint = EndpointTestSupport.publishEndpoint(
+                    registry, role, address, status(role, port), response);
+
+            assertInstanceOf(PrefillEndpoint.class, endpoint);
+            assertSame(endpoint, registry.get(role, address));
+            assertEquals(dpSize, endpoint.getStatus().getDpSize());
+            assertEquals(rank, endpoint.getStatus().getDpRank());
+            assertEquals(100_000L + rank,
+                    endpoint.getStatus().getAvailableKvCacheTokens());
+        }
+        assertEquals(dpSize, registry.getEndpointCount(role));
+        assertEquals(dpSize, registry.prefillRoutingSnapshot(role).size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 4})
+    void keepsUnsupportedPdfusionDpGroupsOutOfRouting(int dpSize) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setDpSize(dpSize);
+        assertThrows(UnsupportedOperationException.class,
+                () -> EndpointTestSupport.publishEndpoint(registry, RoleType.PDFUSION,
+                        "127.0.0.1:8000", status(RoleType.PDFUSION, 8000), response));
+        assertEquals(0, registry.getEndpointCount(RoleType.PDFUSION));
     }
 
     @Test

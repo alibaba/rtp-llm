@@ -745,14 +745,16 @@ public class EndpointRegistry {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
-        boolean prefill = role == RoleType.PREFILL
-                || role == RoleType.PDFUSION;
-        if (prefill && engineStatus.dpSize() > 1) {
+        // PDFusion uses a different RPC implementation without batch admission.
+        if (role == RoleType.PDFUSION && engineStatus.dpSize() > 1) {
             throw new UnsupportedOperationException(
                     role + " DP group endpoint not yet supported: ipPort="
                             + status.getIpPort() + ", dp_size="
                             + engineStatus.dpSize());
         }
+        // Discovery exposes each DP rank's TP-leader address separately. Its
+        // status, KV capacity and delivery queue belong to that rank, even when
+        // dp_size describes a larger EP/DP group. Keep those endpoints independent.
         prepareEndpointMetrics(role, status);
         return switch (role) {
             case PREFILL, PDFUSION -> new PrefillEndpoint(

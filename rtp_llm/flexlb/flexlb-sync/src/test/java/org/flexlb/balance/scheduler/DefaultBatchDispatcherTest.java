@@ -18,6 +18,8 @@ import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -82,6 +84,58 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         assertEquals(1, callback.successCount.get());
         assertEquals(0, callback.failureCount.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 4})
+    void dispatchesEachDpRankToItsOwnPort(int dpSize) throws Exception {
+        List<Integer> receivedRanks = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(invocation -> {
+                    EngineRpcService.EnqueueBatchRequestPB sent = invocation.getArgument(2);
+                    assertEquals(1, sent.getDpSlotsCount());
+                    EngineRpcService.EnqueueBatchDpSlotPB slot = sent.getDpSlots(0);
+                    int rank = slot.getDpRank();
+                    int grpcPort = invocation.getArgument(1);
+                    assertEquals(9001 + rank * 10, grpcPort);
+                    assertEquals("127.0.0.1", invocation.getArgument(0));
+                    assertEquals(2, slot.getRequestsCount());
+                    List<Long> ids = new ArrayList<>();
+                    for (EngineRpcService.EnqueueBatchExternalInputPB entry : slot.getRequestsList()) {
+                        EngineRpcService.GenerateInputPB input = entry.getInput();
+                        EngineRpcService.RoleAddrPB prefill = input.getGenerateConfig().getRoleAddrs(0);
+                        assertEquals("PREFILL", prefill.getRoleStr());
+                        assertEquals(grpcPort, prefill.getGrpcPort());
+                        assertEquals(grpcPort - 1, prefill.getHttpPort());
+                        ids.add(input.getRequestId());
+                    }
+                    receivedRanks.add(rank);
+                    return CompletableFuture.completedFuture(ackResponse(sent.getBatchId(), ids));
+                });
+        CountDownLatch completed = new CountDownLatch(dpSize * 2);
+        List<DeliveryResult.Status> results = new CopyOnWriteArrayList<>();
+        for (int rank = 0; rank < dpSize; rank++) {
+            PrefillEndpoint endpoint = createPrefillEndpoint();
+            int httpPort = 9000 + rank * 10;
+            when(endpoint.getHttpPort()).thenReturn(httpPort);
+            when(endpoint.getGrpcPort()).thenReturn(httpPort + 1);
+            List<ScheduledRequest> items = new ArrayList<>();
+            for (int index = 0; index < 2; index++) {
+                ScheduledRequest item = createScheduledRequest(100L + rank * 2 + index, 500, 0, endpoint);
+                item.prefill().setHttpPort(httpPort);
+                item.prefill().setGrpcPort(httpPort + 1);
+                item.prefill().setDpRank(rank);
+                items.add(item);
+            }
+            submit(items, 1000L + rank, 100, "dp_rank", (item, result) -> {
+                results.add(result.status());
+                completed.countDown();
+            });
+        }
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+        assertTrue(results.stream().allMatch(status -> status == DeliveryResult.Status.DELIVERED));
+        assertEquals(java.util.stream.IntStream.range(0, dpSize).boxed().toList(),
+                receivedRanks.stream().sorted().toList());
     }
 
     @Test
