@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>
 #include <functional>
@@ -149,6 +150,9 @@ public:
                                       std::move(result.second));
             }));
     }
+
+    std::optional<kv_cache_manager::ClientErrorCode> load_status;
+    std::optional<kv_cache_manager::ClientErrorCode> save_status;
 
     MOCK_METHOD(bool,
                 initForPools,
@@ -423,6 +427,8 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
                                                               parallelism_config,
                                                               SpeculativeExecutionConfig{},
                                                               std::move(broadcast_manager),
+                                                              gdr_enabled,
+                                                              std::move(metrics_reporter),
                                                               client_wrapper));
 }
 
@@ -485,6 +491,16 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
         [promise](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success) {
             promise->set_value({matched_blocks_num, std::move(match_meta), success});
         });
+    return await(future);
+}
+
+[[maybe_unused]] ErrorInfo
+readResult(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+    auto promise = std::make_shared<std::promise<ErrorInfo>>();
+    auto future  = promise->get_future();
+    backend.read(std::move(request), std::move(match_meta), [promise](ErrorInfo error) {
+        promise->set_value(std::move(error));
+    });
     return await(future);
 }
 
