@@ -25,17 +25,12 @@
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
-#include <chrono>
 #include <cerrno>
 #include <cstring>
-#include <cstdlib>
 #include <utility>
-#include <exception>
-#include "autil/Scope.h"
 
 namespace rtp_llm {
 

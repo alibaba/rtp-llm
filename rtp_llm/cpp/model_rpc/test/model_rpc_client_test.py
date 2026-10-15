@@ -556,7 +556,7 @@ class ModelRpcClientTest(TestCase):
                 addresses=["localhost:1234"],
                 client_config={},
                 max_rpc_timeout_ms=max_rpc_timeout_ms,
-                decode_entrance=False,
+                role_type=RoleType.PDFUSION,
             )
 
     def test_thinking_mode_values_match_proto_contract(self):
@@ -1513,13 +1513,12 @@ class ModelRpcClientTest(TestCase):
             "rtp_llm.generate_stream_call", "worker:9000"
         )
 
-    def test_enqueue_cancels_decode_stream_on_early_close(self):
     def test_prefill_only_fails_fast_when_backend_reports_generated_tokens(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.PDFUSION,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(generate_responses=[_make_response(output_len=1)])
@@ -1557,7 +1556,7 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.PDFUSION,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(
@@ -1605,7 +1604,7 @@ class ModelRpcClientTest(TestCase):
             addresses=["worker:9000"],
             client_config={},
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
+            role_type=RoleType.PDFUSION,
         )
         client._channel_pool = _FakeChannelPool()
         stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
@@ -1639,7 +1638,7 @@ class ModelRpcClientTest(TestCase):
         self.assertIn("request_id=1", log_text)
         self.assertFalse(stub.generate_iterator.cancelled)
 
-    def test_enqueue_cancels_fetch_stream_on_early_close(self):
+    def test_enqueue_cancels_decode_stream_on_early_close(self):
         async def run_and_close():
             gen = client.enqueue(input_py)
             first = await gen.__anext__()

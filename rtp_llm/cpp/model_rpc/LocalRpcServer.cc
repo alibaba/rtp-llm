@@ -103,7 +103,7 @@ public:
             try {
                 if (stream->getStatus() == StreamState::FINISHED || stream->hasError()
                     || stream->hasEvent(StreamEvents::GenerateDone)
-                    || stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+                    || stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
                     continue;
                 }
                 stream->reportError(ErrorCode::CANCELLED, "batch generate call exited before all streams finished");
