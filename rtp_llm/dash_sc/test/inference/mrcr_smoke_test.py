@@ -78,6 +78,7 @@ class _Dsv4Tokenizer:
         return list(
             {
                 "<think>\n": [128821, 201],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "</think>": [128822],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],

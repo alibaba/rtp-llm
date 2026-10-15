@@ -65,6 +65,27 @@ def thinking_mode_from_value(value: Any) -> ThinkingMode:
     }[normalized]
 
 
+def should_disable_forced_thinking(
+    thinking_mode: ThinkingMode,
+    default_thinking_mode: ThinkingMode,
+    *,
+    emits_reasoning_stream: bool,
+    prompt_has_think_anchor: bool,
+) -> bool:
+    """Avoid an unreachable think envelope on a non-reasoning deployment.
+
+    Encoding think tags alone does not establish model support. Trust an
+    explicitly enabled deployment, a reasoning renderer, or an open prompt
+    anchor before accepting request-forced fixed thinking.
+    """
+    return (
+        thinking_mode == ThinkingMode.ENABLED
+        and default_thinking_mode != ThinkingMode.ENABLED
+        and not emits_reasoning_stream
+        and not prompt_has_think_anchor
+    )
+
+
 class RoleAddr(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

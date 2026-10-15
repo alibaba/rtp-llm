@@ -14,6 +14,7 @@ from rtp_llm.config.generate_config import (
     GenerateConfig,
     ReturnAllProbsMode,
     ThinkingMode,
+    should_disable_forced_thinking,
 )
 from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_args import ModelArgs
@@ -652,12 +653,12 @@ class OpenaiEndpoint(object):
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
         config.thinking_mode = renderer.resolve_thinking_mode(request)
-        if (
-            config.thinking_mode == ThinkingMode.ENABLED
-            and renderer.default_thinking_mode != ThinkingMode.ENABLED
-            and not renderer.emits_reasoning_stream
-            and not self._request_prompt_has_think_anchor(config, input_ids, request)
-        ):
+        if should_disable_forced_thinking(
+            config.thinking_mode,
+            renderer.default_thinking_mode,
+            emits_reasoning_stream=renderer.emits_reasoning_stream,
+            prompt_has_think_anchor=False,
+        ) and not self._request_prompt_has_think_anchor(config, input_ids, request):
             # A fixed-ENABLED think envelope compiles with begin="" and masks EOS
             # until the model emits the think end tag. That is only reachable for
             # models that actually produce a reasoning stream (they emit

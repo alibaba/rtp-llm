@@ -9,7 +9,11 @@ from rtp_llm.openai.renderer_factory_register import (
     ensure_renderer_registered,
 )
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
+from rtp_llm.openai.renderers.custom_renderer import (
+    EMITS_REASONING_STREAM_BY_MODEL_TYPE,
+    CustomChatRenderer,
+    RendererParams,
+)
 from rtp_llm.openai.renderers.fast_chat_renderer import FastChatRenderer
 from rtp_llm.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 
@@ -17,6 +21,17 @@ from rtp_llm.openai.renderers.llama_template_renderer import LlamaTemplateRender
 class ChatRendererFactory:
     def __init__(self):
         pass
+
+    @staticmethod
+    def model_emits_reasoning_stream(model_type: Optional[str]) -> bool:
+        """Resolve the same capability as renderer instances without rendering."""
+        if not model_type:
+            return False
+        ensure_renderer_registered(model_type)
+        renderer_type = _renderer_factory.get(model_type, CustomChatRenderer)
+        return EMITS_REASONING_STREAM_BY_MODEL_TYPE.get(
+            model_type, renderer_type.emits_reasoning_stream
+        )
 
     @staticmethod
     def try_get_imported_renderer(
