@@ -23,9 +23,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
-#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include <algorithm>
 #include <exception>
 #include <tuple>
 #include <utility>
