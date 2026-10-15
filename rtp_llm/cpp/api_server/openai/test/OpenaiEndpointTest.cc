@@ -130,6 +130,36 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_EQ(config->random_seed, req.seed.value());
 }
 
+TEST_F(OpenaiEndpointTest, CodebookIgnoresModelAndRequestStopWords) {
+    ModelConfig model_config;
+    model_config.vocab_size                         = 100;
+    model_config.output_vocab_ids                   = {0, 10, 20};
+    model_config.output_vocab_groups                = {{1}, {2}};
+    model_config.special_tokens.eos_token_id        = 0;
+    model_config.special_tokens.stop_words_id_list  = {{10}};
+    model_config.special_tokens.stop_words_str_list = {"model-stop"};
+    EXPECT_CALL(*mock_tokenizer_, isPreTrainedTokenizer).WillOnce(Return(false));
+    EXPECT_CALL(*mock_render_, disable_stop_words).Times(1);
+    EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).Times(0);
+    EXPECT_CALL(*mock_render_, tokenize_words(_)).Times(0);
+    auto endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
+    EXPECT_TRUE(endpoint->stop_word_ids_list_.empty());
+    EXPECT_TRUE(endpoint->stop_words_list_.empty());
+
+    GenerateConfig extra;
+    extra.stop_words_list = {{20}};
+    extra.stop_words_str  = {"extra-stop"};
+    ChatCompletionRequest request;
+    request.max_tokens    = 2;
+    request.stop          = "request-stop";
+    request.extra_configs = extra;
+    auto config           = endpoint->extract_generation_config(request);
+    EXPECT_TRUE(config->stop_words_list.empty());
+    EXPECT_TRUE(config->stop_words_str.empty());
+    EXPECT_EQ(config->max_new_tokens, 2);
+    EXPECT_EQ(request.extra_configs->stop_words_list, extra.stop_words_list);
+}
+
 TEST_F(OpenaiEndpointTest, GetChatRender) {
     {
         ModelConfig model_config;

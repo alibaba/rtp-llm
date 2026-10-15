@@ -67,7 +67,7 @@ template<typename T>
 BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
                                      runtime::SizeType32 beamWidthIn,
                                      runtime::SizeType32 beamWidthOut,
-                                     runtime::SizeType32 vocabSize) {
+                                     runtime::SizeType32 vocabSize, bool forceV2) {
 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
@@ -85,7 +85,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
     int const nByteReservedSharedMemoryPerBlock = nByteMaxSharedMemoryPerSM - nByteMaxSharedMemoryPerBlock;
     config.mByteMaxSharedMemoryPerBlock = nByteMaxSharedMemoryPerBlock;
 
-    if (beamWidthIn == beamWidthOut && beamWidthIn <= kMaxBeamWidthForV1)
+    if (!forceV2 && beamWidthIn == beamWidthOut && beamWidthIn <= kMaxBeamWidthForV1)
     {
         // V1 workflow for small beam width and non-VBWS
         // Stage 1
@@ -251,10 +251,10 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
 template BeamSearchConfig configureBeamSearch<float>(runtime::SizeType32 batchSize,
                                                      runtime::SizeType32 beamWidthIn,
                                                      runtime::SizeType32 beamWidthOut,
-                                                     runtime::SizeType32 vocabSize);
+                                                     runtime::SizeType32 vocabSize, bool forceV2);
 template BeamSearchConfig configureBeamSearch<half>(runtime::SizeType32 batchSize,
                                                     runtime::SizeType32 beamWidthIn,
                                                     runtime::SizeType32 beamWidthOut,
-                                                    runtime::SizeType32 vocabSize);
+                                                    runtime::SizeType32 vocabSize, bool forceV2);
 
 }

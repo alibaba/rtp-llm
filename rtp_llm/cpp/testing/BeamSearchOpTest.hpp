@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <torch/torch.h>
+#include <limits>
 
 using namespace rtp_llm;
 
@@ -70,14 +71,41 @@ public:
         return TestBeamSearchInput({logits, token_ids, input_lengths, sequence_lengths, cum_log_probs, beam_width_out});
     };
 
-    TestBeamSearchOutput opRun(TestBeamSearchInput& input) {
+    void runMaskedEqualSmallBeamV2Tests() {
+        for (const int valid_tokens : {1, 2}) {
+            for (const int vocab_size : {3, 7, 65536}) {
+                SCOPED_TRACE(vocab_size);
+                TestBeamSearchInput input;
+                input.logits = torch::full({1, 2, vocab_size}, -std::numeric_limits<float>::infinity(), float_options);
+                input.logits[0][0][0] = 3.0f;
+                if (valid_tokens > 1)
+                    input.logits[0][0][1] = 1.0f;
+                input.logits[0][1][0] = 2.0f;
+                if (valid_tokens > 1)
+                    input.logits[0][1][1] = 0.0f;
+                input.token_ids        = torch::tensor({10, 0, 11, 0}, int_options).reshape({1, 2, 2});
+                input.input_lengths    = torch::ones({1, 2}, int_options);
+                input.sequence_lengths = torch::ones({1, 2}, int_options);
+                input.cum_log_probs    = torch::tensor({0.0f, -10.0f}, float_options).reshape({1, 2});
+                input.beam_width_out   = 2;
+                auto ref               = torchRef(input);
+                auto result            = opRun(input, true);
+                ASSERT_TRUE(torch::equal(result.token_ids, ref.token_ids));
+                ASSERT_TRUE(torch::equal(result.beam_indices, ref.beam_indices));
+                assertTensorClose(result.cum_log_probs, ref.cum_log_probs);
+            }
+        }
+    }
+
+    TestBeamSearchOutput opRun(TestBeamSearchInput& input, bool force_v2 = false) {
         auto logits     = input.logits.to(torch::kCUDA);
         auto cuda_input = BeamSearchParams({logits,
                                             input.token_ids.to(torch::kCUDA),
                                             input.input_lengths.to(torch::kCUDA),
                                             input.sequence_lengths.to(torch::kCUDA),
                                             input.cum_log_probs.to(torch::kCUDA),
-                                            static_cast<size_t>(input.beam_width_out)});
+                                            static_cast<size_t>(input.beam_width_out),
+                                            force_v2});
 
         auto result = execSampleBeamSearch(std::move(cuda_input));
 
