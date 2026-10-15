@@ -907,7 +907,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             wraps=attn_op.decode_wrapper.plan,
         ) as plan_mock:
             attn_op.prepare(capture_inputs)
-            self.assertEqual(plan_mock.call_count, 1)
+            # Initial graph preparation replans after workspace compaction.
+            self.assertEqual(plan_mock.call_count, 2)
             capture_call = plan_mock.call_args
             self.assertFalse(capture_call.args[0].is_cuda)
             self.assertTrue(capture_call.args[1].is_cuda)
@@ -1122,7 +1123,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 2)
             capture_call = plan_mock.call_args
             self.assertFalse(capture_call.args[0].is_cuda)
-            self.assertFalse(capture_call.args[1].is_cuda)
+            # Graph capture plans with the device indices buffer that
+            # fill_params refreshes in place; a host mirror here would make the
+            # plan's H2D copy block the previous replay.
+            self.assertTrue(capture_call.args[1].is_cuda)
+            self.assertEqual(
+                capture_call.args[1].data_ptr(), fmha_params.page_indice_d.data_ptr()
+            )
             self.assertFalse(capture_call.args[2].is_cuda)
             self.assertTrue(capture_call.kwargs["non_blocking"])
             self.assertTrue(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))

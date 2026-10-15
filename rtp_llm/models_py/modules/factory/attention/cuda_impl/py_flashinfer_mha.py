@@ -1895,20 +1895,6 @@ class PyFlashinferDecodeAttnOp(object):
             page_indice = self.fmha_params.page_indice_d
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
-        elif use_cuda_core_graph_plan_cache:
-            # FlashInfer 0.2.5/0.6.9/0.6.15.post1 CUDA-core BatchDecode derives
-            # its work partition from page indptr. The last-page-length values
-            # are read by the kernel at runtime; their tensor length still
-            # matches the graph's fixed batch size. Keep both metadata tensors
-            # on host to avoid a D2H copy. Indices stay on device and alias the
-            # graph-bound buffer refreshed by fill_params() before each replay.
-            # It is the same tensor as the wrapper's indices buffer, so the
-            # plan-internal copy is a no-op; forbid_realloc=True guarantees
-            # that its capture-time capacity remains valid during replay.
-            page_indptr = self.fmha_params.decode_page_indptr_h
-            page_indice = self.fmha_params.page_indice_d
-            last_page_len = self.fmha_params.paged_kv_last_page_len_h
-            plan_kwargs = {"non_blocking": True}
         else:
             page_indptr = self.fmha_params.decode_page_indptr_d
             page_indice = self.fmha_params.page_indice_d
