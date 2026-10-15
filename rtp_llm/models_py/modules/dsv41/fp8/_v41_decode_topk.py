@@ -3,9 +3,10 @@
 """Batched V4.1 decode selection and fused candidate metadata.
 
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
-Keep PyTorch's candidate selection algorithm: tied block scores can select
-different tokens downstream. Only the unused ordering of the selected blocks
-is removed. Token K512 uses native DeepSelect when supported, with radix-select fallback.
+Candidate K2048 uses radix selection with device-side visible block counts.
+Equal cutoff scores may select different blocks than PyTorch. Unsupported
+backends or an explicit opt-out retain PyTorch. Token K512 uses native
+DeepSelect when supported, with radix-select fallback.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -49,6 +51,7 @@ def _candidate_pool_kernel(
     logits,
     lengths,
     scores,
+    block_lengths,
     WIDTH: tl.constexpr,
     STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -59,7 +62,9 @@ def _candidate_pool_kernel(
     blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
     offsets = tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))
     columns = blocks[:, None] * BLOCK_SIZE + offsets[None, :]
-    visible = tl.load(lengths + row)
+    visible = tl.minimum(tl.maximum(tl.load(lengths + row), 0), WIDTH)
+    if block_lengths is not None and tl.program_id(1) == 0:
+        tl.store(block_lengths + row, tl.cdiv(visible, BLOCK_SIZE))
     values = tl.load(
         logits + row * STRIDE + columns,
         (blocks[:, None] < NBLOCKS)
@@ -85,6 +90,7 @@ def _candidate_store_flags_kernel(
     flags,
     K: tl.constexpr,
     NBLOCKS: tl.constexpr,
+    SCORE_TABLE: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     offsets = tl.arange(0, 1024)
@@ -92,9 +98,18 @@ def _candidate_store_flags_kernel(
         blocks = tile * 1024 + offsets
         tl.store(flags + row * NBLOCKS + blocks, 0, blocks < NBLOCKS)
     columns = tl.arange(0, triton.next_power_of_2(K))
-    score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
-    index = tl.load(indices + row * K + columns, columns < K, other=-1)
-    valid = (columns < K) & (score > -float("inf"))
+    index = tl.load(
+        indices + row * (2048 if SCORE_TABLE else K) + columns, columns < K, other=-1
+    )
+    if SCORE_TABLE:
+        score = tl.load(
+            values + row * NBLOCKS + index,
+            (columns < K) & (index >= 0) & (index < NBLOCKS),
+            other=-float("inf"),
+        )
+    else:
+        score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
+    valid = (columns < K) & (index >= 0) & (index < NBLOCKS) & (score > -float("inf"))
     # +inf pins the newest block; NaN and -inf remain invalid, as in torch.
     tl.store(candidates + row * K + columns, tl.where(valid, index, -1), columns < K)
     tl.debug_barrier()
@@ -157,16 +172,32 @@ def select_candidates(
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
-    # Keep candidate-block topk on its original FP32 path, including tie selection.
+    use_v3 = topk_blocks == 2048 and candidate_topk.is_available("decode")
+    block_lengths = (
+        torch.empty(rows, dtype=torch.int32, device=logits.device) if use_v3 else None
+    )
     scores = torch.empty((rows, nblocks), dtype=torch.float32, device=logits.device)
     _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
-        logits, lengths, scores, width, logits.stride(0), block_size, nblocks, 128
+        logits,
+        lengths,
+        scores,
+        block_lengths,
+        width,
+        logits.stride(0),
+        block_size,
+        nblocks,
+        128,
     )
-    values, indices = scores.topk(count, dim=-1, sorted=False)
+    if use_v3:
+        # +inf pins the newest block. Do not use the finite-filtering variant.
+        indices = candidate_topk.select(scores, block_lengths)
+        values = scores
+    else:
+        values, indices = scores.topk(count, dim=-1, sorted=False)
     candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
     _candidate_store_flags_kernel[(rows,)](
-        values, indices, candidates, flags, count, nblocks
+        values, indices, candidates, flags, count, nblocks, SCORE_TABLE=use_v3
     )
     return candidates, flags
 

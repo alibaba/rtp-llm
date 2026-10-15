@@ -459,13 +459,13 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
                 torch.tensor([0, 0, 1, 1] if batched else [0] * rows),
                 request_row_slices=slices,
             )
-        requested = torch.bfloat16 if layer > 20 else torch.float32
+        requested = (
+            torch.bfloat16
+        )  # The existing row-scale scorer consumes BF16 on both paths.
         self.assertEqual(prepared.call_args.kwargs["weights_out_dtype"], requested)
         if batched:
             self.assertEqual(batch.call_args.args[3].dtype, requested)
-        expected = (
-            raw_scaled.bfloat16() if sparse_supported and layer > 20 else raw_scaled
-        )
+        expected = raw_scaled.bfloat16()
         actual = torch.cat(consumed)
         self.assertEqual(actual.dtype, expected.dtype)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -473,10 +473,10 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
     def test_sparse_consumer_receives_fused_bf16_weights(self):
         self._check_weight_routing(layer=26, sparse_supported=True)
 
-    def test_rejected_batched_sparse_restores_original_fp32_weights(self):
+    def test_rejected_batched_sparse_keeps_bf16_row_scaled_weights(self):
         self._check_weight_routing(layer=26, sparse_supported=False, batched=True)
 
-    def test_candidate_source_keeps_fp32_weights(self):
+    def test_candidate_source_uses_bf16_row_scaled_weights(self):
         self._check_weight_routing(layer=20, sparse_supported=False)
 
 

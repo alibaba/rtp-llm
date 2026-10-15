@@ -3,9 +3,10 @@
 """V4.1 prefill candidate pooling and reusable packed candidate masks.
 
 Adapted from vLLM's model_executor/kernels/attention/dsa/candidate_blocks.py
-and RTP's _v41_decode_topk.py. Bitmap publication retains torch.topk(sorted=True).
-Candidate-only publication skips the final score sort: sparse plans sort and
-deduplicate block IDs before scoring, so they only consume the selected set.
+and RTP's _v41_decode_topk.py. K2048 uses topk_v3 by default, with unordered
+candidate IDs for both bitmap and sparse-table consumers. Equal cutoff scores
+may select different blocks than PyTorch. Unsupported/disabled paths retain
+PyTorch selection.
 BF16 logits are promoted in registers before the FP32 block reduction and
 selection, preserving the old BF16-to-FP32 normalization semantics without
 materializing a full FP32 score tensor. The caller either applies causal
@@ -25,6 +26,8 @@ import os
 import torch
 import triton
 import triton.language as tl
+
+from . import _v41_candidate_topk_v3 as candidate_topk
 
 DEFAULT_MAX_BITMAP_BYTES = 256 * 1024 * 1024
 
@@ -122,6 +125,7 @@ def _prefill_candidate_pool_kernel(
     token_indices=None,
     token_ends=None,
     FILTER_TOKENS: tl.constexpr = False,
+    block_lengths=None,
 ):
     row = tl.program_id(0).to(tl.int64)
     blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
@@ -139,6 +143,9 @@ def _prefill_candidate_pool_kernel(
     pooled = _torch_amax(values, BLOCK_SIZE)
     if not MASK_TAIL:
         length = tl.load(visible + row * VISIBLE_STRIDE)
+    if block_lengths is not None and tl.program_id(1) == 0:
+        bounded_length = tl.minimum(tl.maximum(length, 0), WIDTH)
+        tl.store(block_lengths + row, tl.cdiv(bounded_length, BLOCK_SIZE))
     newest = tl.maximum(length - 1, 0) // BLOCK_SIZE
     pooled = tl.where(
         blocks == newest,
@@ -167,7 +174,7 @@ def _prefill_candidate_pool_kernel(
             tl.store(token_indices + row * 512 + slot, tl.where(keep, index, -1))
 
 
-@triton.jit(do_not_specialize=["K", "FLAG_WORDS", "FLAG_STRIDE"])
+@triton.jit(do_not_specialize=["K", "FLAG_WORDS", "FLAG_STRIDE", "NBLOCKS"])
 def _prefill_candidate_store_bitmap_kernel(
     values,
     indices,
@@ -180,14 +187,25 @@ def _prefill_candidate_store_bitmap_kernel(
     FLAG_STRIDE,
     WRITE_FLAGS: tl.constexpr,
     FLAG_TILE: tl.constexpr,
+    NBLOCKS=0,
+    SCORE_TABLE: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     if WRITE_FLAGS:
         word = tl.arange(0, FLAG_TILE)
         tl.store(flags + row * FLAG_STRIDE + word, 0, word < FLAG_WORDS)
     columns = tl.arange(0, triton.next_power_of_2(OUT_K))
-    score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
-    index = tl.load(indices + row * K + columns, columns < K, other=-1).to(tl.int32)
+    index = tl.load(
+        indices + row * (2048 if SCORE_TABLE else K) + columns, columns < K, other=-1
+    ).to(tl.int32)
+    if SCORE_TABLE:
+        score = tl.load(
+            values + row * NBLOCKS + index,
+            (columns < K) & (index >= 0) & (index < NBLOCKS),
+            other=-float("inf"),
+        )
+    else:
+        score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
     valid = (columns < K) & (score > -float("inf"))
     # Keep +inf newest-block pins; filter NaN and -inf exactly like torch.
     tl.store(
@@ -338,8 +356,8 @@ def select_candidates(
     their ends must describe the same visible range. Candidate +inf pins and
     token finite filtering deliberately use different predicates.
     Flags may be bounded cache views; extra words are cleared. Output padding
-    is -1. IDs are score-ordered by default; ``build_bitmap=False`` consumers
-    use an unordered set and can rebuild their own bounded bitmap.
+    is -1. IDs are unordered on K2048 v3 paths; consumers use the selected set
+    and can rebuild their own bounded bitmap.
     """
     if not can_select_candidates(
         logits,
@@ -363,7 +381,9 @@ def select_candidates(
         flags = torch.empty((rows, words), dtype=torch.int32, device=logits.device)
     if not build_bitmap:
         flags = None
-        if nblocks <= topk_blocks:
+        if nblocks <= topk_blocks and not (
+            topk_blocks == 2048 and candidate_topk.is_available("prefill")
+        ):
             # Every block is selected, so only pooling/pinning/filtering remain.
             _prefill_candidate_pool_kernel[(rows, triton.cdiv(out.shape[1], 128))](
                 logits,
@@ -384,6 +404,10 @@ def select_candidates(
                 token_indices is not None,
             )
             return out, None
+    use_v3 = topk_blocks == 2048 and candidate_topk.is_available("prefill")
+    block_lengths = (
+        torch.empty(rows, dtype=torch.int32, device=logits.device) if use_v3 else None
+    )
     # Keep the pooled TopK input FP32 even for raw BF16 logits: narrowing the
     # reduction output would change the existing selection/tie contract.
     scores = torch.empty((rows, nblocks), dtype=torch.float32, device=logits.device)
@@ -401,14 +425,13 @@ def select_candidates(
         token_indices=token_indices,
         token_ends=token_ends,
         FILTER_TOKENS=token_indices is not None,
+        block_lengths=block_lengths,
     )
-    if not build_bitmap:
-        from ._v41_candidate_topk import try_select
-
-        selected = try_select(scores, out, k=count)
-        if selected is not None:
-            return selected, None
-    values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)
+    if use_v3:
+        indices = candidate_topk.select(scores, block_lengths)
+        values = scores
+    else:
+        values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)
     _prefill_candidate_store_bitmap_kernel[(rows,)](
         values,
         indices,
@@ -421,6 +444,8 @@ def select_candidates(
         flags.stride(0) if flags is not None else 1,
         build_bitmap,
         triton.next_power_of_2(flags.shape[1]) if flags is not None else 1,
+        NBLOCKS=nblocks,
+        SCORE_TABLE=use_v3,
     )
     return out, flags
 

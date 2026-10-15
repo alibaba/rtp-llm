@@ -58,6 +58,7 @@ _TESTS = [
 # The dense selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
     "test_v41_decode_topk",
+    "test_v41_prefill_candidates",
     "test_v41_decode_indexer",
     "test_v41_prefill_deepselect",
     "test_v41_deepselect",

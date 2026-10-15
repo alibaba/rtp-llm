@@ -623,7 +623,7 @@ class V41Fp4DualDecodeAttentionCUDA(unittest.TestCase):
 class V41DecodeTopKFusionCUDA(unittest.TestCase):
     """Independent old-PyTorch oracles for the decode selection helpers.
 
-    Candidate membership must be exact, including cutoff ties. Token TopK has
+    Candidate score multisets must be exact; cutoff ties may change membership. Token TopK has
     an unordered contract: compare selected score multisets and uniqueness,
     while keeping the old short-context ascending indices exactly.
     """
@@ -670,9 +670,19 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         expected, expected_flags = self._old_candidates(logits, lengths, block_size)
         self.assertEqual(candidates.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.uint8)
-        torch.testing.assert_close(
-            candidates.sort(-1).values, expected.sort(-1).values, rtol=0, atol=0
+        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_prefill_candidates import (
+            assert_candidate_values,
         )
+
+        assert_candidate_values(self, candidates, expected, logits, lengths, block_size)
+        nblocks = flags.shape[1]
+        expected_flags = torch.zeros(
+            (logits.shape[0], nblocks + 1), dtype=torch.uint8, device=logits.device
+        )
+        expected_flags.scatter_(
+            1, torch.where(candidates >= 0, candidates, nblocks).long(), 1
+        )
+        expected_flags = expected_flags[:, :nblocks]
         torch.testing.assert_close(flags, expected_flags, rtol=0, atol=0)
         for row, visible in enumerate(lengths.cpu().tolist()):
             ids = candidates[row][candidates[row] >= 0]
