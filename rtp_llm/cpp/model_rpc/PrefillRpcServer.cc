@@ -20,6 +20,7 @@
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
