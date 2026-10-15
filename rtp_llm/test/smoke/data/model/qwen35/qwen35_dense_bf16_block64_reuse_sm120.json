@@ -1,0 +1,46 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-4B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "alpha alpha alpha alpha alpha alpha alpha alpha \nPRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk.",
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " PROD",
+                "aux_info": {
+                    "input_len": 65,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "output_len": 1,
+                    "iter_count": 1
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "alpha alpha alpha alpha alpha alpha alpha alpha \nPRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk. PRODUCER branch continues with enough extra tokens to exceed one chunk.",
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " PROD",
+                "aux_info": {
+                    "input_len": 65,
+                    "reuse_len": 64,
+                    "local_reuse_len": 64,
+                    "output_len": 1,
+                    "iter_count": 1
+                }
+            }
+        }
+    ]
+}

@@ -36,10 +36,10 @@ ENABLE_MERGE_W13=1 \
 --checkpoint_path XXXX \
 --model_type qwen_3_moe \
 --act_type bf16 \
---sp_model_type qwen_3_moe_eagle3 \
+--sp_model_type angelslim_qwen3_eagle3 \
 --sp_checkpoint_path XXXXXXX \
 --sp_act_type bf16 \
---sp_type mtp \
+--sp_type eagle3 \
 --sp_min_token_match 2 \
 --sp_max_token_match 2 \
 --max_seq_len 32768 \

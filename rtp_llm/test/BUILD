@@ -62,7 +62,9 @@ py_test(
     srcs = [
         "renderer_stop_words_test.py",
     ],
-    data = [],
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+    ],
     deps = [
         "//rtp_llm:testlib",
     ],

@@ -28,6 +28,25 @@ class BaseReasoningFormatDetector:
         self._buffer = ""
         self.stripped_think_start = False
 
+    def flush_buffer(self) -> StreamingParseResult:
+        """Release text parked by the tag-prefix heuristic at end of stream.
+
+        ``parse_streaming_increment`` holds back text that is a strict prefix of
+        a think tag (a trailing ``<``, ``</thi``, ...) because it may grow into
+        one. Nothing calls us again once generation stops, so without this the
+        tail would never reach the response. Inside a reasoning block the parked
+        text is the beginning of the end tag, which the state machine also refuses
+        to emit as reasoning; outside one it is plain content and must be
+        returned.
+        """
+        if not self._buffer:
+            return StreamingParseResult()
+        remaining = self._buffer
+        self._buffer = ""
+        if self._in_reasoning:
+            return StreamingParseResult()
+        return StreamingParseResult(normal_text=remaining)
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses reasoning sections in the provided text.
@@ -64,15 +83,22 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
-        logging.info(
-            f"[REASONING_DEBUG] parse_streaming_increment: buffer={repr(self._buffer)}, new_text={repr(new_text)}"
+        # This runs once per generated token on the streaming path, so keep it at
+        # DEBUG with lazy formatting: at INFO it emitted two log records per
+        # token for every reasoning-renderer request.
+        logging.debug(
+            "[REASONING_DEBUG] parse_streaming_increment: buffer=%r, new_text=%r",
+            self._buffer,
+            new_text,
         )
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
-        logging.info(
-            f"[REASONING_DEBUG] parse_streaming_increment: current_text={repr(current_text)}, in_reasoning={self._in_reasoning}"
+        logging.debug(
+            "[REASONING_DEBUG] parse_streaming_increment: current_text=%r, in_reasoning=%r",
+            current_text,
+            self._in_reasoning,
         )
         if any(
             token.startswith(current_text) and token != current_text
@@ -242,4 +268,9 @@ class ReasoningParser:
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[str, str]:
         """Streaming call: incremental parsing"""
         ret = self.detector.parse_streaming_increment(chunk_text)
+        return ret.reasoning_text, ret.normal_text
+
+    def flush(self) -> Tuple[str, str]:
+        """End of stream: release text parked on a partial think tag."""
+        ret = self.detector.flush_buffer()
         return ret.reasoning_text, ret.normal_text

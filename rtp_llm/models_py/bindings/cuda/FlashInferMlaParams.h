@@ -72,6 +72,11 @@ public:
                                    torch::Tensor kv_cache_block_id_device,
                                    int           seq_size_per_block);
 
+    void fillDecodeParamsDevice(torch::Tensor sequence_lengths_h,
+                                torch::Tensor sequence_lengths_plus_1_d,
+                                torch::Tensor kv_cache_block_id_device,
+                                int           seq_size_per_block);
+
     // Device-only fast path for MHA paged attention. Fills paged-KV metadata
     // plus batch_indice_d/positions_d, reusing fillParams buffers so existing
     // FlashInfer aliases stay valid. MLA-only/reuse fields are not filled.

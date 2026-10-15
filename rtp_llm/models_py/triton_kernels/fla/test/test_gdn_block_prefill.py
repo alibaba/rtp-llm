@@ -293,6 +293,89 @@ class BlockTest(unittest.TestCase):
             use_narrow_block_map=True,
         )
 
+    def test_store_first_64_token_block_for_reuse(self):
+        """A 65-token prefill must store the first reusable GDN block.
+
+        With both the physical block and GDN chunk set to 64 tokens, chunk
+        zero is a non-final block boundary. The cached state for that chunk is
+        what a subsequent request with one reused block loads.
+        """
+        device = torch.device("cuda")
+        head_num = 2
+        k_size = 128
+        v_size = 128
+        chunk_size = 64
+        seq_size_per_block = 64
+
+        # prepare_chunk_indices creates two chunks for a 65-token request. The
+        # store kernel reads h[i_c + 1] for the first, non-final chunk.
+        h = torch.randn(
+            2,
+            head_num,
+            v_size,
+            k_size,
+            device=device,
+            dtype=INTERMEDIATE_DTYPE,
+        )
+        final_states = torch.randn(
+            1,
+            head_num,
+            v_size,
+            k_size,
+            device=device,
+            dtype=INTERMEDIATE_DTYPE,
+        )
+        prefix_lengths = torch.zeros(1, device=device, dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, 65], device=device, dtype=torch.int32)
+        block_map = torch.tensor([[1, 2]], device=device, dtype=torch.int32)
+        sentinel = -999.0
+        ssm_states = torch.full(
+            (3, head_num, v_size, k_size),
+            sentinel,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+
+        store_ssm_state_to_block_map(
+            h,
+            final_states,
+            prefix_lengths,
+            cu_seqlens,
+            block_map,
+            ssm_states,
+            seq_size_per_block,
+            chunk_size,
+        )
+
+        torch.testing.assert_close(
+            ssm_states[1], h[1].to(ssm_states.dtype), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            ssm_states[2], final_states[0].to(ssm_states.dtype), rtol=0, atol=0
+        )
+        self.assertTrue(torch.all(ssm_states[0] == sentinel).item())
+
+        # Model the next request: a 64-token prefix resolves to block_map[0, 0]
+        # and must recover the state written at the first chunk boundary.
+        reused_state = torch.empty(
+            1,
+            head_num,
+            v_size,
+            k_size,
+            device=device,
+            dtype=INTERMEDIATE_DTYPE,
+        )
+        load_initial_state_from_block_map(
+            torch.tensor([64], device=device, dtype=torch.int32),
+            block_map,
+            ssm_states,
+            reused_state,
+            seq_size_per_block,
+        )
+        torch.testing.assert_close(
+            reused_state[0], ssm_states[1].to(INTERMEDIATE_DTYPE), rtol=0, atol=0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

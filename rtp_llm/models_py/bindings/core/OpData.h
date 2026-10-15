@@ -104,6 +104,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // Speculative post-verification draft prefill uses fixed-width multi-token attention.
+    bool is_spec_draft_prefill = false;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 

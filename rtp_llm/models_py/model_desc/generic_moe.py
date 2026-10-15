@@ -553,6 +553,9 @@ class GenericMoeModel(GptModelBase):
 
         return capture.finalize(hidden_states, residual)
 
+    def has_mtp_hidden_buffer(self) -> bool:
+        return bool(self._mtp_aux_capture_layer_ids)
+
 
 __all__ = [
     "GenericMoeLayer",

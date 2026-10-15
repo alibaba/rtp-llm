@@ -1,5 +1,6 @@
 import math
 import unittest
+from types import SimpleNamespace
 from typing import List
 from unittest import mock
 
@@ -7,7 +8,10 @@ import torch
 from flashinfer.cascade import merge_state
 from flashinfer.prefill import single_prefill_with_kv_cache
 
-from rtp_llm.models_py.modules.factory.attention import attn_factory
+from rtp_llm.models_py.modules.factory.attention import attn_factory, common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+    KVCacheWriteOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferHybridPrefillAttnOp,
     PyFlashinferHybridPrefillImpl,
@@ -17,7 +21,12 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     fill_paged_kv_cache,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, RopeStyle
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
+from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
+    PyAttentionInputs,
+    get_typemeta,
+    rtp_llm_ops,
+)
 
 
 class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
@@ -98,7 +107,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def _test_hybrid_prefill_correctness(
         self,
-        batch_size: int,
         prefix_lengths: List[int],
         input_lengths: List[int],
         head_num: int,
@@ -115,7 +123,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
         cache_dtype = self.cache_dtype(config.attn_configs)
 
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            batch_size, prefix_lengths, input_lengths, page_size
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
         )
         attn_op = PyFlashinferHybridPrefillAttnOp(config.attn_configs, attn_inputs)
         self.assertTrue(attn_op.support(attn_inputs))
@@ -221,10 +231,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
         config.attn_configs.max_seq_len = 128
 
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths),
-            prefix_lengths,
-            input_lengths,
-            page_size,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
             dtype=compute_dtype,
         )
 
@@ -390,7 +399,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_single_batch(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=1,
             prefix_lengths=[4884],
             input_lengths=[5],
             head_num=40,
@@ -401,7 +409,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_multi_batch_varied(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=3,
             prefix_lengths=[32, 96, 160],
             input_lengths=[8, 16, 24],
             head_num=16,
@@ -412,7 +419,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_multi_batch_uniform(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=4,
             prefix_lengths=[64, 64, 64, 64],
             input_lengths=[16, 16, 16, 16],
             head_num=32,
@@ -423,7 +429,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_small_page_size(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[128, 256],
             input_lengths=[16, 32],
             head_num=32,
@@ -434,7 +439,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_large_page_size(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[128, 256],
             input_lengths=[16, 32],
             head_num=32,
@@ -445,7 +449,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_many_heads(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[64, 128],
             input_lengths=[16, 32],
             head_num=64,
@@ -456,7 +459,6 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 
     def test_chunked_prefill_gqa(self):
         self._test_hybrid_prefill_correctness(
-            batch_size=2,
             prefix_lengths=[64, 128],
             input_lengths=[16, 32],
             head_num=32,
@@ -478,7 +480,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
             seq_size_per_block=page_size,
         )
         attn_inputs = self._create_chunked_prefill_attention_inputs(
-            len(prefix_lengths), prefix_lengths, input_lengths, page_size
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=page_size,
         )
         block_table_host = attn_inputs.kv_cache_kernel_block_id.clone()
         attn_inputs.kv_cache_kernel_block_id = torch.empty(0, dtype=torch.int32)
@@ -573,11 +577,787 @@ class TestHybridPrefillSupport(unittest.TestCase):
         self.assertFalse(PyFlashinferHybridPrefillImpl.support(self._config(), inputs))
 
 
+class _NoReleaseHybridAttnOp(PyFlashinferHybridPrefillAttnOp):
+    def __del__(self):
+        pass
+
+
+class TestDynamicFp8HybridUnit(unittest.TestCase):
+    def test_compact_prefix_plan_and_write_before_gather(self):
+        params = SimpleNamespace(
+            fill_params=mock.Mock(),
+            batch_reuse_info_vec_h=torch.tensor(
+                [[0, 1, 0, 1], [0, 9, 1, 2]], dtype=torch.int32
+            ),
+            reuse_cache_page_indice_h=torch.tensor([12, 4, 9], dtype=torch.int32),
+            reuse_cache_page_indice_d=torch.tensor([12, 4, 9], dtype=torch.int32),
+        )
+        events = []
+        ragged = SimpleNamespace(
+            plan=mock.Mock(),
+            run=mock.Mock(
+                side_effect=lambda *args, **kwargs: (
+                    events.append("ragged")
+                    or (torch.zeros_like(args[0]), torch.zeros(args[0].shape[:2]))
+                )
+            ),
+        )
+        prefix = SimpleNamespace(
+            plan=mock.Mock(),
+            run=mock.Mock(
+                side_effect=lambda *args, **kwargs: (
+                    events.append("prefix")
+                    or (torch.zeros_like(args[0]), torch.zeros(args[0].shape[:2]))
+                )
+            ),
+        )
+        op = _NoReleaseHybridAttnOp.__new__(_NoReleaseHybridAttnOp)
+        op.dynamic_fp8 = True
+        op.fmha_params = params
+        op.ragged_wrapper = ragged
+        op.prefix_paged_wrapper = prefix
+        op.local_head_num = 4
+        op.local_kv_head_num = 2
+        op.head_dim_qk = 4
+        op.head_dim_vo = 4
+        op.physical_page_size = 32
+        op.page_size = 8
+        op.subdivision = 4
+        op.dtype = torch.bfloat16
+        op.q_dtype = torch.bfloat16
+        op.kv_dtype = torch.bfloat16
+        op.is_causal = True
+        inputs = SimpleNamespace(
+            kv_cache_kernel_block_id=torch.tensor([[12, 4], [9, 0]]),
+            kv_cache_kernel_block_id_device=None,
+            prefix_lengths=torch.tensor([1, 9], dtype=torch.int32),
+            sequence_lengths=torch.tensor([2, 10], dtype=torch.int32),
+            input_lengths=torch.tensor([1, 1], dtype=torch.int32),
+            cu_seqlens_device=torch.tensor([0, 1, 2], dtype=torch.int32),
+        )
+        op.prepare(inputs)
+        torch.testing.assert_close(
+            prefix.plan.call_args.args[2],
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+        )
+        torch.testing.assert_close(
+            params.reuse_cache_page_indice_d,
+            torch.tensor([12, 4, 9], dtype=torch.int32),
+        )
+
+        q = torch.randn(2, 4, 4, dtype=torch.bfloat16)
+        k = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+        v = torch.randn_like(k)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.empty(16, 2, 2, 8, 4, dtype=torch.float8_e4m3fn),
+            kv_scale_base=torch.empty(16, 2 * 2 * 8, dtype=torch.float32),
+        )
+        writer = SimpleNamespace(
+            forward=mock.Mock(side_effect=lambda *args: events.append("write"))
+        )
+
+        def gather_side_effect(*args):
+            events.append("gather")
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "rtp_llm_ops.gather_and_dequantize_fp8_kv_cache",
+            side_effect=gather_side_effect,
+            create=True,
+        ) as gather_mock, mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "quantize_to_fp8_if_needed",
+            side_effect=AssertionError("unit-scale cast must not run"),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "merge_state_in_place"
+        ):
+            op.forward(q, k, v, cache, writer)
+
+        self.assertEqual(events, ["ragged", "write", "gather", "prefix"])
+        self.assertIs(gather_mock.call_args.args[2], params.reuse_cache_page_indice_d)
+        self.assertEqual(gather_mock.call_args.args[3].dtype, torch.bfloat16)
+
+    def test_mode2_hybrid_attention_matches_base_reference_with_subdivision(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+
+        device = torch.device("cuda")
+        torch.manual_seed(2026)
+        harness = TestPyFlashinferHybridPrefillAttnOp()
+        harness.device = device
+        prefix_lengths = [7, 9]
+        input_lengths = [2, 3]
+        sequence_lengths = [
+            prefix + current for prefix, current in zip(prefix_lengths, input_lengths)
+        ]
+        kernel_page_size = 4
+        physical_page_size = 8
+        subdivision = physical_page_size // kernel_page_size
+        config = harness._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=64,
+            seq_size_per_block=kernel_page_size,
+        )
+        config.attn_configs.tokens_per_block = physical_page_size
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+        config.attn_configs.is_causal = True
+        inputs = harness._create_chunked_prefill_attention_inputs(
+            len(prefix_lengths),
+            prefix_lengths,
+            input_lengths,
+            kernel_page_size,
+        )
+        block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
+        physical_page_offset = 0
+        for batch_idx, sequence_length in enumerate(sequence_lengths):
+            kernel_pages = math.ceil(sequence_length / kernel_page_size)
+            for logical_page in range(kernel_pages):
+                physical_page = physical_page_offset + logical_page // subdivision
+                block_table[batch_idx, logical_page] = (
+                    physical_page * subdivision + logical_page % subdivision
+                )
+            physical_page_offset += math.ceil(sequence_length / physical_page_size)
+        physical_page_count = physical_page_offset
+        torch.testing.assert_close(
+            block_table,
+            torch.tensor([[0, 1, 2], [4, 5, 6]], dtype=torch.int32),
+        )
+        self.assertEqual(physical_page_count, 4)
+        inputs.kv_cache_kernel_block_id = block_table
+        inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+
+        op = PyFlashinferHybridPrefillAttnOp(config.attn_configs, inputs)
+        params = op.prepare(inputs)
+
+        q_chunks = []
+        k_prefix_chunks = []
+        v_prefix_chunks = []
+        k_new_chunks = []
+        v_new_chunks = []
+        prefix_k_tokens = []
+        prefix_v_tokens = []
+        target_pages = []
+        target_offsets = []
+        block_table = inputs.kv_cache_kernel_block_id
+        for batch_idx, (prefix_length, input_length) in enumerate(
+            zip(prefix_lengths, input_lengths)
+        ):
+            q_new = torch.randn(input_length, 4, 64, device=device, dtype=torch.float16)
+            k_prefix = torch.randn(
+                prefix_length, 2, 64, device=device, dtype=torch.float16
+            )
+            v_prefix = torch.randn_like(k_prefix)
+            k_new = torch.randn(input_length, 2, 64, device=device, dtype=torch.float16)
+            v_new = torch.randn_like(k_new)
+            q_chunks.append(q_new)
+            k_prefix_chunks.append(k_prefix)
+            v_prefix_chunks.append(v_prefix)
+            k_new_chunks.append(k_new)
+            v_new_chunks.append(v_new)
+            for position in range(prefix_length):
+                kernel_page = int(
+                    block_table[batch_idx, position // kernel_page_size].item()
+                )
+                prefix_k_tokens.append(k_prefix[position])
+                prefix_v_tokens.append(v_prefix[position])
+                target_pages.append(kernel_page // subdivision)
+                target_offsets.append(
+                    kernel_page % subdivision * kernel_page_size
+                    + position % kernel_page_size
+                )
+
+        kernel_page_count = physical_page_count * subdivision
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.zeros(
+            kernel_page_count,
+            2,
+            2,
+            kernel_page_size,
+            64,
+            device=device,
+            dtype=torch.float8_e4m3fn,
+        )
+        cache.kv_scale_base = torch.ones(
+            kernel_page_count,
+            2 * 2 * kernel_page_size,
+            device=device,
+            dtype=torch.float32,
+        )
+        rtp_llm_ops.quantize_and_write_fp8_kv_cache(
+            torch.stack(prefix_k_tokens),
+            torch.stack(prefix_v_tokens),
+            cache.kv_cache_base,
+            cache.kv_scale_base,
+            torch.tensor(target_pages, device=device, dtype=torch.int32),
+            torch.tensor(target_offsets, device=device, dtype=torch.int32),
+            physical_page_size,
+            kernel_page_size,
+            subdivision,
+        )
+        scale_view = cache.kv_scale_base.view(kernel_page_count, 2, 2, kernel_page_size)
+        reference_chunks = []
+        for batch_idx, (prefix_length, input_length) in enumerate(
+            zip(prefix_lengths, input_lengths)
+        ):
+            restored_prefix_k = []
+            restored_prefix_v = []
+            for position in range(prefix_length):
+                kernel_page = int(
+                    block_table[batch_idx, position // kernel_page_size].item()
+                )
+                storage_token = position % kernel_page_size
+                restored_prefix_k.append(
+                    cache.kv_cache_base[kernel_page, 0, :, storage_token].float()
+                    * scale_view[kernel_page, 0, :, storage_token].unsqueeze(-1)
+                )
+                restored_prefix_v.append(
+                    cache.kv_cache_base[kernel_page, 1, :, storage_token].float()
+                    * scale_view[kernel_page, 1, :, storage_token].unsqueeze(-1)
+                )
+            reference_chunks.append(
+                harness._reference_chunked_prefill(
+                    q_chunks[batch_idx],
+                    torch.cat(
+                        [
+                            torch.stack(restored_prefix_k).to(
+                                k_prefix_chunks[batch_idx].dtype
+                            ),
+                            k_new_chunks[batch_idx],
+                        ]
+                    ),
+                    torch.cat(
+                        [
+                            torch.stack(restored_prefix_v).to(
+                                v_prefix_chunks[batch_idx].dtype
+                            ),
+                            v_new_chunks[batch_idx],
+                        ]
+                    ),
+                    prefix_length,
+                    input_length,
+                    torch.float16,
+                    torch.float16,
+                )
+            )
+
+        writer = KVCacheWriteOp(
+            num_kv_heads=2,
+            head_size=64,
+            physical_page_size=physical_page_size,
+            kernel_page_size=kernel_page_size,
+            dynamic_mode=True,
+        )
+        writer.set_params(params)
+
+        output = op.forward(
+            torch.cat(q_chunks),
+            torch.cat(k_new_chunks),
+            torch.cat(v_new_chunks),
+            cache,
+            writer,
+        )
+        reference = torch.cat(reference_chunks)
+        torch.testing.assert_close(output, reference, rtol=0.06, atol=0.04)
+
+        for batch_idx, (prefix_length, input_length) in enumerate(
+            zip(prefix_lengths, input_lengths)
+        ):
+            for chunk_offset in range(input_length):
+                position = prefix_length + chunk_offset
+                kernel_page = int(
+                    block_table[batch_idx, position // kernel_page_size].item()
+                )
+                storage_token = position % kernel_page_size
+                for kv, source in enumerate(
+                    (k_new_chunks[batch_idx], v_new_chunks[batch_idx])
+                ):
+                    restored = cache.kv_cache_base[
+                        kernel_page, kv, :, storage_token
+                    ].float() * scale_view[kernel_page, kv, :, storage_token].unsqueeze(
+                        -1
+                    )
+                    torch.testing.assert_close(
+                        restored,
+                        source[chunk_offset].float(),
+                        rtol=0.13,
+                        atol=0.02,
+                    )
+
+    def test_mode2_large_negative_logits_merge_distinct_values_with_subdivision(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+
+        device = torch.device("cuda")
+        harness = TestPyFlashinferHybridPrefillAttnOp()
+        harness.device = device
+        prefix_lengths = [33, 129, 4807]
+        input_lengths = [129, 4807, 33]
+        sequence_lengths = [
+            prefix + current for prefix, current in zip(prefix_lengths, input_lengths)
+        ]
+        physical_page_size = 64
+        for dtype in (torch.float16, torch.bfloat16):
+            for subdivision in (1, 2, 4):
+                with self.subTest(dtype=dtype, subdivision=subdivision):
+                    kernel_page_size = physical_page_size // subdivision
+                    config = harness._create_config(
+                        head_num=28,
+                        head_num_kv=4,
+                        size_per_head=128,
+                        seq_size_per_block=kernel_page_size,
+                    )
+                    config.attn_configs.dtype = dtype
+                    config.attn_configs.tokens_per_block = physical_page_size
+                    config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+                    config.attn_configs.fp8_kv_cache_mode = 2
+                    config.attn_configs.is_causal = True
+                    inputs = harness._create_chunked_prefill_attention_inputs(
+                        len(prefix_lengths),
+                        prefix_lengths,
+                        input_lengths,
+                        kernel_page_size,
+                        dtype=dtype,
+                    )
+
+                    physical_pages = sum(
+                        math.ceil(length / physical_page_size)
+                        for length in sequence_lengths
+                    )
+                    page_ids = list(range(1, 2 * physical_pages, 2))
+                    page_ids = page_ids[::2] + page_ids[1::2]
+                    physical_blocks = harness._create_kv_cache_block_ids(
+                        len(sequence_lengths), sequence_lengths, physical_page_size
+                    )
+                    block_table = torch.zeros_like(inputs.kv_cache_kernel_block_id)
+                    page_offset = 0
+                    for batch_idx, length in enumerate(sequence_lengths):
+                        num_physical_pages = math.ceil(length / physical_page_size)
+                        physical_blocks[batch_idx, :num_physical_pages] = torch.tensor(
+                            page_ids[page_offset : page_offset + num_physical_pages],
+                            dtype=torch.int32,
+                        )
+                        num_kernel_pages = math.ceil(length / kernel_page_size)
+                        for logical_page in range(num_kernel_pages):
+                            block_table[batch_idx, logical_page] = (
+                                physical_blocks[batch_idx, logical_page // subdivision]
+                                * subdivision
+                                + logical_page % subdivision
+                            )
+                        page_offset += num_physical_pages
+                    inputs.kv_cache_block_id = physical_blocks
+                    inputs.kv_cache_block_id_device = physical_blocks.to(device)
+                    inputs.kv_cache_kernel_block_id = block_table
+                    inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+
+                    kernel_page_count = 2 * physical_pages * subdivision
+                    cache = LayerKVCache()
+                    cache.kv_cache_base = torch.zeros(
+                        kernel_page_count,
+                        2,
+                        4,
+                        kernel_page_size,
+                        128,
+                        dtype=torch.float8_e4m3fn,
+                        device=device,
+                    )
+                    cache.kv_scale_base = torch.ones(
+                        kernel_page_count,
+                        2 * 4 * kernel_page_size,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    writer = KVCacheWriteOp(
+                        num_kv_heads=4,
+                        head_size=128,
+                        physical_page_size=physical_page_size,
+                        kernel_page_size=kernel_page_size,
+                        dynamic_mode=True,
+                    )
+                    prefix_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                    prefix_params.fill_params(
+                        torch.zeros_like(inputs.prefix_lengths),
+                        inputs.prefix_lengths,
+                        inputs.prefix_lengths,
+                        block_table,
+                        kernel_page_size,
+                        False,
+                    )
+                    writer.set_params(prefix_params)
+                    k_prefix = torch.full(
+                        (sum(prefix_lengths), 4, 128), -32, dtype=dtype, device=device
+                    )
+                    writer.forward(k_prefix, torch.ones_like(k_prefix), cache)
+
+                    op = PyFlashinferHybridPrefillAttnOp(config.attn_configs, inputs)
+                    writer.set_params(op.prepare(inputs))
+                    total_tokens = sum(input_lengths)
+                    q = torch.full(
+                        (total_tokens, 28, 128), 32, dtype=dtype, device=device
+                    )
+                    k = torch.full(
+                        (total_tokens, 4, 128), -32, dtype=dtype, device=device
+                    )
+                    v = torch.full_like(k, 3)
+                    output = op.forward(q, k, v, cache, writer)
+                    self.assertEqual(output.shape, q.shape)
+                    self.assertEqual(output.dtype, dtype)
+                    self.assertTrue(torch.isfinite(output).all().item())
+
+                    scale_view = cache.kv_scale_base.view(
+                        kernel_page_count, 2, 4, kernel_page_size
+                    )
+                    restored_cache = cache.kv_cache_base.float() * scale_view.unsqueeze(
+                        -1
+                    )
+                    token_offset = 0
+                    for batch_idx, (prefix_length, input_length) in enumerate(
+                        zip(prefix_lengths, input_lengths)
+                    ):
+                        with self.subTest(prefix=prefix_length, current=input_length):
+                            positions = torch.arange(
+                                prefix_length + input_length, device=device
+                            )
+                            pages = inputs.kv_cache_kernel_block_id_device[
+                                batch_idx, positions // kernel_page_size
+                            ]
+                            offsets = positions % kernel_page_size
+                            restored = restored_cache[pages, :, :, offsets]
+                            expected_cache = torch.full_like(restored, -32)
+                            expected_cache[:, 1] = torch.where(
+                                positions < prefix_length, 1.0, 3.0
+                            ).view(-1, 1, 1)
+                            torch.testing.assert_close(
+                                restored, expected_cache, rtol=1e-5, atol=1e-5
+                            )
+
+                            actual = output[token_offset : token_offset + input_length]
+                            causal_count = torch.arange(
+                                1, input_length + 1, dtype=torch.float32, device=device
+                            )
+                            # All-one V would hide incorrect LSE merging.
+                            expected = (prefix_length + causal_count * 3) / (
+                                prefix_length + causal_count
+                            )
+                            expected = (
+                                expected.to(dtype).view(-1, 1, 1).expand_as(actual)
+                            )
+                            torch.testing.assert_close(
+                                actual, expected, rtol=1e-2, atol=1e-2
+                            )
+                        token_offset += input_length
+
+
+class TestDynamicFp8FactoryGating(unittest.TestCase):
+    @staticmethod
+    def _config() -> SimpleNamespace:
+        return SimpleNamespace(
+            fp8_kv_cache_mode=2,
+            use_mla=False,
+            use_logn_attn=False,
+            rope_config=SimpleNamespace(style=RopeStyle.Base),
+        )
+
+    @staticmethod
+    def _impl(name, constructor=None, supports_cuda_graph=False):
+        class Impl:
+            accepts_fmha_config = False
+
+            @staticmethod
+            def support(attn_configs, attn_inputs):
+                return True
+
+            @classmethod
+            def support_parallelism_config(cls, parallelism_config):
+                return True
+
+            def __new__(cls, *args, **kwargs):
+                if constructor is not None:
+                    return constructor()
+                return super().__new__(cls)
+
+            def support_cuda_graph(self):
+                return supports_cuda_graph
+
+        Impl.__name__ = name
+        return Impl
+
+    def test_only_native_flashinfer_backend_is_instantiated(self):
+        disallowed = self._impl(
+            "OtherBackend",
+            constructor=lambda: self.fail("disallowed backend was instantiated"),
+        )
+        allowed = self._impl("PyFlashinferPrefillImpl")
+        inputs = SimpleNamespace(is_prefill=True)
+        with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [disallowed, allowed]):
+            result = attn_factory.get_fmha_impl(
+                self._config(), None, inputs, parallelism_config=None
+            )
+        self.assertIsInstance(result, allowed)
+
+    def test_decode_only_instantiates_native_flashinfer_backend(self):
+        disallowed = self._impl(
+            "OtherDecodeBackend",
+            constructor=lambda: self.fail("disallowed decode backend was instantiated"),
+        )
+        allowed = self._impl("PyFlashinferDecodeImpl")
+        inputs = SimpleNamespace(is_prefill=False)
+        with mock.patch.object(attn_factory, "DECODE_MHA_IMPS", [disallowed, allowed]):
+            result = attn_factory.get_fmha_impl(
+                self._config(), None, inputs, parallelism_config=None
+            )
+        self.assertIsInstance(result, allowed)
+
+    def test_mode2_cuda_graph_allows_native_single_token_decode(self):
+        allowed = self._impl("PyFlashinferDecodeImpl", supports_cuda_graph=True)
+        inputs = SimpleNamespace(is_prefill=False)
+        with mock.patch.object(attn_factory, "DECODE_MHA_IMPS", [allowed]):
+            result = attn_factory.get_fmha_impl(
+                self._config(),
+                None,
+                inputs,
+                is_cuda_graph=True,
+                parallelism_config=None,
+            )
+        self.assertIsInstance(result, allowed)
+
+    def test_allowed_backend_constructor_failure_does_not_fallback(self):
+        fallback_calls = []
+
+        def fail_constructor():
+            raise RuntimeError("construction failed")
+
+        broken = self._impl("PyFlashinferPrefillImpl", fail_constructor)
+        fallback = self._impl(
+            "PyFlashinferPagedPrefillImpl",
+            constructor=lambda: fallback_calls.append(True),
+        )
+        with mock.patch.object(attn_factory, "PREFILL_MHA_IMPS", [broken, fallback]):
+            with self.assertRaisesRegex(RuntimeError, "required attention backend"):
+                attn_factory.get_fmha_impl(
+                    self._config(),
+                    None,
+                    SimpleNamespace(is_prefill=True),
+                    parallelism_config=None,
+                )
+        self.assertEqual(fallback_calls, [])
+
+    def test_rejects_unsupported_mode2_features_before_selection(self):
+        cases = (
+            ("cuda_graph", lambda config: None, True, "CUDA graph"),
+            ("mla", lambda config: setattr(config, "use_mla", True), False, "MLA"),
+            (
+                "mrope",
+                lambda config: setattr(config.rope_config, "style", RopeStyle.Mrope),
+                False,
+                "MRoPE",
+            ),
+            (
+                "logn",
+                lambda config: setattr(config, "use_logn_attn", True),
+                False,
+                "use_logn_attn",
+            ),
+        )
+        for name, mutate, is_cuda_graph, message in cases:
+            with self.subTest(name=name):
+                config = self._config()
+                mutate(config)
+                with self.assertRaisesRegex(ValueError, message):
+                    attn_factory.get_fmha_impl(
+                        config,
+                        None,
+                        SimpleNamespace(is_prefill=True),
+                        is_cuda_graph=is_cuda_graph,
+                    )
+
+
 class TestPyFlashinferHybridPrefillAttnOpFP8(TestPyFlashinferHybridPrefillAttnOp):
     kv_cache_dtype = KvCacheDataType.FP8
     rtol = 4e-2
     atol = 4e-2
     max_mismatch_rate = 1e-5
+
+    def test_mode1_interleaved_mrope_preserves_hybrid_order(self):
+        prefix_lengths = [5, 7]
+        input_lengths = [3, 2]
+        sequence_lengths = [
+            prefix + current for prefix, current in zip(prefix_lengths, input_lengths)
+        ]
+        page_size = 4
+        config = self._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=page_size,
+        )
+        self._enable_qwen35_mrope_mode1(config)
+        inputs = self._create_chunked_prefill_attention_inputs(
+            len(prefix_lengths), prefix_lengths, input_lengths, page_size
+        )
+        position_ids = self._add_qwen35_mrope_inputs(
+            inputs, input_lengths, prefix_lengths
+        )
+        self.assertTrue(
+            PyFlashinferHybridPrefillImpl.support(config.attn_configs, inputs)
+        )
+
+        total_tokens = sum(input_lengths)
+        qkv = torch.randn(
+            total_tokens,
+            (config.head_num + 2 * config.head_num_kv) * config.size_per_head,
+            dtype=config.attn_configs.dtype,
+            device=self.device,
+        )
+        q, k, v = torch.split(
+            qkv,
+            [
+                config.head_num * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+            ],
+            dim=-1,
+        )
+        q = q.reshape(total_tokens, config.head_num, config.size_per_head)
+        k = k.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        v = v.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        expected_q, expected_k = self._apply_qwen35_mrope_reference(q, k, position_ids)
+
+        k_prefix = [
+            torch.randn(
+                length,
+                config.head_num_kv,
+                config.size_per_head,
+                dtype=config.attn_configs.dtype,
+                device=self.device,
+            )
+            for length in prefix_lengths
+        ]
+        v_prefix = [torch.randn_like(key) for key in k_prefix]
+        kv_cache = self._create_prefix_kv_cache(
+            k_prefix,
+            v_prefix,
+            prefix_lengths,
+            sequence_lengths,
+            page_size,
+            config.head_num_kv,
+            config.size_per_head,
+            inputs.kv_cache_kernel_block_id,
+            torch.float8_e4m3fn,
+        )
+        cache_before = kv_cache.kv_cache_base.clone()
+        expected_cache = cache_before.clone()
+        token_offset = 0
+        for batch_idx, (prefix_length, input_length) in enumerate(
+            zip(prefix_lengths, input_lengths)
+        ):
+            for chunk_offset in range(input_length):
+                position = prefix_length + chunk_offset
+                page_id = int(
+                    inputs.kv_cache_kernel_block_id[
+                        batch_idx, position // page_size
+                    ].item()
+                )
+                page_offset = position % page_size
+                expected_cache[page_id, 0, :, page_offset] = expected_k[
+                    token_offset + chunk_offset
+                ].to(torch.float8_e4m3fn)
+                expected_cache[page_id, 1, :, page_offset] = v[
+                    token_offset + chunk_offset
+                ].to(torch.float8_e4m3fn)
+            token_offset += input_length
+
+        impl = PyFlashinferHybridPrefillImpl(
+            config.attn_configs, inputs, config.parallelism_config
+        )
+        events = []
+        fused_forward = impl.fused_mrope_impl.forward
+        cache_write = impl.kv_cache_write_op.forward
+
+        def observed_fused_forward(qkv_input, cache, params):
+            events.append("fused_rope")
+            self.assertIsNone(cache)
+            return fused_forward(qkv_input, cache, params)
+
+        def observed_ragged(query, key, value, *args, **kwargs):
+            events.append("ragged_attention")
+            torch.testing.assert_close(
+                kv_cache.kv_cache_base.float(), cache_before.float(), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                query.float(), expected_q.float(), rtol=1e-2, atol=1e-2
+            )
+            return (
+                torch.zeros_like(expected_q),
+                torch.zeros(
+                    expected_q.shape[:2], dtype=torch.float32, device=self.device
+                ),
+            )
+
+        def observed_cache_write(key, value, cache):
+            events.append("cache_write")
+            return cache_write(key, value, cache)
+
+        def observed_paged(query, cache, *args, **kwargs):
+            events.append("paged_attention")
+            self.assertIs(cache, kv_cache.kv_cache_base)
+            torch.testing.assert_close(
+                kv_cache.kv_cache_base.float(), expected_cache.float(), rtol=0, atol=0
+            )
+            return (
+                torch.zeros_like(expected_q),
+                torch.zeros(
+                    expected_q.shape[:2], dtype=torch.float32, device=self.device
+                ),
+            )
+
+        def observed_cache_store(*args, **kwargs):
+            events.append("cache_store")
+
+        with mock.patch.object(
+            impl.fused_mrope_impl,
+            "forward",
+            side_effect=observed_fused_forward,
+        ) as fused_mock, mock.patch.object(
+            impl.fmha_impl.ragged_wrapper,
+            "run",
+            side_effect=observed_ragged,
+        ), mock.patch.object(
+            impl.kv_cache_write_op,
+            "forward",
+            side_effect=observed_cache_write,
+        ) as write_mock, mock.patch.object(
+            impl.fmha_impl.prefix_paged_wrapper,
+            "run",
+            side_effect=observed_paged,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "merge_state_in_place"
+        ), mock.patch.object(
+            common,
+            "apply_write_cache_store",
+            side_effect=observed_cache_store,
+        ):
+            impl.forward(qkv.clone(), kv_cache)
+
+        fused_mock.assert_called_once()
+        write_mock.assert_called_once()
+        self.assertEqual(
+            events,
+            [
+                "fused_rope",
+                "ragged_attention",
+                "cache_write",
+                "paged_attention",
+                "cache_store",
+            ],
+        )
+        torch.testing.assert_close(
+            kv_cache.kv_cache_base.float(), expected_cache.float(), rtol=0, atol=0
+        )
+        self.assertTrue(torch.all(kv_cache.kv_scale_base == 1).item())
 
 
 if __name__ == "__main__":

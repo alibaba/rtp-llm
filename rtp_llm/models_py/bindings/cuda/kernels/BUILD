@@ -87,6 +87,23 @@ cc_library(
 )
 
 cc_library(
+    name = "fp8_kv_cache",
+    srcs = ["fp8_kv_cache.cu"],
+    hdrs = ["fp8_kv_cache.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        ":cuda_utils_common",
+        ":scaled_fp8_quant",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "scaled_fp4_quant",
     srcs = ["scaled_fp4_quant.cu"],
     hdrs = ["scaled_fp4_quant.h"],
@@ -106,10 +123,12 @@ cc_library(
 cc_library(
     name = "cuda_quantization",
     srcs = [
+        "fast_bf16_int8.cu",
         "per_token_group_quant_8bit.cu",
         "per_token_group_quant_8bit_v2.cu",
     ],
     hdrs = [
+        "fast_bf16_int8.h",
         "per_token_group_quant_8bit.h",
         "per_token_group_quant_8bit_v2.h",
     ],

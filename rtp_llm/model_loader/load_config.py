@@ -60,6 +60,8 @@ class LoadConfig(BaseModel):
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
+    enable_w4a16_sm120_dense_ffn: bool = False
+    w4a16_device: Optional[str] = None
     moe_pure_tp_preshard: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo")

@@ -8,15 +8,21 @@ from unittest import mock
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionTest
+from base_attention_test import BaseAttentionTest, compare_tensors
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    _validate_dynamic_fp8_config,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
     PyFlashinferDecodeImpl,
+    _create_dynamic_fp8_decode_wrapper,
+    _validate_dynamic_fp8_scale,
 )
-from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops import KvCacheDataType, RopeConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
     PyAttentionInputs,
     fill_mla_params,
     get_typemeta,
@@ -87,6 +93,206 @@ class PageMetadata(NamedTuple):
     page_indptr: List[int]
     page_indices: List[int]
     last_page_lens: List[int]
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestDynamicFp8DirectScaleNumerics(unittest.TestCase):
+    def test_large_negative_logits_preserve_constant_values(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            for length in (
+                33,
+                63,
+                64,
+                65,
+                127,
+                128,
+                129,
+                4095,
+                4096,
+                4097,
+                4807,
+                4808,
+                8191,
+            ):
+                with self.subTest(dtype=dtype, length=length):
+                    pages = (length + 63) // 64
+                    raw = torch.ones(pages, 2, 4, 64, 128, device="cuda")
+                    raw[:, 0].fill_(-32)
+                    scales = raw.abs().amax(-1) / 448
+                    payload = (raw / scales.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                    wrapper.plan(
+                        torch.tensor([0, pages], dtype=torch.int32, device="cuda"),
+                        torch.arange(
+                            pages - 1, -1, -1, dtype=torch.int32, device="cuda"
+                        ),
+                        torch.tensor(
+                            [(length - 1) % 64 + 1], dtype=torch.int32, device="cuda"
+                        ),
+                        28,
+                        4,
+                        128,
+                        64,
+                        q_data_type=dtype,
+                        kv_data_type=payload.dtype,
+                    )
+                    q = torch.full((1, 28, 128), 32, dtype=dtype, device="cuda")
+                    output = wrapper.run(q, payload, scales.reshape(pages, -1))
+                    torch.testing.assert_close(
+                        output, torch.ones_like(output), rtol=0.01, atol=0.01
+                    )
+
+    def test_long_context_independent_scales_match_fp32_reference(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            torch.manual_seed(2026)
+            workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+            wrapper = _create_dynamic_fp8_decode_wrapper(workspace, dtype, dtype, 128)
+            for length in (33, 129, 4095, 4096, 4097, 4807, 8191):
+                pages = (length + 63) // 64
+                raw = torch.randn(pages, 2, 4, 64, 128, device="cuda")
+                raw[:, 0] *= torch.tensor([0, 0.01, 1, 4], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                raw[:, 1] *= torch.tensor([2, 0.1, 0.5, 1], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                maxima = raw.abs().amax(-1)
+                scales = torch.where(maxima > 0, maxima / 448, torch.ones_like(maxima))
+                payload = (
+                    (raw / scales.unsqueeze(-1))
+                    .clamp(-448, 448)
+                    .to(torch.float8_e4m3fn)
+                )
+                indices = torch.randperm(pages, dtype=torch.int32, device="cuda")
+                wrapper.plan(
+                    torch.tensor([0, pages], dtype=torch.int32, device="cuda"),
+                    indices,
+                    torch.tensor(
+                        [(length - 1) % 64 + 1], dtype=torch.int32, device="cuda"
+                    ),
+                    28,
+                    4,
+                    128,
+                    64,
+                    q_data_type=dtype,
+                    kv_data_type=payload.dtype,
+                )
+                restored = payload.float()[indices.long()] * scales[
+                    indices.long()
+                ].unsqueeze(-1)
+                keys = (
+                    restored[:, 0]
+                    .permute(1, 0, 2, 3)
+                    .reshape(4, -1, 128)[:, :length]
+                    .repeat_interleave(7, 0)
+                )
+                values = (
+                    restored[:, 1]
+                    .permute(1, 0, 2, 3)
+                    .reshape(4, -1, 128)[:, :length]
+                    .repeat_interleave(7, 0)
+                )
+                for amplitude in (0.001, 1, 4, 16):
+                    with self.subTest(dtype=dtype, length=length, amplitude=amplitude):
+                        q = (torch.randn(1, 28, 128, device="cuda") * amplitude).to(
+                            dtype
+                        )
+                        scores = torch.einsum(
+                            "bhd,hld->bhl", q.float(), keys
+                        ) / math.sqrt(128)
+                        expected = torch.einsum(
+                            "bhl,hld->bhd", scores.softmax(-1), values
+                        )
+                        output = wrapper.run(q, payload, scales.reshape(pages, -1))
+                        torch.testing.assert_close(
+                            output.float(), expected, rtol=0.06, atol=0.04
+                        )
+
+    def test_qwen2_gqa_eager_and_graph_match_reference(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(2026)
+                workspace = torch.empty(
+                    128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+                )
+                wrapper = _create_dynamic_fp8_decode_wrapper(
+                    workspace, dtype, dtype, 128
+                )
+                raw = torch.randn(6, 2, 4, 16, 128, device="cuda", dtype=dtype).float()
+                raw[:, 0] *= torch.tensor([0, 1e-4, 1, 1000], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                raw[:, 1] *= torch.tensor([1, 4, 0.01, 0.5], device="cuda").view(
+                    1, 4, 1, 1
+                )
+                maxima = raw.abs().amax(dim=-1)
+                scales = torch.where(maxima > 0, maxima / 448, torch.ones_like(maxima))
+                payload = (
+                    (raw / scales.unsqueeze(-1))
+                    .clamp(-448, 448)
+                    .to(torch.float8_e4m3fn)
+                )
+                scale_arg = scales.reshape(6, -1)
+                q = torch.randn(2, 28, 128, device="cuda", dtype=dtype) * 0.001
+                indptr = torch.tensor([0, 2, 5], device="cuda", dtype=torch.int32)
+                indices = torch.tensor(
+                    [4, 1, 5, 0, 3], device="cuda", dtype=torch.int32
+                )
+                last_page_len = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+                wrapper.plan(
+                    indptr,
+                    indices,
+                    last_page_len,
+                    28,
+                    4,
+                    128,
+                    16,
+                    q_data_type=dtype,
+                    kv_data_type=torch.float8_e4m3fn,
+                )
+
+                def reference():
+                    outputs = []
+                    for batch, (pages, length) in enumerate(
+                        (([4, 1], 19), ([5, 0, 3], 33))
+                    ):
+                        restored = payload.float()[pages] * scales[pages].unsqueeze(-1)
+                        key = (
+                            restored[:, 0]
+                            .permute(1, 0, 2, 3)
+                            .reshape(4, -1, 128)[:, :length]
+                        )
+                        value = (
+                            restored[:, 1]
+                            .permute(1, 0, 2, 3)
+                            .reshape(4, -1, 128)[:, :length]
+                        )
+                        key = key.repeat_interleave(7, dim=0)
+                        value = value.repeat_interleave(7, dim=0)
+                        scores = torch.einsum(
+                            "hd,hld->hl", q[batch].float(), key
+                        ) / math.sqrt(128)
+                        outputs.append(
+                            torch.einsum("hl,hld->hd", scores.softmax(dim=-1), value)
+                        )
+                    return torch.stack(outputs).to(dtype)
+
+                output = wrapper.run(q, payload, scale_arg)
+                self.assertTrue(torch.isfinite(output).all().item())
+                torch.testing.assert_close(output, reference(), rtol=0.06, atol=0.04)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_output = wrapper.run(q, payload, scale_arg)
+                q.mul_(0.5)
+                scales.mul_(2)
+                graph.replay()
+                eager_output = wrapper.run(q, payload, scale_arg)
+                torch.testing.assert_close(graph_output, eager_output, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    graph_output, reference(), rtol=0.06, atol=0.04
+                )
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
@@ -701,6 +907,217 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             wraps=attn_op.decode_wrapper.plan,
         ) as plan_mock:
             attn_op.prepare(capture_inputs)
+            self.assertEqual(plan_mock.call_count, 1)
+            capture_call = plan_mock.call_args
+            self.assertFalse(capture_call.args[0].is_cuda)
+            self.assertTrue(capture_call.args[1].is_cuda)
+            self.assertEqual(
+                capture_call.args[1].data_ptr(), fmha_params.page_indice_d.data_ptr()
+            )
+            self.assertFalse(capture_call.args[2].is_cuda)
+            self.assertTrue(capture_call.kwargs["non_blocking"])
+            self.assertTrue(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
+            self.assertEqual(
+                attn_op.decode_wrapper._qo_indptr_buf.numel(), capture_bs + 1
+            )
+            graph_buffer_pointers = (
+                fmha_params.decode_page_indptr_d.data_ptr(),
+                fmha_params.page_indice_d.data_ptr(),
+                fmha_params.paged_kv_last_page_len_d.data_ptr(),
+            )
+            self._assert_graph_buffer_pointers(
+                attn_op, fmha_params, graph_buffer_pointers
+            )
+
+            plan_mock.reset_mock()
+            run_seq_lens = [100, 200, 300, 400, 64, 128, 256, 512]
+            run_inputs = self._create_cuda_graph_inputs(
+                capture_bs,
+                run_seq_lens,
+                config.seq_size_per_block,
+            )
+            attn_op.prepare_for_cuda_graph_replay(run_inputs)
+            self.assertEqual(plan_mock.call_count, 1)
+            expected = self._expected_page_metadata(
+                run_seq_lens,
+                config.seq_size_per_block,
+                batch_size=capture_bs,
+            )
+            self._assert_page_metadata(fmha_params, expected)
+            self._assert_graph_buffer_pointers(
+                attn_op, fmha_params, graph_buffer_pointers
+            )
+            attn_op.prepare_for_cuda_graph_replay(run_inputs)
+            self.assertEqual(plan_mock.call_count, 2)
+
+        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+
+    def test_tensor_core_replay_does_not_wait_for_previous_graph(self):
+        config = self._create_config()
+        inputs = self._create_cuda_graph_inputs(
+            2, [100, 200], config.seq_size_per_block
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(inputs)
+        attn_op.prepare_for_cuda_graph_replay(inputs)
+        torch.cuda.synchronize()
+
+        # A blocking host-index copy in FlashInfer.plan used to wait for all
+        # earlier work on this stream, preventing cross-step graph submission.
+        previous_forward = torch.cuda.Event()
+        torch.cuda._sleep(200_000_000)
+        previous_forward.record()
+        try:
+            attn_op.prepare_for_cuda_graph_replay(inputs)
+            self.assertFalse(previous_forward.query())
+        finally:
+            torch.cuda.synchronize()
+
+    def test_dynamic_fp8_cuda_graph_plan_and_buffers_are_stable(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+
+        for capture_bs in (1, 2, 4, 8, 16, 32):
+            with self.subTest(capture_bs=capture_bs):
+                capture_inputs = self._create_cuda_graph_inputs(
+                    capture_bs,
+                    [4809] * capture_bs,
+                    config.seq_size_per_block,
+                )
+                attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+                fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                attn_op.set_params(fmha_params)
+                attn_op.prepare(capture_inputs)
+                capture_signature = tuple(attn_op.decode_wrapper._plan_info)
+                capture_pointers = (
+                    attn_op.g_workspace_buffer.data_ptr(),
+                    attn_op.decode_wrapper._int_workspace_buffer.data_ptr(),
+                    attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+                    fmha_params.decode_page_indptr_d.data_ptr(),
+                    fmha_params.page_indice_d.data_ptr(),
+                    fmha_params.paged_kv_last_page_len_d.data_ptr(),
+                )
+
+                replay_cases = [
+                    ([1] * capture_bs, capture_bs, False),
+                    (
+                        [63 + index % 3 for index in range(capture_bs)],
+                        capture_bs,
+                        False,
+                    ),
+                    (
+                        [64 + index % 3 for index in range(capture_bs)],
+                        capture_bs,
+                        True,
+                    ),
+                    (
+                        [4807 + index % 3 for index in range(capture_bs)],
+                        capture_bs,
+                        False,
+                    ),
+                ]
+                if capture_bs > 1:
+                    active_batch_size = max(1, capture_bs // 2)
+                    replay_cases.append(
+                        ([65] * active_batch_size, active_batch_size, True)
+                    )
+
+                for sequence_lengths, active_batch_size, sparse_ids in replay_cases:
+                    replay_inputs = self._create_cuda_graph_inputs(
+                        capture_bs,
+                        sequence_lengths,
+                        config.seq_size_per_block,
+                        active_batch_size=active_batch_size,
+                        padding_block_id=7,
+                    )
+                    if sparse_ids:
+                        sparse_table = (
+                            replay_inputs.kv_cache_kernel_block_id * 7 + 11
+                        ) % 97
+                        if capture_bs > 1:
+                            sparse_table[-1, 0] = sparse_table[0, 0]
+                        replay_inputs.kv_cache_kernel_block_id = sparse_table
+                        replay_inputs.kv_cache_kernel_block_id_device = (
+                            sparse_table.cuda()
+                        )
+                    attn_op.prepare_for_cuda_graph_replay(replay_inputs)
+                    self.assertEqual(
+                        tuple(attn_op.decode_wrapper._plan_info),
+                        capture_signature,
+                        f"plan changed for batch={capture_bs}, lengths={sequence_lengths}",
+                    )
+                    self.assertEqual(
+                        (
+                            attn_op.g_workspace_buffer.data_ptr(),
+                            attn_op.decode_wrapper._int_workspace_buffer.data_ptr(),
+                            attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+                            fmha_params.decode_page_indptr_d.data_ptr(),
+                            fmha_params.page_indice_d.data_ptr(),
+                            fmha_params.paged_kv_last_page_len_d.data_ptr(),
+                        ),
+                        capture_pointers,
+                    )
+
+    def test_dynamic_fp8_cuda_graph_rejects_changed_plan(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+        inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 65],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(inputs)
+
+        changed_plan = list(attn_op.decode_wrapper._plan_info)
+        changed_plan[0] += 1
+        attn_op.decode_wrapper._plan_info = changed_plan
+        with self.assertRaisesRegex(RuntimeError, "plan or buffer addresses changed"):
+            attn_op._validate_dynamic_fp8_cuda_graph_state()
+
+    def test_dynamic_fp8_direct_decode_real_cuda_graph_replay(self):
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+        capture_bs = 4
+        capture_lengths = [129, 130, 131, 132]
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            capture_lengths,
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        with mock.patch.object(
+            attn_op.decode_wrapper,
+            "plan",
+            wraps=attn_op.decode_wrapper.plan,
+        ) as plan_mock:
+            attn_op.prepare(capture_inputs)
             # Initial graph preparation replans after workspace compaction.
             self.assertEqual(plan_mock.call_count, 2)
             capture_call = plan_mock.call_args
@@ -743,6 +1160,239 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 2)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+
+
+        page_count = 64
+        local_head_num = config.head_num // config.tp_size
+        local_kv_head_num = config.head_num_kv // config.tp_size
+        payload = torch.randn(
+            page_count,
+            2,
+            local_kv_head_num,
+            config.seq_size_per_block,
+            config.size_per_head,
+            device="cuda",
+            dtype=torch.bfloat16,
+        ).to(torch.float8_e4m3fn)
+        scales = (
+            torch.rand(
+                page_count,
+                2,
+                local_kv_head_num,
+                config.seq_size_per_block,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            .mul_(0.02)
+            .add_(0.01)
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = payload
+        kv_cache.kv_scale_base = scales.flatten(1)
+        q = self._create_query_tensor(
+            capture_bs, local_head_num, config.size_per_head
+        ).to(config.attn_configs.dtype)
+
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            graph_output = attn_op.forward(q, kv_cache, fmha_params)
+        torch.cuda.synchronize()
+
+        graph_pointers = (
+            attn_op.g_workspace_buffer.data_ptr(),
+            attn_op.decode_wrapper._int_workspace_buffer.data_ptr(),
+            attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+            fmha_params.decode_page_indptr_d.data_ptr(),
+            fmha_params.page_indice_d.data_ptr(),
+            fmha_params.paged_kv_last_page_len_d.data_ptr(),
+            q.data_ptr(),
+            payload.data_ptr(),
+            kv_cache.kv_scale_base.data_ptr(),
+            graph_output.data_ptr(),
+        )
+        capture_signature = tuple(attn_op.decode_wrapper._plan_info)
+        replay_cases = (
+            ([63, 64, 65, 129], 0),
+            ([65, 66, 127, 130], 16),
+        )
+        scale_view = kv_cache.kv_scale_base.view(
+            page_count,
+            2,
+            local_kv_head_num,
+            config.seq_size_per_block,
+        )
+        restored_k = (payload[:, 0].float() * scale_view[:, 0].unsqueeze(-1)).to(
+            q.dtype
+        )
+        restored_v = (payload[:, 1].float() * scale_view[:, 1].unsqueeze(-1)).to(
+            q.dtype
+        )
+
+        for sequence_lengths, block_id_offset in replay_cases:
+            replay_inputs = self._create_cuda_graph_inputs(
+                capture_bs,
+                sequence_lengths,
+                config.seq_size_per_block,
+                block_id_offset=block_id_offset,
+            )
+            replay_q = torch.randn_like(q)
+            q.copy_(replay_q)
+            attn_op.prepare_for_cuda_graph_replay(replay_inputs)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            block_id_list = [
+                replay_inputs.kv_cache_kernel_block_id[
+                    batch_idx,
+                    : math.ceil(sequence_length / config.seq_size_per_block),
+                ].tolist()
+                for batch_idx, sequence_length in enumerate(sequence_lengths)
+            ]
+            reference = compute_flashinfer_decode_reference(
+                replay_q,
+                restored_k,
+                restored_v,
+                sequence_lengths,
+                block_id_list,
+                config.seq_size_per_block,
+            )
+            torch.testing.assert_close(
+                graph_output,
+                reference,
+                rtol=0.06,
+                atol=0.04,
+            )
+            self.assertEqual(
+                tuple(attn_op.decode_wrapper._plan_info), capture_signature
+            )
+            self.assertEqual(
+                (
+                    attn_op.g_workspace_buffer.data_ptr(),
+                    attn_op.decode_wrapper._int_workspace_buffer.data_ptr(),
+                    attn_op.decode_wrapper._qo_indptr_buf.data_ptr(),
+                    fmha_params.decode_page_indptr_d.data_ptr(),
+                    fmha_params.page_indice_d.data_ptr(),
+                    fmha_params.paged_kv_last_page_len_d.data_ptr(),
+                    q.data_ptr(),
+                    payload.data_ptr(),
+                    kv_cache.kv_scale_base.data_ptr(),
+                    graph_output.data_ptr(),
+                ),
+                graph_pointers,
+            )
+
+    def test_dynamic_fp8_impl_real_cuda_graph_replay(self):
+        self._check_dynamic_fp8_impl_real_cuda_graph_replay(32, 8, "bf16")
+
+    def test_qwen2_dynamic_fp8_impl_real_cuda_graph_replay(self):
+        for data_type in ("fp16", "bf16"):
+            with self.subTest(data_type=data_type):
+                self._check_dynamic_fp8_impl_real_cuda_graph_replay(28, 4, data_type)
+
+    def _check_dynamic_fp8_impl_real_cuda_graph_replay(
+        self, head_num: int, head_num_kv: int, data_type: str
+    ):
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type=data_type,
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+        config.attn_configs.need_rope_kv_cache = False
+        capture_bs = 2
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [130, 131],
+            config.seq_size_per_block,
+        )
+        impl = PyFlashinferDecodeImpl(config.attn_configs, capture_inputs)
+        local_head_num = config.head_num // config.tp_size
+        local_kv_head_num = config.head_num_kv // config.tp_size
+        qkv = torch.randn(
+            capture_bs,
+            (local_head_num + 2 * local_kv_head_num) * config.size_per_head,
+            device="cuda",
+            dtype=config.attn_configs.dtype,
+        )
+
+        def new_cache() -> LayerKVCache:
+            cache = LayerKVCache()
+            cache.kv_cache_base = torch.zeros(
+                32,
+                2,
+                local_kv_head_num,
+                config.seq_size_per_block,
+                config.size_per_head,
+                device="cuda",
+                dtype=torch.float8_e4m3fn,
+            )
+            cache.kv_scale_base = torch.ones(
+                32,
+                2 * local_kv_head_num * config.seq_size_per_block,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            return cache
+
+        graph_cache = new_cache()
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            graph_output = impl.forward(qkv, graph_cache)
+        torch.cuda.synchronize()
+
+        for sequence_lengths, block_id_offset in (
+            ([63, 65], 4),
+            ([129, 130], 12),
+        ):
+            graph_cache.kv_cache_base.zero_()
+            graph_cache.kv_scale_base.fill_(1)
+            replay_qkv = torch.randn_like(qkv)
+            qkv.copy_(replay_qkv)
+            replay_inputs = self._create_cuda_graph_inputs(
+                capture_bs,
+                sequence_lengths,
+                config.seq_size_per_block,
+                block_id_offset=block_id_offset,
+            )
+            impl.prepare_cuda_graph(replay_inputs)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            eager_inputs = self._create_cuda_graph_inputs(
+                capture_bs,
+                sequence_lengths,
+                config.seq_size_per_block,
+                block_id_offset=block_id_offset,
+            )
+            eager_inputs.is_cuda_graph = False
+            eager_impl = PyFlashinferDecodeImpl(config.attn_configs, eager_inputs)
+            eager_cache = new_cache()
+            eager_output = eager_impl.forward(replay_qkv.clone(), eager_cache)
+            torch.cuda.synchronize()
+
+            torch.testing.assert_close(
+                graph_output,
+                eager_output,
+                rtol=0.06,
+                atol=0.04,
+            )
+            torch.testing.assert_close(
+                graph_cache.kv_cache_base,
+                eager_cache.kv_cache_base,
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                graph_cache.kv_scale_base,
+                eager_cache.kv_scale_base,
+                rtol=0,
+                atol=0,
+            )
 
     def test_cuda_core_replay_replans_only_on_page_topology_change(self):
         """CUDA-core replay caches only topology and refreshes graph buffers."""

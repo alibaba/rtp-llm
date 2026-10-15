@@ -6,25 +6,216 @@ This mode is used for dynamic batch processing.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    _is_fmha_impl_disabled,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import trt
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
+    apply_base_rope_to_qkv_reference,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTLLMFMHAv2TestBase,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_test_utils import (
-    apply_base_rope_to_qkv_reference,
     compute_pytorch_prefill_reference,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
+    FlashInferNativePrefillImpl,
     FlashInferTRTLLMFMHAv2PrefillImpl,
     TRTLLMFMHAv2PrefillOp,
 )
 from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
-from rtp_llm.ops import KvCacheDataType, RopeStyle
-from rtp_llm.ops.compute_ops import get_typemeta
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, RopeStyle
+from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta
+
+
+class TestFlashInferNativePrefillSupport(unittest.TestCase):
+    @staticmethod
+    def _config(**overrides) -> AttentionConfigs:
+        config = AttentionConfigs()
+        config.head_num = 16
+        config.kv_head_num = 2
+        config.size_per_head = 256
+        config.tokens_per_block = 64
+        config.kernel_tokens_per_block = 64
+        config.dtype = torch.bfloat16
+        config.kv_cache_dtype = KvCacheDataType.BASE
+        config.use_mla = False
+        config.is_causal = True
+        for name, value in overrides.items():
+            setattr(config, name, value)
+        return config
+
+    @staticmethod
+    def _inputs(prefix_lengths=(0,), is_cuda_graph=False) -> PyAttentionInputs:
+        inputs = PyAttentionInputs()
+        inputs.prefix_lengths = torch.tensor(prefix_lengths, dtype=torch.int32)
+        inputs.is_cuda_graph = is_cuda_graph
+        return inputs
+
+    def test_supports_validated_sm12x_shape(self):
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt.is_sm12x",
+            return_value=True,
+        ):
+            self.assertTrue(
+                FlashInferNativePrefillImpl.support(self._config(), self._inputs())
+            )
+
+    def test_rejects_unvalidated_configurations(self):
+        cases = {
+            "fp8_kv": ({"kv_cache_dtype": KvCacheDataType.FP8}, self._inputs()),
+            "prefix": ({}, self._inputs((32,))),
+            "cuda_graph": ({}, self._inputs(is_cuda_graph=True)),
+            "fp16": ({"dtype": torch.float16}, self._inputs()),
+            "fp32": ({"dtype": torch.float32}, self._inputs()),
+            "head_dim": ({"size_per_head": 128}, self._inputs()),
+            "mha": ({"head_num": 2, "kv_head_num": 2}, self._inputs()),
+            "invalid_gqa": ({"head_num": 15, "kv_head_num": 2}, self._inputs()),
+            "noncausal": ({"is_causal": False}, self._inputs()),
+            "mla": ({"use_mla": True}, self._inputs()),
+        }
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt.is_sm12x",
+            return_value=True,
+        ):
+            for name, (overrides, inputs) in cases.items():
+                with self.subTest(name=name):
+                    self.assertFalse(
+                        FlashInferNativePrefillImpl.support(
+                            self._config(**overrides), inputs
+                        )
+                    )
+
+    def test_rejects_sm90(self):
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt.is_sm12x",
+            return_value=False,
+        ):
+            self.assertFalse(
+                FlashInferNativePrefillImpl.support(self._config(), self._inputs())
+            )
+
+    def test_cuda_graph_falls_back_before_construction(self):
+        config = self._config()
+        inputs = self._inputs(is_cuda_graph=True)
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt.is_sm12x",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt._supports_trtllm_fmha_v2",
+            return_value=True,
+        ):
+            self.assertFalse(FlashInferNativePrefillImpl.support(config, inputs))
+            self.assertTrue(FlashInferTRTLLMFMHAv2PrefillImpl.support(config, inputs))
+
+    def test_global_flashinfer_native_switch_disables_impl(self):
+        config = FMHAConfig()
+        config.disable_flashinfer_native = True
+        self.assertTrue(_is_fmha_impl_disabled("FlashInferNativePrefillImpl", config))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestTRTLLMFMHAv2PrefillQuantization(unittest.TestCase):
+    def test_unit_scale_inputs_and_base_dtype_are_preserved(self):
+        module = "rtp_llm.models_py.modules.factory.attention.cuda_impl.trt"
+        for dtype in (torch.float16, torch.bfloat16):
+            for heads, kv_heads in ((4, 4), (28, 4)):
+                for fp8 in (False, True):
+                    for strided in (False, True):
+                        with self.subTest(
+                            dtype=dtype, heads=heads, fp8=fp8, strided=strided
+                        ):
+                            config = AttentionConfigs()
+                            config.head_num = heads
+                            config.kv_head_num = kv_heads
+                            config.size_per_head = 128
+                            config.dtype = dtype
+                            config.kv_cache_dtype = (
+                                KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+                            )
+                            config.fp8_kv_cache_mode = int(fp8)
+                            op = TRTLLMFMHAv2PrefillOp(config)
+                            op.attention_type = "mha" if heads == kv_heads else "gqa"
+                            width = (heads + 2 * kv_heads) * 128
+                            values = torch.tensor(
+                                [
+                                    0,
+                                    1,
+                                    -1,
+                                    100,
+                                    -100,
+                                    448,
+                                    -448,
+                                    500,
+                                    -500,
+                                    1000,
+                                    -1000,
+                                    1e-4,
+                                ],
+                                dtype=dtype,
+                                device="cuda",
+                            )
+                            qkv = values.repeat((4 * width + 11) // 12)[
+                                : 4 * width
+                            ].view(4, width)
+                            if strided:
+                                qkv = qkv.repeat_interleave(2, dim=1)[:, ::2]
+                            original = qkv.clone()
+                            expected = (
+                                qkv.float().clamp(-448, 448).to(torch.float8_e4m3fn)
+                                if fp8
+                                else qkv
+                            )
+                            params = SimpleNamespace(
+                                seq_lens=torch.tensor(
+                                    [4], device="cuda", dtype=torch.int32
+                                ),
+                                max_q_len=4,
+                                max_kv_len=4,
+                                batch_size=1,
+                                cu_seqlens=torch.tensor(
+                                    [0, 4], device="cuda", dtype=torch.int32
+                                ),
+                            )
+                            with patch(
+                                f"{module}.trtllm_fmha_v2_prefill",
+                                return_value=torch.zeros(
+                                    4, heads, 128, device="cuda", dtype=dtype
+                                ),
+                            ) as fmha:
+                                output = op.forward(qkv, None, params)
+                            kwargs = fmha.call_args.kwargs
+                            actual = kwargs["qkv"]
+                            if heads == kv_heads:
+                                self.assertEqual(kwargs["input_layout"], "PACKED_QKV")
+                                self.assertEqual(actual.dtype, expected.dtype)
+                                actual = actual.reshape(4, width)
+                            else:
+                                self.assertEqual(
+                                    kwargs["input_layout"], "CONTIGUOUS_Q_KV"
+                                )
+                                for part in actual:
+                                    self.assertEqual(part.dtype, expected.dtype)
+                                actual = torch.cat(
+                                    [part.float().reshape(4, -1) for part in actual],
+                                    dim=1,
+                                )
+                            self.assertTrue(torch.isfinite(actual.float()).all().item())
+                            torch.testing.assert_close(
+                                actual.float(), expected.float(), rtol=0, atol=0
+                            )
+                            torch.testing.assert_close(qkv, original, rtol=0, atol=0)
+                            self.assertEqual(output.dtype, dtype)
+                            self.assertEqual(output.shape, (4, heads * 128))
+                            self.assertEqual(kwargs["out_dtype"], dtype)
+                            self.assertEqual(kwargs["bmm2_scale"], 1.0)
 
 
 class TestTRTLLMWorkspaceReuse(unittest.TestCase):
@@ -665,6 +856,64 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
 
     def test_impl_with_rope_matches_torch(self):
         self._run_impl_rope_correctness(RopeStyle.Base)
+
+    @unittest.skipUnless(is_sm12x(), "native FA2 rollout is SM12x-only")
+    def test_native_fa2_matches_trt_with_custom_scale(self):
+        input_lengths = [32, 47]
+        head_num = 16
+        head_num_kv = 2
+        head_dim = 256
+        tokens_per_block = 64
+
+        for rope_style in (RopeStyle.No, RopeStyle.Base):
+            with self.subTest(rope_style=rope_style):
+                attn_configs = self._create_config(
+                    head_num=head_num,
+                    head_num_kv=head_num_kv,
+                    size_per_head=head_dim,
+                    seq_size_per_block=tokens_per_block,
+                )
+                attn_configs.is_causal = True
+                attn_configs.q_scaling = 2.0
+                attn_configs.softmax_extra_scale = 0.75
+                attn_configs.rope_config.style = rope_style
+                attn_configs.rope_config.dim = 64
+                attn_configs.rope_config.base = 10000
+                attn_configs.rope_config.max_pos = 128
+                attn_configs.max_seq_len = 128
+
+                attn_inputs = self._create_prefill_attention_inputs(
+                    len(input_lengths),
+                    input_lengths,
+                    tokens_per_block,
+                    prefix_lengths=None,
+                )
+                attn_inputs.sequence_lengths = attn_inputs.input_lengths
+                attn_inputs.is_cuda_graph = False
+
+                qkv = self._create_qkv_tensor(
+                    sum(input_lengths),
+                    head_num,
+                    head_num_kv,
+                    head_dim,
+                    dtype=attn_configs.dtype,
+                )
+                attn_inputs.dtype = get_typemeta(qkv)
+
+                trt_impl = FlashInferTRTLLMFMHAv2PrefillImpl(attn_configs, attn_inputs)
+                native_impl = FlashInferNativePrefillImpl(attn_configs, attn_inputs)
+                expected_scale = (
+                    attn_configs.softmax_extra_scale
+                    / attn_configs.q_scaling
+                    * head_dim**-0.5
+                )
+                self.assertAlmostEqual(native_impl.fmha_impl.sm_scale, expected_scale)
+
+                trt_output = trt_impl.forward(qkv.clone(), None)
+                native_output = native_impl.forward(qkv.clone(), None)
+                torch.testing.assert_close(
+                    native_output, trt_output, rtol=5e-3, atol=2e-2
+                )
 
 
 class TestTRTLLMFMHAv2PrefillOpFP8(TestTRTLLMFMHAv2PrefillOpBF16):

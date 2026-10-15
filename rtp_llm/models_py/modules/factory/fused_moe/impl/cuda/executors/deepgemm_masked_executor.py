@@ -214,30 +214,29 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     dtype=torch.float8_e4m3fn,
                 )
 
-                # SM100 (compute capability 10.x) uses fused packed kernel for better performance
-                # when UE8M0 scale format is enabled
+                # Emit packed UE8M0 scales directly on supported Blackwell paths.
                 sm_major = torch.cuda.get_device_capability()[0]
-                if (
-                    sm_major == 10
-                    and is_deep_gemm_e8m0_used()
-                    and self._N % (self.DEEPGEMM_BLOCK_SHAPE[0] * 2 * 4) == 0
-                ):
-                    # Create packed scale tensor with proper layout for deep_gemm
-                    # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
+                if sm_major in (10, 12) and is_deep_gemm_e8m0_used():
+                    # Emit complete packed scales, including partial packs
+                    # (e.g. Qwen3 H=768) and all masked/TMA padding rows.
                     down_input_scale = create_packed_scale_tensor(
                         expert_num=num_slice_experts,
                         token_num_padded=num_tokens,
                         hidden_dim=self._N,
                         quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                        device=device,
+                        device=down_input.device,
                     )
-                    # Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing
                     silu_and_mul_masked_post_quant_packed_fwd(
                         upgate_output,
                         down_input,
                         down_input_scale,
                         self.DEEPGEMM_BLOCK_SHAPE[0],
                         masked_m[start_idx:end_idx],
+                        # Only these shapes previously used rounded packed arithmetic.
+                        round_intermediate=(
+                            sm_major == 10
+                            and self._N % (self.DEEPGEMM_BLOCK_SHAPE[0] * 2 * 4) == 0
+                        ),
                     )
                 else:
                     # Standard path for other SM versions

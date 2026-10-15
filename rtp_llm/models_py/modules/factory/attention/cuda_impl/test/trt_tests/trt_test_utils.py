@@ -8,44 +8,6 @@ import torch.nn.functional as F
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
-def apply_base_rope_to_qkv_reference(
-    qkv: torch.Tensor,
-    input_lengths: List[int],
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    rope_base: float = 10000.0,
-) -> torch.Tensor:
-    """Apply non-interleaved Base RoPE to packed QKV in float32."""
-    q_size = num_q_heads * head_dim
-    kv_size = num_kv_heads * head_dim
-    q = qkv[:, :q_size].reshape(-1, num_q_heads, head_dim).float()
-    k = qkv[:, q_size : q_size + kv_size].reshape(-1, num_kv_heads, head_dim).float()
-    v = qkv[:, q_size + kv_size :]
-
-    positions = torch.cat(
-        [torch.arange(length, device=qkv.device) for length in input_lengths]
-    ).float()
-    inv_freq = 1.0 / (
-        rope_base
-        ** (
-            torch.arange(0, head_dim, 2, device=qkv.device, dtype=torch.float32)
-            / head_dim
-        )
-    )
-    freqs = torch.outer(positions, inv_freq)
-    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1).unsqueeze(1)
-    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1).unsqueeze(1)
-
-    def rotate_half(x: torch.Tensor) -> torch.Tensor:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat([-x2, x1], dim=-1)
-
-    q = q * cos + rotate_half(q) * sin
-    k = k * cos + rotate_half(k) * sin
-    return torch.cat([q.flatten(1), k.flatten(1), v.float()], dim=-1).to(qkv.dtype)
-
-
 def compute_pytorch_prefill_reference(
     qkv: torch.Tensor,
     input_lengths: List[int],

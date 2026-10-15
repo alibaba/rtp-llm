@@ -617,6 +617,120 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     slot_mapping                 = torch::Tensor();
 }
 
+void FlashInferMlaAttnParams::fillDecodeParamsDevice(torch::Tensor sequence_lengths_h,
+                                                     torch::Tensor sequence_lengths_plus_1_d,
+                                                     torch::Tensor kv_cache_block_id_device,
+                                                     int           seq_size_per_block) {
+    sequence_lengths_h = toHostContiguousI32(sequence_lengths_h);
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_h.defined() && sequence_lengths_h.dim() == 1,
+                            "fillDecodeParamsDevice expects one-dimensional host sequence lengths");
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_plus_1_d.defined() && sequence_lengths_plus_1_d.is_cuda()
+                                && sequence_lengths_plus_1_d.is_contiguous()
+                                && sequence_lengths_plus_1_d.scalar_type() == torch::kInt32,
+                            "fillDecodeParamsDevice expects contiguous CUDA int32 sequence_lengths_plus_1_d");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda()
+                                && kv_cache_block_id_device.is_contiguous()
+                                && kv_cache_block_id_device.scalar_type() == torch::kInt32
+                                && kv_cache_block_id_device.dim() == 2,
+                            "fillDecodeParamsDevice expects a contiguous two-dimensional CUDA int32 block table");
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "fillDecodeParamsDevice expects a positive page size");
+
+    const int batch_size           = static_cast<int>(sequence_lengths_h.size(0));
+    const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+    RTP_LLM_CHECK_WITH_INFO(sequence_lengths_plus_1_d.numel() == batch_size,
+                            "fillDecodeParamsDevice sequence length batch mismatch");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.size(0) >= batch_size,
+                            "fillDecodeParamsDevice block table does not cover the batch");
+
+    const auto sequence_lengths_ptr = sequence_lengths_h.data_ptr<int32_t>();
+    int        page_num             = 0;
+    for (int batch = 0; batch < batch_size; ++batch) {
+        const int seq_len = std::max(sequence_lengths_ptr[batch] + 1, 1);
+        const int pages   = (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(pages <= max_blocks_per_batch,
+                                "fillDecodeParamsDevice requires %d pages but block table capacity is %d",
+                                pages,
+                                max_blocks_per_batch);
+        page_num += pages;
+    }
+
+    ensureTensorSize(batch_size, batch_size, page_num, 0, batch_size * 4, false);
+
+    auto set_i32_shape = [](torch::Tensor& tensor, std::vector<int64_t> shape) {
+        if (tensor.defined()) {
+            tensor.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
+        }
+    };
+    set_i32_shape(decode_page_indptr_d, {batch_size + 1});
+    set_i32_shape(decode_page_indptr_h, {batch_size + 1});
+    set_i32_shape(prefill_ragged_kv_len_indptr_d, {0});
+    set_i32_shape(prefill_ragged_kv_len_indptr_h, {0});
+    set_i32_shape(qo_indptr_d, {batch_size + 1});
+    set_i32_shape(qo_indptr_h, {batch_size + 1});
+    set_i32_shape(batch_indice_d, {batch_size});
+    set_i32_shape(batch_indice_h, {batch_size});
+    set_i32_shape(positions_d, {batch_size});
+    set_i32_shape(positions_h, {batch_size});
+    set_i32_shape(kvlen_d, {batch_size});
+    set_i32_shape(kvlen_h, {batch_size});
+    set_i32_shape(paged_kv_last_page_len_d, {batch_size});
+    set_i32_shape(paged_kv_last_page_len_h, {batch_size});
+    set_i32_shape(page_indice_d, {page_num});
+    set_i32_shape(page_indice_h, {0});
+    set_i32_shape(reuse_cache_page_indice_d, {0});
+    set_i32_shape(reuse_cache_page_indice_h, {0});
+    set_i32_shape(batch_reuse_info_vec_d, {0, 4});
+    set_i32_shape(batch_reuse_info_vec_h, {0, 4});
+
+    auto decode_page_indptr_ptr     = decode_page_indptr_h.data_ptr<int32_t>();
+    auto paged_kv_last_page_len_ptr = paged_kv_last_page_len_h.data_ptr<int32_t>();
+    auto qo_indptr_ptr              = qo_indptr_h.data_ptr<int32_t>();
+    auto batch_indice_ptr           = batch_indice_h.data_ptr<int32_t>();
+    auto positions_ptr              = positions_h.data_ptr<int32_t>();
+    auto kvlen_ptr                  = kvlen_h.data_ptr<int32_t>();
+    decode_page_indptr_ptr[0]       = 0;
+    qo_indptr_ptr[0]                = 0;
+    int page_offset                 = 0;
+    for (int batch = 0; batch < batch_size; ++batch) {
+        const int seq_len = std::max(sequence_lengths_ptr[batch] + 1, 1);
+        const int pages   = (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        page_offset += pages;
+        decode_page_indptr_ptr[batch + 1] = page_offset;
+        paged_kv_last_page_len_ptr[batch] = (seq_len - 1) % seq_size_per_block + 1;
+        qo_indptr_ptr[batch + 1]          = batch + 1;
+        batch_indice_ptr[batch]           = batch;
+        positions_ptr[batch]              = seq_len - 1;
+        kvlen_ptr[batch]                  = seq_len;
+    }
+
+    cudaStream_t stream = GET_CURRENT_STREAM();
+    invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
+                                        kv_cache_block_id_device.data_ptr<int32_t>(),
+                                        batch_indice_d.data_ptr<int32_t>(),
+                                        page_indice_d.data_ptr<int32_t>(),
+                                        decode_page_indptr_d.data_ptr<int32_t>(),
+                                        paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                        qo_indptr_d.data_ptr<int32_t>(),
+                                        kvlen_d.data_ptr<int32_t>(),
+                                        positions_d.data_ptr<int32_t>(),
+                                        batch_size,
+                                        max_blocks_per_batch,
+                                        seq_size_per_block,
+                                        stream);
+
+    batch_indice                 = batch_indice_d;
+    page_indice                  = page_indice_d;
+    reuse_cache_page_indice      = torch::Tensor();
+    decode_page_indptr           = decode_page_indptr_d;
+    prefill_ragged_kv_len_indptr = torch::Tensor();
+    paged_kv_last_page_len       = paged_kv_last_page_len_d;
+    qo_indptr                    = qo_indptr_d;
+    kvlen                        = kvlen_d;
+    positions                    = positions_d;
+    batch_reuse_info_vec         = torch::Tensor();
+    slot_mapping                 = torch::Tensor();
+}
+
 void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
                                                   torch::Tensor t_sequence_lengths,
                                                   torch::Tensor t_input_lengths,
@@ -721,6 +835,13 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
              pybind11::arg("kv_cache_block_id_device"),
              pybind11::arg("seq_size_per_block"),
              "Update FlashInfer decode metadata on device during CUDA graph replay")
+        .def("fill_decode_params_device",
+             &rtp_llm::FlashInferMlaAttnParams::fillDecodeParamsDevice,
+             pybind11::arg("sequence_lengths_h"),
+             pybind11::arg("sequence_lengths_plus_1_d"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"),
+             "Fill eager decode metadata from host lengths and a device block table")
         .def(
             "fill_params_mha_device",
             [](rtp_llm::FlashInferMlaAttnParams& self,

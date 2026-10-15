@@ -424,6 +424,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
         .def_readwrite("disable_flashinfer_native", &FMHAConfig::disable_flashinfer_native)
         .def_readwrite("disable_flashinfer_hybrid_prefill", &FMHAConfig::disable_flashinfer_hybrid_prefill)
+        .def_readwrite("enable_fa4_spec_decode", &FMHAConfig::enable_fa4_spec_decode)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
@@ -444,11 +445,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_triton_pa,
                                       self.absorb_opt_len,
                                       self.enable_flashinfer_trtllm_gen,
-                                      self.disable_flashinfer_hybrid_prefill);
+                                      self.disable_flashinfer_hybrid_prefill,
+                                      self.enable_fa4_spec_decode);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
-                    throw std::runtime_error("FMHAConfig: expected 13-element state, got " + std::to_string(t.size()));
+                if (t.size() != 14)
+                    throw std::runtime_error("FMHAConfig: expected 14-element state, got " + std::to_string(t.size()));
                 FMHAConfig c;
                 try {
                     c.enable_fmha                         = t[0].cast<bool>();
@@ -464,6 +466,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.absorb_opt_len                      = t[10].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
                     c.disable_flashinfer_hybrid_prefill   = t[12].cast<bool>();
+                    c.enable_fa4_spec_decode              = t[13].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -1834,6 +1837,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("fp8_kv_cache_mode", &AttentionConfigs::fp8_kv_cache_mode)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)

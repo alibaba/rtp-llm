@@ -647,6 +647,64 @@ class GenerateConfigTest(TestCase):
                 self.assertTrue(hasattr(KVCacheConfig, field))
                 self.assertEqual(stub_fields.get(field), expected_type)
 
+    def test_fp8_kv_cache_modes_parse_and_reject_invalid_values(self):
+        for flag in ("--fp8_kv_cache", "--blockwise_use_fp8_kv_cache"):
+            for mode in (0, 1, 2):
+                with self.subTest(flag=flag, mode=mode), patch.dict(
+                    os.environ, _jit_env(), clear=True
+                ):
+                    config = setup_args([flag, str(mode)]).kv_cache_config
+                    self.assertEqual(config.fp8_kv_cache, mode)
+
+        for mode in (0, 1, 2):
+            with self.subTest(env_mode=mode), patch.dict(
+                os.environ,
+                _jit_env(FP8_KV_CACHE=str(mode)),
+                clear=True,
+            ):
+                config = setup_args(["--model_type", "fake_model"]).kv_cache_config
+                self.assertEqual(config.fp8_kv_cache, mode)
+
+        for args, env in (
+            (["--fp8_kv_cache", "-1"], {}),
+            (["--fp8_kv_cache", "3"], {}),
+            (["--fp8_kv_cache", "invalid"], {}),
+            (["--model_type", "fake_model"], {"FP8_KV_CACHE": "3"}),
+        ):
+            stderr = io.StringIO()
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, _jit_env(**env), clear=True
+            ), contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                setup_args(args)
+            self.assertIn("must be one of 0, 1, or 2", stderr.getvalue())
+
+    @patch(
+        "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+        return_value=None,
+    )
+    def test_fp8_kv_cache_mode_propagates_to_attention_config(self, _load_from_ckpt):
+        from rtp_llm.config.model_config import ModelConfig
+
+        for mode, expected_dtype in (
+            (0, KvCacheDataType.BASE),
+            (1, KvCacheDataType.FP8),
+            (2, KvCacheDataType.FP8),
+        ):
+            with self.subTest(mode=mode):
+                kv_cache_config = PyEnvConfigs().kv_cache_config
+                kv_cache_config.fp8_kv_cache = mode
+                model_config = ModelConfig()
+
+                model_config.init_precision_config(kv_cache_config, "BF16")
+                attention_config = model_config.getAttentionConfigs(1)
+
+                self.assertEqual(attention_config.fp8_kv_cache_mode, mode)
+                self.assertEqual(attention_config.kv_cache_dtype, expected_dtype)
+
+        kv_cache_config.fp8_kv_cache = 3
+        with self.assertRaisesRegex(ValueError, "one of 0, 1, or 2"):
+            ModelConfig().init_precision_config(kv_cache_config, "BF16")
+
     def test_jit_config(self):
         valid = (
             ([], {}, ("", 180)),

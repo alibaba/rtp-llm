@@ -100,6 +100,7 @@ class WeightManager:
         weight: ModelWeights,
         model_weights_loader: ModelLoader,
         non_owned_global_weights: Sequence[str] = (),
+        allow_weight_updates: bool = True,
     ) -> None:
         """
         Initializes the WeightManager with a model's weights, device information, and weight loader.
@@ -117,6 +118,7 @@ class WeightManager:
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._non_owned_global_weights = frozenset(non_owned_global_weights)
+        self._allow_weight_updates = allow_weight_updates
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,
         )
@@ -171,6 +173,10 @@ class WeightManager:
             - `Exception`: If the tensor cannot be built from the IPC metadata (e.g., invalid descriptor).
                           This is a general catch-all for unexpected failures in `_t_helper.build_from_meta`.
         """
+        if not self._allow_weight_updates:
+            raise RuntimeError(
+                "Online weight updates are disabled for this model instance"
+            )
         if "desc" not in req:
             raise KeyError(
                 "Update request is missing the 'desc' field. "

@@ -84,7 +84,10 @@ class WeightModule(ABC):
             target_cls = valid_classes[0]
 
             params = cls.extract_params(target_cls, weight_info, quant_config)
-            return target_cls(**params)
+            result = target_cls(**params)
+            if hasattr(result, "kernel") and not quant_config.is_quanted():
+                result.kernel._unquantized_weight = weight_info
+            return result
         elif isinstance(weight_info, CompositeWeight):
             target_cls = weight_info.__class__
             params = target_cls.extract_params(target_cls, weight_info, quant_config)
@@ -169,6 +172,16 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
+        if not getattr(load_config, "enable_w4a16_sm120_dense_ffn", False):
+            return self._load(tensor_source, layer_id, device, load_config)
+        from rtp_llm.model_loader.w4a16_weight import collect_w4a16_weights
+
+        with collect_w4a16_weights() as extra_weights:
+            weights = self._load(tensor_source, layer_id, device, load_config)
+            weights.update(extra_weights)
+            return weights
+
+    def _load(self, tensor_source, layer_id, device, load_config):
         raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
@@ -361,6 +374,21 @@ class AtomicWeight(WeightModule):
         for ckpt_weight in self.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
+                if getattr(load_config, "enable_w4a16_sm120_dense_ffn", False):
+                    source_tensors = tensor_source.load_tensor(name, None)
+                    # Reject quantized dtypes (float8/int) before conversion:
+                    # .to() would reinterpret quantization codes as values.
+                    if any(
+                        t.dtype not in (torch.float32, torch.float16, torch.bfloat16)
+                        for t in source_tensors
+                    ):
+                        raise ValueError(
+                            f"W4A16 requires unquantized float checkpoint weights, "
+                            f"got {source_tensors[0].dtype} tensor {name}"
+                        )
+                    source_tensors = [t.to(convert_type) for t in source_tensors]
+                else:
+                    source_tensors = tensor_source.load_tensor(name, convert_type)
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
                         [
@@ -369,7 +397,7 @@ class AtomicWeight(WeightModule):
                                 if "scale" in name and x.dim() == 1
                                 else x.to(device)
                             )
-                            for x in tensor_source.load_tensor(name, convert_type)
+                            for x in source_tensors
                         ]
                     )
                 )
@@ -385,6 +413,10 @@ class AtomicWeight(WeightModule):
         except Exception as e:
             logging.error(f"加载 {self.name} 失败，完整堆栈:\n{traceback.format_exc()}")
             raise e
+        if getattr(load_config, "enable_w4a16_sm120_dense_ffn", False):
+            from rtp_llm.model_loader.w4a16_weight import capture_w4a16_weight
+
+            capture_w4a16_weight(self, after_merge_tensor, load_config)
         return {self.name: after_merge_tensor}
 
     def lora_tensor_name(self, layer_id: Optional[int], name: str):

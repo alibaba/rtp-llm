@@ -71,6 +71,14 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否禁用FlashInfer Hybrid Prefill实现。True表示禁用，False表示启用。",
     )
     fmha_group.add_argument(
+        "--enable_fa4_spec_decode",
+        env_name="ENABLE_FA4_SPEC_DECODE",
+        bind_to=(fmha_config, "enable_fa4_spec_decode"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用vllm FA4 投机采样实现，用于 target verify 和 draft prefill。仅支持SM90 + BF16 + 非量化KV Cache。设为False可回退到FlashInfer/TRT prefill路径。可选值: True (启用), False (禁用)。",
+    )
+    fmha_group.add_argument(
         "--enable_xqa",
         env_name="ENABLE_XQA",
         bind_to=(fmha_config, "enable_xqa"),

@@ -149,6 +149,7 @@ struct FMHAConfig {
     bool enable_paged_open_source_fmha       = true;
     bool disable_flashinfer_native           = false;
     bool disable_flashinfer_hybrid_prefill   = true;
+    bool enable_fa4_spec_decode              = true;
     bool enable_xqa                          = true;
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;
@@ -198,7 +199,8 @@ struct KVCacheConfig {
     // Empty preserves the existing pool sizing policy.
     std::string kv_cache_pool_block_weights = "";
     // Fields merged from PyKvCacheConfig
-    int fp8_kv_cache = 0;
+    // 0 = disabled, 1 = legacy unit-scale, 2 = dynamic per-token-per-local-KV-head.
+    int         fp8_kv_cache              = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
     // without such a declaration keep LinearAttentionConfig's BF16 default;
     // the legacy remote connector falls back to BF16 because it requires one

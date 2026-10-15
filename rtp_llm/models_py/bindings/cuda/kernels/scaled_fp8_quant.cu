@@ -263,15 +263,16 @@ __global__ void per_token_quant_fp8_kernel(const T* __restrict__ input,
         }
     }
 
-    float warp_max = warpReduceMax(max_value);
+    const float warp_max = warpReduceMax(max_value);
 
-    __shared__ float scale;
-    scale = warp_max / tensorrt_llm::common::FP8_E4M3_MAX;
-    // Broadcast scale
+    // warpReduceMax broadcasts within this warp. Keep the scale warp-local:
+    // sharing one scalar between the eight independent token warps races and
+    // can quantize a token with another token's scale.
+    const float scale = warp_max == 0.0f ? 1.0f : warp_max / tensorrt_llm::common::FP8_E4M3_MAX;
     if (lane_id == 0) {
         token_scale[0] = scale;
     }
-    float scale_inv = (scale == 0.f) ? 0.f : 1.0f / scale;
+    const float scale_inv = 1.0f / scale;
 
     //
     // Pass-2: quantize and write back
@@ -338,7 +339,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(const T* __restrict__ inp
 
     __shared__ float scale;
     if (tid == 0) {
-        scale               = max_value / tensorrt_llm::common::FP8_E4M3_MAX;
+        scale               = max_value == 0.0f ? 1.0f : max_value / tensorrt_llm::common::FP8_E4M3_MAX;
         output_s[token_idx] = scale;
     }
     __syncthreads();

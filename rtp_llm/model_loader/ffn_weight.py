@@ -31,6 +31,9 @@ class FfnConfig(BaseModel):
     is_moe: bool = False
     need_post_ln: bool = False
     need_ffn_act_scale: bool = False
+    # Marks dense FFN weights as W4A16 participants;
+    # set in ModelWeightsInfo.get_weight_info, read by capture_w4a16_weight.
+    enable_w4a16_sm120: bool = False
 
 
 class FfnAtomicWeight(AtomicWeight):

@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
@@ -182,9 +182,16 @@ class ChatCompletionRequest(BaseModel):
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
 
-    # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
+    # Standard OpenAI sampling penalties. None means "not stated by the caller",
+    # so an unset field leaves extra_configs alone instead of zeroing it. A
+    # non-neutral value is rejected on services that prune the output vocabulary
+    # (GenerateStream's validateOutputVocabRequest): the two features cannot be
+    # combined, and the engine returns INVALID_PARAMS rather than silently
+    # dropping the caller's request.
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    # RTP-specific; OpenAI has no repetition_penalty field.
+    repetition_penalty: Optional[float] = None
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
@@ -202,6 +209,19 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+
+    # Resolved by the endpoint once the prompt is rendered, so the response path
+    # can tell whether the template injected a think anchor without rendering a
+    # second time. PrivateAttr keeps it out of the request schema: this is server
+    # state, not something a client may assert.
+    _prompt_has_think_anchor: Optional[bool] = PrivateAttr(default=None)
+
+    def set_prompt_has_think_anchor(self, anchored: bool) -> None:
+        self._prompt_has_think_anchor = anchored
+
+    def prompt_has_think_anchor(self) -> Optional[bool]:
+        """None means no code path has inspected the rendered prompt yet."""
+        return self._prompt_has_think_anchor
 
     @model_validator(mode="before")
     @classmethod
@@ -251,6 +271,27 @@ class ChatCompletionRequest(BaseModel):
         ):
             return self.extra_configs.chat_template_kwargs
         return self.chat_template_kwargs
+
+    def set_chat_template_kwarg(self, key: str, value: Any) -> None:
+        """Write a template kwarg where the renderers will actually read it.
+
+        ``extra_configs.chat_template_kwargs`` shadows the top-level field in
+        every renderer, so writing to ``self.chat_template_kwargs`` alone would
+        be silently ignored whenever the nested mapping is present. The mapping
+        is replaced rather than updated in place, so a dict the caller also holds
+        is left untouched; the new mapping does end up attached to this request's
+        ``extra_configs``, which is endpoint-owned by the time rendering runs.
+        """
+        if (
+            self.extra_configs is not None
+            and self.extra_configs.chat_template_kwargs is not None
+        ):
+            self.extra_configs.chat_template_kwargs = {
+                **self.extra_configs.chat_template_kwargs,
+                key: value,
+            }
+            return
+        self.chat_template_kwargs = {**(self.chat_template_kwargs or {}), key: value}
 
     def enable_thinking_requested(self):
         if self.enable_thinking is True:

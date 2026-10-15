@@ -145,6 +145,7 @@ cc_library(
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
         "NoBlockCopy.cc",
+        "W4A16GemmOp.cc",
         "cuda_host_utils.cc",
         "launch_utils.cc",
     ]),
@@ -165,6 +166,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:fp8_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
@@ -235,7 +237,8 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
-        ":cuda_attn_bindings_base"
+        ":cuda_attn_bindings_base",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_quantization",
     ] + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
@@ -244,7 +247,25 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": [":w4a16_sm120_op"],
+        "@//:using_cuda13_x86": [":w4a16_sm120_op"],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "w4a16_sm120_op",
+    srcs = ["W4A16GemmOp.cc"],
+    hdrs = ["W4A16GemmOp.h"],
+    copts = copts(),
+    defines = ["ENABLE_W4A16_SM120"],
+    deps = torch_deps() + [
+        "@fast_hadamard_transform_src//:fast_hadamard_transform",
+        "//rtp_llm/models_py/bindings/cuda/kernels/w4a16_sm120",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
 )

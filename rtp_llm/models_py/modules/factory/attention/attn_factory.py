@@ -79,6 +79,37 @@ FLASHINFER_TRTLLM_GEN_IMPLS = {
     "FlashInferTRTLLMDecodeImpl",
 }
 
+DYNAMIC_FP8_PREFILL_IMPLS = {
+    "PyFlashinferPrefillImpl",
+    "PyFlashinferPagedPrefillImpl",
+    "PyFlashinferHybridPrefillImpl",
+}
+DYNAMIC_FP8_DECODE_IMPLS = {"PyFlashinferDecodeImpl"}
+
+
+def _validate_dynamic_fp8_config(
+    attn_configs: AttentionConfigs,
+    is_cuda_graph: bool,
+    attn_inputs: Optional[PyAttentionInputs] = None,
+) -> None:
+    """Reject mode-2 configurations before any attention backend is created."""
+    if getattr(attn_configs, "fp8_kv_cache_mode", 0) != 2:
+        return
+    if is_cuda_graph and (
+        attn_inputs is None or getattr(attn_inputs, "is_prefill", True)
+    ):
+        raise ValueError("FP8 KV cache mode 2 supports CUDA graph for decode only")
+    if attn_configs.use_mla:
+        raise ValueError("FP8 KV cache mode 2 supports MHA only; MLA is not supported")
+    if attn_configs.rope_config.style == RopeStyle.Mrope:
+        raise ValueError("FP8 KV cache mode 2 does not support MRoPE")
+    if attn_configs.use_logn_attn:
+        raise ValueError("FP8 KV cache mode 2 does not support use_logn_attn")
+    if getattr(attn_configs, "gen_num_per_cycle", 1) > 1:
+        raise ValueError(
+            "FP8 KV cache mode 2 does not support speculative or multi-token decode"
+        )
+
 
 def get_mla_impl(
     attn_configs: AttentionConfigs,
@@ -91,6 +122,7 @@ def get_mla_impl(
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
 ) -> MlaImplBase:
+    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
 
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
@@ -184,6 +216,9 @@ def _is_fmha_impl_disabled(
     # FlashInfer TRT-LLM Gen implementations (SM100)
     elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
         return not fmha_config.enable_flashinfer_trtllm_gen
+    # FA4 spec-decode paged attention (SM90 target verify / draft prefill)
+    elif impl_class_name == "FlashAttn4SpecDecodeImpl":
+        return not fmha_config.enable_fa4_spec_decode
     # FlashInfer native Hybrid Prefill
     elif impl_class_name == "PyFlashinferHybridPrefillImpl":
         return (
@@ -237,10 +272,17 @@ def get_fmha_impl(
     )
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
+    _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
 
+    dynamic_fp8 = getattr(attn_configs, "fp8_kv_cache_mode", 0) == 2
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
-    strict_impl_selection = False
-    if get_device_type() == DeviceType.ROCm:
+    allowed_dynamic_impls = (
+        DYNAMIC_FP8_PREFILL_IMPLS
+        if attn_inputs.is_prefill
+        else DYNAMIC_FP8_DECODE_IMPLS
+    )
+    strict_impl_selection = dynamic_fp8
+    if not strict_impl_selection and get_device_type() == DeviceType.ROCm:
         from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
             validate_v_layout,
         )
@@ -254,6 +296,11 @@ def get_fmha_impl(
         impl_class_name = impl.__name__
 
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
+            continue
+
+        # Mode 2 has one storage/read contract. Never try a backend that does not
+        # dynamically dequantize the cache before invoking FlashInfer.
+        if dynamic_fp8 and impl_class_name not in allowed_dynamic_impls:
             continue
 
         # Skip if this FMHA implementation is disabled in config
@@ -276,6 +323,13 @@ def get_fmha_impl(
             # the bug as a performance regression.
             raise
         except Exception as e:
+            if dynamic_fp8:
+                # ROCm validation and dynamic FP8 select a cache layout before
+                # construction. Falling back could select an incompatible reader.
+                raise RuntimeError(
+                    "failed to instantiate required attention backend "
+                    f"{impl_class_name} for FP8 KV cache mode 2"
+                ) from e
             if (
                 selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH
                 or strict_impl_selection
@@ -299,6 +353,12 @@ def get_fmha_impl(
             return instance
         if _matches_cuda_graph_selection_mode(instance, selection_mode):
             return instance
+    if dynamic_fp8:
+        allowed = ", ".join(sorted(allowed_dynamic_impls))
+        raise ValueError(
+            "FP8 KV cache mode 2 requires a supported native FlashInfer backend; "
+            f"allowed implementations: {allowed}"
+        )
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -341,6 +401,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
+        _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]

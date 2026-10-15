@@ -70,6 +70,7 @@ class QwenVLRenderer(QwenRenderer):
         messages = copy.deepcopy(request.messages)
         prompt_and_mm_input = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        self._record_prompt_think_anchor(request, prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
             input_urls=prompt_and_mm_input.urls,
@@ -163,26 +164,27 @@ class Qwen2VLRenderer(QwenRenderer):
             final_messages.append(msg_dict)
 
         final_tools = []
-        if request.tools:
-            for tool in request.tools:
-                final_tools.append(
-                    {
-                        "type": tool.type,
-                        "function": tool.function.model_dump(
-                            exclude_none=True, mode="json"
-                        ),
-                    }
-                )
+        for tool in self._effective_tools(request) or []:
+            final_tools.append(
+                {
+                    "type": tool.type,
+                    "function": tool.function.model_dump(
+                        exclude_none=True, mode="json"
+                    ),
+                }
+            )
 
         chat_template_kwargs = {
             "tokenize": False,
             "add_generation_prompt": True,
             "add_vision_id": add_vision_id,
-            "tools": final_tools,
         }
         request_chat_template_kwargs = request.get_chat_template_kwargs()
         if request_chat_template_kwargs is not None:
             chat_template_kwargs.update(request_chat_template_kwargs)
+        # The request's effective tool policy is authoritative even when custom
+        # template kwargs also contain a tools field.
+        chat_template_kwargs["tools"] = final_tools
         prompt = self.tokenizer.apply_chat_template(
             final_messages, **chat_template_kwargs
         )
@@ -201,6 +203,7 @@ class Qwen2VLRenderer(QwenRenderer):
             request.extra_configs.add_vision_id if request.extra_configs else True,
         )
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        self._record_prompt_think_anchor(request, prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
             input_urls=prompt_and_mm_input.urls,

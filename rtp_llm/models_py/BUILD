@@ -49,6 +49,7 @@ requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(["packaging"])
 
 
 filegroup(
@@ -81,7 +82,9 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [
+    data = glob([
+        "modules/factory/attention/cuda_impl/flashinfer_direct_scale/include/**/*.cuh",
+    ]) + [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
@@ -89,6 +92,7 @@ py_library(
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
+        ":packaging",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
@@ -111,7 +115,9 @@ py_library(
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
         "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
-        "@//:using_cuda12_9_x86": flashmla,
+        "@//:using_cuda12_9_x86": flashmla + [
+            "//3rdparty/vllm_flash_attention:fa4_cute",
+        ],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,

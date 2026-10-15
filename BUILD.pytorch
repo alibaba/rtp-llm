@@ -25,7 +25,10 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
-        ]),
+        ]) + glob([
+            # Newer PyTorch wheels require this library; older wheels omit it.
+            "torch/lib/libtorch_nvshmem.so*",
+        ], allow_empty = True),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",
             # "torch/lib/librocsolver.so",

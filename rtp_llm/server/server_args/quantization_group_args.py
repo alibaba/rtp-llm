@@ -1,5 +1,7 @@
 import argparse
 
+from rtp_llm.server.server_args.util import str2bool
+
 
 def _positive_int(value):
     try:
@@ -41,4 +43,12 @@ def init_quantization_group_args(parser, quantization_config):
         type=_positive_int,
         default=1024,
         help="Rows loaded per W8A8 online quantization chunk.",
+    )
+    quantization_group.add_argument(
+        "--enable_w4a16_sm120_dense_ffn",
+        env_name="ENABLE_W4A16_SM120_DENSE_FFN",
+        bind_to=(quantization_config, "enable_w4a16_sm120_dense_ffn"),
+        type=str2bool,
+        default=False,
+        help=("是否开启 sm120 中小 batch 的 w4a16 ffn 量化来加速 gemm"),
     )

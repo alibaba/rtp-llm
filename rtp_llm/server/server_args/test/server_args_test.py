@@ -626,11 +626,13 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
+        os.environ["ENFORCE_NO_THINK_ON_DISABLED"] = "0"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
         os.environ["ENABLE_CUDA_GRAPH"] = "1"
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
         os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
+        os.environ["ENABLE_FA4_SPEC_DECODE"] = "0"
 
         sys.argv = ["prog"]
 
@@ -726,6 +728,11 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
         self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
         self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
+        # ENFORCE_NO_THINK_ON_DISABLED=0 is the deployment rollback for the
+        # DISABLED no-think grammar; it must reach GenerateEnvConfig.
+        self.assertFalse(
+            py_env_configs.generate_env_config.enforce_no_think_on_disabled
+        )
         self.assertEqual(
             py_env_configs.jit_config.remote_jit_dir,
             "dfs://bucket/jit/cache",
@@ -745,6 +752,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.output_dispatcher_worker_count, 3
         )
+        # ENABLE_FA4_SPEC_DECODE=0 turns off the default-on FA4 spec-decode path.
+        self.assertFalse(py_env_configs.fmha_config.enable_fa4_spec_decode)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -792,6 +801,10 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--output_dispatcher_worker_count",
             "4",
+            "--enable_fa4_spec_decode",
+            "false",
+            "--enforce_no_think_on_disabled",
+            "false",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -1352,6 +1365,12 @@ class ServerArgsSetTest(TestCase):
                         else:
                             with self.assertRaises(SystemExit):
                                 server_args.setup_args(args)
+        self.assertFalse(py_env_configs.fmha_config.enable_fa4_spec_decode)
+
+        # --enforce_no_think_on_disabled false turns the default-on hardening off.
+        self.assertFalse(
+            py_env_configs.generate_env_config.enforce_no_think_on_disabled
+        )
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"
@@ -1402,6 +1421,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_FA4_SPEC_DECODE"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -1417,6 +1437,8 @@ class ServerArgsSetTest(TestCase):
             "--concurrency_limit",
             "64",
             "--disable_flashinfer_hybrid_prefill",
+            "false",
+            "--enable_fa4_spec_decode",
             "false",
         ]
 
@@ -1438,6 +1460,9 @@ class ServerArgsSetTest(TestCase):
         )  # Overridden
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
+        )  # Overridden
+        self.assertFalse(
+            py_env_configs.fmha_config.enable_fa4_spec_decode
         )  # Overridden
 
     def test_mixed_env_and_cmd_args(self):
@@ -1485,6 +1510,7 @@ class ServerArgsSetTest(TestCase):
 
         # Not set via env or cmd args: verify the default value
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertTrue(py_env_configs.fmha_config.enable_fa4_spec_decode)
 
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""

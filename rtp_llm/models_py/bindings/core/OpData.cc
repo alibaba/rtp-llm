@@ -76,6 +76,8 @@ std::string GptModelInputs::debugString(bool force) const {
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << ", skip_lm_head: " << skip_lm_head;
     debug_string << ", capture_hidden_states: " << capture_hidden_states;
+    debug_string << ", is_target_verify: " << is_target_verify;
+    debug_string << ", is_spec_draft_prefill: " << is_spec_draft_prefill;
     debug_string << "}";
     return debug_string.str();
 }

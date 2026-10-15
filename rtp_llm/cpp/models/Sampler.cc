@@ -124,10 +124,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
 #if USING_ROCM
-    // ROCm: hipMemcpyAsync from pageable memory is truly async, and
-    // Tensor::record_stream() rejects at::hip streams (aborts with a device
-    // type check), so keep the blocking transfer here.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+    // Use the execution stream: there is no cross-stream allocation to record.
+    // Pinned inputs are retained by the host allocator (and the executor's
+    // holder); pageable callers keep the blocking fallback.
+    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/inputs.token_ids.is_pinned());
 #else
     torch::Tensor inputs_token_ids_cuda;
     {

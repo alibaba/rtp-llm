@@ -306,14 +306,13 @@ def build_megakernel(
             )
             global_chunk_idx = token_offset // bt_i32 + chunk_idx_i32
             next_global_chunk = global_chunk_idx + one_i32
-            chunk_gt_zero = arith.cmpi(
-                arith.CmpIPredicate.sgt, global_chunk_idx, zero_i32
-            )
             boundary_rem = (next_global_chunk * bt_i32) % seq_size_per_block
             on_block_boundary = arith.cmpi(
                 arith.CmpIPredicate.eq, boundary_rem, zero_i32
             )
-            is_middle_store = arith.andi(chunk_gt_zero, on_block_boundary)
+            # The state after global chunk zero is reusable when a physical
+            # cache block is exactly one 64-token GDN chunk.
+            is_middle_store = on_block_boundary
             prefix = buffer_ops.buffer_load(rsrc_prefix, i_b, vec_width=1, dtype=T.i32)
             last_dest = (prefix + global_input_len - one_i32) // seq_size_per_block
             middle_dest = (

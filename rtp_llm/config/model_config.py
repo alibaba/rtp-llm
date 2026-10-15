@@ -98,6 +98,7 @@ class ModelConfig(CppModelConfig):
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
+        "enable_w4a16_sm120_dense_ffn",
         "mm_related_params",
         "vit_separation",
         "src_quantization_bit",
@@ -268,6 +269,17 @@ class ModelConfig(CppModelConfig):
             + self.layer_weight_param_count() * layer_param_bytes
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
+
+        if self.enable_w4a16_sm120_dense_ffn:
+            ffn_weights = 3 if self.isGatedActivation() else 2
+            # INT4 values and one byte of scale per eight weights.
+            model_size += (
+                self.num_layers
+                * self.inter_size
+                * self.hidden_size
+                * ffn_weights
+                * 0.625
+            )
 
         if (
             self.mm_model_config.is_multimodal
@@ -610,6 +622,7 @@ class ModelConfig(CppModelConfig):
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
         self.w8a8_quant_chunk_rows: int = 1024
+        self.enable_w4a16_sm120_dense_ffn: bool = False
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -817,23 +830,34 @@ class ModelConfig(CppModelConfig):
                     "ACT_TYPE can be configured manually."
                 )
 
-        # Set attn_config.kv_cache_dtype based on kv_cache_config
+        # Propagate the exact FP8 KV cache mode to attention implementations and
+        # derive the storage dtype without collapsing dynamic mode 2 into a bool.
         if kv_cache_config is not None:
-            if kv_cache_config.fp8_kv_cache:
+            fp8_kv_cache_mode = int(kv_cache_config.fp8_kv_cache)
+            if fp8_kv_cache_mode not in (0, 1, 2):
+                raise ValueError(
+                    "fp8_kv_cache must be one of 0, 1, or 2, "
+                    f"got {fp8_kv_cache_mode}"
+                )
+            self.attn_config.fp8_kv_cache_mode = fp8_kv_cache_mode
+            if fp8_kv_cache_mode in (1, 2):
                 self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
                 logging.info(
-                    "Setting attn_config.kv_cache_dtype to FP8 based on kv_cache_config.fp8_kv_cache"
+                    "Setting attn_config.kv_cache_dtype to FP8 for "
+                    f"fp8_kv_cache mode {fp8_kv_cache_mode}"
                 )
             else:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
                 logging.info(
-                    "Setting attn_config.kv_cache_dtype to BASE (default, no fp8 kv_cache specified)"
+                    "Setting attn_config.kv_cache_dtype to BASE (fp8_kv_cache mode 0)"
                 )
 
         if quant_config and quant_config.get_method().lower() == "fp8":
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+            if self.attn_config.fp8_kv_cache_mode == 0:
+                self.attn_config.fp8_kv_cache_mode = 1
             logging.info(
-                "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"
+                "Setting legacy FP8 KV cache mode based on quant_config.get_method().lower() == 'fp8'"
             )
 
         # Validate configuration with quant_config
@@ -1054,6 +1078,9 @@ def build_model_config(
     if quantization_config is not None:
         model_config.quantization = quantization_config.get_quantization()
         model_config.w8a8_quant_chunk_rows = quantization_config.w8a8_quant_chunk_rows
+        model_config.enable_w4a16_sm120_dense_ffn = (
+            quantization_config.enable_w4a16_sm120_dense_ffn
+        )
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype

@@ -451,6 +451,120 @@ class FlyDSLChunkGDNCacheStoreTest(unittest.TestCase):
             with self.subTest(shape=shape):
                 self._decode_round_trip_for_shape(shape)
 
+    def test_first_block_matches_standalone_final_state(self):
+        """A non-final first chunk must materialize the 64-token reuse state.
+
+        Comparing FlyDSL only with the fallback is insufficient because both
+        store paths once skipped this boundary.  Use a standalone 64-token GDN
+        invocation as the independent oracle for block 1 of a 128-token prefill.
+        """
+        shape = (16, 32, 128, 128)
+        device = torch.device("cuda")
+        total_tokens = 128
+        boundary = SEQ_SIZE_PER_BLOCK
+        cu_seqlens = torch.tensor([0, total_tokens], device=device, dtype=torch.int32)
+        prefix_lengths = torch.zeros(1, device=device, dtype=torch.int32)
+        block_map = torch.tensor([[1, 2]], device=device, dtype=torch.int32)
+        q, k, v, g, beta, _ = _build_inputs(shape, total_tokens, cu_seqlens=cu_seqlens)
+
+        _, _, boundary_state = chunk_gated_delta_rule(
+            q=q[:, :boundary],
+            k=k[:, :boundary],
+            v=v[:, :boundary],
+            g=g[:, :boundary],
+            beta=beta[:, :boundary],
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=torch.tensor([0, boundary], device=device, dtype=torch.int32),
+            head_first=False,
+            use_qk_l2norm_in_kernel=True,
+        )
+        expected = boundary_state[0].to(torch.bfloat16)
+
+        ssm_triton = _alloc_ssm_states(3, shape)
+        self._run_triton_path(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            cu_seqlens,
+            prefix_lengths,
+            block_map,
+            ssm_triton,
+            SEQ_SIZE_PER_BLOCK,
+        )
+        ssm_flydsl = _alloc_ssm_states(3, shape)
+        full_output = self._run_flydsl_path(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            cu_seqlens,
+            prefix_lengths,
+            block_map,
+            ssm_flydsl,
+            SEQ_SIZE_PER_BLOCK,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(ssm_triton[1], expected, rtol=0, atol=0)
+        torch.testing.assert_close(ssm_flydsl[1], expected, rtol=2e-2, atol=6.25e-2)
+
+        # The same prefix ending at token 64 takes the final-state branch.  Its
+        # cache image is the production-equivalent oracle for the new middle
+        # boundary branch and must be byte-identical.
+        ssm_exact_boundary = _alloc_ssm_states(2, shape)
+        self._run_flydsl_path(
+            q[:, :boundary],
+            k[:, :boundary],
+            v[:, :boundary],
+            g[:, :boundary],
+            beta[:, :boundary],
+            torch.tensor([0, boundary], device=device, dtype=torch.int32),
+            prefix_lengths,
+            torch.tensor([[1]], device=device, dtype=torch.int32),
+            ssm_exact_boundary,
+            SEQ_SIZE_PER_BLOCK,
+        )
+        torch.cuda.synchronize()
+        torch.testing.assert_close(ssm_flydsl[1], ssm_exact_boundary[1], rtol=0, atol=0)
+
+        # Loading the newly materialized block must resume the second chunk in
+        # the same way as an uninterrupted prefill (allowing BF16 cache-state
+        # truncation at the reuse boundary).
+        resumed_cache = _alloc_ssm_states(3, shape)
+        resumed_output, _ = chunk_gated_delta_rule_flydsl_with_cache_store(
+            q=q[:, boundary:],
+            k=k[:, boundary:],
+            v=v[:, boundary:],
+            g=g[:, boundary:],
+            beta=beta[:, boundary:],
+            prefix_lengths=torch.tensor([boundary], device=device, dtype=torch.int32),
+            block_map=block_map,
+            ssm_states=resumed_cache,
+            seq_size_per_block=SEQ_SIZE_PER_BLOCK,
+            initial_state=ssm_flydsl[1].float().unsqueeze(0),
+            output_final_state=True,
+            cu_seqlens=torch.tensor(
+                [0, total_tokens - boundary], device=device, dtype=torch.int32
+            ),
+            use_qk_l2norm_in_kernel=True,
+        )
+        torch.cuda.synchronize()
+        expected_suffix = full_output[:, boundary:]
+        cos_suffix = torch.nn.functional.cosine_similarity(
+            expected_suffix.float().flatten().unsqueeze(0),
+            resumed_output.float().flatten().unsqueeze(0),
+        ).item()
+        max_diff = (expected_suffix.float() - resumed_output.float()).abs().max().item()
+        self.assertGreater(
+            cos_suffix,
+            0.999,
+            f"resumed suffix cos={cos_suffix:.6f}, max diff={max_diff:.3e}",
+        )
+
     def _decode_round_trip_for_shape(self, shape):
         T = 128
         device = torch.device("cuda")

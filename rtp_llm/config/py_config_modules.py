@@ -495,6 +495,7 @@ class GenerateEnvConfig:
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
+        self.enforce_no_think_on_disabled: bool = True
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -508,6 +509,7 @@ class GenerateEnvConfig:
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
             f"think_terminate_token_id: {self.think_terminate_token_id}\n"
+            f"enforce_no_think_on_disabled: {self.enforce_no_think_on_disabled}\n"
             f"generation_config_path: {self.generation_config_path}"
         )
 
@@ -549,12 +551,14 @@ class QuantizationConfig:
         self.int8_mode: int = 0
         self.quantization: str = ""
         self.w8a8_quant_chunk_rows: int = 1024
+        self.enable_w4a16_sm120_dense_ffn: bool = False
 
     def to_string(self):
         return (
             f"int8_mode: {self.int8_mode}\n"
             f"quantization: {self.quantization}\n"
-            f"w8a8_quant_chunk_rows: {self.w8a8_quant_chunk_rows}"
+            f"w8a8_quant_chunk_rows: {self.w8a8_quant_chunk_rows}\n"
+            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}"
         )
 
     def get_quantization(self):

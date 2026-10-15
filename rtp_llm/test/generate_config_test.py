@@ -3,7 +3,10 @@ import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
+from unittest.mock import Mock, patch
 
+import torch
+from jinja2 import Environment
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -15,23 +18,72 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.response_format import ResponseFormat
+from rtp_llm.config.response_format import ResponseFormat, prompt_ends_with_think_anchor
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
+    _warn_skipped_no_think,
     restore_final_constraint,
     validate_engine_ready,
 )
 from rtp_llm.config.thinking_mode import normalize_think_mode
 from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTokenizer
+from rtp_llm.frontend.tokenizer_factory.tokenizers.qwen_tokenizer import (
+    _QWEN35_DEFAULT_CHAT_TEMPLATE,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatMessage,
+    GenerateConfig,
+)
 from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
+from rtp_llm.openai.api_datatype import RoleEnum
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderer_factory import RendererParams
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
-from rtp_llm.ops import SpecialTokens
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+from rtp_llm.ops import SpecialTokens, SpeculativeType
 from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+
+class _Qwen35TemplateTokenizer:
+    """Stub tokenizer carrying the real Qwen3.5 chat template.
+
+    That template's assistant tail branches on ``enable_thinking``: only an
+    explicit ``false`` renders the closed empty think block, anything else
+    (including the flag being absent) injects an open ``<think>`` anchor.
+    """
+
+    path = ""
+    chat_template = _QWEN35_DEFAULT_CHAT_TEMPLATE
+
+    def apply_chat_template(self, messages, **kwargs):
+        env = Environment()
+        env.globals["raise_exception"] = self._raise_exception
+        template = env.from_string(self.chat_template)
+        return template.render(messages=messages, **kwargs)
+
+    def encode(self, prompt, **kwargs):
+        # Char codes keep the ids injective, so the endpoint's think-anchor and
+        # think-block probing matches the literal tag text in the prompt instead
+        # of a degenerate range artifact.
+        return [ord(char) for char in prompt]
+
+    def decode(self, token_ids):
+        return ""
+
+    def convert_tokens_to_ids(self, token):
+        return []
+
+    def __len__(self):
+        return 4096
+
+    def _raise_exception(self, message):
+        raise ValueError(message)
 
 
 class GenerateConfigTest(TestCase):
@@ -369,6 +421,8 @@ class OpenaiGenerateConfigTest(TestCase):
         self,
         request: ChatCompletionRequest,
         generate_env_config: Optional[GenerateEnvConfig] = None,
+        input_ids: Optional[List[int]] = None,
+        renderer: Optional[CustomChatRenderer] = None,
     ):
         model_config = ModelConfig()
         model_config.generate_env_config = generate_env_config or GenerateEnvConfig()
@@ -386,7 +440,9 @@ class OpenaiGenerateConfigTest(TestCase):
             tokenizer=self.tokenizer,
             backend_rpc_server_visitor=None,
         )
-        return openai_endpoint._extract_generation_config(request)
+        return openai_endpoint._extract_generation_config(
+            request, input_ids=input_ids, renderer=renderer
+        )
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""
@@ -401,6 +457,26 @@ class OpenaiGenerateConfigTest(TestCase):
             elements[1]["json_schema"],
             {"anyOf": [{"type": "object"}, {"type": "array"}]},
         )
+
+    def _make_openai_endpoint(self, model_config: ModelConfig):
+        return OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+
+    def _make_default_model_config(self) -> ModelConfig:
+        model_config = ModelConfig()
+        model_config.generate_env_config = GenerateEnvConfig()
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+        return model_config
 
     def _generate_config_with_stop_word(
         self,
@@ -418,6 +494,8 @@ class OpenaiGenerateConfigTest(TestCase):
         input_ids: Optional[List[int]] = None,
         thinking_mode: Optional[ThinkingMode] = None,
         env_think_mode: Optional[Union[str, int]] = None,
+        prompt_has_think_anchor: bool = False,
+        begin_think_token_ids: Optional[List[int]] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -443,13 +521,7 @@ class OpenaiGenerateConfigTest(TestCase):
         model_config.model_name = ""
         model_config.ckpt_path = ""
 
-        openai_endpoint = OpenaiEndpoint(
-            model_config=model_config,
-            misc_config=PyMiscellaneousConfig(),
-            vit_config=VitConfig(),
-            tokenizer=self.tokenizer,
-            backend_rpc_server_visitor=None,
-        )
+        openai_endpoint = self._make_openai_endpoint(model_config)
 
         request = ChatCompletionRequest(
             messages=[],
@@ -458,10 +530,16 @@ class OpenaiGenerateConfigTest(TestCase):
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
         )
+        if prompt_has_think_anchor:
+            request.set_prompt_has_think_anchor(True)
         if thinking_mode is not None:
             if request.extra_configs is None:
                 request.extra_configs = GenerateConfig()
             request.extra_configs.thinking_mode = thinking_mode
+        if begin_think_token_ids is not None:
+            if request.extra_configs is None:
+                request.extra_configs = GenerateConfig()
+            request.extra_configs.begin_think_token_ids = list(begin_think_token_ids)
 
         if req_stop is not None:
             request.stop = req_stop
@@ -620,6 +698,9 @@ class OpenaiGenerateConfigTest(TestCase):
         request = ChatCompletionRequest(
             messages=[], thinking_budget=10, enable_thinking=True
         )
+        # The template opened a <think> anchor, so the model can emit the end
+        # tag: request-level enable_thinking is honored end-to-end.
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -640,6 +721,7 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format={"type": "json_object"},
             enable_thinking=True,
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -660,6 +742,7 @@ class OpenaiGenerateConfigTest(TestCase):
             response_format={"type": "json_object"},
             chat_template_kwargs={"enable_thinking": True},
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -682,6 +765,7 @@ class OpenaiGenerateConfigTest(TestCase):
                 chat_template_kwargs={"enable_thinking": True}
             ),
         )
+        request.set_prompt_has_think_anchor(True)
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
@@ -828,6 +912,7 @@ class OpenaiGenerateConfigTest(TestCase):
         enabled = self._generate_config_with_stop_word(
             enable_thinking=True,
             env_think_mode="disabled",
+            prompt_has_think_anchor=True,
         )
 
         self.assertEqual(disabled.thinking_mode, ThinkingMode.DISABLED)
@@ -879,13 +964,613 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(adaptive_request.get_enable_thinking())
 
     def test_enabled_openai_thinking_keeps_legacy_empty_grammar_begin(self):
-        config = self._generate_config_with_stop_word(enable_thinking=True)
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True, prompt_has_think_anchor=True
+        )
 
         self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
         self.assertTrue(config.in_think_mode)
         reasoning_tag = config.structural_tag["format"]["elements"][0]
         self.assertEqual(reasoning_tag["begin"], "")
         self.assertEqual(config.begin_think_token_ids, [])
+
+    def test_enabled_thinking_without_anchor_warns(self):
+        """Request-forced ENABLED on a non-reasoning renderer whose prompt has no
+        <think> anchor cannot emit the think end tag (case-two structural hazard).
+        It is now clamped back to DISABLED so the grammar never masks EOS."""
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = self._generate_config_with_stop_word(enable_thinking=True)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertIsNone(config.structural_tag)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in mock_logging.warning.call_args_list
+                    if "clamping to DISABLED" in str(call)
+                ]
+            ),
+            1,
+        )
+
+    def test_enabled_thinking_with_anchor_is_not_clamped(self):
+        """An anchor proves the template opened thinking, so the clamp must not
+        fire even on a non-reasoning renderer. Guards the token-level fallback:
+        the Qwen form of the tag ends with a newline, which must count as the
+        anchor just as the text predicate does."""
+        begin_ids = self.tokenizer.encode("<think>\n", add_special_tokens=False)
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = self._generate_config_with_stop_word(
+                enable_thinking=True, input_ids=[1, 2, *begin_ids]
+            )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertFalse(
+            any(
+                "does not end with the think start tag" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_enabled_thinking_with_bare_anchor_is_not_clamped(self):
+        """DeepSeek-style templates append a bare `<think>` with no newline."""
+        begin_ids = self.tokenizer.encode("<think>", add_special_tokens=False)
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True, input_ids=[1, 2, *begin_ids]
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+
+    def test_begin_think_token_ids_keep_priority_in_anchor_check(self):
+        """A caller-supplied begin sequence must stay authoritative even when it
+        is not the tokenization of the configured tag, as the ADAPTIVE branch
+        already assumes."""
+        config = self._generate_config_with_stop_word(
+            enable_thinking=True,
+            input_ids=[1, 2, 3],
+            begin_think_token_ids=[1, 2, 3],
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+
+    def test_clamp_warning_is_deduplicated_per_renderer(self):
+        """The clamp decision depends on nothing request-specific, so a client
+        that always sends enable_thinking=true must not log once per request.
+        Reuses one endpoint because the warn-once state lives on the renderer."""
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+
+        config = None
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(5):
+                request = ChatCompletionRequest(messages=[], enable_thinking=True)
+                config = endpoint._extract_generation_config(request, input_ids=[1, 2])
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in mock_logging.warning.call_args_list
+                    if "clamping to DISABLED" in str(call)
+                ]
+            ),
+            1,
+        )
+
+    def test_forced_thinking_on_reasoning_renderer_without_anchor_is_not_clamped(self):
+        """Reasoning renderers legitimately emit <think> without a template anchor
+        (R1-style). The clamp must exempt them: request-forced ENABLED stays
+        ENABLED so the envelope + budget are still compiled."""
+        request = ChatCompletionRequest(messages=[], enable_thinking=True)
+        # No prompt anchor recorded.
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0  # service default DISABLED
+        model_config = ModelConfig()
+        model_config.generate_env_config = generate_env_config
+        model_config.render_config = RenderConfig()
+        model_config.special_tokens = SpecialTokens()
+        model_config.max_seq_len = 1024
+        model_config.template_type = None
+        model_config.model_name = ""
+        model_config.ckpt_path = ""
+
+        endpoint = OpenaiEndpoint(
+            model_config=model_config,
+            misc_config=PyMiscellaneousConfig(),
+            vit_config=VitConfig(),
+            tokenizer=self.tokenizer,
+            backend_rpc_server_visitor=None,
+        )
+        # Swap in a reasoning renderer (emits_reasoning_stream=True by class).
+        reasoning_renderer = Mock(spec=CustomChatRenderer)
+        reasoning_renderer.emits_reasoning_stream = True
+        reasoning_renderer.default_thinking_mode = ThinkingMode.DISABLED
+        reasoning_renderer.resolve_thinking_mode = Mock(
+            return_value=ThinkingMode.ENABLED
+        )
+        reasoning_renderer.get_reasoning_format = Mock(
+            return_value=ReasoningFormat(tag_begin="", tag_end="</think>\n\n")
+        )
+        reasoning_renderer.apply_chat_completion_constraints = Mock()
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = endpoint._extract_generation_config(
+                request, input_ids=[1, 2, 3], renderer=reasoning_renderer
+            )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertFalse(
+            any(
+                "clamping to DISABLED" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_service_level_enabled_on_non_reasoning_renderer_is_not_clamped(self):
+        """Service-level ENABLED is trusted (deployer declares the model can
+        think). Non-reasoning renderer + no request-level override + no anchor
+        must still compile the envelope."""
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = self._generate_config_with_stop_word(
+                enable_thinking=None, env_think_mode="enabled"
+            )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+        self.assertFalse(
+            any(
+                "clamping to DISABLED" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def _reasoning_renderer_mock(
+        self, emits_reasoning_stream=True, installs_grammar=False
+    ):
+        renderer = Mock(spec=CustomChatRenderer)
+        renderer.emits_reasoning_stream = emits_reasoning_stream
+        renderer.default_thinking_mode = ThinkingMode.DISABLED
+        renderer.resolve_thinking_mode = Mock(return_value=ThinkingMode.DISABLED)
+        renderer.get_reasoning_format = Mock(
+            return_value=ReasoningFormat(tag_begin="", tag_end="</think>\n\n")
+        )
+        renderer.apply_chat_completion_constraints = Mock()
+        renderer.installs_request_grammar = Mock(return_value=installs_grammar)
+        return renderer
+
+    def _make_qwen35_endpoint(self, think_mode="disabled"):
+        """Endpoint over a reasoning renderer whose template branches on
+        ``enable_thinking`` -- the Qwen3.5 shape that rendered the open anchor in
+        production while the deployment was DISABLED."""
+        tokenizer = _Qwen35TemplateTokenizer()
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = think_mode
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_tag = "</think>"
+        renderer = Qwen35Renderer(
+            tokenizer,
+            RendererParams(
+                model_type="qwen35_dense",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config,
+            RenderConfig(),
+        )
+        endpoint = object.__new__(OpenaiEndpoint)
+        endpoint.tokenizer = tokenizer
+        endpoint.chat_renderer = renderer
+        endpoint.template_renderer = renderer
+        endpoint.generate_env_config = generate_env_config
+        endpoint.stop_words_id_list = []
+        endpoint.stop_words_str_list = []
+        return endpoint, renderer, generate_env_config
+
+    def _render_and_extract(self, endpoint, renderer, request):
+        rendered = endpoint.render_chat(request)
+        config = endpoint._extract_generation_config(
+            request, rendered.input_ids, renderer
+        )
+        return rendered.rendered_prompt, config
+
+    def test_disabled_mode_aligns_template_switch_and_installs_envelope(self):
+        """A DISABLED request that states no template kwargs must not be asked to
+        think by its own template: the injected ``enable_thinking=false`` renders
+        the closed empty block, which in turn stops the request from being exempt
+        from the no-think envelope."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(
+            prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        )
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.structural_tag["type"], "structural_tag")
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(answer_format["type"], "any_text")
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_explicit_enable_thinking_request_keeps_the_open_anchor(self):
+        """The alignment must not override a caller that asked for thinking: the
+        resolved mode is ENABLED, so the template's own anchor stays and the
+        open-anchor exemption still applies."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            chat_template_kwargs={"enable_thinking": True},
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        # An ENABLED request compiles the reasoning envelope, which closes the
+        # model's think block -- not the no-think one, whose marker is the
+        # ``excludes`` list.
+        reasoning_tag = config.structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["end"], "</think>")
+        self.assertNotIn("excludes", reasoning_tag["content"])
+
+    def test_alignment_writes_where_the_renderers_read_the_kwargs(self):
+        """``extra_configs.chat_template_kwargs`` shadows the top-level field in
+        every renderer, so the injected flag has to land in the nested mapping --
+        writing it to the top-level one alone would be a silent no-op."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            extra_configs=GenerateConfig(chat_template_kwargs={"add_vision_id": True}),
+        )
+
+        prompt, _ = self._render_and_extract(endpoint, renderer, request)
+
+        effective_kwargs = request.get_chat_template_kwargs()
+        self.assertIs(effective_kwargs, request.extra_configs.chat_template_kwargs)
+        self.assertIs(effective_kwargs["enable_thinking"], False)
+        self.assertIsNone(request.chat_template_kwargs)
+        self.assertTrue(prompt.endswith("<think>\n\n</think>\n\n"))
+
+    def test_adaptive_mode_keeps_the_template_think_default(self):
+        """ADAPTIVE lets the model decide, so the template default (open anchor)
+        is the shape the mode is defined on and must not be aligned away."""
+        endpoint, renderer, _ = self._make_qwen35_endpoint("adaptive")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
+
+    def test_deployment_switch_off_leaves_the_template_anchor_alone(self):
+        """The alignment shares the envelope's rollback switch: with the hardening
+        off, dropping the anchor would push untagged reasoning into the visible
+        reply instead of into reasoning_content."""
+        endpoint, renderer, generate_env_config = self._make_qwen35_endpoint("disabled")
+        generate_env_config.enforce_no_think_on_disabled = False
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")]
+        )
+
+        prompt, config = self._render_and_extract(endpoint, renderer, request)
+
+        self.assertTrue(prompt.endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertIsNone(config.structural_tag)
+
+    def test_penalty_fields_reach_generate_config(self):
+        """presence/frequency_penalty used to be dropped by the chat path, which
+        left callers unable to ask for anti-repetition through the standard API."""
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                presence_penalty=1.0,
+                frequency_penalty=0.5,
+                repetition_penalty=1.1,
+            )
+        )
+
+        self.assertEqual(config.presence_penalty, 1.0)
+        self.assertEqual(config.frequency_penalty, 0.5)
+        self.assertEqual(config.repetition_penalty, 1.1)
+
+    def test_absent_penalty_fields_keep_extra_configs_values(self):
+        """None means "not stated by the caller": an unset standard field must not
+        zero out the equivalent value already carried by extra_configs."""
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                extra_configs=GenerateConfig(
+                    presence_penalty=1.0, frequency_penalty=1.0
+                ),
+            )
+        )
+
+        self.assertEqual(config.presence_penalty, 1.0)
+        self.assertEqual(config.frequency_penalty, 1.0)
+
+    @staticmethod
+    def _patch_repetition_risk_warn():
+        """Patch the dedup helper so the assertions observe the decision itself."""
+        return patch("rtp_llm.openai.openai_endpoint._warn_once_per_renderer")
+
+    @staticmethod
+    def _count_repetition_risk_warnings(mock_warn_once):
+        """Count by warn key rather than message text, so rewording the
+        operator-facing message cannot silently disarm these assertions."""
+        return len(
+            [
+                call
+                for call in mock_warn_once.call_args_list
+                if call.args[1] == ("repetition_collapse_risk",)
+            ]
+        )
+
+    def test_repetition_collapse_risk_warns_on_neutral_penalties_and_narrow_sampling(
+        self,
+    ):
+        """All three anti-repetition knobs neutral (the defaults) plus greedy-ish
+        decoding is the shape that left the reported repetitions unrecoverable."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+        )
+
+        with self._patch_repetition_risk_warn() as mock_warn_once:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 1)
+
+    def test_repetition_collapse_risk_silent_when_anti_repetition_is_set(self):
+        """A caller that turned on any anti-repetition knob is not on the risk
+        surface: the sampler has an escape hatch."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+            presence_penalty=1.0,
+        )
+
+        with self._patch_repetition_risk_warn() as mock_warn_once:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
+
+    def test_repetition_collapse_risk_silent_with_no_repeat_ngram(self):
+        """``no_repeat_ngram_size`` is the knob that actually breaks a loop, so a
+        service already carrying it must not be warned about."""
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.01,
+            top_p=0.1,
+            extra_configs=GenerateConfig(no_repeat_ngram_size=4),
+        )
+
+        with self._patch_repetition_risk_warn() as mock_warn_once:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
+
+    def test_repetition_collapse_risk_silent_on_broad_sampling(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            top_p=0.9,
+        )
+
+        with self._patch_repetition_risk_warn() as mock_warn_once:
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(self._count_repetition_risk_warnings(mock_warn_once), 0)
+
+    def test_repetition_collapse_risk_warns_once_per_deployment(self):
+        """The condition is a configuration shape, so a client that always sends
+        the same risky sampling must not log one line per request. The dedup lives
+        inside the helper, so this one keeps the real one and counts log lines."""
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            for _ in range(3):
+                request = ChatCompletionRequest(
+                    messages=[], temperature=0.01, top_p=0.1
+                )
+                endpoint._extract_generation_config(request, input_ids=[1, 2])
+
+        # The repetition-risk line is the only warning this path emits.
+        self.assertEqual(len(mock_logging.warning.call_args_list), 1)
+
+    def test_disabled_closed_think_block_installs_no_think_constraint(self):
+        """prompt 以闭合 think 块结尾（enable_thinking=false 的模板形态）时，
+        关闭 thinking 的推理模型不得再重新起 think：否则自发思考会吃掉
+        max_new_tokens，渲染层只能搬运、救不回答案。"""
+        input_ids = self.tokenizer.encode(
+            "hi\n<think>\n\n</think>\n\n", add_special_tokens=False
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(config.structural_tag["type"], "structural_tag")
+        self.assertEqual(answer_format["type"], "any_text")
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_open_anchor_skips_no_think_constraint(self):
+        """模板注入开放锚点时模型确实会思考，不做 no-think 约束：此时禁掉结束
+        标记会让 think 块无法闭合（该形态由渲染层剥离，force 解析器负责）。"""
+        input_ids = self.tokenizer.encode("hi\n<think>\n", add_special_tokens=False)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_prompt_without_think_markup_installs_no_think_constraint(self):
+        """prompt 里完全没有 think 标记（模板不含 enable_thinking 分支的部署，
+        实测里模型仍会自发 think）时同样要禁止：否则整段思考会占满预算。"""
+        input_ids = self.tokenizer.encode("hi\nassistant\n", add_special_tokens=False)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(answer_format["type"], "any_text")
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_no_think_enforcement_can_be_disabled_by_deployment(self):
+        """回退口：部署把 ENFORCE_NO_THINK_ON_DISABLED 置 0 后，行为与修复前一致
+        （只剥离、不禁止）。"""
+        input_ids = self.tokenizer.encode("hi\nassistant\n", add_special_tokens=False)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        env = GenerateEnvConfig()
+        env.enforce_no_think_on_disabled = False
+
+        config = self._extract_openai_generation_config(
+            request,
+            generate_env_config=env,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_answer_mode_without_reasoning_renderer_skips_constraint(self):
+        """非推理模型不会自发 think，不该为它装语法约束。"""
+        input_ids = self.tokenizer.encode(
+            "hi\n<think>\n\n</think>\n\n", add_special_tokens=False
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(emits_reasoning_stream=False),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_prompt_inside_open_think_block_skips_no_think_constraint(self):
+        """prompt 末尾锚点之后又被调用方 prefill 续写了思考正文时，prompt 仍在
+        未闭合的 think 块内：此时禁掉结束标记会让该块永远无法闭合、回复卡在
+        reasoning 里，因此必须与开放锚点同样豁免。"""
+        input_ids = self.tokenizer.encode(
+            "hi\n<think>\n我在思考", add_special_tokens=False
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_closed_think_block_behind_anchor_still_installs_constraint(self):
+        """锚点之后 prefill 的是已闭合的 think 块时，模型并不在思考中：判据不能
+        因为 prompt 里出现过开始标记就误豁免。"""
+        input_ids = self.tokenizer.encode(
+            "hi\n<think>\n\n</think>\n\nassistant\n", add_special_tokens=False
+        )
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(),
+        )
+
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_renderer_installed_grammar_skips_no_think_constraint(self):
+        """渲染器要为本次请求装自己的语法时（DSV4 强制工具调用），no-think
+        envelope 必须让位：引擎每请求只接受一个语法字段，抢装会把请求打成 400，
+        而渲染器的语法本身更窄。"""
+        input_ids = self.tokenizer.encode("hi\nassistant\n", add_special_tokens=False)
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        config = self._extract_openai_generation_config(
+            request,
+            input_ids=input_ids,
+            renderer=self._reasoning_renderer_mock(installs_grammar=True),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_adaptive_thinking_requires_begin_token_ids(self):
+        """ADAPTIVE 靠 begin 标记探测思考是否开始；begin 标记为空意味着模型没有
+        任何合法路径结束思考，必须在 validate 阶段拒绝（案例二的结构性隐患）。"""
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            config.validate()
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertIn("begin_think_token_ids must be non-empty", ctx.exception.message)
+
+    def test_thinking_not_adaptive_tolerates_empty_begin_token_ids(self):
+        # ENABLED 不依赖 begin 标记（R1 风格模型无锚点也能 think），不得被误伤；
+        # 填好 begin 标记的 ADAPTIVE 配置应通过。
+        GenerateConfig(
+            thinking_mode=ThinkingMode.ENABLED,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+        ).validate()
+        GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+            begin_think_token_ids=[7],
+        ).validate()
 
     def test_invalid_chat_template_thinking_mode_is_rejected(self):
         for value in ("auto", "Adaptive", True, 1, None):
@@ -937,6 +1622,186 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertFalse(config.in_think_mode)
         self.assertEqual(config.end_think_token_ids, [102])
         self.assertIsNone(config.structural_tag)
+
+    def test_disabled_answer_mode_installs_no_think_constraint(self):
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        config = GenerateConfig(thinking_mode=ThinkingMode.DISABLED)
+
+        config.add_thinking_params(
+            self.tokenizer,
+            env,
+            enable_thinking=False,
+            reasoning_format=ReasoningFormat(
+                tag_begin="<think>",
+                tag_end="</think>",
+                enforce_no_think=True,
+            ),
+        )
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(config.in_think_mode)
+        self.assertIsNone(config.json_schema)
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(config.structural_tag["type"], "structural_tag")
+        self.assertEqual(answer_format["type"], "any_text")
+        self.assertEqual(answer_format["excludes"], ["<think>", "</think>"])
+
+    def test_disabled_without_enforce_leaves_grammar_empty(self):
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        config = GenerateConfig(thinking_mode=ThinkingMode.DISABLED)
+
+        config.add_thinking_params(
+            self.tokenizer,
+            env,
+            enable_thinking=False,
+            reasoning_format=ReasoningFormat(
+                tag_begin="<think>",
+                tag_end="</think>",
+            ),
+        )
+
+        self.assertIsNone(config.structural_tag)
+
+    def test_disabled_no_think_keeps_caller_json_format_inside_envelope(self):
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.DISABLED,
+            response_format=ResponseFormat(type="json_object"),
+        )
+
+        config.add_thinking_params(
+            self.tokenizer,
+            env,
+            enable_thinking=False,
+            reasoning_format=ReasoningFormat(
+                tag_begin="<think>",
+                tag_end="</think>",
+                enforce_no_think=True,
+            ),
+        )
+
+        answer_format = config.structural_tag["format"]
+        self.assertEqual(answer_format["type"], "json_schema")
+        self.assertNotIn("<think>", str(answer_format))
+
+    def test_disabled_no_think_declines_multiple_sequences(self):
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.DISABLED,
+            num_return_sequences=2,
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            _warn_skipped_no_think.cache_clear()  # one record per process
+            config.add_thinking_params(
+                self.tokenizer,
+                env,
+                enable_thinking=False,
+                reasoning_format=ReasoningFormat(
+                    tag_begin="<think>",
+                    tag_end="</think>",
+                    enforce_no_think=True,
+                ),
+            )
+
+        self.assertIsNone(config.structural_tag)
+        self.assertIn(
+            "skipping the no-think constraint",
+            "\n".join(logs.output),
+        )
+
+    def test_disabled_no_think_keeps_bounded_caller_grammar_servable(self):
+        """调用方自带带预算的 structural_tag 时 envelope 无法嵌套：加固让位并告警，
+        保留调用方语法，而不是把请求打成 400（对照 ENABLED 的
+        test_reasoning_final_structural_tag_with_existing_budget_rejected）。"""
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        caller_tag = {
+            "type": "structural_tag",
+            "format": {"type": "any_text", "max_tokens": 8},
+        }
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.DISABLED,
+            structural_tag=caller_tag,
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            _warn_skipped_no_think.cache_clear()
+            constraint = config.add_thinking_params(
+                self.tokenizer,
+                env,
+                enable_thinking=False,
+                reasoning_format=ReasoningFormat(
+                    tag_begin="<think>",
+                    tag_end="</think>",
+                    enforce_no_think=True,
+                ),
+            )
+
+        self.assertEqual(constraint.value, caller_tag)
+        validate_engine_ready(config)
+        self.assertEqual(config.structural_tag, caller_tag)
+        self.assertIn("cannot wrap", "\n".join(logs.output))
+        self.assertNotIn("<think>", str(config.structural_tag))
+
+    def test_disabled_no_think_keeps_legacy_structural_tag_servable(self):
+        """调用方自带 legacy 形态 structural_tag（{"structures","triggers"}，无 "format"）时，
+        envelope 无法包裹：final_format_node() 会抛错，加固必须让位并告警，保留调用方语法，
+        而不是把这个在加固前就可服务的请求打成 400（回归 finding 16573）。"""
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        caller_tag = {
+            "structures": [{"type": "any_text"}],
+            "triggers": ["<foo>"],
+        }
+        normalized_tag = {"type": "structural_tag", **caller_tag}
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.DISABLED,
+            structural_tag=caller_tag,
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            _warn_skipped_no_think.cache_clear()
+            constraint = config.add_thinking_params(
+                self.tokenizer,
+                env,
+                enable_thinking=False,
+                reasoning_format=ReasoningFormat(
+                    tag_begin="<think>",
+                    tag_end="</think>",
+                    enforce_no_think=True,
+                ),
+            )
+
+        self.assertEqual(constraint.value, normalized_tag)
+        validate_engine_ready(config)
+        self.assertEqual(config.structural_tag, normalized_tag)
+        self.assertIn("skipping the no-think constraint", "\n".join(logs.output))
+        self.assertNotIn("<think>", str(config.structural_tag))
+
+    def test_disabled_no_think_envelope_passes_engine_boundary(self):
+        """约束不带 think 预算，RPC 边界只需校验、不会触发预算重编译。"""
+        env = GenerateEnvConfig()
+        env.think_end_tag = "</think>"
+        config = GenerateConfig(thinking_mode=ThinkingMode.DISABLED)
+
+        config.add_thinking_params(
+            self.tokenizer,
+            env,
+            enable_thinking=False,
+            reasoning_format=ReasoningFormat(
+                tag_begin="<think>",
+                tag_end="</think>",
+                enforce_no_think=True,
+            ),
+        )
+
+        validate_engine_ready(config)
+        self.assertNotIn("max_tokens", str(config.structural_tag))
 
     def assert_config_stop_word(
         self,
@@ -1755,6 +2620,287 @@ class RawUpdateAndGrammarConflictTest(TestCase):
             {"format": {"type": "regex", "pattern": "a"}},
         )
         self.assertEqual(remain, {"stranger": 1})
+
+
+class MaxThinkingTokensClampTest(TestCase):
+    """max_thinking_tokens 必须落在可生成预算内，C++ 侧的强制收尾兜底才可达。
+
+    C++ 只有在已生成 token 数 >= max_thinking_tokens 时才会强制写入 think 结束
+    标记；预算超过 max_seq_len - prompt_length 时该兜底永远不成立，模型会被
+    think 语法约束卡住直到撞上序列上限（案例二）。
+    """
+
+    def setUp(self):
+        self.visitor = Mock()
+        self.visitor.max_seq_len = 100
+        self.visitor.sp_config = None
+        self.visitor._validate_input = BackendRPCServerVisitor._validate_input.__get__(
+            self.visitor
+        )
+
+    def _make_input(
+        self,
+        prompt_length=40,
+        max_new_tokens=36000,
+        max_thinking_tokens=32000,
+        end_think_token_ids=None,
+        in_think_mode=True,
+    ):
+        return GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, prompt_length, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                max_new_tokens=max_new_tokens,
+                max_thinking_tokens=max_thinking_tokens,
+                in_think_mode=in_think_mode,
+                end_think_token_ids=(
+                    [101] if end_think_token_ids is None else end_think_token_ids
+                ),
+            ),
+        )
+
+    def test_budget_beyond_room_is_clamped_to_generatable_tokens(self):
+        # room = max_seq_len - prompt_length = 60，生成上限取 min(room, max_new_tokens)。
+        generate_input = self._make_input()
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as mock_logging:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
+        self.assertTrue(
+            any(
+                "exceeds the safe thinking budget" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_budget_within_room_is_untouched(self):
+        generate_input = self._make_input(max_new_tokens=50, max_thinking_tokens=30)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 30)
+
+    def test_cap_is_room_when_request_asks_for_more(self):
+        # max_new_tokens=80 大于 room=60 时，上限是 room 而不是请求值。
+        generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=75)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
+
+    def test_zero_budget_keeps_thinking_disabled(self):
+        generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=0)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 0)
+
+    def test_clamp_reserves_room_for_the_think_end_tag(self):
+        """收敛值必须给结束标记留出长度。
+
+        兜底是逐 token 强制写入结束标记的，收敛到恰好等于可生成空间会让强制收尾
+        落在最后一步、标记写不完，think 块照旧闭合不了——那样这个 clamp 等于没做。
+        """
+        generate_input = self._make_input(end_think_token_ids=[101, 102, 103])
+        self.visitor._validate_input(generate_input)
+
+        # room = 60，结束标记 3 个 token，再为 EOS/最终内容留 1 个 token。
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 56)
+
+    def test_budget_exactly_at_room_is_pulled_back_for_the_end_tag(self):
+        generate_input = self._make_input(
+            max_new_tokens=60, max_thinking_tokens=60, end_think_token_ids=[101]
+        )
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 58)
+
+    def test_request_is_rejected_when_the_end_tag_exceeds_the_room(self):
+        generate_input = self._make_input(
+            prompt_length=98, max_new_tokens=80, end_think_token_ids=[1, 2, 3, 4, 5]
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.LONG_PROMPT_ERROR)
+        self.assertIn("cannot fit", str(ctx.exception))
+
+    def test_enabled_thinking_requires_end_token_ids(self):
+        generate_input = self._make_input(end_think_token_ids=[])
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertIn("end_think_token_ids", str(ctx.exception))
+
+    def test_clamp_rebuilds_the_structural_reasoning_budget(self):
+        generate_input = self._make_input(end_think_token_ids=[101, 102])
+        config = generate_input.generate_config
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+        original_budget = config.structural_tag["format"]["elements"][0]["content"][
+            "max_tokens"
+        ]
+
+        self.visitor._validate_input(generate_input)
+
+        rebuilt_budget = config.structural_tag["format"]["elements"][0]["content"][
+            "max_tokens"
+        ]
+        self.assertEqual(original_budget, 32000)
+        self.assertEqual(config.max_thinking_tokens, 57)
+        self.assertEqual(rebuilt_budget, 57)
+
+    def test_speculative_reserve_is_removed_before_clamping(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "0"}):
+            self.visitor._validate_input(generate_input)
+
+        # room 60 - draft window 3 - end tag 1 - final/EOS token 1
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 55)
+
+    def test_stream_async_reserves_two_draft_windows(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="mtp", type=SpeculativeType.MTP, gen_num_per_cycle=3
+        )
+        generate_input = self._make_input(end_think_token_ids=[101])
+
+        with patch.dict(os.environ, {"RTP_LLM_STREAM_ASYNC": "1"}):
+            self.visitor._validate_input(generate_input)
+
+        # room 60 - (2 * gamma + 1) - end tag 1 - final/EOS token 1
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 51)
+
+    def test_default_budget_is_clamped_without_warning(self):
+        config = GenerateConfig()
+        config.in_think_mode = True
+        config.thinking_mode = ThinkingMode.ENABLED
+        config.end_think_token_ids = [101]
+        generate_input = GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, 40, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=config,
+        )
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as logging_mock:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 58)
+        logging_mock.warning.assert_not_called()
+
+    def _make_config_stub(self, **fields):
+        """未经 pydantic 校验的最小配置对象：字段可能缺席，也可能为 None。"""
+        return type("_ConfigStub", (), fields)()
+
+    def test_missing_think_fields_are_treated_as_unconfigured(self):
+        # 服务端测试里用的最小 fake config 就没有这两个字段；clamp 必须容忍缺席，
+        # 否则每个请求都会在 _validate_input 里抛 AttributeError。
+        config = self._make_config_stub(max_new_tokens=36000)
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertFalse(hasattr(config, "max_thinking_tokens"))
+
+    def test_none_think_fields_are_treated_as_unconfigured(self):
+        config = self._make_config_stub(
+            max_new_tokens=36000,
+            max_thinking_tokens=None,
+            end_think_token_ids=None,
+        )
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertIsNone(config.max_thinking_tokens)
+
+    def test_non_think_request_budget_is_untouched_and_silent(self):
+        """clamp 只服务于 in_think_mode 的请求：预算仅在 C++ 的同名处理器里被
+        消费（该处理器只在 in_think_mode 下创建），其余请求上默认的 32000 没有
+        语义，不能逐请求触发告警与改写。"""
+        generate_input = self._make_input(in_think_mode=False)
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as mock_logging:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 32000)
+        mock_logging.warning.assert_not_called()
+
+    def test_in_think_mode_absent_is_treated_as_non_think(self):
+        config = self._make_config_stub(
+            max_new_tokens=36000,
+            max_thinking_tokens=32000,
+            end_think_token_ids=[],
+        )
+        generate_input = Mock(prompt_length=40, generate_config=config)
+
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(config.max_thinking_tokens, 32000)
+
+
+class ThinkAnchorPredicateTest(TestCase):
+    """endpoint 与 renderer 必须共用同一个锚点判据。
+
+    两边曾各有一套：endpoint 按 token 比较（`input_ids[-n:] == begin_ids`），
+    renderer 按字符串比较且容忍尾部换行。DeepSeek 模板追加的是裸 `<think>`，而
+    begin_ids 由 `<think>\\n` 编码而来，两套判据会对同一个 prompt 得出相反结论。
+    """
+
+    def test_trailing_newline_differences_are_tolerated_both_ways(self):
+        for tag, prompt_tail in (
+            ("<think>\n", "<think>"),
+            ("<think>", "<think>\n"),
+            ("<think>\n", "<think>\n"),
+            ("<think>", "<think>"),
+        ):
+            with self.subTest(tag=tag, tail=prompt_tail):
+                self.assertTrue(
+                    prompt_ends_with_think_anchor(f"user hi\n{prompt_tail}", tag)
+                )
+
+    def test_closed_empty_block_is_not_an_anchor(self):
+        # 对照 B：显式 enable_thinking=false 时模板注入的是闭合空块。
+        self.assertFalse(
+            prompt_ends_with_think_anchor(
+                "user hi\n<think>\n\n</think>\n\n", "<think>\n"
+            )
+        )
+
+    def test_prompt_without_anchor_is_not_anchored(self):
+        self.assertFalse(
+            prompt_ends_with_think_anchor("user hi\nassistant\n", "<think>")
+        )
+
+    def test_empty_tag_never_anchors(self):
+        # think_start_tag 配成空串（或只有换行）时不能把任意 prompt 判成锚定。
+        for tag in ("", "\n", "\n\n"):
+            with self.subTest(tag=tag):
+                self.assertFalse(prompt_ends_with_think_anchor("anything", tag))
+
+    def test_raw_config_tag_with_literal_escape_matches(self):
+        # THINK_START_TAG 写的是字面 \n 时，判据内部先归一化再比较：否则持有原始值
+        # 的调用方会与持有归一化值的调用方对同一个 prompt 得出相反结论。
+        self.assertTrue(
+            prompt_ends_with_think_anchor("user hi\n<think>\n", r"<think>\n")
+        )
+
+    def test_open_anchor_with_trailing_blank_lines_is_anchored(self):
+        # 开放锚点（无结束标记）后跟空行仍应判为锚定：模型确实会从这里开始思考。
+        # 与闭合空块的区别在于结束标记是否出现，而不是尾部有几个换行。
+        self.assertTrue(
+            prompt_ends_with_think_anchor("user hi\n<think>\n\n", "<think>\n")
+        )
+        self.assertFalse(
+            prompt_ends_with_think_anchor("user hi\n<think></think>\n\n", "<think>\n")
+        )
 
 
 if __name__ == "__main__":

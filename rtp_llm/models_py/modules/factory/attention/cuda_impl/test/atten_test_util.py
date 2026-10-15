@@ -15,6 +15,7 @@ def write_kv_cache(
     kv_cache: KVCache,
     seq_lens: torch.Tensor,
     block_tables: torch.Tensor,
+    start_positions: Optional[torch.Tensor] = None,
 ):
     assert seq_lens.sum().item() == k.shape[0] and k.shape[0] == v.shape[0]
     batch_size = seq_lens.shape[0]
@@ -25,31 +26,33 @@ def write_kv_cache(
         1, 1
     )  # [num_pages, num_kv_heads, page_size, head_dim]
     page_size = k_cache.shape[2]
-    max_seq_len = seq_lens.max().item()
-    max_block_size = max_seq_len // page_size + 1
+    if start_positions is None:
+        start_positions = torch.zeros_like(seq_lens)
     token_idx = 0
     for i in range(batch_size):
-        seq_len = seq_lens[i].item()
-        num_blocks = (seq_len + page_size - 1) // page_size
-        for block_idx in range(num_blocks):
+        remaining = seq_lens[i].item()
+        position = start_positions[i].item()
+        while remaining > 0:
+            block_idx = position // page_size
             block_id = block_tables[i, block_idx].item()
-            block_start = block_idx * page_size
-            block_end = min(block_start + page_size, seq_len)
-            block_len = block_end - block_start
-            if block_len > 0:
-                # Validate block_id is within cache bounds
-                if block_id < 0 or block_id >= k_cache.shape[0]:
-                    raise ValueError(
-                        f"Invalid block_id {block_id} for sequence {i}, "
-                        f"block {block_idx}. Cache has {k_cache.shape[0]} pages."
-                    )
-                k_cache[block_id, :, :block_len, :] = k[
-                    token_idx : token_idx + block_len
-                ].transpose(0, 1)
-                v_cache[block_id, :, :block_len, :] = v[
-                    token_idx : token_idx + block_len
-                ].transpose(0, 1)
-            token_idx += block_len
+            if block_id < 0 or block_id >= k_cache.shape[0]:
+                raise ValueError(
+                    f"Invalid block_id {block_id} for sequence {i}, "
+                    f"block {block_idx}. Cache has {k_cache.shape[0]} pages."
+                )
+            block_offset = position % page_size
+            block_len = min(page_size - block_offset, remaining)
+            token_end = token_idx + block_len
+            cache_end = block_offset + block_len
+            k_cache[block_id, :, block_offset:cache_end, :] = k[
+                token_idx:token_end
+            ].transpose(0, 1)
+            v_cache[block_id, :, block_offset:cache_end, :] = v[
+                token_idx:token_end
+            ].transpose(0, 1)
+            token_idx = token_end
+            position += block_len
+            remaining -= block_len
 
 
 def attention_prefill_ref(

@@ -1,0 +1,54 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-4B",
+    "grammar_constraint_only": true,
+    "_comment": "SM120 twin of q_r_no_think_answer_mode.json: same production shape (server think_mode=0, caller declares neither response_format nor template kwargs, thinking off resolved by the endpoint), on the dense model this pool can load. Because the caller states no template kwargs, the endpoint's DISABLED-mode alignment is what renders the closed empty block; drop it and the prompt ends on an open <think> anchor, which exempts the request from the envelope. The answer-mode no-think hardening is a Python-endpoint contract with no arch branch, but the SM120 deployment line is a cherry-pick channel and carried no think coverage at all before this case, so the shape is pinned on the pool that has no full smoke suite. Single query: the caller-visible contract is the answer shape, declared through compare_config.expected_response_format -- a reply that spends the budget on untagged prose (the diversion failure) or re-opens a think block fails the fullmatch. grammar_constraint_only=true: validate the constraint only, never model-version-dependent bytes.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是电商场景的售前/售后判别助手。只输出一个阿拉伯数字：\"1\" 表示售后，\"2\" 表示售前，\"0\" 表示不确定；禁止输出任何解释、标点或其他字符。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "图片展示某电商 App 上运动鞋的商品页面，包含商品主图、上脚实拍图、价格 ¥404 及“立即购买”按钮。"
+                    }
+                ],
+                "max_tokens": 24,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "compare_config": {
+                "expected_response_format": {
+                    "type": "regex",
+                    "pattern": "[012]"
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "2",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only — content must fullmatch [012]: the digit has to appear inside max_tokens, which is the contract the endpoint's self-compiled no-think envelope exists to protect."
+            },
+            "_comment": "Thinking-off answer quality on SM120: a regression that sends the request back into a think block, drops the envelope, or lets the model answer in prose fails here instead of only in production."
+        }
+    ]
+}
