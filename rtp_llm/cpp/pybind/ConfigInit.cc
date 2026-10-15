@@ -2061,6 +2061,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
         .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
+        .def_readwrite("output_vocab_groups", &ModelConfig::output_vocab_groups)
         .def_readwrite("output_vocab_padded_size", &ModelConfig::output_vocab_padded_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("hidden_state_capture_layer_ids", &ModelConfig::hidden_state_capture_layer_ids)

@@ -17,6 +17,10 @@ TEST_F(CudaBeamSearchOpTest, prunedVocabV2Test) {
     runPrunedVocabV2Tests();
 }
 
+TEST_F(CudaBeamSearchOpTest, forcedV2HandlesMaskedEqualSmallBeams) {
+    runMaskedEqualSmallBeamV2Tests();
+}
+
 TEST_F(CudaBeamSearchOpTest, selectAllVocabV2Test) {
     const int vocab_size = 3000;
     for (const int batch_size : {1, 2}) {

@@ -36,8 +36,8 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     const int vocab_size     = params.logits.size(2);
     const int max_seq_len    = params.token_ids.size(2);
     // TODO(zhangjianning.zjn): check the shape of params
-    const bool use_v2 =
-        beam_width_in != beam_width_out || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1);
+    const bool use_v2 = params.force_v2 || beam_width_in != beam_width_out
+                        || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1);
     if (use_v2) {
         const size_t stage1_topk = std::min(static_cast<size_t>(vocab_size), static_cast<size_t>(beam_width_out));
         RTP_LLM_CHECK_WITH_INFO(
@@ -97,7 +97,8 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     auto                           logits_dtype = torchDTypeToDataType(params.logits.dtype());
     tensorrt_llm::BeamSearchConfig config;
     DISPATCH_TYPE(T, logits_dtype, [&]() {
-        config = tensorrt_llm::configureBeamSearch<T>(batch_size, beam_width_in, beam_width_out, vocab_size);
+        config = tensorrt_llm::configureBeamSearch<T>(
+            batch_size, beam_width_in, beam_width_out, vocab_size, params.force_v2);
     });
 
     // set beam search kernel workspace

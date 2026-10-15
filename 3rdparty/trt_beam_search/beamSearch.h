@@ -37,6 +37,7 @@ template<typename T>
 BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
                                      runtime::SizeType32 beamWidthIn,
                                      runtime::SizeType32 beamWidthOut,
-                                     runtime::SizeType32 vocabSize);
+                                     runtime::SizeType32 vocabSize,
+                                     bool                forceV2 = false);
 
 }  // namespace tensorrt_llm
