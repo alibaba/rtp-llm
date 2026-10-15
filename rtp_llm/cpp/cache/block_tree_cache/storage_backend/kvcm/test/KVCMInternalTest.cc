@@ -795,6 +795,30 @@ TEST(KVCMInternalTest, BufferSizeMismatchDoesNotPublishPartialBuffers) {
     EXPECT_EQ(buffers.front().iovs.front().size, sentinel_storage.size());
 }
 
+TEST(KVCMInternalTest, BufferMemoryTypeFollowsBackingStorage) {
+    std::array<char, 16> storage{};
+    auto topology = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
+    auto resolver = [&](int layer_id, const std::string& tag, int block_id) {
+        EXPECT_EQ(layer_id, 0);
+        EXPECT_EQ(tag, "full");
+        EXPECT_EQ(block_id, 7);
+        BlockInfo info;
+        info.is_cuda    = false;
+        info.addr       = storage.data();
+        info.size_bytes = storage.size();
+        return std::vector<BlockInfo>{info};
+    };
+    FullLayerGroupPolicy policy(*topology, resolver, /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
+    ASSERT_TRUE(policy.init());
+
+    kv_cache_manager::BlockBuffers buffers;
+    ASSERT_TRUE(policy.genBlockBuffers({"full"}, {7}, buffers));
+    ASSERT_EQ(buffers.size(), 1u);
+    ASSERT_EQ(buffers.front().iovs.size(), 1u);
+    EXPECT_EQ(buffers.front().iovs.front().type, kv_cache_manager::MemoryType::CPU);
+    EXPECT_EQ(buffers.front().iovs.front().base, storage.data());
+}
+
 TEST(KVCMInternalTest, RejectsInvalidGroupModeInputs) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},

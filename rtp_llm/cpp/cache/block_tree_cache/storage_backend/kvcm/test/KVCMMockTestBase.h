@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -116,6 +117,9 @@ class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
     MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
 
+    std::optional<kv_cache_manager::ClientErrorCode> load_status;
+    std::optional<kv_cache_manager::ClientErrorCode> save_status;
+
     MOCK_METHOD(bool,
                 initForPools,
                 (const ConfigMap&,
@@ -175,6 +179,31 @@ public:
                  const kv_cache_manager::BlockBuffers&,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&),
                 (override));
+    kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) override {
+        if (load_status.has_value()) {
+            return *load_status;
+        }
+        return loadKvCachesForTag(tag, uris, buffers, trace_info) ? kv_cache_manager::ClientErrorCode::ER_OK
+                                                                  : kv_cache_manager::ClientErrorCode::ER_SDKREAD_ERROR;
+    }
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(
+        const std::string&                                          tag,
+        const kv_cache_manager::UriStrVec&                          uris,
+        const kv_cache_manager::BlockBuffers&                       buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) override {
+        if (save_status.has_value()) {
+            return {*save_status, {}};
+        }
+        auto [success, result] = saveKvCachesForTag(tag, uris, buffers, trace_info);
+        return {success ? kv_cache_manager::ClientErrorCode::ER_OK
+                        : kv_cache_manager::ClientErrorCode::ER_SDKWRITE_ERROR,
+                std::move(result)};
+    }
 };
 
 struct BackendEnvironment {
@@ -361,10 +390,12 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     return result;
 }
 
-[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
-                                           const ParallelismConfig&                  parallelism_config,
-                                           const std::shared_ptr<MockClientWrapper>& client_wrapper,
-                                           std::shared_ptr<BroadcastManager>         broadcast_manager = nullptr) {
+[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                  environment,
+                                           const ParallelismConfig&                   parallelism_config,
+                                           const std::shared_ptr<MockClientWrapper>&  client_wrapper,
+                                           std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
+                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
+                                           bool                                       gdr_enabled       = false) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.kvcm_server_address = "unused-test-address";
     RuntimeConfig runtime_config;
@@ -375,6 +406,8 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
                                                               parallelism_config,
                                                               SpeculativeExecutionConfig{},
                                                               std::move(broadcast_manager),
+                                                              gdr_enabled,
+                                                              std::move(metrics_reporter),
                                                               client_wrapper));
 }
 
@@ -440,12 +473,19 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     return await(future);
 }
 
+[[maybe_unused]] ErrorInfo
+readResult(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+    auto promise = std::make_shared<std::promise<ErrorInfo>>();
+    auto future  = promise->get_future();
+    backend.read(std::move(request), std::move(match_meta), [promise](ErrorInfo error) {
+        promise->set_value(std::move(error));
+    });
+    return await(future);
+}
+
 [[maybe_unused]] bool
 read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
-    auto promise = std::make_shared<std::promise<bool>>();
-    auto future  = promise->get_future();
-    backend.read(std::move(request), std::move(match_meta), [promise](bool success) { promise->set_value(success); });
-    return await(future);
+    return readResult(backend, std::move(request), std::move(match_meta)).ok();
 }
 
 [[maybe_unused]] ParallelismConfig singleRankConfig() {
