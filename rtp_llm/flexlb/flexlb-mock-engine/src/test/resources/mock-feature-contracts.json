@@ -14,7 +14,7 @@
     },
     "rpc_execution": {
       "fidelity": "harness",
-      "scope": "Cluster-owned shared bounded RPC execution off Netty I/O threads; cache and status compete in one pool; no per-Pod CPU, GC or queue timing simulation claim",
+      "scope": "Cluster-owned shared fixed-worker RPC execution off Netty I/O threads; protocol callbacks queue without rejection and cache/status compete in one pool; engine admission owns request capacity; no per-Pod CPU, GC or queue timing simulation claim",
       "implementation": [
         "MockRpcExecutors.java"
       ],

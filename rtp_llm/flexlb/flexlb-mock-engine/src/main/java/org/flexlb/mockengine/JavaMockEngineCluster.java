@@ -7074,8 +7074,7 @@ public final class JavaMockEngineCluster {
         private EventLoopGroup rpcTransport;
         synchronized MockRpcExecutors rpcExecutors(EventLoopGroup transport) {
             if (rpcExecutors == null || rpcTransport.isTerminated()) {
-                rpcExecutors = new MockRpcExecutors(eventLoopThreads,
-                        Math.max(1024, 4 * (nPrefill + nDecode)));
+                rpcExecutors = new MockRpcExecutors(eventLoopThreads);
                 rpcTransport = transport;
                 MockRpcExecutors owned = rpcExecutors;
                 transport.terminationFuture().addListener(ignored -> owned.close());
