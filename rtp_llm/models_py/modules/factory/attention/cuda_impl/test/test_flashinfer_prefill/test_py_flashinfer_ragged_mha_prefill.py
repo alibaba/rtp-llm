@@ -540,7 +540,15 @@ class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
         )
         self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
         self._add_qwen35_mrope_inputs(inputs, [2])
+        # Mode 2 lifted the blanket MRoPE rejection: with a valid interleaved
+        # geometry the prefill rope runs through InterleavedMropeEmbeddingOp
+        # (base-class _create_rope_impl), so the ragged impl — the Blackwell
+        # fallback for encoder-only inputs without a paged KV cache — supports
+        # mode-2 MRoPE prefill.
         config.attn_configs.fp8_kv_cache_mode = 2
+        self.assertTrue(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
+        # The legacy kv_scale path (mode 0) still has no fused MRoPE prefill.
+        config.attn_configs.fp8_kv_cache_mode = 0
         self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
 
     def test_out_of_fp8_range_kv(self):

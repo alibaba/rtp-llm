@@ -2127,6 +2127,11 @@ class PyFlashinferDecodeAttnOp(object):
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
+    # Class-level default so legacy callers that build partial instances via
+    # __new__ (see test_prepare_cuda_graph_supports_legacy_rope_binding) keep
+    # the pre-dynamic-FP8 behavior.
+    dynamic_fp8 = False
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
