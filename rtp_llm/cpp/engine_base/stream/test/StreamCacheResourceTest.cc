@@ -314,9 +314,11 @@ protected:
                 pool->incRef(*allocated);
                 device_blocks.push_back(allocated->front());
             }
-            const bool stored = cache->executeTransfer(
-                TransferTask({TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, block)},
-                             std::chrono::seconds(30))).ok();
+            const bool stored = cache
+                                    ->executeTransfer(TransferTask(
+                                        {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, block)},
+                                        std::chrono::seconds(30)))
+                                    .ok();
             for (size_t member = 0; member < device_blocks.size(); ++member) {
                 group->devicePools()[member]->decRef(device_blocks[member]);
             }
@@ -399,7 +401,7 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
-        auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+        auto            config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
         ResourceContext context;
         context.cache_manager = std::make_shared<KVCacheManager>(config);
         StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
@@ -886,16 +888,38 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     ASSERT_TRUE(resource.loadCacheDone());
 }
 
-TEST_F(StreamCacheResourceTest, CacheReuseMetricsAllowMissingWarmupCacheManager) {
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsSkipWarmupWithoutReporter) {
     prepareResource(/*reuse_cache=*/true);
-    auto&                 resource = stream_->streamCacheResource();
-    kmonitor::MetricsTags tags;
-    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    auto& resource = stream_->streamCacheResource();
+    stream_->setMetricsReporter(nullptr);
     resource.resource_context_.cache_manager.reset();
 
     resource.reportCacheReuseMetrics();
 
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_reuse_metrics);
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWithoutCacheManager) {
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), /*reuse_cache=*/true);
+    auto&                 resource = stream_->streamCacheResource();
+    kmonitor::MetricsTags tags;
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+    resource.resource_context_.cache_manager.reset();
+    stream_->setInitialReuseLength(20);
+    stream_->setLocalReuseLength(12);
+    stream_->setHostReuseLength(4);
+    stream_->setDiskReuseLength(6);
+    stream_->setRemoteReuseLength(8);
+
+    resource.reportCacheReuseMetrics();
+
+    const auto& metrics = resource.cache_reuse_metrics_;
+    EXPECT_TRUE(metrics.report_reuse_metrics);
+    EXPECT_EQ(metrics.kv_cache_reuse_length, 20);
+    EXPECT_EQ(metrics.stream_cache_device_reuse_length, 2);
+    EXPECT_EQ(metrics.stream_cache_memory_reuse_length, 4);
+    EXPECT_EQ(metrics.stream_cache_disk_reuse_length, 6);
+    EXPECT_EQ(metrics.stream_cache_remote_reuse_length, 8);
 }
 
 TEST_F(StreamCacheResourceTest, AllocatorReuseRejectsInvalidCountsBeforePublishing) {
@@ -918,7 +942,7 @@ TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength
     StreamCacheResource& resource = stream_->streamCacheResource();
 
     ASSERT_TRUE(resource.initKVBlock().ok());
-    EXPECT_EQ(resource.cache_reuse_metrics_.block_aligned_input_length, 6);
+    EXPECT_EQ(resource.cache_reuse_metrics_.device_input_length, 6);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
     EXPECT_FALSE(resource.cache_reuse_metrics_.load_attempted);
     EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
@@ -951,7 +975,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     ASSERT_TRUE(resource.loadCacheDone());
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
-    EXPECT_TRUE(metrics.report_match_latency);
+    EXPECT_TRUE(metrics.report_match_cost_time);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_TRUE(metrics.load_success);
     EXPECT_TRUE(metrics.load_attempted);
@@ -959,7 +983,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
     EXPECT_GE(metrics.match_to_ready_latency_us,
-              metrics.match_latency_us + metrics.load_prepare_latency_us + metrics.load_wait_latency_us);
+              metrics.match_cost_time_us + metrics.load_prepare_latency_us + metrics.load_wait_latency_us);
 }
 
 TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
@@ -982,7 +1006,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
     EXPECT_FALSE(metrics.report_load_wait_latency);
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
-    EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_latency_us + metrics.load_prepare_latency_us);
+    EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_cost_time_us + metrics.load_prepare_latency_us);
 }
 
 TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
@@ -998,9 +1022,9 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     stream_->setLocalReuseLength(2);
     stream_->setHostReuseLength(0);
     stream_->setDiskReuseLength(0);
-    resource.cache_reuse_metrics_.block_aligned_input_length = 6;
-    resource.load_wait_begin_time_us_                        = currentTimeUs();
-    resource.malloc_begin_time_us_                           = resource.load_wait_begin_time_us_;
+    resource.cache_reuse_metrics_.device_input_length = 6;
+    resource.load_wait_begin_time_us_                 = currentTimeUs();
+    resource.malloc_begin_time_us_                    = resource.load_wait_begin_time_us_;
 
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
     ASSERT_TRUE(load_context->completeTransfers(1, false));
@@ -1018,19 +1042,11 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.reportCacheReuseMetrics();
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
-    EXPECT_EQ(metrics.block_aligned_input_length, 6);
+    EXPECT_EQ(metrics.device_input_length, 6);
     EXPECT_EQ(metrics.kv_cache_reuse_length, 2);
-    EXPECT_EQ(metrics.device_reuse_length, 2);
-    EXPECT_EQ(metrics.host_reuse_length, 0);
-    EXPECT_EQ(metrics.disk_reuse_length, 0);
-    EXPECT_FALSE(metrics.report_hit_rates);
-    RtpLLMCacheReuseMetricsCollector hit_metrics;
-    ASSERT_TRUE(cache_manager_->collectCacheHitRates(cache_manager_->cache_hit_window_start_ + std::chrono::minutes(1),
-                                                     hit_metrics));
-    EXPECT_FLOAT_EQ(hit_metrics.kv_cache_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.device_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.host_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(hit_metrics.disk_hit_rate, 0.0f);
+    EXPECT_EQ(metrics.stream_cache_device_reuse_length, 2);
+    EXPECT_EQ(metrics.stream_cache_memory_reuse_length, 0);
+    EXPECT_EQ(metrics.stream_cache_disk_reuse_length, 0);
     EXPECT_TRUE(metrics.report_reuse_metrics);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_FALSE(metrics.load_success);
@@ -1410,9 +1426,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1471,9 +1486,8 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED}; });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1593,9 +1607,8 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
     resource.allocator_load_context_ = context;
     EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
     context->startBackendMatch();

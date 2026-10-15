@@ -615,9 +615,9 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
             const auto  desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
             const auto  spec = SpecBuilder::build(desc, context);
             CacheConfig config;
-            config.dtype     = context.dtype;
-            config.layer_num = 1;
-            config.seq_size_per_block               = context.seq_size_per_block;
+            config.dtype              = context.dtype;
+            config.layer_num          = 1;
+            config.seq_size_per_block = context.seq_size_per_block;
             config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {SpecBuilder::groupPolicy(desc)});
             config.setGroupBlockLayout({tag}, {8}, {spec->block_size_bytes()}, {0});
             ASSERT_EQ(config.group(tag).seqSizePerBlock(), device_ready_reuse_length);
@@ -914,7 +914,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
     const size_t total_available             = allocator->availableBlocksNum();
     const size_t tokens_before               = allocator->availableTokensNum();
     const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
-    auto expected_available_capacity = [&]() {
+    auto         expected_available_capacity = [&]() {
         return pools[1]->availableBlocksNum() * config.group("full").seqSizePerBlock();
     };
 
@@ -1327,8 +1327,9 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
-        EXPECT_FLOAT_EQ(snapshot->used_ratio,
-                        static_cast<float>(100.0 * snapshot->used_blocks / static_cast<double>(snapshot->total_blocks)))
+        EXPECT_FLOAT_EQ(
+            snapshot->used_ratio,
+            static_cast<float>(100.0 * expected_request_blocks / static_cast<double>(snapshot->total_blocks)))
             << source.pool_name;
     }
 
@@ -1366,7 +1367,8 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     snapshot.load_ref_blocks            = 14 + seed;
     snapshot.eviction_target_ref_blocks = 15 + seed;
     snapshot.store_ref_blocks           = 16 + seed;
-    snapshot.used_ratio = static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
+    snapshot.used_ratio                 = static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                             / static_cast<double>(snapshot.total_blocks));
     return snapshot;
 }
 
@@ -1390,6 +1392,12 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.load_ref_blocks            = 34 + seed;
     snapshot.eviction_target_ref_blocks = 35 + seed;
     snapshot.store_ref_blocks           = 36 + seed;
+    if (tier == Tier::DISK) {
+        snapshot.read_bytes                    = (int64_t{1} << 40) + seed;
+        snapshot.write_bytes                   = (int64_t{1} << 41) + seed;
+        snapshot.read_bandwidth_bytes_per_sec  = 1234.5 + seed;
+        snapshot.write_bandwidth_bytes_per_sec = 5678.25 + seed;
+    }
     return snapshot;
 }
 
@@ -1412,6 +1420,10 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
+    EXPECT_FALSE(actual.read_bytes.has_value()) << context;
+    EXPECT_FALSE(actual.write_bytes.has_value()) << context;
+    EXPECT_FALSE(actual.read_bandwidth_bytes_per_sec.has_value()) << context;
+    EXPECT_FALSE(actual.write_bandwidth_bytes_per_sec.has_value()) << context;
 }
 
 static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
@@ -1432,11 +1444,11 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
-    EXPECT_FLOAT_EQ(actual.used_ratio,
-                    static_cast<float>(100.0 * (source.total_blocks - source.free_blocks)
-                                       / static_cast<double>(source.total_blocks)))
-        << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
+    EXPECT_EQ(actual.read_bytes, source.read_bytes) << context;
+    EXPECT_EQ(actual.write_bytes, source.write_bytes) << context;
+    EXPECT_EQ(actual.read_bandwidth_bytes_per_sec, source.read_bandwidth_bytes_per_sec) << context;
+    EXPECT_EQ(actual.write_bandwidth_bytes_per_sec, source.write_bandwidth_bytes_per_sec) << context;
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsSnapshotsPreservesReportContract) {
@@ -1444,6 +1456,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsSnapshotsPres
         bool   from_allocator;
         size_t input_index;
         size_t available_blocks;
+        float  used_ratio;
     };
     struct MergeCase {
         std::string                               name;
@@ -1459,24 +1472,24 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsSnapshotsPres
          {makeMergeTreeInput(Tier::DEVICE, "linear", 3, /*total=*/111, /*free=*/44, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "tree_only_device", 4, /*total=*/50, /*free=*/20, /*available=*/35),
           makeMergeTreeInput(Tier::HOST, "host_pool", 5, /*total=*/200, /*free=*/150, /*available=*/180),
-          makeMergeTreeInput(Tier::DISK, "disk_pool", 6, /*total=*/300, /*free=*/300, /*available=*/300)},
+          makeMergeTreeInput(Tier::DISK, "disk_pool", 6, /*total=*/300, /*free=*/100, /*available=*/270)},
          {// Device rows come entirely from allocator snapshots.
-          {true, 0, 73},
-          {true, 1, 80},
+          {true, 0, 73, 27.0f},
+          {true, 1, 80, 0.0f},
           // Tree-only pools follow every allocator pool, in tree input order.
-          {false, 1, 35},
-          {false, 2, 180},
-          {false, 3, 300}}},
+          {false, 1, 35, 30.0f},
+          {false, 2, 180, 10.0f},
+          {false, 3, 270, 10.0f}}},
         {"allocator_duplicate_keeps_first_and_skips_rest",
          {makeMergeAllocatorInput("dup_pool", 1, /*total=*/100, /*free=*/40, /*available=*/73),
           makeMergeAllocatorInput("dup_pool", 9, /*total=*/500, /*free=*/5, /*available=*/9)},
          {},
-         {{true, 0, 73}}},
+         {{true, 0, 73, 27.0f}}},
         {"same_named_tree_does_not_override_allocator",
          {makeMergeAllocatorInput("dup_tree_pool", 1, /*total=*/100, /*free=*/40, /*available=*/73)},
          {makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 3, /*total=*/100, /*free=*/40, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 4, /*total=*/100, /*free=*/40, /*available=*/25)},
-         {{true, 0, 73}}},
+         {{true, 0, 73, 27.0f}}},
         // Asymmetry with the allocator loop: tree-only duplicates are all emitted.
         {"tree_only_duplicates_are_not_deduplicated",
          {},
@@ -1484,7 +1497,11 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsSnapshotsPres
           makeMergeTreeInput(Tier::DEVICE, "orphan_device", 4, /*total=*/100, /*free=*/30, /*available=*/65),
           makeMergeTreeInput(Tier::HOST, "host_dup", 5, /*total=*/200, /*free=*/150, /*available=*/180),
           makeMergeTreeInput(Tier::HOST, "host_dup", 6, /*total=*/200, /*free=*/100, /*available=*/170)},
-         {{false, 0, 70}, {false, 1, 65}, {false, 2, 180}, {false, 3, 170}}},
+         {{false, 0, 70, 30.0f}, {false, 1, 65, 35.0f}, {false, 2, 180, 10.0f}, {false, 3, 170, 15.0f}}},
+        {"empty_pool_has_zero_used_ratio",
+         {},
+         {makeMergeTreeInput(Tier::HOST, "empty_host", 0, /*total=*/0, /*free=*/0, /*available=*/0)},
+         {{false, 0, 0, 0.0f}}},
     };
 
     for (const MergeCase& merge_case : cases) {
@@ -1494,6 +1511,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsSnapshotsPres
         for (size_t row = 0; row < merge_case.expected_rows.size(); ++row) {
             const ExpectedRow& expected = merge_case.expected_rows[row];
             const std::string  context  = "case=" + merge_case.name + " row=" + std::to_string(row);
+            EXPECT_FLOAT_EQ(merged[row].used_ratio, expected.used_ratio) << context;
             if (expected.from_allocator) {
                 ASSERT_LT(expected.input_index, merge_case.allocator_snapshots.size()) << context;
                 expectMergedRowFromAllocator(merge_case.allocator_snapshots[expected.input_index],

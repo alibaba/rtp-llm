@@ -2,10 +2,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +38,11 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};
     size_t      store_ref_blocks{0};
+
+    std::optional<int64_t> read_bytes;
+    std::optional<int64_t> write_bytes;
+    std::optional<double>  read_bandwidth_bytes_per_sec;
+    std::optional<double>  write_bandwidth_bytes_per_sec;
 };
 
 enum class CacheTransferOperation : uint8_t {
@@ -91,7 +98,8 @@ public:
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
     std::vector<BlockTreePoolMetricsSnapshot>
-    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const;
+    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
+                                std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
@@ -131,6 +139,14 @@ public:
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
+    struct PoolIOSample {
+        size_t                                read_bytes{0};
+        size_t                                write_bytes{0};
+        std::chrono::steady_clock::time_point time;
+    };
+
+    std::unordered_map<const IBlockPool*, PoolIOSample> pool_io_samples_;
+
     static constexpr size_t kOperationCount = 3;
     static constexpr size_t kDirectionCount = 5;
 
