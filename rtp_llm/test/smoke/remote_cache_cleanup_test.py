@@ -17,10 +17,13 @@ class RemoteCacheCleanupTest(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         server = object.__new__(RemoteKVCMServer)
         server._server_process = self.process
         server._fault_trigger = False
+        server.pace_fixture = None
+        server._work_dir = None
         logs = tempfile.TemporaryDirectory()
         self.addCleanup(logs.cleanup)
         server._kvcm_src_logs_path = str(Path(logs.name) / "source")
@@ -81,6 +84,7 @@ class RemoteCacheCleanupTest(unittest.TestCase):
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         self.runner.remote_kvcm_server._server_process = self.process
         self.assertEqual(self.process.stdout.readline(), b"ready\n")

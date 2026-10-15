@@ -513,6 +513,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
+        .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
         .def_readwrite("kvcm_meta_channel_connection_timeout", &KVCacheConfig::kvcm_meta_channel_connection_timeout)
         .def_readwrite("kvcm_meta_channel_call_timeout", &KVCacheConfig::kvcm_meta_channel_call_timeout)
