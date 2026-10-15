@@ -78,7 +78,8 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     metrics_reporter_(std::move(metrics_reporter)) {}
 
 std::vector<BlockTreePoolMetricsSnapshot>
-BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {
+BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
+                                                           std::chrono::steady_clock::time_point now) {
     std::unordered_set<const IBlockPool*>     reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
     for (const GroupSetPtr& group_set : group_sets) {
@@ -102,7 +103,28 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
 
         const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
         if (disk_pool != nullptr) {
-            snapshots.push_back(makePoolMetricsSnapshot(Tier::DISK, *disk_pool));
+            auto               snapshot = makePoolMetricsSnapshot(Tier::DISK, *disk_pool);
+            const PoolIOSample sample{disk_pool->readBytes(), disk_pool->writeBytes(), now};
+            snapshot.read_bytes  = static_cast<int64_t>(sample.read_bytes);
+            snapshot.write_bytes = static_cast<int64_t>(sample.write_bytes);
+            auto [it, inserted]  = pool_io_samples_.emplace(disk_pool.get(), sample);
+            if (inserted) {
+                snapshot.read_bandwidth_bytes_per_sec  = 0;
+                snapshot.write_bandwidth_bytes_per_sec = 0;
+            } else {
+                auto&        previous    = it->second;
+                const double elapsed_sec = std::chrono::duration<double>(now - previous.time).count();
+                if (elapsed_sec > 0) {
+                    const size_t read_delta =
+                        sample.read_bytes >= previous.read_bytes ? sample.read_bytes - previous.read_bytes : 0;
+                    const size_t write_delta =
+                        sample.write_bytes >= previous.write_bytes ? sample.write_bytes - previous.write_bytes : 0;
+                    snapshot.read_bandwidth_bytes_per_sec  = read_delta / elapsed_sec;
+                    snapshot.write_bandwidth_bytes_per_sec = write_delta / elapsed_sec;
+                    previous                               = sample;
+                }
+            }
+            snapshots.push_back(std::move(snapshot));
         }
     }
     return snapshots;
@@ -423,7 +445,8 @@ void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  s
     collector.error_type     = cacheCopyErrorName(result.copy_error);
     collector.copy_direction = source_tier == Tier::DEVICE ? "FROM_GPU" :
                                target_tier == Tier::DEVICE ? "TO_GPU" :
-                               target_tier == Tier::DISK   ? "TO_DISK" : "FROM_DISK";
+                               target_tier == Tier::DISK   ? "TO_DISK" :
+                                                             "FROM_DISK";
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 
