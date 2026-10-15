@@ -50,6 +50,7 @@ from rtp_llm.models_py.modules.xing4.hc import (
     xing4_hc_triton_entries,
     xing4_hc_use_fused,
 )
+from rtp_llm.models_py.modules.xing4.hc.mean_norm_triton import mean_rmsnorm
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -590,7 +591,12 @@ class Xing4Model(GptModelBase):
     def _capture_canonical_final(
         self, hidden_states: torch.Tensor, residual: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        return self.norm(hidden_states.mean(dim=-2))
+        # Fused mean+norm tail (XING4_MEAN_NORM_IMPL, torch fallback):
+        # mathematically self.norm(hidden_states.mean(dim=-2)) with one
+        # single-read kernel and no [T, H] intermediate.
+        return mean_rmsnorm(
+            hidden_states, self.norm.weight, self.norm.variance_epsilon
+        )
 
     def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         return self.embed_tokens(inputs.input_ids)

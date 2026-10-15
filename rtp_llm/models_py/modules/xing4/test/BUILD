@@ -122,3 +122,21 @@ py_test(
         "gpu_count": "1",
     },
 )
+
+py_test(
+    name = "test_mean_norm_triton",
+    srcs = ["test_mean_norm_triton.py"],
+    main = "test_mean_norm_triton.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = [
+        "manual",
+        "SM103_CU13",
+    ],
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+)
