@@ -1513,7 +1513,8 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr int block_dim = 512;
     constexpr bool fused_last_filter = false;
     constexpr int topk_bits = 11;
-    if (len <= block_dim * items_per_thread)
+    // Full selection must use one-block: multi-block early-stop does not populate output.
+    if (k == len || len <= block_dim * items_per_thread)
     {
         standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, 
             static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);

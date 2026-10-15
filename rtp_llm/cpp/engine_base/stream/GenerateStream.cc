@@ -46,9 +46,22 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         if (output_vocab_size < max_num_beams) {
             return "output vocabulary size must be at least the maximum beam width";
         }
-        if (config.variable_num_beams.empty() && max_num_beams <= kSmallBeamSearchV1MaxBeamWidth
-            && output_vocab_size <= 2 * max_num_beams) {
-            return "output vocabulary size must be greater than twice the maximum beam width for small-beam search";
+        // Match the per-step V1/V2 dispatch, including repeated final variable beam widths.
+        // After the first repeated tail step, every remaining transition is identical.
+        const size_t steps_to_check = std::min(static_cast<size_t>(std::max(config.max_new_tokens, 0)),
+                                               std::max(config.variable_num_beams.size(), size_t{1}) + 1);
+        int          input_beams    = 1;
+        for (size_t step = 0; step < steps_to_check; ++step) {
+            const int output_beams =
+                config.variable_num_beams.empty() ?
+                    config.num_beams :
+                    config.variable_num_beams[std::min(step, config.variable_num_beams.size() - 1)];
+            if (output_beams > 1 && input_beams == output_beams
+                && static_cast<size_t>(input_beams) <= kSmallBeamSearchV1MaxBeamWidth
+                && output_vocab_size <= 2 * static_cast<size_t>(input_beams)) {
+                return "output vocabulary size must be greater than twice the beam width for V1 beam search";
+            }
+            input_beams = output_beams;
         }
     }
     return std::nullopt;
