@@ -758,7 +758,10 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
                         )
                     self.assertEqual(
                         radix.call_count,
-                        int(nblocks > topk_blocks and topk_blocks in (512, 1024, 2048)),
+                        int(
+                            topk_blocks == 2048
+                            or (nblocks > topk_blocks and topk_blocks in (512, 1024))
+                        ),
                     )
                     expected_flags = self._assert_candidates(
                         logits, lengths, ids, flags, topk_blocks=topk_blocks
