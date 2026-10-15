@@ -1,3 +1,4 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 package(default_visibility = ["//visibility:public"])
@@ -64,7 +65,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS
+    for name in _TESTS if name not in ["test_v41_mega_mhc"]
 ]
 
 py_test(
@@ -80,3 +81,22 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_mega_mhc"]
+]
