@@ -153,6 +153,9 @@ final class MockRpcExecutors implements AutoCloseable {
             final boolean permit;
             final Status failure;
             final AtomicBoolean closed = new AtomicBoolean();
+            // Context cancellation releases admission; application close still owns
+            // draining the response framer, including a buffered unary response.
+            final AtomicBoolean closeForwarded = new AtomicBoolean();
             final AtomicBoolean released = new AtomicBoolean();
             final Set<Thread> runners = ConcurrentHashMap.newKeySet();
             Admission(ServerCall<?, ?> call, Context context, boolean permit, Status failure) {
@@ -167,7 +170,8 @@ final class MockRpcExecutors implements AutoCloseable {
                     runners.forEach(thread -> { if (thread != Thread.currentThread()) thread.interrupt(); });
             }
             void close(Status status, Metadata trailers) {
-                if (closed.compareAndSet(false, true)) {
+                closed.set(true);
+                if (closeForwarded.compareAndSet(false, true)) {
                     try { call.close(status, trailers); } finally { release(); }
                 }
             }
