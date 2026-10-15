@@ -41,6 +41,11 @@ from rtp_llm.models_py.modules import (
 )
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.utils import maybe_squeeze_hc_1d
+from rtp_llm.models_py.modules.hybrid.fused_norm_quant import (
+    fused_rmsnorm_fp8_quant_ue8m0,
+    linear_supports_quantized_input,
+    ue8m0_deepgemm_active,
+)
 from rtp_llm.models_py.modules.xing4.hc import (
     xing4_hc_triton_entries,
     xing4_hc_use_fused,
@@ -50,6 +55,17 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+
+
+def _xing4_fused_norm_quant_enabled() -> bool:
+    # Fused RMSNorm + ue8m0 FP8 quant for input/post_attention layernorm
+    # consumers. Per-call resolution, same discipline as XING4_HC_IMPL.
+    # Default OFF: the DSV4 one-CTA-per-row kernel measured net-negative on
+    # Xing4 shapes at every M (decode +0.9~8.2% TPOT, prefill +7.0~9.2%
+    # TTFT; see fusion_workflow/p1_4_norm_quant_fusion.md). The injection
+    # plumbing is golden-verified — flip to "1" after a smem-cached row
+    # kernel replaces the double-read layout.
+    return os.environ.get("XING4_FUSED_NORM_QUANT", "0") == "1"
 
 
 def _xing4_hc_chunk_tokens() -> int:
@@ -344,6 +360,7 @@ class Xing4DecoderLayer(nn.Module):
             quant_config,
             hw_kernel_config,
             global_weights=global_weights,
+            enable_fused_norm_quant=_xing4_fused_norm_quant_enabled(),
         )
 
         if layer_idx not in config.moe_layer_index:
@@ -400,6 +417,51 @@ class Xing4DecoderLayer(nn.Module):
             **hc_kwargs,
         )
 
+    def _can_fuse_norm_quant(
+        self,
+        x: torch.Tensor,
+        norm: RMSNorm,
+        linear_consumers: tuple,
+        require_ue8m0_router: bool = False,
+    ) -> bool:
+        """Fused RMSNorm + ue8m0 FP8 quant gate shared by both norm sites.
+
+        Requires the collapsed [T, H] stream, a contiguous bf16 norm weight,
+        H % 128 == 0, and every linear consumer to accept the same
+        (fp8, packed ue8m0 scale) pair the fused kernel emits. m-row aware:
+        ``CudaFp8GEMMLinear`` wrappers dispatch m < 32 to a FlashInfer
+        backend that must keep reading the bf16 normed tensor.
+
+        ``require_ue8m0_router`` additionally gates on the device's MoE
+        router quant flavor being packed ue8m0 (SM100/SM120); SM90 routers
+        quantize with fp32 scales, so the MoE site stays unfused there.
+        """
+        if not _xing4_fused_norm_quant_enabled():
+            return False
+        if require_ue8m0_router and not ue8m0_deepgemm_active():
+            return False
+        if (
+            x.dim() != 2
+            or x.dtype != torch.bfloat16
+            or not x.is_cuda
+            or not x.is_contiguous()
+        ):
+            return False
+        n = x.shape[1]
+        if n % 128 != 0:
+            return False
+        weight = norm.weight
+        if (
+            weight.dtype != torch.bfloat16
+            or not weight.is_contiguous()
+            or weight.shape != (n,)
+        ):
+            return False
+        return all(
+            linear_supports_quantized_input(linear, n, m_rows=x.shape[0])
+            for linear in linear_consumers
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -409,18 +471,54 @@ class Xing4DecoderLayer(nn.Module):
         """hidden_states: [T, hc_mult, H]; returns the same shape."""
         residual = hidden_states
         x_pre, post, comb = self.attn_hc.pre(hidden_states)
-        x_pre = self.input_layernorm(x_pre)
+        attn_quant = None
+        attn_consumers = ()
+        if self.self_attn.q_lora_rank > 0 and hasattr(
+            self.self_attn, "fused_qkv_a_proj"
+        ):
+            attn_consumers = (self.self_attn.fused_qkv_a_proj,)
+        if self._can_fuse_norm_quant(
+            x_pre, self.input_layernorm, attn_consumers
+        ):
+            # Norm in place over the dead pre-norm stream; the (fp8, scale)
+            # pair feeds fused_qkv_a_proj without the separate quant kernel.
+            x_pre, attn_fp8, attn_scales = fused_rmsnorm_fp8_quant_ue8m0(
+                x_pre,
+                self.input_layernorm.weight,
+                eps=self.input_layernorm.variance_epsilon,
+                out_norm=x_pre,
+            )
+            attn_quant = (attn_fp8, attn_scales)
+        else:
+            x_pre = self.input_layernorm(x_pre)
         attn_out = self.self_attn(
             hidden_states=x_pre,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
+            quantized_input=attn_quant,
         )
         hidden_states = self.attn_hc.post(attn_out, residual, post, comb)
 
         residual = hidden_states
         x_pre, post, comb = self.ffn_hc.pre(hidden_states)
-        x_pre = self.post_attention_layernorm(x_pre)
-        mlp_out = self.mlp(x_pre)
+        ffn_quant = None
+        if isinstance(self.mlp, (GenericMoeLayer, DenseMLP)) and self._can_fuse_norm_quant(
+            x_pre, self.post_attention_layernorm, (), require_ue8m0_router=True
+        ):
+            # No linear gate here: the MoE router and shared expert consume
+            # the quantized pair through GenericMoeLayer/DenseMLP opt-in
+            # paths (each re-checks its own linears); the routed gate GEMM
+            # keeps reading the bf16 normed tensor.
+            x_pre, ffn_fp8, ffn_scales = fused_rmsnorm_fp8_quant_ue8m0(
+                x_pre,
+                self.post_attention_layernorm.weight,
+                eps=self.post_attention_layernorm.variance_epsilon,
+                out_norm=x_pre,
+            )
+            ffn_quant = (ffn_fp8, ffn_scales)
+        else:
+            x_pre = self.post_attention_layernorm(x_pre)
+        mlp_out = self.mlp(x_pre, quantized_input=ffn_quant)
         hidden_states = self.ffn_hc.post(mlp_out, residual, post, comb)
         return hidden_states
 

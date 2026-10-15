@@ -135,6 +135,40 @@ class PureTpRouterBase(FusedMoeDataRouter):
             topk_weights,
         )
 
+    def prepare_prequant(
+        self,
+        expert_x: torch.Tensor,
+        expert_x_scale: Optional[torch.Tensor],
+        orig_dtype: torch.dtype,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> ExpertForwardPayload:
+        """``prepare`` for a caller-pre-quantized expert input.
+
+        The ``(fp8, packed ue8m0 scale)`` pair must be layout-identical to
+        what ``_do_quant`` produces on the e8m0 DeepGEMM path (the fused
+        norm+quant kernel emits exactly that), so the router only recompute
+        topk bookkeeping and skips re-quantization. ``orig_dtype`` is the
+        pre-quantization activation dtype the payload records for output
+        allocation.
+        """
+        adjusted_topk_ids = topk_ids
+        num_recv_tokens_per_expert = None
+        if self.do_recompute_topk:
+            adjusted_topk_ids, num_recv_tokens_per_expert = (
+                recompute_topk_ids_sum_expert_count(
+                    topk_ids, self.expert_start_id, self.expert_num_per_rank
+                )
+            )
+        return ExpertForwardPayload(
+            expert_x,
+            orig_dtype,
+            expert_x_scale,
+            ExpertTokensMetadata(None, num_recv_tokens_per_expert, None),
+            adjusted_topk_ids,
+            topk_weights,
+        )
+
     def finalize(
         self,
         payload: CombineForwardPayload,

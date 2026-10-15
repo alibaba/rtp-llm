@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
 import torch
 from torch import nn
@@ -8,6 +8,11 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+from rtp_llm.models_py.modules.hybrid.fused_norm_quant import (
+    deepgemm_forward_quantized,
+    fused_rmsnorm_fp8_quant_ue8m0,
+    linear_supports_quantized_input,
+)
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
@@ -29,10 +34,16 @@ class MlaAttention(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        enable_fused_norm_quant: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
         self.parallelism_config = parallelism_config
+        # Opt-in fused RMSNorm+FP8 quant paths (q_a_layernorm -> q_b_proj and
+        # caller-provided input_norm -> fused_qkv_a_proj quantized input).
+        # Off by default: only models that verified the ue8m0 DeepGEMM layout
+        # (e.g. Xing4 on SM100/SM120) turn it on.
+        self.enable_fused_norm_quant = enable_fused_norm_quant
         self.num_heads = (
             attn_config.head_num // self.parallelism_config.get_attn_tp_size()
         )
@@ -134,11 +145,39 @@ class MlaAttention(nn.Module):
             )
         return topk_indices
 
+    def _can_fuse_qa_norm_quant(self, q: torch.Tensor) -> bool:
+        """q_a_layernorm -> q_b_proj fusion gate (opt-in per model)."""
+        if not self.enable_fused_norm_quant:
+            return False
+        if self.q_lora_rank <= 0 or self.q_lora_rank % 128 != 0:
+            return False
+        if (
+            q.dim() != 2
+            or q.dtype != torch.bfloat16
+            or not q.is_cuda
+            or q.stride(1) != 1
+            or q.stride(0) < q.shape[1]
+        ):
+            return False
+        weight = self.q_a_layernorm.weight
+        if (
+            weight.dtype != torch.bfloat16
+            or not weight.is_contiguous()
+            or weight.shape != (self.q_lora_rank,)
+        ):
+            return False
+        # m-aware: a CudaFp8GEMMLinear wrapper dispatches m < 32 to its
+        # FlashInfer backend, which must keep reading the bf16 normed input.
+        return linear_supports_quantized_input(
+            self.q_b_proj, self.q_lora_rank, m_rows=q.shape[0]
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+        quantized_input: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         if self.indexer is not None:
             required_tags = {"default", "indexer_kv"}
@@ -178,7 +217,19 @@ class MlaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         q_c = None
         if self.q_lora_rank > 0:
-            fused_qkv = self.fused_qkv_a_proj(hidden_states)
+            if quantized_input is not None and linear_supports_quantized_input(
+                self.fused_qkv_a_proj,
+                hidden_states.shape[-1],
+                m_rows=hidden_states.shape[0],
+            ):
+                fused_qkv = deepgemm_forward_quantized(
+                    self.fused_qkv_a_proj, *quantized_input
+                )
+            else:
+                # Plain path: hidden_states is the normed bf16 tensor the
+                # fused kernel wrote even when the quant pair is unusable
+                # (e.g. the wrapper dispatches small-M to FlashInfer).
+                fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -188,15 +239,27 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            # Pass the strided split view straight into the norm when the
-            # backend accepts strided rows; this removes the .contiguous()
-            # copy while keeping the norm math identical (the kernel reads
-            # the same row elements via their stride and writes a fresh
-            # contiguous output).
-            q_c = self.q_a_layernorm(
-                q if self.q_a_layernorm.supports_strided_input else q.contiguous()
-            )
-            q = self.q_b_proj(q_c)
+            if self._can_fuse_qa_norm_quant(q):
+                # Fused q_a RMSNorm + ue8m0 quant in one kernel; the strided
+                # split view is accepted directly (kernel reads rows through
+                # x_stride_m) and q_c lands in a fresh contiguous tensor,
+                # matching the flashinfer strided-input contract below.
+                q_c, q_fp8, q_scales = fused_rmsnorm_fp8_quant_ue8m0(
+                    q,
+                    self.q_a_layernorm.weight,
+                    eps=self.q_a_layernorm.variance_epsilon,
+                )
+                q = deepgemm_forward_quantized(self.q_b_proj, q_fp8, q_scales)
+            else:
+                # Pass the strided split view straight into the norm when the
+                # backend accepts strided rows; this removes the .contiguous()
+                # copy while keeping the norm math identical (the kernel reads
+                # the same row elements via their stride and writes a fresh
+                # contiguous output).
+                q_c = self.q_a_layernorm(
+                    q if self.q_a_layernorm.supports_strided_input else q.contiguous()
+                )
+                q = self.q_b_proj(q_c)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head

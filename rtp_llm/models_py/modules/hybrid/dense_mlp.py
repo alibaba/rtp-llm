@@ -92,12 +92,70 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s,
         )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        skip_allreduce: bool = False,
+        quantized_input: Optional[tuple] = None,
+    ) -> torch.Tensor:
+        if quantized_input is not None and self.can_consume_quantized_input(
+            quantized_input[0]
+        ):
+            return self.forward_quantized(
+                quantized_input[0], quantized_input[1], skip_allreduce=skip_allreduce
+            )
+        # A provided-but-unusable quantized input falls back to the plain
+        # path; x is the bf16 normed tensor either way.
         if not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
         else:
             up = self.up_proj(x)
             activated = self.act_fn(up)
+
+        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
+        output = self.down_proj(activated)
+        if not skip_allreduce and ffn_tp_size > 1:
+            output = all_reduce(output, group=Group.TP)
+        return output
+
+    def can_consume_quantized_input(self, input_fp8: torch.Tensor) -> bool:
+        """True when ``forward_quantized`` accepts this pre-quantized input.
+
+        Only the gated (SiGLU) fp8-per-block ue8m0 DeepGEMM up projection
+        qualifies: its ``quantize_input`` produces exactly the packed-scale
+        layout the fused norm+quant kernel emits. Wrappers that dispatch
+        small-M inputs to FlashInfer only qualify for m >= 32.
+        """
+        from rtp_llm.models_py.modules.hybrid.fused_norm_quant import (
+            linear_supports_quantized_input,
+        )
+
+        if not self.is_gated:
+            return False
+        if input_fp8.dim() != 2 or not input_fp8.is_cuda:
+            return False
+        return linear_supports_quantized_input(
+            self.up_proj, input_fp8.shape[1], m_rows=input_fp8.shape[0]
+        )
+
+    def forward_quantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        skip_allreduce: bool = False,
+    ) -> torch.Tensor:
+        """SiGLU forward with a caller-provided quantized up-proj input.
+
+        Mirrors ``forward`` for the gated path; the down projection keeps its
+        own activation-side quantization (its input is the post-activation
+        tensor, not this input).
+        """
+        from rtp_llm.models_py.modules.hybrid.fused_norm_quant import (
+            deepgemm_forward_quantized,
+        )
+
+        up = deepgemm_forward_quantized(self.up_proj, input_fp8, input_scales)
+        activated = self.act_fn(up)
 
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         output = self.down_proj(activated)

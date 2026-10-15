@@ -369,18 +369,35 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
+        quantized_input: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
 
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
         a1 = hidden_states
 
-        expert_payload = self.router.prepare(
-            a1,
-            a1_scale,
-            a2_scale,
-            topk_weights,
-            topk_ids,
-        )
+        if quantized_input is not None and hasattr(
+            self.router, "prepare_prequant"
+        ):
+            # Caller pre-quantized a1 with the fused norm+quant kernel; the
+            # (fp8, packed ue8m0 scale) pair matches what _do_quant produces
+            # on the e8m0 DeepGEMM path, so the router skips re-quantization.
+            # hidden_states stays the bf16 normed tensor for shape/dtype
+            # bookkeeping and output allocation.
+            expert_payload = self.router.prepare_prequant(
+                quantized_input[0],
+                quantized_input[1],
+                hidden_states.dtype,
+                topk_weights,
+                topk_ids,
+            )
+        else:
+            expert_payload = self.router.prepare(
+                a1,
+                a1_scale,
+                a2_scale,
+                topk_weights,
+                topk_ids,
+            )
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:

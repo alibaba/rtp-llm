@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
@@ -203,7 +203,11 @@ class GenericMoeLayer(nn.Module):
             and (self.use_unified_tp_allreduce or self.router_tp_size == 1)
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        quantized_input: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -250,18 +254,39 @@ class GenericMoeLayer(nn.Module):
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
+        # Optional fused norm+quant input: routed experts and (when its up
+        # projection is an ue8m0 DeepGEMM linear) the shared expert reuse the
+        # same pre-quantized activations instead of re-quantizing the normed
+        # tensor per consumer.
+        shared_quantized_input = None
+        if (
+            quantized_input is not None
+            and self.shared_expert is not None
+            and hasattr(self.shared_expert, "can_consume_quantized_input")
+            and self.shared_expert.can_consume_quantized_input(quantized_input[0])
+        ):
+            shared_quantized_input = quantized_input
+
         if self._fold_shared_expert_into_moe():
             # Compute the shared expert first and let the strategy fold its
             # output into the routed combine kernel (ep_gather accumulate),
             # replacing the separate bf16 add launch. The fold reproduces the
             # exact two-rounding sequence of the plain add, so the result is
             # bitwise identical to the merge below.
-            shared_expert_output = self.shared_expert(
-                hidden_states,
-                skip_allreduce=(
-                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
-                ),
-            )
+            if shared_quantized_input is not None:
+                shared_expert_output = self.shared_expert.forward_quantized(
+                    *shared_quantized_input,
+                    skip_allreduce=(
+                        self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                    ),
+                )
+            else:
+                shared_expert_output = self.shared_expert(
+                    hidden_states,
+                    skip_allreduce=(
+                        self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                    ),
+                )
             experts_output = self.fused_moe(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
@@ -271,6 +296,7 @@ class GenericMoeLayer(nn.Module):
                 extra_expert_args={
                     SHARED_EXPERT_ACCUMULATE_ARG: shared_expert_output
                 },
+                quantized_input=quantized_input,
             )
             if self.use_unified_tp_allreduce:
                 experts_output = all_reduce(experts_output, group=Group.TP)
@@ -281,14 +307,23 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
+            quantized_input=quantized_input,
         )
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(
-                hidden_states,
-                skip_allreduce=(
-                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
-                ),
-            )
+            if shared_quantized_input is not None:
+                shared_expert_output = self.shared_expert.forward_quantized(
+                    *shared_quantized_input,
+                    skip_allreduce=(
+                        self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                    ),
+                )
+            else:
+                shared_expert_output = self.shared_expert(
+                    hidden_states,
+                    skip_allreduce=(
+                        self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                    ),
+                )
             if self.use_unified_tp_allreduce:
                 # Both paths are still TP-partial.  The shared-expert gate is
                 # rank-consistent because hidden_states are replicated across

@@ -137,3 +137,23 @@ py_test (
     ],
     exec_properties = {"gpu": "H20_CU13"},
 )
+# Fused RMSNorm + FP8 UE8M0 quant wrapper (Xing4 norm sites). The reference
+# chain is flashinfer rmsnorm + sgl_per_token_group_quant_fp8(ue8m0), so the
+# target needs the modules closure (flashinfer/triton on cuda13).
+py_test(
+    name = "fused_norm_quant_test",
+    srcs = ["fused_norm_quant_test.py"],
+    main = "fused_norm_quant_test.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = [
+        "manual",
+        "SM103_CU13",
+    ],
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+)
