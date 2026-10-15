@@ -33,6 +33,7 @@ public:
     // `virtual` for test
     virtual std::vector<std::vector<int>>  tokenize_words(const std::vector<std::string>& words);
     virtual std::vector<std::vector<int>>  get_all_extra_stop_word_ids_list();
+    virtual void                           disable_stop_words();
     virtual RenderedInputs                 render_chat_request(const std::string& req);
     py::object                             getRender();
     virtual std::shared_ptr<RenderContext> getRenderContext();

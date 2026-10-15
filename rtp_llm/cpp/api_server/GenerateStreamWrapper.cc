@@ -10,9 +10,7 @@ GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetr
 
 void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
                                  const std::shared_ptr<EngineBase>&    engine) {
-    input_ids_       = input->input_ids;
-    generate_config_ = input->generate_config;
-    stream_          = engine->enqueue(input);
+    init(engine->enqueue(input), engine);
 }
 
 void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {
@@ -20,6 +18,11 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
     input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
     stream_          = stream;
+    if (stream_->isCodebook()) {
+        generate_config_ = std::make_shared<GenerateConfig>(*generate_config_);
+        generate_config_->stop_words_list.clear();
+        generate_config_->stop_words_str.clear();
+    }
 }
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {

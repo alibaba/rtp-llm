@@ -48,6 +48,8 @@ request_counter = AtomicCounter()
 
 
 class Pipeline(object):
+    codebook_mode: bool = False
+
     def __init__(
         self,
         special_tokens: SpecialTokens,  # SpecialTokens from ModelConfig
@@ -64,7 +66,9 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        codebook_mode: bool = False,
     ):
+        self.codebook_mode = codebook_mode
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
         self._special_tokens: SpecialTokens = special_tokens
@@ -527,6 +531,10 @@ class Pipeline(object):
         generate_config: GenerateConfig,
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
+        if self.codebook_mode:
+            generate_config = generate_config.model_copy(
+                update={"stop_words_list": [], "stop_words_str": []}
+            )
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
 
@@ -677,6 +685,10 @@ class Pipeline(object):
             **kwargs,
         )
         generate_config.is_streaming = False
+        if self.codebook_mode:
+            generate_config = generate_config.model_copy(
+                update={"stop_words_list": [], "stop_words_str": []}
+            )
 
         inputs = []
         for i, prompt in enumerate(prompts):

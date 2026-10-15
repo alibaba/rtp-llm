@@ -19,6 +19,7 @@ struct SamplerInitParams {
     // max_batch_size == 0, fixed_max_batch_size is ignored and buffers grow dynamically.
     size_t max_batch_size       = 0;
     bool   fixed_max_batch_size = true;
+    bool   force_beam_search_v2 = false;
 };
 
 struct SamplerInputs {

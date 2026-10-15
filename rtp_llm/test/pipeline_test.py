@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 from typing import List
+from unittest.mock import AsyncMock, patch
 
 import torch
 from rtp_llm.config.generate_config import GenerateConfig
@@ -153,6 +155,91 @@ class PipelineDecodeTest(unittest.TestCase):
         self.assertEqual(len(final_texts), 1)
         self.assertEqual(output_lens, [3])
         self.assertEqual(len(output_tokens_list), 1)
+
+    def test_codebook_stream_ignores_stops_without_mutating_request(self):
+        for codebook_mode, expected_text in [(False, "K"), (True, "KUE")]:
+            with self.subTest(codebook_mode=codebook_mode):
+                self.pipeline.codebook_mode = codebook_mode
+                self.pipeline._special_tokens.eos_token_id = 0
+                config = GenerateConfig(
+                    max_new_tokens=3,
+                    is_streaming=False,
+                    aux_info=False,
+                    stop_words_list=[[30]],
+                    stop_words_str=["U"],
+                )
+                captured = []
+
+                async def enqueue(request):
+                    captured.append(request.generate_config)
+
+                    async def outputs():
+                        yield GenerateOutputs(
+                            [
+                                GenerateOutput(
+                                    output_ids=torch.tensor(
+                                        [[10, 20, 30]], dtype=torch.int32
+                                    ),
+                                    finished=True,
+                                )
+                            ]
+                        )
+
+                    return outputs()
+
+                async def collect():
+                    return [
+                        response
+                        async for response in self.pipeline.generate_stream(
+                            1, [8, 9], [], config
+                        )
+                    ]
+
+                with patch.object(
+                    self.pipeline.backend_rpc_server_visitor,
+                    "enqueue",
+                    side_effect=enqueue,
+                ):
+                    responses = asyncio.run(collect())
+                self.assertEqual(responses[-1].generate_texts, [expected_text])
+                self.assertEqual(
+                    captured[0].stop_words_list, [] if codebook_mode else [[30]]
+                )
+                self.assertEqual(
+                    captured[0].stop_words_str, [] if codebook_mode else ["U"]
+                )
+                self.assertEqual(config.stop_words_list, [[30]])
+                self.assertEqual(config.stop_words_str, ["U"])
+
+    def test_codebook_batch_ignores_stop_words(self):
+        self.pipeline.codebook_mode = True
+        self.pipeline._special_tokens.eos_token_id = 0
+        config = GenerateConfig(
+            aux_info=False, stop_words_list=[[30]], stop_words_str=["U"]
+        )
+        outputs = GenerateOutputs(
+            [
+                GenerateOutput(
+                    output_ids=torch.tensor([[10, 20, 30]], dtype=torch.int32),
+                    finished=True,
+                )
+            ]
+        )
+        batch_enqueue = AsyncMock(return_value=[outputs])
+        with (
+            patch.object(self.pipeline, "create_generate_config", return_value=config),
+            patch.object(type(self.tokenizer), "__len__", return_value=1000),
+            patch.object(self.tokenizer, "encode", return_value=[8, 9]),
+            patch.object(
+                self.pipeline.backend_rpc_server_visitor, "batch_enqueue", batch_enqueue
+            ),
+        ):
+            responses = asyncio.run(self.pipeline.batch_infer(["prompt"], 1, {}))
+        self.assertEqual(responses[0].generate_texts, ["KUE"])
+        request = batch_enqueue.call_args.args[0][0]
+        self.assertEqual(request.generate_config.stop_words_list, [])
+        self.assertEqual(request.generate_config.stop_words_str, [])
+        self.assertEqual(config.stop_words_list, [[30]])
 
     def test_decode_non_incremental_tokens_with_stop_words(self):
         """Test decode_non_incremental_tokens with stop words"""

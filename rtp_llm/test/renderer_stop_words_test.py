@@ -1,6 +1,12 @@
+from types import SimpleNamespace
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.py_config_modules import RenderConfig
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
+from rtp_llm.ops import SpecialTokens
 from typing import List
 from unittest import IsolatedAsyncioTestCase, TestCase, main
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
@@ -604,6 +610,92 @@ class TestStopWordTruncation(_RendererTestBase):
             is_streaming=True,
         )
         self.assertEqual(delta2.output_str, "")
+
+
+class CodebookEndpointStopWordsTest(TestCase):
+    def test_codebook_clears_default_and_request_stops_for_engine_and_renderer(self):
+        for codebook_mode in (False, True):
+            with self.subTest(codebook_mode=codebook_mode):
+                tokenizer = MagicMock()
+                tokenizer.__len__.return_value = 1000
+                tokenizer.eos_token_id = 0
+                tokenizer.encode.return_value = [10]
+                tokenizer.decode.return_value = "stop"
+                special_tokens = SpecialTokens()
+                special_tokens.eos_token_id = 0
+                special_tokens.stop_words_id_list = [[10]]
+                special_tokens.stop_words_str_list = ["stop"]
+                renderer = Mock(spec=BasicRenderer)
+                renderer.stop_words_id_list = [[10]]
+                renderer.stop_words_str_list = ["stop"]
+                renderer.extra_stop_word_ids_list = [[12]]
+                renderer.extra_stop_words = ["extra"]
+                renderer.get_all_extra_stop_word_ids_list.return_value = [[12]]
+                renderer.tokenize_words.return_value = [[10]]
+                renderer.parses_user_stop_sequences = False
+                renderer.resolve_thinking_mode.return_value = ThinkingMode.DISABLED
+                renderer.get_reasoning_format.return_value = None
+                renderer.disable_stop_words.side_effect = (
+                    CustomChatRenderer.disable_stop_words.__get__(renderer)
+                )
+                model = SimpleNamespace(
+                    generate_env_config=GenerateEnvConfig(),
+                    max_seq_len=4096,
+                    model_name="test",
+                    model_type="test",
+                    special_tokens=special_tokens,
+                    template_type=None,
+                    ckpt_path="",
+                    render_config=RenderConfig(),
+                )
+                with patch(
+                    "rtp_llm.openai.openai_endpoint.ChatRendererFactory.get_renderer",
+                    return_value=renderer,
+                ):
+                    endpoint = OpenaiEndpoint(
+                        model,
+                        None,
+                        None,
+                        tokenizer,
+                        Mock(),
+                        codebook_mode=codebook_mode,
+                    )
+                extra = GenerateConfig(stop_words_list=[[20]], stop_words_str=["U"])
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="prompt")],
+                    max_tokens=3,
+                    stop=["request-stop"],
+                    extra_configs=extra,
+                )
+                config = endpoint._extract_generation_config(request)
+                if codebook_mode:
+                    self.assertEqual(config.stop_words_list, [])
+                    self.assertEqual(config.stop_words_str, [])
+                    self.assertEqual(renderer.stop_words_id_list, [])
+                    self.assertEqual(renderer.stop_words_str_list, [])
+                    self.assertEqual(renderer.extra_stop_word_ids_list, [])
+                    self.assertEqual(renderer.extra_stop_words, [])
+                else:
+                    self.assertIn([20], config.stop_words_list)
+                    self.assertIn("request-stop", config.stop_words_str)
+                    self.assertEqual(renderer.extra_stop_words, ["extra"])
+                self.assertEqual(extra.stop_words_list, [[20]])
+                self.assertEqual(extra.stop_words_str, ["U"])
+
+                endpoint._complete_stream_response = Mock()
+                endpoint.render_chat = Mock(return_value=SimpleNamespace(
+                        input_ids=[8, 9],
+                        rendered_prompt="prompt",
+                        multimodal_inputs=[],
+                        v41_inputs=None,
+                    ))
+                endpoint.chat_completion(1, request, SimpleNamespace(headers={}))
+                renderer_request = renderer.generate_choice.call_args.args[5]
+                self.assertEqual(
+                    renderer_request.stop,
+                    None if codebook_mode else ["request-stop"],
+                )
+                self.assertEqual(request.stop, ["request-stop"])
 
 
 if __name__ == "__main__":

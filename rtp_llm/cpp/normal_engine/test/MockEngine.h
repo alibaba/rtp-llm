@@ -44,9 +44,11 @@ struct CustomConfig {
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    std::vector<std::vector<int64_t>>       output_vocab_groups;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
     bool                                    prefill_cp_enabled        = false;
     bool                                    speculative_enabled       = false;
+    bool                                    warm_up                   = false;
     bool                                    warm_up_with_loss         = false;
     int                                     engine_async_worker_count = 0;
 };
@@ -131,7 +133,11 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
     rtp_llm::ParallelismConfig parallelism_config;
-    model_config.output_vocab_ids = config.output_vocab_ids;
+    model_config.output_vocab_ids    = config.output_vocab_ids;
+    model_config.output_vocab_groups = config.output_vocab_groups;
+    if (!config.output_vocab_groups.empty()) {
+        model_config.special_tokens.eos_token_id = 0;
+    }
     if (!config.output_vocab_ids.empty()) {
         model_config.output_vocab_padded_size = static_cast<int64_t>(config.output_vocab_ids.size());
     }
@@ -148,6 +154,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
+    runtime_config.warm_up = config.warm_up;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
     rtp_llm::CacheStoreConfig      cache_store_config;
     rtp_llm::MiscellaneousConfig   misc_config;
@@ -187,7 +194,7 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     rtp_llm::KVCacheConfig kv_cache_config;
     EngineInitParams rtp_llm_params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     // Set test model factory before engine construction so the model is available during startLoop()
-    size_t vocab                       = model_config.vocab_size;
+    size_t vocab = model_config.output_vocab_ids.empty() ? model_config.vocab_size : model_config.output_vocab_ids.size();
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };

@@ -17,6 +17,14 @@ OpenaiEndpoint::OpenaiEndpoint(const std::shared_ptr<Tokenizer>&  tokenizer,
     }
     eos_token_id_ = res.value_or(model_config_.special_tokens.eos_token_id);
 
+    if (!model_config_.output_vocab_groups.empty()) {
+        if (chat_render_) {
+            chat_render_->disable_stop_words();
+        }
+        RTP_LLM_LOG_INFO("multi-group codebook ignores stop words");
+        return;
+    }
+
     for (const auto& vec : model_config_.special_tokens.stop_words_id_list) {
         std::vector<int> tmpVec;
         for (int64_t val : vec) {
@@ -68,7 +76,7 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     }
     config.num_return_sequences = req.n.value_or(1);
     std::vector<std::string> request_stop_words_list;
-    if (req.stop.has_value()) {
+    if (model_config_.output_vocab_groups.empty() && req.stop.has_value()) {
         auto stop = req.stop.value();
         if (std::holds_alternative<std::string>(stop)) {
             auto stop_str = std::get<std::string>(stop);
@@ -84,9 +92,11 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
     config.stop_words_list.insert(
         config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
-    auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
-    config.stop_words_list.insert(
-        config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    if (model_config_.output_vocab_groups.empty()) {
+        auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
+        config.stop_words_list.insert(
+            config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    }
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
     // }
@@ -100,6 +110,10 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         }
     }
     config.addSpecialTokens(model_config_.special_tokens);
+    if (!model_config_.output_vocab_groups.empty()) {
+        config.stop_words_list.clear();
+        config.stop_words_str.clear();
+    }
 
     auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
     config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
