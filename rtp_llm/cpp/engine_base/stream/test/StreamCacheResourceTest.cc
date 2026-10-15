@@ -229,7 +229,7 @@ protected:
     void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
         PDSepConfig pd;
         pd.role_type = RoleType::PREFILL;
-        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, 8, pd);
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd);
         stream_->generateConfig()->pd_separation      = query_pd;
         stream_->generateConfig()->unique_key         = key;
         stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
@@ -274,7 +274,6 @@ protected:
                                         bool                    reuse_cache,
                                         RoleType                role_type,
                                         const KVCacheConfig&    kv_cache_config      = {},
-                                        size_t                  expected_free_blocks = 8,
                                         const PDSepConfig&      pd_sep_config        = {}) {
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
@@ -926,7 +925,7 @@ TEST_F(StreamCacheResourceTest, NonPDRequestStillWaitsForAllocatorLoadWithP2PCon
     EXPECT_EQ(resource.p2p_load_context_, nullptr);
     EXPECT_FALSE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, load_context);
-    EXPECT_TRUE(load_context->completeOne(true));
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_TRUE(cache_manager_->p2p_connector_->streamStore()->resource_map_.empty());
@@ -1825,7 +1824,6 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", eos=" << eos);
             const std::string key = "first-token-outputs";
             prepareP2PRegistrationResource(true, key);
-            cache_manager_->config_.use_independent_block_pools = requested;
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
             const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
             const auto make_stream       = [&](RoleType role) {
@@ -1885,7 +1883,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
-            EXPECT_EQ(published.prefill_use_independent_block_pools, requested);
+            EXPECT_TRUE(published.prefill_use_independent_block_pools);
             EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
             logits.fill_(-1);
@@ -1895,7 +1893,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             loss.fill_(-1);
 
             auto result = std::make_shared<DecodeLoadHelper::Result>();
-            ASSERT_TRUE(prefill_connector.fillStartLoadResponsePayload(published, result->response).ok());
+            ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(published, result->response).ok());
             result->complete(true);
             ASSERT_TRUE(result->success());
             EXPECT_EQ(result->side_channel_payload.generation_prefill_cuda_graph_status,
