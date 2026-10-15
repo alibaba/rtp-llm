@@ -76,3 +76,17 @@ cc_test(
     # sm90.
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "model_types_test",
+    srcs = [
+        "ModelTypesTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = device_test_envs(),
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "L20_CU13"},
+    }),
+)
