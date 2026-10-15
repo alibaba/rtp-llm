@@ -550,6 +550,12 @@ public class MetricConstant {
     public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
 
     /**
+     * Configured upper bound of the global Generation queue ({@code scheduler.maxQueuedRequests}),
+     * tagged type=mainQueue. Pair with {@link #ROUTING_QUEUE_LENGTH} type=mainQueue for queue utilisation.
+     */
+    public static final String ROUTING_QUEUE_MAX_LENGTH = "app.routing.queue.max.length";
+
+    /**
      * Queue entry QPS
      */
     public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";

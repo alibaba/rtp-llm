@@ -310,10 +310,14 @@ class GlobalQueueProgressTest {
             f.submit(1, "a");
             f.submit(2, "a");
             awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 2);
+            GlobalQueueCoordinator queue = (GlobalQueueCoordinator) ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            assertEquals(2, queue.size());
+            assertEquals(2, queue.maxQueuedRequests());
 
             FlexlbConfig reduced = SchedulingTestConfig.batchConfig();
             reduced.getScheduler().setMaxQueuedRequests(1);
             f.currentConfig.set(reduced);
+            assertEquals(1, queue.maxQueuedRequests());
             f.submit(3, "a");
             assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), f.requests.get(3L).join().getCode());
             assertEquals(2, f.scheduler.getQueuedRequestCount());

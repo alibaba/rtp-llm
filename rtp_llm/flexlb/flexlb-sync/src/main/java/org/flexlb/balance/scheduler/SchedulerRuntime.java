@@ -72,6 +72,7 @@ final class SchedulerRuntime {
             return;
         }
         reportSchedulerInflight();
+        reportGlobalQueue();
         reportPrefillEndpoints();
         reportDecodeEndpoints();
     }
@@ -90,6 +91,18 @@ final class SchedulerRuntime {
         } catch (RuntimeException failure) {
             warnIsolated(
                     "Failed to report scheduler inflight metrics", failure);
+        }
+    }
+
+    private void reportGlobalQueue() {
+        try {
+            RequestRegistry.GlobalQueueStats stats = requests.globalQueueStats();
+            if (stats != null) {
+                reporter.reportGlobalQueue(stats.depth(), stats.maxQueuedRequests());
+            }
+        } catch (RuntimeException failure) {
+            warnIsolated(
+                    "Failed to report global queue metrics", failure);
         }
     }
 

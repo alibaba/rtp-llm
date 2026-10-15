@@ -23,6 +23,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
+import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_MAX_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.mockito.ArgumentMatchers.any;
@@ -85,6 +86,22 @@ class BatchSchedulerReporterTest {
                 "role", "PREFILL",
                 "engineIp", "10.0.0.1");
         verify(monitor).report(ROUTING_QUEUE_LENGTH, tags, 5.0);
+    }
+
+    @Test
+    void should_report_global_queue_depth_and_limit_with_main_queue_type() {
+        reporter.reportGlobalQueue(12, 256);
+
+        FlexMetricTags tags = FlexMetricTags.of("type", "mainQueue");
+        verify(monitor).report(ROUTING_QUEUE_LENGTH, tags, 12.0);
+        verify(monitor).report(ROUTING_QUEUE_MAX_LENGTH, tags, 256.0);
+    }
+
+    @Test
+    void should_register_global_queue_limit_metric_on_init() {
+        reporter.init();
+
+        verify(monitor).register(ROUTING_QUEUE_MAX_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     @Test

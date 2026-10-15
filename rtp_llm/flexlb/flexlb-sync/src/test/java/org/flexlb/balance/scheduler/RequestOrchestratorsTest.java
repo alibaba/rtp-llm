@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -164,6 +165,32 @@ class RequestOrchestratorsTest {
         verify(admissionReporter).reportPrefillQueueDepth("p1", 0);
         verify(admissionReporter).reportPrefillQueueDepth("p2", 0);
         verify(decode).reportAdmissionMetrics(admissionReporter);
+    }
+
+    @Test
+    void metricsReportGlobalQueueDepthAndLimitWhenQueueModeIsActive() {
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(0, 0, 0L));
+        when(lifecycle.globalQueueStats()).thenReturn(new RequestRegistry.GlobalQueueStats(12, 256));
+
+        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class)).report();
+
+        verify(reporter).reportGlobalQueue(12, 256);
+    }
+
+    @Test
+    void metricsSkipGlobalQueueWhenQueueModeIsNotActive() {
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(0, 0, 0L));
+        when(lifecycle.globalQueueStats()).thenReturn(null);
+
+        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class)).report();
+
+        verify(reporter, never()).reportGlobalQueue(anyInt(), anyInt());
     }
 
     private static SchedulerRuntime runtime(

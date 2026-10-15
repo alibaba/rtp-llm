@@ -206,6 +206,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    int maxQueuedRequests() {
+        return configService.loadBalanceConfig().queueScheduler().getMaxQueuedRequests();
+    }
+
     /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
     boolean requeue(ScheduledRequest previous) {
         lock.lock();

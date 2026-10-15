@@ -30,6 +30,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
+import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_MAX_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT;
@@ -52,6 +53,9 @@ public class BatchSchedulerReporter {
             "batch_full", "fixed_window_timeout", "predicted_execution_cap"
     };
 
+    /** type tag value for the global Generation queue series of routing.queue.length. */
+    public static final String GLOBAL_QUEUE_TYPE = "mainQueue";
+
     /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
     public static final String SCHEDULER_ROLE = "SCHEDULER";
 
@@ -69,6 +73,7 @@ public class BatchSchedulerReporter {
     public void init() {
         // Queue — same type as RoutingQueueReporter
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_MAX_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         // Dispatch reason — independent metric for batch path
@@ -112,10 +117,20 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (21 metrics)");
+        log.info("BatchSchedulerReporter initialized (22 metrics)");
     }
 
     // ==================== Queue metrics ====================
+
+    /**
+     * Report the global Generation queue depth via {@code routing.queue.length} (type=mainQueue)
+     * and its configured bound via {@code routing.queue.max.length}.
+     */
+    public void reportGlobalQueue(int depth, int maxQueuedRequests) {
+        FlexMetricTags tags = FlexMetricTags.of("type", GLOBAL_QUEUE_TYPE);
+        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
+        monitor.report(ROUTING_QUEUE_MAX_LENGTH, tags, maxQueuedRequests);
+    }
 
     /**
      * Report per-worker batcher queue depth via {@code routing.queue.length}.
