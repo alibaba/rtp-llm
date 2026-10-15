@@ -412,10 +412,18 @@ class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
         packed, block_scale, scale_2 = quantize_expert_to_nvfp4(
             weight, block_size=self._block_size
         )
+        # mm_fp4 consumes the 128x4-swizzled scale layout (same conversion the
+        # checkpoint modelopt_fp4 loader applies in per_group_fp4_quant_weight);
+        # feeding the plain [N, K/block] scale layout fails kernel init.
+        processed_weight, processed_scale = (
+            load_config.exported_device.convert_fp4_gemm_weight_params(
+                packed, block_scale
+            )
+        )
         input_scale = torch.ones([1], dtype=torch.float32, device=weight.device)
         return {
-            self.kernel.name: packed,
-            self.scale.name: block_scale,
+            self.kernel.name: processed_weight,
+            self.scale.name: processed_scale,
             self.scale_2.name: scale_2.reshape([1]),
             self.input_scale.name: input_scale,
         }

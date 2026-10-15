@@ -15,6 +15,7 @@ import torch
 
 import rtp_llm.model_loader  # noqa: F401  (registers QuantWeight classes)
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     NVFP4_BLOCK_SIZE,
@@ -129,12 +130,18 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
             return_value={W.ffn_w2: weight},
         ):
             tensors = quant_weight._load_raw_tensor(
-                tensor_source=mock.Mock(), layer_id=0, device="cuda", load_config=mock.Mock()
+                tensor_source=mock.Mock(),
+                layer_id=0,
+                device="cuda",
+                load_config=SimpleNamespace(exported_device=CudaImpl),
             )
 
         self.assertEqual(set(tensors), {W.ffn_w2, W.ffn_s2, W.ffn_w2_s2, W.ffn_w2_i_s})
         self.assertEqual(tensors[W.ffn_w2].dtype, torch.uint8)
         self.assertEqual(tensors[W.ffn_s2].dtype, torch.float8_e4m3fn)
+        # The GEMM scale leaves in the 128x4-swizzled layout: M padded to 128
+        # (32 -> 128) and 16 scale columns per 256-wide K.
+        self.assertEqual(tuple(tensors[W.ffn_s2].shape), (128, 16))
         self.assertEqual(tensors[W.ffn_w2_s2].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].flatten().tolist(), [1.0])
@@ -162,20 +169,24 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
             weight_bf16, NVFP4_BLOCK_SIZE
         )
         self.assertEqual(scale_2.numel(), 1)
+        # The loader applies the GEMM scale swizzle; mirror it here.
+        gemm_weight, gemm_scale = CudaImpl.convert_fp4_gemm_weight_params(
+            packed, block_scale
+        )
 
         quant_config = _quant_config(True)
         self.assertTrue(
             CudaFp4GEMMLinear.can_handle(
                 quant_config,
-                packed,
-                block_scale,
+                gemm_weight,
+                gemm_scale,
                 weight_scale_2=scale_2,
                 input_scale=torch.tensor(1.0),
             )
         )
         linear = CudaFp4GEMMLinear(
-            weight=packed,
-            weight_scales=block_scale,
+            weight=gemm_weight,
+            weight_scales=gemm_scale,
             input_scales=torch.tensor(1.0),
             bias=None,
             quant_config=quant_config,
