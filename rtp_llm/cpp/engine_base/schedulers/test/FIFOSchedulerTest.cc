@@ -1,4 +1,5 @@
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 
 #define protected public
@@ -90,9 +92,9 @@ protected:
         EXPECT_FALSE(expected->hasError());
     }
 
-    void verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                       int second_max_new_tokens,
-                                                       bool with_group_metadata = false);
+    void verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                      int  second_max_new_tokens,
+                                                      bool with_group_metadata = false);
     void verifyBatchDecodeSchedulerDrainsMixedModeTail(const std::vector<int>& max_new_tokens);
 
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
@@ -185,6 +187,118 @@ static PDSepConfig makePDFusionPDSepConfig() {
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PDFUSION;
     return pd_sep_config;
+}
+
+// Construction and empty scheduler polls need no device or KV cache allocation.
+// Keep these tests independent of the DeviceTestBase fixture.
+TEST(SchedulerPollIntervalTest, DefaultsAndEnvironmentValidation) {
+    const std::string env_name = "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS";
+    autil::EnvGuard   restore_env(env_name, "");
+    const auto        check_interval = [](int expected_ms) {
+        RuntimeConfig runtime_config;
+        FIFOScheduler fifo(
+            runtime_config, ModelConfig{}, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, nullptr);
+        PDFusionRatioScheduler pdfusion(runtime_config,
+                                        ModelConfig{},
+                                        makePDFusionPDSepConfig(),
+                                        ParallelismConfig{},
+                                        ModelSpecificConfig{},
+                                        nullptr);
+        BatchDecodeScheduler   batch(runtime_config, nullptr, nullptr);
+        EXPECT_EQ(fifo.poll_interval_.count(), expected_ms);
+        EXPECT_EQ(pdfusion.poll_interval_.count(), expected_ms);
+        // BatchDecode inherits the configuration; its separate batch-fill gate stays unchanged.
+        EXPECT_EQ(batch.poll_interval_.count(), expected_ms);
+    };
+    ASSERT_TRUE(autil::EnvUtil::unsetEnv(env_name));
+    check_interval(10);
+    for (const auto& value : {"", "0", "-1", "3ms", "invalid", "2147483648", "-2147483649"}) {
+        SCOPED_TRACE(value);
+        ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, value));
+        check_interval(10);
+    }
+    for (const auto& value : {"1", "3", "10", "25", "2147483647"}) {
+        SCOPED_TRACE(value);
+        ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, value));
+        check_interval(std::stoi(value));
+    }
+}
+
+TEST(SchedulerPollIntervalTest, ConfigurationIsFixedForSchedulerLifetime) {
+    const std::string env_name = "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS";
+    autil::EnvGuard   restore_env(env_name, "3");
+    RuntimeConfig     runtime_config;
+    FIFOScheduler     fifo(
+        runtime_config, ModelConfig{}, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, nullptr);
+    PDFusionRatioScheduler pdfusion(
+        runtime_config, ModelConfig{}, makePDFusionPDSepConfig(), ParallelismConfig{}, ModelSpecificConfig{}, nullptr);
+    BatchDecodeScheduler batch(runtime_config, nullptr, nullptr);
+    ASSERT_TRUE(autil::EnvUtil::setEnv(env_name, "25"));
+    EXPECT_EQ(fifo.poll_interval_.count(), 3);
+    EXPECT_EQ(pdfusion.poll_interval_.count(), 3);
+    EXPECT_EQ(batch.poll_interval_.count(), 3);
+}
+
+TEST(SchedulerPollIntervalTest, ConfiguredIntervalControlsTimedPolling) {
+    autil::EnvGuard   restore_env("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "200");
+    RuntimeConfig     runtime_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size = 2;
+    FIFOScheduler fifo(
+        runtime_config, ModelConfig{}, PDSepConfig{}, parallelism_config, ModelSpecificConfig{}, nullptr);
+    PDFusionRatioScheduler pdfusion(
+        runtime_config, ModelConfig{}, makePDFusionPDSepConfig(), parallelism_config, ModelSpecificConfig{}, nullptr);
+    for (FIFOSchedulerBase* scheduler :
+         {static_cast<FIFOSchedulerBase*>(&fifo), static_cast<FIFOSchedulerBase*>(&pdfusion)}) {
+        SCOPED_TRACE(scheduler->schedulerName());
+        auto       poll   = std::async(std::launch::async, [scheduler] {
+            const auto start   = std::chrono::steady_clock::now();
+            auto       result  = scheduler->schedule();
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            return std::make_pair(std::move(result), elapsed);
+        });
+        const auto status = poll.wait_for(std::chrono::seconds(5));
+        EXPECT_EQ(status, std::future_status::ready);
+        if (status != std::future_status::ready) {
+            // Bound a regression to an indefinite wait before destroying the future.
+            EXPECT_TRUE(scheduler->stop().ok());
+        }
+        const auto result = poll.get();
+        ASSERT_TRUE(result.first.ok());
+        EXPECT_TRUE(result.first.value().empty());
+        // A broad margin distinguishes the override from the old fixed 10 ms poll.
+        EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(result.second).count(), 150);
+    }
+}
+
+TEST(SchedulerPollIntervalTest, ReadyPredicateWakesTimedPolling) {
+    autil::EnvGuard   restore_env("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    RuntimeConfig     runtime_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size = 2;
+    FIFOScheduler fifo(
+        runtime_config, ModelConfig{}, PDSepConfig{}, parallelism_config, ModelSpecificConfig{}, nullptr);
+    PDFusionRatioScheduler pdfusion(
+        runtime_config, ModelConfig{}, makePDFusionPDSepConfig(), parallelism_config, ModelSpecificConfig{}, nullptr);
+    for (FIFOSchedulerBase* scheduler :
+         {static_cast<FIFOSchedulerBase*>(&fifo), static_cast<FIFOSchedulerBase*>(&pdfusion)}) {
+        SCOPED_TRACE(scheduler->schedulerName());
+        auto poll = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+        EXPECT_EQ(poll.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        {
+            std::lock_guard<std::mutex> lock(scheduler->lock_);
+            scheduler->schedule_trigger_ = true;
+        }
+        scheduler->cond_.notify_all();
+        const auto status = poll.wait_for(std::chrono::seconds(5));
+        EXPECT_EQ(status, std::future_status::ready);
+        if (status != std::future_status::ready) {
+            EXPECT_TRUE(scheduler->stop().ok());
+        }
+        const auto result = poll.get();
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result.value().empty());
+    }
 }
 
 TEST_F(FIFOSchedulerTest, testSimple) {
@@ -895,8 +1009,8 @@ static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<in
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                                     int second_max_new_tokens,
+void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                                     int  second_max_new_tokens,
                                                                      bool with_group_metadata) {
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
@@ -910,8 +1024,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     ModelSpecificConfig model_specific_config;
 
     const auto make_stream = [&](const std::vector<int>& ids,
-                                  const ResourceContext& resource_context,
-                                  int max_new_tokens) {
+                                 const ResourceContext&  resource_context,
+                                 int                     max_new_tokens) {
         if (with_group_metadata) {
             return makeForceBatchStream(ids, 800, 2, model_config, runtime_config, resource_context, max_new_tokens);
         }
@@ -972,8 +1086,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
-        auto first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
-        auto second = make_stream({3, 4}, resource_context, second_max_new_tokens);
+        auto                 first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
+        auto                 second = make_stream({3, 4}, resource_context, second_max_new_tokens);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
 
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
