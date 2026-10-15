@@ -60,6 +60,27 @@ py_test(
     },
 )
 
+# Fusion round-2 (K1+GEMM): fused row RMSNorm + hc_fn skinny GEMV. Imports
+# norm_triton for the chained-reference comparison, hence :modules.
+py_test(
+    name = "test_hc_fn_gemv_triton",
+    size = "large",
+    srcs = ["test_hc_fn_gemv_triton.py"],
+    main = "test_hc_fn_gemv_triton.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = [
+        "manual",
+        "SM103_CU13",
+    ],
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+)
+
 py_test(
     name = "test_hc_mix_triton",
     srcs = ["test_hc_mix_triton.py"],

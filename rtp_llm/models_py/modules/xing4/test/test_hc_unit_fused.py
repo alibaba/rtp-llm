@@ -33,6 +33,13 @@ elements; x = 0.25 * randn brings max(diff/tol) down to 0.60 (T=4096) /
 |pre*x| ~ 1.
 The factory/fallback contract (env default / explicit torch / illegal
 value / CPU auto-fallback with exactly one log line) is pinned CPU-side.
+
+Round-2 K1+GEMM dispatch: with the default ``XING4_HC_FN_GEMV_MAX_TOKENS``
+gate (32), the T=1 and T=8 legs of ``test_pre_post_equivalence_flat``
+automatically run the fused GEMV arm of ``_pre_fused`` while T=512/4096 run
+the K1 + F.linear arm; the dedicated dispatch test pins the gate itself
+(default/disabled/forced) and the equivalence test gates both arms against
+the eager reference at the same 2**-7 tolerance.
 """
 
 import logging
@@ -62,6 +69,7 @@ TOKENS = (1, 8, 512, 4096)
 # docstring) inside the mandated 2**-7 gate; measured margin ~40%.
 X_SCALE = 0.25
 CHUNK_ENV = "XING4_HC_FALLBACK_CHUNK_TOKENS"
+GEMV_ENV = "XING4_HC_FN_GEMV_MAX_TOKENS"
 _FACTORY_LOGGER = "rtp_llm.models_py.modules.xing4.hc"
 
 
@@ -391,6 +399,70 @@ class TestXing4HcUnitFusedVsTorch(unittest.TestCase):
             f"[unit-fused] mix-kernel launches: torch=0, triton={counter['launches']}",
             flush=True,
         )
+
+    def test_fused_pre_uses_gemv_when_rows_gated_in(self) -> None:
+        # K1+GEMM fusion dispatch (round-2): at rows <= the gate (default
+        # 32) one pre() must launch the fused GEMV exactly once and skip
+        # F.linear; above the gate (and when the gate is disabled, or on the
+        # torch backend) it launches zero times and the K1+F.linear chain
+        # runs instead.
+        from rtp_llm.models_py.modules.xing4.hc import fn_gemv_triton
+
+        unit = _make_unit(device="cuda")
+        x_small = _make_stream(8, HC, HIDDEN, seed=17)
+        x_big = _make_stream(512, HC, HIDDEN, seed=18)
+        kernel = fn_gemv_triton._hc_fn_gemv_kernel
+        orig_run = kernel.run
+        counter = {"launches": 0}
+
+        def counting_run(*args, **kwargs):
+            counter["launches"] += 1
+            return orig_run(*args, **kwargs)
+
+        kernel.run = counting_run
+        try:
+            with torch.inference_mode(), _env(IMPL_ENV, TRITON_IMPL):
+                with _env(GEMV_ENV, None):
+                    counter["launches"] = 0
+                    unit.pre(x_small)  # default gate 32 >= rows 8
+                    self.assertEqual(counter["launches"], 1)
+                    unit.pre(x_big)  # 512 rows -> K1 + F.linear
+                    self.assertEqual(counter["launches"], 1)
+                with _env(GEMV_ENV, "0"):  # explicit disable
+                    unit.pre(x_small)
+                    self.assertEqual(counter["launches"], 1)
+                with _env(GEMV_ENV, "4096"):  # forced on at prefill size
+                    unit.pre(x_big)
+                    self.assertEqual(counter["launches"], 2)
+            with torch.inference_mode(), _env(IMPL_ENV, TORCH_IMPL), _env(
+                GEMV_ENV, None
+            ):
+                unit.pre(x_small)  # eager backend never launches it
+                self.assertEqual(counter["launches"], 2)
+        finally:
+            del kernel.run  # restore the class-level JITFunction.run
+        print(
+            f"[unit-fused] gemv-kernel dispatch: rows<=gate 1/rows>gate 0/"
+            f"disabled 0/forced-on 1/torch 0 (total {counter['launches']})",
+            flush=True,
+        )
+
+    def test_pre_equivalence_gemv_forced_and_disabled(self) -> None:
+        # Both dispatch arms must match the eager reference at the same
+        # tolerance: the GEMV-forced arm (rows above the default gate) and
+        # the gate-disabled arm (rows below it, running K1 + F.linear).
+        unit = _make_unit(device="cuda")
+        for T, env in ((512, "4096"), (8, "0")):
+            with self.subTest(T=T, gemv_env=env):
+                x = _make_stream(T, HC, HIDDEN, seed=123 + T)
+                with torch.inference_mode():
+                    with _env(IMPL_ENV, TORCH_IMPL), _env(GEMV_ENV, None):
+                        ref_y, ref_post, ref_comb = unit.pre(x)
+                    with _env(IMPL_ENV, TRITON_IMPL), _env(GEMV_ENV, env):
+                        y, post, comb = unit.pre(x)
+                _assert_equiv(y, ref_y, f"pre y T={T} gemv_env={env}")
+                _assert_equiv(post, ref_post, f"pre post T={T} gemv_env={env}")
+                _assert_equiv(comb, ref_comb, f"pre comb T={T} gemv_env={env}")
 
 
 if __name__ == "__main__":

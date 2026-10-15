@@ -5,7 +5,10 @@ The per-kernel modules stay the math authorities for their segments:
 * ``norm_triton``     (K1) row RMSNorm over the flattened hc*H row;
 * ``mix_triton``      (K2) sigmoid gates + clamp/exp + sinkhorn comb;
 * ``collapse_triton`` (K3) y = sum_i pre[..., i] * x[..., i, H];
-* ``post_triton``     (K4) out = post(x) x + comb @ residual.
+* ``post_triton``     (K4) out = post(x) x + comb @ residual;
+* ``fn_gemv_triton``  (K1+GEMM) fused row RMSNorm + hc_fn skinny GEMV
+  producing the mixes directly from the stream (rows-gated by
+  ``XING4_HC_FN_GEMV_MAX_TOKENS``; see fn_gemv_triton.py).
 
 This package adds the unit-level factory that ``Xing4HCUnit``
 (rtp_llm/models_py/model_desc/xing4_0_model.py) consults on every
@@ -48,12 +51,16 @@ TORCH_IMPL = "torch"
 
 
 class Xing4HcTritonEntries(NamedTuple):
-    """The four fused entry points consulted by ``Xing4HCUnit``."""
+    """The fused entry points consulted by ``Xing4HCUnit``."""
 
     row_rms_norm: Callable[..., Any]  # K1: hc_row_rms_norm_triton
     mix: Callable[..., Any]  # K2: hc_mix_triton
     collapse: Callable[..., Any]  # K3: hc_collapse
     post: Callable[..., Any]  # K4: xing4_hc_post
+    # K1+GEMM fusion (round-2): one kernel produces the hc_fn mixes directly
+    # from the stream, and the rows-gate resolver that dispatches it.
+    norm_fn_gemv: Callable[..., Any]
+    fn_gemv_max_tokens: Callable[[], int]
 
 
 # Lazy re-exports kept for the package surface the K1 lane shipped (the
@@ -70,6 +77,9 @@ _LAZY_EXPORTS = {
     "hc_post_triton": ("post_triton", "hc_post_triton"),
     "xing4_hc_post": ("post_triton", "xing4_hc_post"),
     "post_triton": ("post_triton", "post_triton"),
+    "hc_fn_gemv_triton": ("fn_gemv_triton", "hc_fn_gemv_triton"),
+    "hc_fn_gemv_max_tokens": ("fn_gemv_triton", "hc_fn_gemv_max_tokens"),
+    "fn_gemv_triton": ("fn_gemv_triton", "fn_gemv_triton"),
 }
 
 _triton_entries: Optional[Xing4HcTritonEntries] = None
@@ -95,7 +105,7 @@ def resolve_xing4_hc_impl() -> str:
 
 
 def xing4_hc_triton_entries() -> Xing4HcTritonEntries:
-    """Import and cache the four fused kernel entry points (K1..K4).
+    """Import and cache the fused kernel entry points (K1..K4 + GEMV).
 
     Importing is deferred to the first fused dispatch, so importing this
     package (and the model file that consults it) never requires triton or a
@@ -109,6 +119,10 @@ def xing4_hc_triton_entries() -> Xing4HcTritonEntries:
         try:
             from rtp_llm.models_py.modules.xing4.hc.collapse_triton import (
                 hc_collapse,
+            )
+            from rtp_llm.models_py.modules.xing4.hc.fn_gemv_triton import (
+                hc_fn_gemv_max_tokens,
+                hc_fn_gemv_triton,
             )
             from rtp_llm.models_py.modules.xing4.hc.mix_triton import (
                 hc_mix_triton,
@@ -125,6 +139,8 @@ def xing4_hc_triton_entries() -> Xing4HcTritonEntries:
                 mix=hc_mix_triton,
                 collapse=hc_collapse,
                 post=xing4_hc_post,
+                norm_fn_gemv=hc_fn_gemv_triton,
+                fn_gemv_max_tokens=hc_fn_gemv_max_tokens,
             )
         except BaseException as exc:  # noqa: BLE001 - cached and re-raised
             _triton_import_error = exc

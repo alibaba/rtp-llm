@@ -83,6 +83,18 @@ class Xing4HCUnit(HCUnitBase):
         ``_fn_for`` dtype cache) -> K2 gates/sinkhorn -> K3 collapse, and K4
         for the post combination; no chunk branch (no [T, hc*dim] fp32
         intermediate exists to bound).
+      * fused K1+GEMM (fusion round-2): when the flattened row count is at
+        most ``XING4_HC_FN_GEMV_MAX_TOKENS`` (default 32; the
+        decode/small-batch regime), the K1 norm and the hc_fn ``F.linear``
+        collapse into ONE Triton GEMV kernel that emits the bf16 ``mixes``
+        directly from the stream — no ``flat_normed`` materialization and no
+        cuBLAS split-K pair (measured 11-19 us per call at those sizes on
+        SM103 — the largest mHC pre-chain stage). Numerics keep the
+        reference rounding structure (bf16 norm rounding + fp32 accumulation
+        + one bf16 round); only the fp32 summation order differs, the same
+        tolerance class the UTs gate at rtol = atol = 2**-7. Larger row
+        counts keep K1 + cuBLAS (bandwidth-bound there; the fused form
+        re-reads fn per row and loses from ~64 rows on).
       * torch: the eager chain below, kept verbatim as the reference and the
         fallback; it retains the ``XING4_HC_FALLBACK_CHUNK_TOKENS`` chunking.
 
@@ -161,15 +173,29 @@ class Xing4HCUnit(HCUnitBase):
         """Fused _pre_impl: K1 norm -> F.linear GEMM -> K2 mix -> K3 collapse."""
         hc = self.hc_mult
         entries = xing4_hc_triton_entries()
-        # K1: x[..., hc, H] -> flat_normed with x.flatten(-2) shape, one
-        # launch, fp32 square accumulation in registers (no [T, hc*H] fp32
-        # intermediate, hence no chunking on this path).
-        flat_normed = entries.row_rms_norm(x, self.norm_eps)
-        # GEMM preserved verbatim (the hc_fn F.linear share stays out of the
-        # fusion numerator); the bf16 GEMM output feeds K2 directly (widened
-        # losslessly in-kernel — bitwise identical to the eager .float() path,
-        # minus the separate widen launch).
-        mixes = torch.nn.functional.linear(flat_normed, self._fn_for(dtype))
+        rows = x.numel() // (hc * self.dim)
+        if rows <= entries.fn_gemv_max_tokens():
+            # K1+GEMM fusion (round-2): one kernel produces the hc_fn mixes
+            # directly from the stream — no flat_normed materialization, no
+            # cuBLAS split-K pair. The rows gate exists because the fused
+            # form re-reads fn per row while cuBLAS wins from ~64 rows on
+            # (measured crossover; fn_gemv_triton.py documents the numbers).
+            # Numerics: the bf16 norm rounding is reproduced in-kernel and
+            # the dot accumulates fp32 like the GEMM — same structure, only
+            # the summation order differs (the 1-ulp class the UTs gate).
+            mixes = entries.norm_fn_gemv(
+                x, self._fn_for(dtype), self.norm_eps
+            )
+        else:
+            # K1: x[..., hc, H] -> flat_normed with x.flatten(-2) shape, one
+            # launch, fp32 square accumulation in registers (no [T, hc*H]
+            # fp32 intermediate, hence no chunking on this path).
+            flat_normed = entries.row_rms_norm(x, self.norm_eps)
+            # GEMM preserved verbatim (the hc_fn F.linear share stays out of
+            # the fusion numerator); the bf16 GEMM output feeds K2 directly
+            # (widened losslessly in-kernel — bitwise identical to the eager
+            # .float() path, minus the separate widen launch).
+            mixes = torch.nn.functional.linear(flat_normed, self._fn_for(dtype))
         mixes = mixes.reshape(-1, (hc + 2) * hc)
         # K2: gates + clamp/exp + sinkhorn comb in one launch; its single exit
         # cast lands exactly where the reference casts pre/post/comb.
