@@ -217,18 +217,6 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
             "    jit_cache_entries = jit_cache_paths.split(os.pathsep)\n",
             "    # Prepend cache paths to the beginning of python_path\n",
             "    python_path = os.pathsep.join(jit_cache_entries) + os.pathsep + python_path\n",
-            "  # Shadow out the flashinfer_cubin runfiles entry: with the package\n",
-            "  # importable, flashinfer resolves its cubin dir to this action's\n",
-            "  # runfiles tree, so JIT ops generated into the shared workspace\n",
-            "  # embed include paths that dangle for every later consumer (the\n",
-            "  # fmha_gen flashInferMetaInfo.h failures). Unfindable, flashinfer\n",
-            "  # falls back to the stable workspace cache and the generated\n",
-            "  # includes stay shareable. The entry is a dedicated pip site-packages\n",
-            "  # path, so dropping it removes exactly this package.\n",
-            "  python_path = os.pathsep.join(\n",
-            "      p for p in python_path.split(os.pathsep)\n",
-            "      if 'flashinfer_cubin' not in p\n",
-            "  )\n",
         ]
 
         # Insert the code before the target line
