@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op imp
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     InterleavedMropeEmbeddingOp,
+    TextMropeEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPagedPrefillImpl,
@@ -1194,6 +1195,220 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
                                 atol=1e-2,
                             )
                         token_offset += length
+
+
+class TestDynamicFp8TargetVerifyMrope(unittest.TestCase):
+    """dspark target-verify forward (prefill-shaped) under FP8 KV cache mode 2."""
+
+    def _run_target_verify(self, dtype: torch.dtype) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+
+        device = torch.device("cuda")
+        harness = BaseAttentionTest()
+        harness.device = device
+        gamma = 3
+        prefix_lengths = [7, 11]
+        verify_lengths = [gamma + 1, gamma + 1]
+        page_size = 4
+        head_num, head_num_kv, head_dim = 4, 2, 256
+        config = harness._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=head_dim,
+            seq_size_per_block=page_size,
+            data_type="bf16" if dtype == torch.bfloat16 else "fp16",
+        )
+        attn_configs = config.attn_configs
+        attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        attn_configs.fp8_kv_cache_mode = 2
+        attn_configs.need_rope_kv_cache = True
+        attn_configs.max_seq_len = 2048
+        rope_config = attn_configs.rope_config
+        rope_config.style = RopeStyle.Mrope
+        rope_config.dim = 64
+        rope_config.base = 10000
+        rope_config.scale = 1.0
+        rope_config.max_pos = 2048
+        rope_config.index_factor = 3
+        rope_config.mrope_dim1 = 11
+        rope_config.mrope_dim2 = 11
+        rope_config.mrope_dim3 = 10
+        rope_config.mrope_interleaved = True
+
+        inputs = harness._create_chunked_prefill_attention_inputs(
+            verify_lengths, prefix_lengths, page_size
+        )
+        inputs.is_target_verify = True
+        position_chunks = []
+        for prefix_length, verify_length in zip(prefix_lengths, verify_lengths):
+            positions = torch.arange(
+                prefix_length,
+                prefix_length + verify_length,
+                dtype=torch.int32,
+                device=device,
+            )
+            position_chunks.append(torch.stack((positions, positions, positions), dim=-1))
+        inputs.combo_position_ids = torch.cat(position_chunks).contiguous()
+
+        impl = PyFlashinferPagedPrefillImpl(
+            attn_configs, inputs, config.parallelism_config
+        )
+        self.assertIsInstance(impl.rope_impl, TextMropeEmbeddingOp)
+
+        total_tokens = sum(verify_lengths)
+        qkv = torch.randn(
+            total_tokens,
+            (head_num + 2 * head_num_kv) * head_dim,
+            dtype=dtype,
+            device=device,
+        )
+        q, k, v = torch.split(
+            qkv,
+            [
+                head_num * head_dim,
+                head_num_kv * head_dim,
+                head_num_kv * head_dim,
+            ],
+            dim=-1,
+        )
+        q = q.reshape(total_tokens, head_num, head_dim)
+        k = k.reshape(total_tokens, head_num_kv, head_dim)
+        v = v.reshape(total_tokens, head_num_kv, head_dim)
+        expected_q, expected_k = harness._apply_qwen35_mrope_reference(
+            q, k, inputs.combo_position_ids
+        )
+
+        # Prefix history: already-roped K at positions [0, prefix) and raw V,
+        # written through the standalone dynamic-FP8 oracle writer.
+        total_prefix = sum(prefix_lengths)
+        prefix_k = torch.randn(
+            total_prefix, head_num_kv, head_dim, dtype=dtype, device=device
+        )
+        prefix_v = torch.randn(
+            total_prefix, head_num_kv, head_dim, dtype=dtype, device=device
+        )
+        prefix_position_chunks = []
+        for prefix_length in prefix_lengths:
+            positions = torch.arange(
+                prefix_length, dtype=torch.int32, device=device
+            )
+            prefix_position_chunks.append(
+                torch.stack((positions, positions, positions), dim=-1)
+            )
+        _, expected_prefix_k = harness._apply_qwen35_mrope_reference(
+            prefix_k, prefix_k, torch.cat(prefix_position_chunks)
+        )
+
+        sequence_lengths = [
+            prefix + verify
+            for prefix, verify in zip(prefix_lengths, verify_lengths)
+        ]
+        page_count = sum(math.ceil(length / page_size) for length in sequence_lengths)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            page_count,
+            2,
+            head_num_kv,
+            page_size,
+            head_dim,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        kv_cache.kv_scale_base = torch.ones(
+            page_count,
+            2 * head_num_kv * page_size,
+            dtype=torch.float32,
+            device=device,
+        )
+
+        def target_slot(batch_idx: int, position: int) -> tuple[int, int]:
+            page_id = int(
+                inputs.kv_cache_kernel_block_id[
+                    batch_idx, position // page_size
+                ].item()
+            )
+            return page_id, position % page_size
+
+        prefix_pages = []
+        prefix_offsets = []
+        for batch_idx, prefix_length in enumerate(prefix_lengths):
+            for position in range(prefix_length):
+                page_id, offset = target_slot(batch_idx, position)
+                prefix_pages.append(page_id)
+                prefix_offsets.append(offset)
+        quantize_and_write_fp8_kv_cache(
+            expected_prefix_k.contiguous(),
+            prefix_v.contiguous(),
+            kv_cache.kv_cache_base,
+            kv_cache.kv_scale_base,
+            torch.tensor(prefix_pages, dtype=torch.int32, device=device),
+            torch.tensor(prefix_offsets, dtype=torch.int32, device=device),
+            page_size,
+            page_size,
+            1,
+        )
+
+        output = impl.forward(qkv.clone(), kv_cache)
+
+        # Restore the full K/V from the paged FP8 cache with per-row scales.
+        scale_view = kv_cache.kv_scale_base.view(page_count, 2, head_num_kv, page_size)
+        restored_k_cache = (
+            kv_cache.kv_cache_base[:, 0].float() * scale_view[:, 0].unsqueeze(-1)
+        ).to(dtype)
+        restored_v_cache = (
+            kv_cache.kv_cache_base[:, 1].float() * scale_view[:, 1].unsqueeze(-1)
+        ).to(dtype)
+        reference_chunks = []
+        token_offset = 0
+        for batch_idx, (prefix_length, verify_length) in enumerate(
+            zip(prefix_lengths, verify_lengths)
+        ):
+            page_ids = inputs.kv_cache_kernel_block_id[
+                batch_idx, : math.ceil(sequence_lengths[batch_idx] / page_size)
+            ].tolist()
+            full_k = (
+                restored_k_cache[page_ids]
+                .permute(1, 0, 2, 3)
+                .reshape(head_num_kv, -1, head_dim)
+                .permute(1, 0, 2)
+            )[: sequence_lengths[batch_idx]]
+            full_v = (
+                restored_v_cache[page_ids]
+                .permute(1, 0, 2, 3)
+                .reshape(head_num_kv, -1, head_dim)
+                .permute(1, 0, 2)
+            )[: sequence_lengths[batch_idx]]
+            expected_verify_q = expected_q[token_offset : token_offset + verify_length]
+            padded_q = torch.zeros(
+                sequence_lengths[batch_idx],
+                head_num,
+                head_dim,
+                dtype=dtype,
+                device=device,
+            )
+            padded_q[prefix_length:] = expected_verify_q
+            reference = compute_flashinfer_prefill_reference(
+                padded_q,
+                full_k,
+                full_v,
+                torch.tensor(
+                    [0, sequence_lengths[batch_idx]], dtype=torch.int32, device=device
+                ),
+                causal=True,
+            )
+            reference_chunks.append(reference[prefix_length:])
+            token_offset += verify_length
+
+        torch.testing.assert_close(
+            output, torch.cat(reference_chunks), rtol=0.06, atol=0.04
+        )
+
+    def test_mode2_target_verify_interleaved_mrope_matches_reference(self):
+        self._run_target_verify(torch.float16)
+
+    def test_mode2_target_verify_interleaved_mrope_matches_reference_bf16(self):
+        self._run_target_verify(torch.bfloat16)
 
 
 if __name__ == "__main__":
