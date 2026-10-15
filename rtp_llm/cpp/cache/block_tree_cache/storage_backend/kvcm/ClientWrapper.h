@@ -62,11 +62,21 @@ public:
                                     const kv_cache_manager::UriStrVec&                          uris,
                                     kv_cache_manager::BlockBuffers&                             buffers,
                                     const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    virtual kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
                        const kv_cache_manager::BlockBuffers&                       buffers,
                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,
