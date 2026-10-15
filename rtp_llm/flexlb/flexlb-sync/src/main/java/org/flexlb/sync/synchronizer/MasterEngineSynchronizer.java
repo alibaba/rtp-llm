@@ -9,6 +9,8 @@ import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -20,6 +22,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -53,6 +57,8 @@ public final class MasterEngineSynchronizer {
     private final ThreadPoolExecutor statusCheckExecutor;
     private final ThreadPoolExecutor cacheStatusExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
+    // Retain only operations that currently occupy an executor thread or a caller thread.
+    private final Map<EndpointTrace.Poll, RoleType> activeSyncs = new ConcurrentHashMap<>();
 
     public MasterEngineSynchronizer(
             WorkerAddressService workerAddressService,
@@ -127,6 +133,54 @@ public final class MasterEngineSynchronizer {
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }
+        reportSlowTraces();
+    }
+
+    /** Read active operations on the existing reporting tick; no per-cycle history or queue tracking. */
+    void reportSlowTraces() {
+        try {
+            if (!logger.isWarnEnabled()) {
+                return;
+            }
+            long slowAfterUs = Math.max(syncEngineStatusInterval * 1000L, statusStaleAfterUs / 2L);
+            String enginePool = null;
+            String statusPool = null;
+            for (var active : activeSyncs.entrySet()) {
+                var snapshot = active.getKey().snapshot();
+                if (snapshot.thread() == null
+                        || Stage.RUNNER_ENDED.name().equals(snapshot.stage())
+                        || (snapshot.runUs() < slowAfterUs && snapshot.queueUs() < slowAfterUs)) {
+                    continue;
+                }
+                if (enginePool == null) {
+                    enginePool = poolSnapshot(engineSyncExecutor);
+                    statusPool = poolSnapshot(statusCheckExecutor);
+                }
+                logger.warn(
+                        "event=worker_sync_trace model={} role={} tasksPerCycle={} engine={}"
+                            + " status={} {}",
+                        modelName,
+                        active.getValue(),
+                        requiredRoles.size(),
+                        enginePool,
+                        statusPool,
+                        snapshot.compact());
+            }
+        } catch (RuntimeException | LinkageError failure) {
+            logger.warn("Failed to report worker sync traces", failure);
+        }
+    }
+
+    private static String poolSnapshot(ThreadPoolExecutor executor) {
+        return "{active:"
+                + executor.getActiveCount()
+                + ",size:"
+                + executor.getPoolSize()
+                + ",queued:"
+                + executor.getQueue().size()
+                + ",completed:"
+                + executor.getCompletedTaskCount()
+                + "}";
     }
 
     public void syncEngineStatus() {
@@ -134,7 +188,7 @@ public final class MasterEngineSynchronizer {
         logger.debug("sync engine status start, times:{}, modelName:{}", syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
-                engineSyncExecutor.submit(
+                EngineSyncRunner runner =
                         new EngineSyncRunner(
                                 modelName,
                                 workerDirectory,
@@ -159,7 +213,16 @@ public final class MasterEngineSynchronizer {
                                                 .getWorkerRegistry()
                                                 .getHealth()
                                                 .getStatusCommitGraceMs()
-                                        * 1000L));
+                                        * 1000L);
+                engineSyncExecutor.submit(
+                        () -> {
+                            activeSyncs.put(runner.trace(), roleType);
+                            try {
+                                runner.run();
+                            } finally {
+                                activeSyncs.remove(runner.trace());
+                            }
+                        });
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
@@ -176,5 +239,6 @@ public final class MasterEngineSynchronizer {
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
         cacheStatusExecutor.shutdown();
+        activeSyncs.clear();
     }
 }

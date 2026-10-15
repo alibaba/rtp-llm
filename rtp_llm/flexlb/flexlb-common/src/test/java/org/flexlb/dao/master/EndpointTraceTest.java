@@ -23,6 +23,43 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EndpointTraceTest {
+    @Test
+    void syncPollTracksQueueAndCompletionWithoutOccupyingWorkerPollSlots() throws Exception {
+        var workerTrace = new EndpointTrace();
+        workerTrace.beginPoll("STATUS", 6L).recordRpcStarted(5000L);
+        workerTrace.beginPoll("CACHE", 6L).record(Stage.POLL_SKIPPED, "CACHE_INTERVAL");
+        var before = workerTrace.snapshot();
+        var sync = new EndpointTrace.Poll("SYNC", 7L);
+        sync.record(Stage.RUNNER_SUBMITTED);
+        Thread.sleep(2);
+        var queued = sync.snapshot();
+        assertEquals("SYNC-7", queued.pollId());
+        assertEquals("RUNNER_SUBMITTED", queued.stage());
+        assertEquals(-1L, queued.times().runnerStartMs());
+        assertTrue(queued.queueUs() > 0L);
+        assertNull(queued.thread());
+        assertEquals(-1L, queued.runUs());
+        sync.record(Stage.RUNNER_STARTED);
+        sync.record(Stage.SYNC_DISCOVERY);
+        sync.record(Stage.SYNC_RETIREMENT);
+        var blocked = sync.snapshot();
+        assertEquals(Thread.currentThread().getName(), blocked.thread());
+        Thread.sleep(2);
+        var later = sync.snapshot();
+        assertEquals(blocked.queueUs(), later.queueUs(), "queue duration stops growing once started");
+        assertTrue(later.runUs() > blocked.runUs());
+        assertEquals("NOT_STARTED", later.rpcResult());
+        assertFalse(later.leaseReleased(), "a sync cycle does not own a Worker poll lease");
+        sync.record(Stage.RUNNER_ENDED);
+        assertEquals("RUNNER_ENDED", sync.snapshot().stage());
+        long completedRunUs = sync.snapshot().runUs();
+        Thread.sleep(2);
+        assertEquals(completedRunUs, sync.snapshot().runUs(), "thread occupancy freezes when the runner ends");
+        assertEquals(before.statusPoll().pollId(), workerTrace.snapshot().statusPoll().pollId());
+        assertEquals(before.cachePoll().pollId(), workerTrace.snapshot().cachePoll().pollId());
+        assertEquals("PENDING", workerTrace.snapshot().statusPoll().rpcResult());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void readingExceptionDetailsDoesNotBlockProgress(boolean pollFailure) throws Exception {
@@ -127,7 +164,7 @@ class EndpointTraceTest {
     }
 
     @Test
-    void thousandsOfPollsRetainOnlyOneLatestPoll() {
+    void thousandsOfPollsRetainOnlyTheLatestPollOfEachKind() {
         var trace = new EndpointTrace();
         for (int i = 0; i < 10_000; i++) {
             trace.beginPoll("STATUS", i).record(Stage.LEASE_RELEASED);
@@ -135,8 +172,43 @@ class EndpointTraceTest {
         }
         trace.beginPoll("STATUS", 10_000);
         trace.beginPoll("CACHE", 10_000);
-        assertEquals("CACHE", trace.snapshot().poll().kind());
-        assertEquals(10_000, trace.snapshot().poll().syncCycleId());
+        var snapshot = trace.snapshot();
+        assertEquals("STATUS-20001", snapshot.statusPoll().pollId());
+        assertEquals("CACHE-20002", snapshot.cachePoll().pollId());
+        assertEquals(snapshot.cachePoll(), snapshot.poll());
+        assertEquals(10_000, snapshot.statusPoll().syncCycleId());
+        assertEquals(10_000, snapshot.cachePoll().syncCycleId());
+    }
+
+    @Test
+    void skippedCachePollsCannotHideTheInFlightStatusPoll() {
+        var trace = new EndpointTrace();
+        var status = trace.beginPoll("STATUS", 7);
+        assertEquals("NOT_STARTED", trace.snapshot().statusPoll().rpcResult());
+        status.recordRpcStarted(1000L);
+        for (int cycle = 8; cycle < 1008; cycle++) {
+            var cache = trace.beginPoll("CACHE", cycle);
+            cache.record(Stage.POLL_SKIPPED, "CACHE_INTERVAL");
+            cache.record(Stage.LEASE_RELEASED);
+        }
+        var snapshot = trace.snapshot();
+        assertEquals(7, snapshot.statusPoll().syncCycleId());
+        assertEquals("PENDING", snapshot.statusPoll().rpcResult());
+        assertEquals("RPC_STARTED", snapshot.statusPoll().stage());
+        assertFalse(snapshot.statusPoll().leaseReleased());
+        assertEquals("NOT_STARTED", snapshot.cachePoll().rpcResult());
+        assertEquals("POLL_SKIPPED:CACHE_INTERVAL", snapshot.cachePoll().outcome());
+        assertTrue(snapshot.cachePoll().leaseReleased());
+        assertTrue(snapshot.compact().contains("statusPoll={id:STATUS-1,cycle:7"));
+        assertTrue(snapshot.compact().contains("cachePoll={id:CACHE-1001,cycle:1007"));
+
+        status.record(Stage.RPC_COMPLETED);
+        assertEquals("OK", trace.snapshot().statusPoll().rpcResult());
+        assertEquals("PENDING", snapshot.statusPoll().rpcResult());
+        trace.beginPoll("STATUS", 1008);
+        status.record(Stage.LEASE_RELEASED);
+        assertEquals("STATUS-1002", trace.snapshot().poll().pollId());
+        assertFalse(trace.snapshot().statusPoll().leaseReleased());
     }
 
     @Test
@@ -203,6 +275,85 @@ class EndpointTraceTest {
         assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
         assertEquals(10_000_000, snapshot.thresholdUs());
         assertTrue(snapshot.compact().contains("gTotalUs:"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void retirementLockIntervalsAccumulateAcrossChunksAndFreezeBetweenThem(boolean finalizeLock) throws Exception {
+        var trace = new EndpointTrace();
+        trace.record(Stage.GENERATION_RETIRING);
+        long completedWait = -1L;
+        long completedHold = -1L;
+        for (int interval = 0; interval < 2; interval++) {
+            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_ATTEMPT : Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            var waiting = trace.snapshot();
+            long initialWait = finalizeLock ? waiting.finalizeWaitUs() : waiting.cleanupWaitUs();
+            assertTrue(initialWait >= Math.max(0L, completedWait));
+            assertEquals(completedHold, finalizeLock ? waiting.finalizeHoldUs() : waiting.cleanupHoldUs());
+            Thread.sleep(2);
+            var stillWaiting = trace.snapshot();
+            assertTrue((finalizeLock ? stillWaiting.finalizeWaitUs() : stillWaiting.cleanupWaitUs()) > initialWait);
+
+            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_ACQUIRED : Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            var acquired = trace.snapshot();
+            completedWait = finalizeLock ? acquired.finalizeWaitUs() : acquired.cleanupWaitUs();
+            long initialHold = finalizeLock ? acquired.finalizeHoldUs() : acquired.cleanupHoldUs();
+            assertTrue(initialHold >= Math.max(0L, completedHold));
+            Thread.sleep(2);
+            var holding = trace.snapshot();
+            assertEquals(completedWait, finalizeLock ? holding.finalizeWaitUs() : holding.cleanupWaitUs());
+            assertTrue((finalizeLock ? holding.finalizeHoldUs() : holding.cleanupHoldUs()) > initialHold);
+
+            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_RELEASED : Stage.CACHE_INDEX_LOCK_RELEASED);
+            var released = trace.snapshot();
+            completedHold = finalizeLock ? released.finalizeHoldUs() : released.cleanupHoldUs();
+            Thread.sleep(2);
+            var later = trace.snapshot();
+            assertEquals(completedWait, finalizeLock ? later.finalizeWaitUs() : later.cleanupWaitUs());
+            assertEquals(completedHold, finalizeLock ? later.finalizeHoldUs() : later.cleanupHoldUs());
+        }
+    }
+
+    @Test
+    void snapshotsRemainReadableWhileGenerationLockIsHeldAndOtherCallersWait() throws Exception {
+        var worker = WorkerStatus.createDiscovered(org.flexlb.dao.route.RoleType.PREFILL,
+                "group", "127.0.0.1", 80, 81, "site");
+        var trace = worker.trace();
+        var statusLease = worker.tryBeginStatusPoll(1L);
+        var cacheLease = worker.tryBeginCachePoll(1L);
+        var waiting = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            worker.lock.lock();
+            try {
+                trace.record(Stage.GENERATION_RETIRING);
+                trace.record(Stage.FINALIZE_LOCK_ATTEMPT);
+                trace.record(Stage.FINALIZE_LOCK_ACQUIRED);
+                trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
+                trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
+                var waiter = executor.submit(() -> {
+                    trace.record(Stage.EXPIRATION_LOCK_ATTEMPT);
+                    waiting.countDown();
+                    worker.lock.lock();
+                    try {
+                        trace.record(Stage.EXPIRATION_LOCK_ACQUIRED);
+                    } finally {
+                        worker.lock.unlock();
+                    }
+                });
+                assertTrue(waiting.await(3, TimeUnit.SECONDS));
+                var captured = executor.submit(trace::snapshot).get(3, TimeUnit.SECONDS);
+                assertEquals("CACHE_INDEX_LOCK_ACQUIRED", captured.phase());
+                assertTrue(captured.cleanupHoldUs() >= 0L);
+                assertTrue(captured.finalizeHoldUs() >= 0L);
+                assertEquals(1L, captured.statusPoll().syncCycleId());
+                assertEquals(1L, captured.cachePoll().syncCycleId());
+                assertFalse(waiter.isDone());
+            } finally {
+                worker.lock.unlock();
+                statusLease.close();
+                cacheLease.close();
+            }
+        }
     }
 
     @Test

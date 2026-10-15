@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Per-generation diagnostic state. Only the newest poll is retained; new polls overwrite it.
+ * Per-generation diagnostic state. Only the newest STATUS and CACHE polls are retained.
  */
 public final class EndpointTrace {
     private static final int MAX_ERROR_MESSAGE_CHARS = 192;
@@ -39,6 +39,10 @@ public final class EndpointTrace {
         CALLBACK_READY,
         CALLBACK_STARTED,
         CONVERSION_STARTED,
+        SYNC_DISCOVERY,
+        SYNC_RETIREMENT,
+        SYNC_DISPATCH,
+        SYNC_REPORT,
         DISCOVERY_POLL_SKIPPED,
         ENDPOINT_AWAIT_BEGIN(true),
         ENDPOINT_AWAIT_END(true),
@@ -68,6 +72,7 @@ public final class EndpointTrace {
         RPC_COMPLETED,
         RPC_INITIATION_FAILED,
         RPC_STARTED,
+        RUNNER_ENDED,
         RUNNER_FAILED,
         RUNNER_REJECTED,
         RUNNER_STARTED,
@@ -147,17 +152,34 @@ public final class EndpointTrace {
 
     public record IndexWait(long ageUs, long totalWaitUs, long contendedHoldUs, long count) {}
 
-    public record PollSnapshot(String pollId, long syncCycleId, String kind, long startedAtMs,
+    public record PollSnapshot(long sequence, long syncCycleId, String kind, long startedAtMs,
                                String stage, boolean leaseReleased,
                                String rpcResult, String failureStage, String error,
                                PollTimes times, IndexWait indexWait, long skippedBusy, long rpcTimeoutMs,
-                               String outcome) {}
+                               String outcome, String thread, long queueUs, long runUs) {
+        public String pollId() {return kind + "-" + sequence;}
+
+        public String compact() {
+            var text = new StringBuilder().append("thread=").append(thread)
+                    .append(" queueUs=").append(queueUs).append(" runUs=").append(runUs);
+            Snapshot.appendPoll(text, "poll", this);
+            return text.toString();
+        }
+    }
 
     public record Snapshot(long capturedAtMs, boolean retiring, String phase,
                            String unavailableReason, long decidedAtMs, long lastSuccessAgeUs,
                            long thresholdUs, long consecutiveFailures, long gateClosedAtMs,
-                           long cleanupWaitUs, long cleanupHoldUs, long scannedKeys, long removedMappings,
-                           String error, PollSnapshot poll) {
+                           long cleanupWaitUs, long cleanupHoldUs, long finalizeWaitUs, long finalizeHoldUs,
+                           long scannedKeys, long removedMappings,
+                           String error, PollSnapshot statusPoll, PollSnapshot cachePoll) {
+        /** Compatibility view of the newest poll; diagnostic output preserves both kinds. */
+        public PollSnapshot poll() {
+            if (statusPoll == null) {return cachePoll;}
+            if (cachePoll == null) {return statusPoll;}
+            return statusPoll.sequence() > cachePoll.sequence() ? statusPoll : cachePoll;
+        }
+
         public String compact() {
             var text = new StringBuilder().append("phase=").append(phase);
             if (retiring) {
@@ -165,11 +187,18 @@ public final class EndpointTrace {
                     .append(" staleUs=").append(lastSuccessAgeUs).append(" limitUs=").append(thresholdUs)
                     .append(" failures=").append(consecutiveFailures).append(" gateMs=").append(gateClosedAtMs)
                     .append(" cleanupWaitUs=").append(cleanupWaitUs).append(" cleanupHoldUs=").append(cleanupHoldUs)
+                    .append(" finalizeWaitUs=").append(finalizeWaitUs).append(" finalizeHoldUs=").append(finalizeHoldUs)
                     .append(" scanned=").append(scannedKeys).append(" removed=").append(removedMappings);
             }
             if (error != null) {text.append(" error=").append(error);}
+            appendPoll(text, "statusPoll", statusPoll);
+            appendPoll(text, "cachePoll", cachePoll);
+            return text.toString();
+        }
+
+        private static void appendPoll(StringBuilder text, String label, PollSnapshot poll) {
             if (poll != null) {
-                text.append(" poll={id:").append(poll.pollId()).append(",cycle:").append(poll.syncCycleId())
+                text.append(' ').append(label).append("={id:").append(poll.pollId()).append(",cycle:").append(poll.syncCycleId())
                     .append(",startMs:").append(poll.startedAtMs()).append(",stage:").append(poll.stage())
                     .append(",rpc:").append(poll.rpcResult())
                     .append(",rpcTimeoutMs:").append(poll.rpcTimeoutMs()).append(",released:").append(poll.leaseReleased())
@@ -188,11 +217,11 @@ public final class EndpointTrace {
                 poll.times().append(text);
                 text.append('}');
             }
-            return text.toString();
         }
     }
 
-    private volatile Poll latestPollTrace;
+    private volatile Poll latestStatusPoll;
+    private volatile Poll latestCachePoll;
     // WorkerStatus creates polls while holding its generation lock.
     private long nextPollId;
     private final AtomicBoolean endpointPublished = new AtomicBoolean();
@@ -211,6 +240,10 @@ public final class EndpointTrace {
     private volatile long cleanupAcquiredNanos;
     private volatile long cleanupWaitUs = -1L;
     private volatile long cleanupHoldUs = -1L;
+    private volatile long finalizeAttemptNanos;
+    private volatile long finalizeAcquiredNanos;
+    private volatile long finalizeWaitUs = -1L;
+    private volatile long finalizeHoldUs = -1L;
     private volatile long scannedKeys;
     private volatile long removedMappings;
 
@@ -218,21 +251,43 @@ public final class EndpointTrace {
         if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {return;}
         if (stage == Stage.ENDPOINT_GATE_CLOSED
                 && !gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis())) {return;}
-        phase = stage.name();
-        if (stage.retirement) {retirementPhase = stage.name();}
         switch (stage) {
             case GENERATION_RETIRING -> retiring = true;
             case ENDPOINT_WITHDRAWN ->
                     gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis());
             case CACHE_INDEX_LOCK_ATTEMPT -> cleanupAttemptNanos = System.nanoTime();
             case CACHE_INDEX_LOCK_ACQUIRED -> {
-                cleanupAcquiredNanos = System.nanoTime();
-                cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(cleanupAttemptNanos, cleanupAcquiredNanos);
+                long now = System.nanoTime();
+                long started = cleanupAttemptNanos;
+                // Close the active interval before publishing its total to avoid double counting in snapshots.
+                cleanupAttemptNanos = 0L;
+                cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(started, now);
+                cleanupAcquiredNanos = now;
             }
-            case CACHE_INDEX_LOCK_RELEASED -> cleanupHoldUs = Math.max(0L, cleanupHoldUs)
-                    + elapsedUs(cleanupAcquiredNanos, System.nanoTime());
+            case CACHE_INDEX_LOCK_RELEASED -> {
+                long now = System.nanoTime();
+                long started = cleanupAcquiredNanos;
+                cleanupAcquiredNanos = 0L;
+                cleanupHoldUs = Math.max(0L, cleanupHoldUs) + elapsedUs(started, now);
+            }
+            case FINALIZE_LOCK_ATTEMPT -> finalizeAttemptNanos = System.nanoTime();
+            case FINALIZE_LOCK_ACQUIRED -> {
+                long now = System.nanoTime();
+                long started = finalizeAttemptNanos;
+                finalizeAttemptNanos = 0L;
+                finalizeWaitUs = Math.max(0L, finalizeWaitUs) + elapsedUs(started, now);
+                finalizeAcquiredNanos = now;
+            }
+            case FINALIZE_LOCK_RELEASED -> {
+                long now = System.nanoTime();
+                long started = finalizeAcquiredNanos;
+                finalizeAcquiredNanos = 0L;
+                finalizeHoldUs = Math.max(0L, finalizeHoldUs) + elapsedUs(started, now);
+            }
             default -> { }
         }
+        phase = stage.name();
+        if (stage.retirement) {retirementPhase = stage.name();}
     }
 
     public void record(Stage stage, Throwable failure) {
@@ -264,7 +319,11 @@ public final class EndpointTrace {
     /** Called under WorkerStatus.lock; callbacks keep their own Poll even after the next one starts. */
     public Poll beginPoll(String kind, long cycle) {
         Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
-        latestPollTrace = pollTrace;
+        switch (kind) {
+            case "STATUS" -> latestStatusPoll = pollTrace;
+            case "CACHE" -> latestCachePoll = pollTrace;
+            default -> throw new IllegalArgumentException("Unknown poll kind: " + kind);
+        }
         return pollTrace;
     }
 
@@ -278,12 +337,14 @@ public final class EndpointTrace {
         private final AtomicReference<Stage> firstFailureStage = new AtomicReference<>();
         private volatile String error = "DETAILS_PENDING";
         private volatile String stage = "LEASE_ACQUIRED";
-        private volatile String rpcResult = "PENDING";
+        private volatile String thread;
+        private volatile String rpcResult = "NOT_STARTED";
         private volatile String outcome;
         private volatile long rpcTimeoutMs;
 
         private volatile long runnerSubmittedNanos;
         private volatile long runnerStartedNanos;
+        private volatile long runnerEndedNanos;
         private volatile long rpcStartedNanos;
         private volatile long rpcCompletedNanos;
         private volatile long conversionStartedNanos;
@@ -314,6 +375,11 @@ public final class EndpointTrace {
             this.syncCycleId = cycle;
         }
 
+        /** A standalone operation uses its cycle as identity; endpoint polls use a lease sequence. */
+        public Poll(String kind, long cycle) {this(kind, cycle, cycle);}
+
+        public PollSnapshot snapshot() {return snapshot(System.nanoTime());}
+
         public void record(Stage point) {record(point, (Throwable) null);}
 
         public void record(Stage point, Throwable failure) {
@@ -321,7 +387,12 @@ public final class EndpointTrace {
             switch (point) {
                 case RUNNER_SUBMITTED -> runnerSubmittedNanos = now;
                 case RUNNER_STARTED -> runnerStartedNanos = now;
-                case RPC_STARTED -> rpcStartedNanos = now;
+                case SYNC_DISCOVERY -> thread = Thread.currentThread().getName();
+                case RUNNER_ENDED -> runnerEndedNanos = now;
+                case RPC_STARTED -> {
+                    rpcStartedNanos = now;
+                    rpcResult = "PENDING";
+                }
                 case RPC_COMPLETED, RPC_INITIATION_FAILED -> {
                     rpcResult = failure == null ? "OK" : "ERROR";
                     rpcCompletedNanos = now;
@@ -394,10 +465,12 @@ public final class EndpointTrace {
                     sinceStartMs(cacheLockReleasedNanos));
             IndexWait wait = new IndexWait(waitStarted == 0L ? 0L : elapsedUs(waitStarted, now),
                     indexTotalWaitUs, indexContendedHoldUs, indexCount);
-            return new PollSnapshot(kind + "-" + id, syncCycleId, kind, startedAtMs,
+            return new PollSnapshot(id, syncCycleId, kind, startedAtMs,
                     stage, times.leaseEndMs() >= 0L, rpcResult,
                     failureStage == null ? null : failureStage.name(), failureStage == null ? null : error,
-                    times, wait, skippedBusy.get(), rpcTimeoutMs, outcome);
+                    times, wait, skippedBusy.get(), rpcTimeoutMs, outcome, thread,
+                    ongoingUs(runnerSubmittedNanos, runnerStartedNanos, now),
+                    ongoingUs(runnerStartedNanos, runnerEndedNanos, now));
         }
 
         private long sinceStartMs(long atNanos) {
@@ -406,14 +479,30 @@ public final class EndpointTrace {
 
     }
 
-    /** Captures one poll. Concurrent fields may describe adjacent instants, not one atomic transaction. */
+    /** Captures both poll kinds without locks; concurrent fields can describe adjacent instants. */
     public Snapshot snapshot() {
-        Poll pollTrace = latestPollTrace;
+        Poll statusPoll = latestStatusPoll;
+        Poll cachePoll = latestCachePoll;
         boolean isRetiring = retiring;
+        long now = System.nanoTime();
+        // Read totals before active starts, matching record's clear-before-accumulate order.
         return new Snapshot(System.currentTimeMillis(), isRetiring, isRetiring ? retirementPhase : phase,
                 unavailableReason, decidedAtMs, lastSuccessAgeUs, thresholdUs, consecutiveFailures,
-                gateClosedAtMs.get(), cleanupWaitUs, cleanupHoldUs, scannedKeys, removedMappings,
-                error.get(), pollTrace == null ? null : pollTrace.snapshot(System.nanoTime()));
+                gateClosedAtMs.get(), ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
+                ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
+                ongoingTotalUs(finalizeWaitUs, finalizeAttemptNanos, now),
+                ongoingTotalUs(finalizeHoldUs, finalizeAcquiredNanos, now), scannedKeys, removedMappings,
+                error.get(), statusPoll == null ? null : statusPoll.snapshot(now),
+                cachePoll == null ? null : cachePoll.snapshot(now));
+    }
+
+    /** Unfinished intervals grow until their matching release; missing starts remain unknown. */
+    private static long ongoingUs(long startNanos, long endNanos, long now) {
+        return elapsedUs(startNanos, endNanos == 0L ? now : endNanos);
+    }
+
+    private static long ongoingTotalUs(long completedUs, long startNanos, long now) {
+        return startNanos == 0L ? completedUs : Math.max(0L, completedUs) + elapsedUs(startNanos, now);
     }
 
     private static long elapsedUs(long startNanos, long endNanos) {
