@@ -118,6 +118,24 @@ py_test(
 )
 
 py_test(
+    name = "residual_up_mix_test",
+    srcs = ["residual_up_mix_test.py", "residual_norm_fp8_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "residual_norm_fp8_test",
+    srcs = ["residual_norm_fp8_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "indexer_rope_triton_test",
     srcs = ["indexer_rope_triton_test.py", "qsa_runtime_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
