@@ -249,6 +249,14 @@ private:
     static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
     static bool shouldSyncDecodeInputOnRank0(bool alignment_only);
 
+    // Fence used on the early-return (fake/empty/non-root) paths right before
+    // releaseAllModelBuffers(). Warmup keeps the device-wide sync so CUDA errors
+    // surface where they happen; serving only needs the previous forward to be
+    // done, because TensorHolder keeps the staging tensors alive for two more
+    // release points and every real step already synchronizes through its
+    // sampler D2H copy.
+    void fenceModelBufferRelease();
+
     void collectPrefillMetrics(const StreamGroups&  stream_groups,
                                MtpMetricsCollector& metrics_collector,
                                int64_t              schedule_time_us,
@@ -316,6 +324,10 @@ private:
     std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
+
+    // Records the most recent forward so an early-return step can wait for it
+    // before its buffers are released, without a device-wide sync.
+    std::shared_ptr<torch::Event> last_forward_event_;
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;

@@ -1352,7 +1352,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        fenceModelBufferRelease();
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -1826,6 +1826,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        fenceModelBufferRelease();
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -2428,6 +2429,22 @@ void MtpExecutor::releaseAllModelBuffers() {
     if (sp_prefill_draft_model_) {
         sp_prefill_draft_model_->releaseBuffers();
     }
+}
+
+void MtpExecutor::fenceModelBufferRelease() {
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        return;
+    }
+    // Serving: only the previous forward can still be reading the staging
+    // buffers that releaseAllModelBuffers() is about to advance. Wait on its
+    // event instead of the whole device, then record this step's forward so the
+    // next early-return step has something to wait on.
+    if (last_forward_event_) {
+        last_forward_event_->synchronize();
+    }
+    last_forward_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    last_forward_event_->record(cuda_graph::graphGetCurrentStream());
 }
 
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
