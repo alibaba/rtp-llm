@@ -242,7 +242,8 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
-    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
+    // All current control flags are set; the removed decode-entrance bit 8 stays clear.
+    EXPECT_EQ(flags, ((1u << 8) - 1u) | (1u << 9));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));
     EXPECT_EQ(hints[GptModelInputIndex::kvBlockStrideBytes], 4096);
     EXPECT_EQ(hints[GptModelInputIndex::kvScaleStrideBytes], 256);
