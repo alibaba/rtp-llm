@@ -7,6 +7,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -120,7 +121,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                         + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                                 ipPort, roleType.name(), cacheStatusPB.getCacheKeysMap().size(), cacheStatusPB.getVersion(),
                                 cacheStatusPB.getAvailableKvCache(), cacheStatusPB.getTotalKvCache(), cacheStatusPB.getBlockSize());
-                        return EngineStatusConverter.convertToCacheStatus(cacheStatusPB);
+                        return convertCacheStatusResponse(cacheStatusPB);
                     })
                     .whenComplete((cacheStatus, failure) -> workerStatus.cacheObservation.ready(
                             failure==null&&cacheStatus!=null&&cacheStatus.getMessage()==null))
@@ -177,6 +178,23 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 ? failure.getCause() : failure;
     }
 
+    private CacheStatus convertCacheStatusResponse(EngineRpcService.CacheStatusPB response) {
+        if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                || !workerStatus.isActiveGeneration()) {
+            return CacheStatus.builder().message("stale worker generation").build();
+        }
+        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+        CacheStatus previous = current.cacheStatus();
+        // Check before copying protobuf keys. Empty keys on an unchanged version
+        // mean "keep the indexed snapshot", not "clear this worker's cache".
+        if (!debug && current.indexInitialized() && previous != null
+                && current.indexedVersion() == response.getVersion()
+                && previous.getVersion() == response.getVersion()) {
+            return EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
+        }
+        return EngineStatusConverter.convertToCacheStatus(response);
+    }
+
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
 
         try {
@@ -208,6 +226,13 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             oldKeys=workerStatus.getCacheStatus().getCacheKeySize();
                         }
                         workerStatus.publishCacheStatus(newCacheStatus);
+                    } else {
+                        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+                        if (current.indexInitialized() && current.cacheStatus() != null
+                                && current.indexedVersion() == newCacheStatus.getVersion()
+                                && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
+                            workerStatus.publishCacheStatus(newCacheStatus);
+                        }
                     }
                 } finally {
                     workerStatus.lock.unlock();

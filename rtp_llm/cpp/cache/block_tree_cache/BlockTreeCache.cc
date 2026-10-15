@@ -260,10 +260,13 @@ KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
     return tree_->logicalCacheSnapshot();
 }
 
-BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot() const {
+BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
     std::lock_guard<std::mutex> lock(mutex_);
     BlockTreeKeySnapshot        snapshot;
     snapshot.version = mutation_version_;
+    if (latest_version >= 0 && latest_version == snapshot.version) {
+        return snapshot;
+    }
 
     std::vector<const TreeNode*> pending;
     pending.reserve(tree_->size());

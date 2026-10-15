@@ -108,6 +108,35 @@ class HttpLoadBalanceServerTest {
     }
 
     @Test
+    void cacheFingerprintUsesExplicitRouteAndDiagnosticProperty() {
+        String previous = System.getProperty("flexlb.diagnostic.allocation-counter");
+        System.setProperty("flexlb.diagnostic.allocation-counter", "true");
+        try {
+            ConfigService config = mock(ConfigService.class);
+            when(config.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+            EndpointRegistry registry = mock(EndpointRegistry.class);
+            when(registry.snapshotPrefillEndpoints()).thenReturn(Map.of());
+            when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of());
+            var global = mock(org.flexlb.cache.core.GlobalCacheIndex.class);
+            when(global.totalBlocks()).thenReturn(123L);
+            when(global.totalMappings()).thenReturn(456L);
+            var server = new HttpLoadBalanceServer(mock(LBStatusConsistencyService.class), config,
+                    mock(RequestScheduler.class), registry, mock(WorkerDirectory.class),
+                    mock(MasterEngineSynchronizer.class), new ServerScheduleLatencyRecorder());
+            org.springframework.test.util.ReflectionTestUtils.setField(server, "diagnosticGlobalIndex", global);
+            WebTestClient client = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+            client.get().uri("/rtp_llm/inflight_status").exchange().expectStatus().isOk()
+                    .expectBody().jsonPath("$.global_mappings").doesNotExist();
+            client.get().uri("/rtp_llm/cache_fingerprint").exchange().expectStatus().isOk()
+                    .expectBody().jsonPath("$.global_mappings").isEqualTo(456)
+                    .jsonPath("$.global_unique_keys").isEqualTo(123);
+        } finally {
+            if (previous == null) System.clearProperty("flexlb.diagnostic.allocation-counter");
+            else System.setProperty("flexlb.diagnostic.allocation-counter", previous);
+        }
+    }
+
+    @Test
     void notifyMasterSerializesTheResponseContract() {
         LBStatusConsistencyService consistency =
                 mock(LBStatusConsistencyService.class);

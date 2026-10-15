@@ -136,7 +136,7 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot() const;
+    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);

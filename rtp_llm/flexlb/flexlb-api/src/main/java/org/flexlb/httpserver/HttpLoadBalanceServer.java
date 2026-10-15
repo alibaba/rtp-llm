@@ -32,6 +32,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -51,6 +52,11 @@ public class HttpLoadBalanceServer {
             Paths.get("/tmp/flexlb-scheduler-snapshots");
     private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
     private static final int MAX_SNAPSHOT_FILES = 10;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.flexlb.cache.core.EngineLocalView diagnosticLocalView;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.flexlb.cache.core.GlobalCacheIndex diagnosticGlobalIndex;
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final ConfigService configService;
@@ -94,6 +100,8 @@ public class HttpLoadBalanceServer {
                         this::queueSnapshot)
                 .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
                         this::inflightStatus)
+                .GET("/rtp_llm/cache_fingerprint", accept(MediaType.APPLICATION_JSON),
+                        request -> inflightStatus(request, true))
                 .GET("/rtp_llm/server_latency", this::serverLatency)
                 .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
                 .build();
@@ -246,10 +254,57 @@ public class HttpLoadBalanceServer {
         }
     }
 
+    // Explicit terminal verification only; never walk key sets during periodic sampling.
+    private void putCacheFingerprint(Map<String, Object> output, String address, WorkerStatus status) {
+        status.cacheMutationLock.lock();
+        try {
+            var snapshot = status.cacheIndexSnapshot();
+            var owned = snapshot.cacheStatus() == null ? java.util.Set.<Long>of()
+                    : snapshot.cacheStatus().getCachedKeys();
+            var indexed = diagnosticLocalView.getEngineCacheBlocks(address);
+            long sum = 0, xor = 0, missingStatus = 0, missingGlobal = 0;
+            for (Long key : indexed) {
+                sum += key;
+                xor ^= key;
+                if (!owned.contains(key)) missingStatus++;
+                if (!diagnosticGlobalIndex.containsMapping(key, address)) missingGlobal++;
+            }
+            output.put("fingerprint", Map.of("indexed_keys", indexed.size(), "status_keys", owned.size(),
+                    "sum", Long.toUnsignedString(sum), "xor", Long.toUnsignedString(xor),
+                    "missing_status", missingStatus, "missing_global", missingGlobal,
+                    "indexed_version", snapshot.indexedVersion()));
+        } finally {
+            status.cacheMutationLock.unlock();
+        }
+    }
+
+    private static void putPollHealth(Map<String, Object> output, WorkerStatus status) {
+        WorkerStatus.PollHealth health = status.pollHealth();
+        if (health == null) return;
+        output.put("generation", status.getGenerationId());
+        output.put("reported_alive", health.reportedAlive());
+        output.put("status_age_ms", health.lastSuccessfulPollUs() == 0 ? -1L
+                : Math.max(0L, System.nanoTime() / 1000 - health.lastSuccessfulPollUs()) / 1000.0);
+        output.put("transport_failures", health.consecutiveTransportFailures());
+    }
+
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
+        return inflightStatus(request, false);
+    }
+
+    private Mono<ServerResponse> inflightStatus(ServerRequest request, boolean verifyCache) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
+            boolean fingerprint = verifyCache && Boolean.getBoolean("flexlb.diagnostic.allocation-counter");
             result.put("scheduler_inflight", requestScheduler.getInflightSize());
+            if (Boolean.getBoolean("flexlb.diagnostic.allocation-counter")) {
+                java.lang.management.ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+                if (threads instanceof com.sun.management.ThreadMXBean allocated
+                        && allocated.isThreadAllocatedMemorySupported()
+                        && allocated.isThreadAllocatedMemoryEnabled()) {
+                    result.put("process_allocated_bytes", allocated.getTotalThreadAllocatedBytes());
+                }
+            }
             result.put("decode_max_engine_requests",
                     configService.loadBalanceConfig().getRouter().getRoles()
                             .getDecode().getAvailability().getMaxEngineRequests());
@@ -263,6 +318,8 @@ public class HttpLoadBalanceServer {
                 CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
+                putPollHealth(ep, endpoint.getStatus());
+                if (fingerprint) putCacheFingerprint(ep, entry.getKey(), endpoint.getStatus());
                 ep.put("inflight_batches", endpoint.getInflightBatchCount());
                 ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
                 ep.put("inflight_route_requests",
@@ -284,6 +341,7 @@ public class HttpLoadBalanceServer {
                         entry.getValue().resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
+                putPollHealth(ep, entry.getValue().getStatus());
                 ep.put("reserved_total", view.reserved().size());
                 ep.put("master_queued", view.queuedCount());
                 ep.put("engine_may_have_seen",
@@ -297,6 +355,10 @@ public class HttpLoadBalanceServer {
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);
+            if (fingerprint) {
+                result.put("global_unique_keys", diagnosticGlobalIndex.totalBlocks());
+                result.put("global_mappings", diagnosticGlobalIndex.totalMappings());
+            }
 
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)

@@ -259,6 +259,12 @@ public class GlobalCacheIndex {
         return blockToEnginesMap.mappingCount();
     }
 
+    /** Allocation-free membership observation for explicit index verification. */
+    public boolean containsMapping(Long key, String engine) {
+        Set<String> owners = blockToEnginesMap.get(key);
+        return owners != null && owners.contains(engine);
+    }
+
     public long totalMappings() {
         return totalMappings.sum();
     }

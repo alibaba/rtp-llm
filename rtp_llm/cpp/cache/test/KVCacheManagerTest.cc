@@ -2152,7 +2152,12 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     const KVCacheInfo same =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/tree_snapshot.version, /*need_cache_keys=*/true);
     EXPECT_EQ(same.version, tree_snapshot.version);
-    EXPECT_EQ(same.cached_keys, tree_snapshot.keys);
+    EXPECT_TRUE(same.cached_keys.empty());
+    EXPECT_EQ(same.total_kv_cache, changed.total_kv_cache);
+    EXPECT_EQ(same.available_kv_cache, changed.available_kv_cache);
+    EXPECT_EQ(same.block_size, changed.block_size);
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(-1, true).cached_keys, tree_snapshot.keys);
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(tree_snapshot.version + 1, true).cached_keys, tree_snapshot.keys);
 
     const KVCacheInfo version_only =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/false);
@@ -2167,7 +2172,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     const BlockTreeKeySnapshot after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(after_duplicate.keys, before_duplicate.keys);
-    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, after_duplicate.keys);
+    EXPECT_TRUE(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys.empty());
 
     {
         ScopedEnvVar snapshot_enabled("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
@@ -2175,7 +2180,11 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
         ASSERT_TRUE(waitForCacheStatusVersion(kv_cache_manager, after_duplicate.version));
         const KVCacheInfo cached = kv_cache_manager->getKVCacheInfo(after_duplicate.version, true);
         EXPECT_EQ(cached.version, after_duplicate.version);
-        EXPECT_EQ(cached.cached_keys, after_duplicate.keys);
+        EXPECT_TRUE(cached.cached_keys.empty());
+        EXPECT_EQ(cached.total_kv_cache, changed.total_kv_cache);
+        EXPECT_EQ(cached.block_size, changed.block_size);
+        EXPECT_EQ(kv_cache_manager->getKVCacheInfo(-1, true).cached_keys, after_duplicate.keys);
+        EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version + 1, true).cached_keys, after_duplicate.keys);
     }
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
@@ -2285,7 +2294,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     EXPECT_EQ(unchanged.version, first.version);
     auto unchanged_keys = unchanged.cached_keys;
     std::sort(unchanged_keys.begin(), unchanged_keys.end());
-    EXPECT_EQ(unchanged_keys, expected_initial_keys);
+    EXPECT_TRUE(unchanged_keys.empty());
 
     auto stale = kv_cache_manager->getKVCacheInfo(first.version - 1, /*need_cache_keys=*/true);
     EXPECT_EQ(stale.version, first.version);
@@ -2308,7 +2317,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     EXPECT_EQ(current.version, updated.version);
     auto current_keys = current.cached_keys;
     std::sort(current_keys.begin(), current_keys.end());
-    EXPECT_EQ(current_keys, expected_updated_keys);
+    EXPECT_TRUE(current_keys.empty());
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
