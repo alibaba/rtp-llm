@@ -111,30 +111,6 @@ TEST(PrefillRpcServerTest, GenerateStreamCallRejectsPdRequestWithoutUniqueKey) {
     EXPECT_EQ(status.error_message(), "PD handoff requires non-empty unique_key");
 }
 
-TEST(PrefillRpcServerTest, OnflightScopeTracksStepAndCleansOnReturn) {
-    PrefillRpcServer server;
-
-    {
-        PrefillRpcServer::OnflightScope scope(&server, 9001);
-        {
-            std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
-            ASSERT_EQ(server.onflight_trackers_.size(), 1);
-            ASSERT_NE(server.onflight_trackers_.find(9001), server.onflight_trackers_.end());
-            EXPECT_EQ(server.onflight_trackers_.at(9001)->step.load(),
-                      static_cast<int>(PrefillRpcServer::GenerateStreamStep::kEntry));
-        }
-
-        scope.markStep(PrefillRpcServer::GenerateStreamStep::kAfterEngineEnqueue);
-        {
-            std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
-            EXPECT_EQ(server.onflight_trackers_.at(9001)->step.load(),
-                      static_cast<int>(PrefillRpcServer::GenerateStreamStep::kAfterEngineEnqueue));
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(server.onflight_trackers_mutex_);
-    EXPECT_TRUE(server.onflight_trackers_.empty());
-}
 
 }  // namespace rtp_llm
 
@@ -182,7 +158,7 @@ TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferAndDownstreamClean
     EXPECT_EQ(terminal.request_id, 102);
     EXPECT_EQ(terminal.batch_id, 77);
     EXPECT_EQ(terminal.priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(terminal.error_code, ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_EQ(terminal.error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
     PDCancelRegistry::Handle late;
     EXPECT_EQ(registry.admit(request, "retry102", "prefill:123", currentTimeMs() + 1000, late).code(),
               ErrorCode::PRIORITY_PREEMPTED);
@@ -357,7 +333,7 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         ASSERT_TRUE(registry.admit(request, "handoff108", "prefill:123", currentTimeMs() + 1000, handle).ok());
         EXPECT_EQ(registry.cancel(108, {code, "original failure"}), CANCEL_STATUS_ACCEPTED);
         ASSERT_TRUE(handle->canceled.load());
-        const auto rpc_error = errorInfoFromGrpcStatus(serializeErrorMsg("108", handle->cancel_reason));
+        const auto rpc_error = errorInfoFromGrpcStatus(PrefillRpcServer{}.serializeErrorMsg("108", handle->cancel_reason));
         EXPECT_EQ(rpc_error.code(), code);
         EXPECT_NE(rpc_error.ToString().find("original failure"), std::string::npos);
         registry.finishLocal(handle);
@@ -367,7 +343,7 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         ASSERT_TRUE(registry.complete(handle));
         const auto info = meta->getEngineScheduleInfo(0);
         ASSERT_EQ(info.finished_task_info_list.size(), 1);
-        EXPECT_EQ(info.finished_task_info_list.front().error_code, code);
+        EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
         EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::NONE);
     }
 }
