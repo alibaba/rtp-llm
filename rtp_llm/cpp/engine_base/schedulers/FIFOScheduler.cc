@@ -30,20 +30,22 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
-                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu]",
+                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
+                     "scheduler_poll_interval_ms is [%lld]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      max_batch_tokens_without_cache_,
                      cp_force_single_prefill_,
                      prefill_cp_size_,
-                     max_inited_kv_cache_streams_);
+                     max_inited_kv_cache_streams_,
+                     static_cast<long long>(poll_interval_.count()));
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -198,8 +200,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -321,13 +322,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -610,7 +608,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        cond_.wait_for(lock, poll_interval_, [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
         // large retryable queue into a tight malloc/eviction loop.

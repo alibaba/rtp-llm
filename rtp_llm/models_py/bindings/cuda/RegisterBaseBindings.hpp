@@ -19,6 +19,7 @@
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit_v3.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #ifndef USE_PPU
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
@@ -32,6 +33,12 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("per_token_group_quant_fp8_v3",
+                  &rtp_llm::per_token_group_quant_fp8_v3,
+                  "V4.1 BF16 group32 E4M3 quantization with packed UE8M0 scales",
+                  py::arg("input"),
+                  py::arg("output_q"),
+                  py::arg("output_s"));
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",

@@ -133,6 +133,7 @@ cc_library(
         "per_token_group_quant_8bit_v2.h",
     ],
     deps = [
+        ":v41_quantization",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         ":cuda_utils_common",
@@ -411,4 +412,22 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "v41_quantization",
+    srcs = [
+        "per_token_group_quant_8bit_v3.cu",
+    ],
+    hdrs = [
+        "per_token_group_quant_8bit_v3.h",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    # Match legacy BF16 quantization, preserving finite subnormal inputs.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
 )

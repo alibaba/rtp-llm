@@ -313,7 +313,8 @@ class V41OutputProjectionTest(unittest.TestCase):
     def test_quant_backend_dispatch_boundary(self):
         with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
             self.assertEqual(quantization_scale_min(1023, 4096), 1e-10)
-            self.assertEqual(quantization_scale_min(1024, 4096), 0)
+            self.assertEqual(quantization_scale_min(1024, 4096), 1e-10)
+            self.assertEqual(quantization_scale_min(3072, 4096), 1e-10)
 
 
 if __name__ == "__main__":

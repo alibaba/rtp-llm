@@ -18,6 +18,7 @@ _TESTS = [
     "test_v41_decode_device_metadata",
     "test_v41_decode_global",
     "test_v41_decode_indexer",
+    "test_v41_decode_topk",
     "test_v41_decode_preprocessing",
     "test_v41_decode_qkv_integration",
     "test_v41_deepselect",
@@ -55,6 +56,17 @@ _TESTS = [
     "test_v41_wo_a_quant",
 ]
 
+
+# The dense selection chain supports both SM100 ARM and SM100/SM103 x86.
+_X86_TESTS = [
+    "test_v41_decode_topk",
+    "test_v41_decode_indexer",
+    "test_v41_prefill_deepselect",
+    "test_v41_deepselect",
+    "test_v41_decode_attention_fusion",
+    "test_v41_decode_qkv_integration",
+]
+
 [
     py_test(
         name = name,
@@ -68,10 +80,14 @@ _TESTS = [
             "//rtp_llm:jit_cache_env",
             test_requirement("pytest"),
         ],
-        tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
-        exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        tags = ["dsv41_cuda13", "SM100_ARM_CU13"] + (["L20_CU13"] if name in _X86_TESTS else []),
+        exec_properties = select({
+            "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+            "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        }),
         target_compatible_with = select({
             "@//:using_cuda13_arm": [],
+            "@//:using_cuda13_x86": [] if name in _X86_TESTS else ["@platforms//:incompatible"],
             "//conditions:default": ["@platforms//:incompatible"],
         }),
         env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
