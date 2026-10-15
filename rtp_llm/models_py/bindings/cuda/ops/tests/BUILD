@@ -104,6 +104,20 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+# A separate process sets the rollback switch before its first cached lookup.
+cc_test(
+    name = "beam_search_select_all_test",
+    srcs = ["CudaBeamSearchOpTest.cc"],
+    args = ["--gtest_filter=CudaBeamSearchOpTest.selectAllVocabV2Test"],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ] + cuda13_torch_link_deps,
+    env = {"RTP_LLM_BEAM_TOPK_FORCE_PATH": "1"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
 alias(
     name = "test_cuda_graph_runner_libs",

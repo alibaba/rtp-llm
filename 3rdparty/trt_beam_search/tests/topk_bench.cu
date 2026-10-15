@@ -25,6 +25,7 @@
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 #include "3rdparty/trt_beam_search/common.h"
 #include "3rdparty/trt_beam_search/topkLastDim.h"
@@ -129,6 +130,10 @@ PathOutput runPath(int batch, int len, int k, bool sorted, int forcePath, float 
     int* dOutIdx = nullptr;
     BENCH_CHECK(cudaMalloc(&dOutVal, sizeof(float) * k * batch));
     BENCH_CHECK(cudaMalloc(&dOutIdx, sizeof(int) * k * batch));
+    // Make unwritten scratch/output slots observable instead of reusing old results.
+    BENCH_CHECK(cudaMemsetAsync(workspace, 0xFF, wsBytes, stream));
+    BENCH_CHECK(cudaMemsetAsync(dOutVal, 0xFF, sizeof(float) * k * batch, stream));
+    BENCH_CHECK(cudaMemsetAsync(dOutIdx, 0xFF, sizeof(int) * k * batch, stream));
 
     PathOutput out;
     out.us = timePath(batch, len, k, sorted, forcePath, dIn, dOutVal, dOutIdx, workspace, reps, stream);
@@ -182,9 +187,9 @@ void hostTopk(std::vector<float> const& in, int batch, int len, int k, bool inde
 // boundary group (WarpSort's boundary-tie pick among equal values is
 // path-specific by design). Tie-order divergence is reported as informational.
 bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> const& hostIn, float const* dIn,
-    cudaStream_t stream, char const* label, bool strictOrder)
+    cudaStream_t stream, char const* label, bool strictOrder, int forcePath = 0)
 {
-    PathOutput dev = runPath(batch, len, k, sorted, /*forcePath=*/0, dIn, /*reps=*/3, stream);
+    PathOutput dev = runPath(batch, len, k, sorted, forcePath, dIn, /*reps=*/3, stream);
     std::vector<float> refVals;
     std::vector<int> refIdxs;
     hostTopk(hostIn, batch, len, k, /*indexAscending=*/!sorted, refVals, refIdxs);
@@ -250,8 +255,8 @@ bool checkVsHost(int batch, int len, int k, bool sorted, std::vector<float> cons
             label, batch, len, k, sorted ? 1 : 0, ok ? "PASS" : "FAIL", valuesOk ? "exact" : "MISMATCH", tieRows);
         return ok;
     }
-    std::printf("check[%s]: batch=%d len=%d k=%d sorted=%d -> %s\n", label, batch, len, k, sorted ? 1 : 0,
-        ok ? "PASS" : "FAIL");
+    std::printf("check[%s]: batch=%d len=%d k=%d sorted=%d path=%d -> %s\n", label, batch, len, k, sorted ? 1 : 0,
+        forcePath, ok ? "PASS" : "FAIL");
     if (!ok)
     {
         for (size_t i = 0; i < refIdxs.size(); ++i)
@@ -314,6 +319,33 @@ int runSemanticChecks()
     // step1 C-stage edge: k == len (single beam expanded once).
     prep(1, 50);
     failures += checkVsHost(1, 50, 50, true, hostIn, dIn, stream, "warpsort-C-step1-k-eq-len", false) ? 0 : 1;
+
+    // Full selection used to leave multi-block outputs unwritten. len=3000 can
+    // select multiple blocks even for one row; 32769 also exercises the auto
+    // route beyond the small-len threshold. k>256 avoids ROCm's WarpSort gate.
+    for (auto const& shape : std::vector<std::pair<int, int>>{{1, 3000}, {3, 3000}, {1, 32769}})
+    {
+        int const batch = shape.first;
+        int const len = shape.second;
+        prep(batch, len);
+        for (int row = 0; row < batch; ++row)
+        {
+            for (int col = 0; col < len; ++col)
+            {
+                hostIn[static_cast<size_t>(row) * len + col] = col % 37 == 0 ?
+                    -std::numeric_limits<float>::infinity() : -0.125f * (1 + (col * 37 + row * 13) % 101);
+            }
+        }
+        BENCH_CHECK(cudaMemcpy(dIn, hostIn.data(), hostIn.size() * sizeof(float), cudaMemcpyHostToDevice));
+        for (bool const sorted : {false, true})
+        {
+            for (int const path : {0, 1, 2})
+            {
+                failures += checkVsHost(batch, len, len, sorted, hostIn, dIn, stream,
+                    "radix-full-selection", true, path) ? 0 : 1;
+            }
+        }
+    }
     if (dIn)
     {
         BENCH_CHECK(cudaFree(dIn));
