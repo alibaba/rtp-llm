@@ -77,6 +77,11 @@ def _ensure_model(local_dir: str) -> None:
         want = sizes[name]
         if os.path.exists(dest) and os.path.getsize(dest) == want:
             continue
+        if os.path.exists(dest) and os.path.getsize(dest) > want:
+            # A mismatched oversized file (e.g. a resumed download that
+            # appended a full response onto a partial) cannot be resumed
+            # into the right size; start over.
+            os.remove(dest)
         _curl(f"{base}/{name}", dest)
         if os.path.getsize(dest) != want:
             raise RuntimeError(
