@@ -549,7 +549,10 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
-        if engine_config.module_dispatch.mode == "legacy":
+        # Some mainline tests build engine configs as bare namespaces without
+        # the dispatch knob; default to the legacy wiring in that case.
+        module_dispatch = getattr(engine_config, "module_dispatch", None)
+        if module_dispatch is None or module_dispatch.mode == "legacy":
             propose_model_cls._apply_kv_cache_config(
                 propose_model_config, engine_config.kv_cache_config
             )
@@ -563,13 +566,17 @@ class ModelFactory:
                 propose_model_cls,
                 propose_model_config,
                 engine_config.kv_cache_config,
-                engine_config.module_dispatch,
+                module_dispatch,
             )
         propose_model_cls._post_build_model_config(propose_model_config)
-        propose_model_config.moe_prefill_max_tokens_per_rank = (
-            model_config.moe_prefill_max_tokens_per_rank
+        # Propagate the scheduler knobs only when the caller carries them;
+        # bare-namespace mainline configs omit both.
+        propose_model_config.moe_prefill_max_tokens_per_rank = getattr(
+            model_config, "moe_prefill_max_tokens_per_rank", None
         )
-        propose_model_config.prefill_chunk_size = model_config.prefill_chunk_size
+        propose_model_config.prefill_chunk_size = getattr(
+            model_config, "prefill_chunk_size", 0
+        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

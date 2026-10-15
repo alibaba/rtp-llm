@@ -125,8 +125,10 @@ class _FakeV4:
         self._mtp_last_hidden_buffer = None
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
         self.aux_captures: list[tuple[int, torch.Tensor]] = []
-        self._norm = lambda h: h + 100
         self.norm = lambda h: h + 100
+        # Real models' TP-aware `_norm` delegates to the public `norm`; mirror
+        # that so mainline assertions patching/counting the public name hold.
+        self._norm = lambda h: self.norm(h)
 
     def _propagate_cp_ctx(self, cp_ctx):
         self.cp_ctx = cp_ctx
