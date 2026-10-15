@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -66,14 +67,29 @@ __device__ __forceinline__ uint32_t dequantPair(uint32_t codes, uint16_t scale) 
     return value ^ ((codes & 0x00800080) << 8);
 }
 
+// FP16 scale products fit exactly in FP32. Round each product to BF16 before the original BF16 addition.
+__device__ __forceinline__ uint32_t dequantHalfPair(uint32_t codes, uint16_t scale) {
+    const float s  = __half2float(__ushort_as_half(scale));
+    const int   lo = static_cast<int8_t>(codes & 0xff);
+    const int   hi = static_cast<int8_t>((codes >> 16) & 0xff);
+    return uint32_t(__bfloat16_as_ushort(__float2bfloat16_rn(__fmul_rn(float(lo), s))))
+           | (uint32_t(__bfloat16_as_ushort(__float2bfloat16_rn(__fmul_rn(float(hi), s)))) << 16);
+}
+
 // Decode one thread's INT8 tile using one scale; first initializes acc[kPairsPerThread], otherwise add to it.
-template<bool UseBiasFma>
+template<bool UseBiasFma, bool HalfScale = false>
 __device__ __forceinline__ void accumulateTile(uint4 codes, uint16_t scale, uint32_t* acc, bool first) {
     const uint32_t words[4] = {codes.x, codes.y, codes.z, codes.w};
 #pragma unroll
     for (int i = 0; i < kPairsPerThread; ++i) {
         // 0x4140 selects bytes 0,1; 0x4342 selects bytes 2,3. Bytes from the zero operand pad each to 16 bits.
-        uint32_t value = dequantPair<UseBiasFma>(__byte_perm(words[i / 2], 0, i % 2 ? 0x4342 : 0x4140), scale);
+        const uint32_t codes = __byte_perm(words[i / 2], 0, i % 2 ? 0x4342 : 0x4140);
+        uint32_t       value;
+        if constexpr (HalfScale) {
+            value = dequantHalfPair(codes, scale);
+        } else {
+            value = dequantPair<UseBiasFma>(codes, scale);
+        }
         if (!first) {
             asm("add.bf16x2 %0, %1, %0;" : "+r"(value) : "r"(acc[i]));
         }
@@ -82,9 +98,9 @@ __device__ __forceinline__ void accumulateTile(uint4 codes, uint16_t scale, uint
 }
 #endif
 
-// Quantize `groups` contiguous groups of GroupSize BF16 values into INT8 output and one BF16 scale per group.
+// Quantize BF16 groups into INT8 codes and one FP16 or BF16 scale per group.
 // GroupSize/kElementsPerThread threads cooperate on absmax and each computes its own BF16 scale/reciprocal.
-template<int GroupSize>
+template<int GroupSize, bool HalfScale>
 __global__ void quantizeKernel(const uint4* input, uint4* output, uint16_t* scales, int64_t groups) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     constexpr int group_threads = GroupSize / kElementsPerThread;
@@ -114,11 +130,22 @@ __global__ void quantizeKernel(const uint4* input, uint4* output, uint16_t* scal
         abs_bits = max(abs_bits, __shfl_xor_sync(mask, abs_bits, offset, group_threads));
     }
     // A BF16 encoding shifted left by 16 represents the same value in FP32.
-    const float         absmax  = fmaxf(__uint_as_float(abs_bits << 16), 1.e-10f);
-    const __nv_bfloat16 scale   = __float2bfloat16_rn(absmax / 127.f);
-    const uint32_t      inverse = duplicate(__bfloat16_as_ushort(__float2bfloat16_rn(1.f / __bfloat162float(scale))));
+    const float absmax = fmaxf(__uint_as_float(abs_bits << 16), 1.e-10f);
+    uint16_t    encoded;
+    float       scale;
+    if constexpr (HalfScale) {
+        // Keep a finite, nonzero FP16 scale even outside its representable range.
+        const __half half_scale = __float2half_rn(fminf(fmaxf(absmax / 127.f, 0x1p-24f), 65504.f));
+        encoded                 = __half_as_ushort(half_scale);
+        scale                   = __half2float(half_scale);
+    } else {
+        const __nv_bfloat16 bf16_scale = __float2bfloat16_rn(absmax / 127.f);
+        encoded                        = __bfloat16_as_ushort(bf16_scale);
+        scale                          = __bfloat162float(bf16_scale);
+    }
+    const uint32_t inverse = duplicate(__bfloat16_as_ushort(__float2bfloat16_rn(1.f / scale)));
     if (lane == 0) {
-        scales[group] = __bfloat16_as_ushort(scale);
+        scales[group] = encoded;
     }
     const uint4 a = values[0];
     const uint4 b = values[1];
@@ -135,7 +162,7 @@ __global__ void quantizeKernel(const uint4* input, uint4* output, uint16_t* scal
 // Decode and sum `inputs` sources in order; each thread writes one of `tiles` kElementsPerThread-element tiles.
 // GroupSize is the number of codes per scale; source strides are in elements of their respective arrays.
 // StaticInputs selects a fixed source count, or uses `inputs` when zero. Each source is contiguous [M,K].
-template<int GroupSize, int StaticInputs>
+template<int GroupSize, int StaticInputs, bool HalfScale>
 __global__ void reduceKernel(const int8_t*   codes,
                              const uint16_t* scales,
                              uint4*          output,
@@ -155,7 +182,9 @@ __global__ void reduceKernel(const int8_t*   codes,
         const uint4    q     = reinterpret_cast<const uint4*>(codes + source * code_stride)[tile];
         const uint16_t scale = scales[source * scale_stride + tile / (GroupSize / kElementsPerThread)];
         // 0x7f80 masks the exponent. A positive normal scale <=0x7bff remains finite when multiplied by 128.
-        if ((scale & 0x7f80) != 0 && scale <= 0x7bff) {
+        if constexpr (HalfScale) {
+            accumulateTile<false, true>(q, scale, acc, source == 0);
+        } else if ((scale & 0x7f80) != 0 && scale <= 0x7bff) {
             accumulateTile<true>(q, scale, acc, source == 0);
         } else {
             accumulateTile<false>(q, scale, acc, source == 0);
@@ -185,6 +214,16 @@ void dispatchGroup(int64_t group_size, Function function) {
     }
 }
 
+// The tensor dtype selects the wire codec consistently for quantization and decoding.
+template<typename Function>
+void dispatchScale(const at::Tensor& scales, Function function) {
+    if (scales.scalar_type() == at::kHalf) {
+        function(std::true_type{});
+    } else {
+        function(std::false_type{});
+    }
+}
+
 // Check devices, dtypes, group_size and alignment; x is the BF16 input or output, q the INT8 codes, s the scales.
 // Value finiteness and non-overlapping storage are caller preconditions, not checked here.
 void checkTensors(const at::Tensor& x, const at::Tensor& q, const at::Tensor& s, int64_t group_size) {
@@ -193,8 +232,9 @@ void checkTensors(const at::Tensor& x, const at::Tensor& q, const at::Tensor& s,
     TORCH_CHECK(x.is_cuda() && q.is_cuda() && s.is_cuda(), "CUDA tensors required");
     TORCH_CHECK(x.device() == q.device() && x.device() == s.device(), "Devices must match");
     TORCH_CHECK(at::cuda::getDeviceProperties(x.get_device())->major >= 9, "Fast BF16/INT8 requires SM90+");
-    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && q.scalar_type() == at::kChar && s.scalar_type() == at::kBFloat16,
-                "Expected BF16 data, INT8 codes, BF16 scales");
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 && q.scalar_type() == at::kChar
+                    && (s.scalar_type() == at::kBFloat16 || s.scalar_type() == at::kHalf),
+                "Expected BF16 data, INT8 codes, FP16 or BF16 scales");
     TORCH_CHECK(x.dim() == 2 && x.is_contiguous() && x.size(1) % group_size == 0,
                 "Expected contiguous BF16 [M,K], K divisible by group_size");
     TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % kVectorAlignment == 0
@@ -203,10 +243,10 @@ void checkTensors(const at::Tensor& x, const at::Tensor& q, const at::Tensor& s,
 }
 
 // Launch reduction of q[R,M,K] with scales[R,M,K/GroupSize] into out[M,K]; Inputs=0 uses runtime R.
-template<int GroupSize, int Inputs>
+template<int GroupSize, int Inputs, bool HalfScale>
 void launchReduce(const at::Tensor& q, const at::Tensor& scales, at::Tensor& out) {
     const int64_t tiles = out.numel() / kElementsPerThread;
-    reduceKernel<GroupSize, Inputs>
+    reduceKernel<GroupSize, Inputs, HalfScale>
         <<<(tiles + kThreads - 1) / kThreads, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
             static_cast<const int8_t*>(q.data_ptr()),
             static_cast<const uint16_t*>(scales.data_ptr()),
@@ -219,26 +259,28 @@ void launchReduce(const at::Tensor& q, const at::Tensor& scales, at::Tensor& out
 
 }  // namespace
 
-// Quantize BF16 x[M,K] into INT8 q[M,K] and BF16 scales[M,K/group_size] on the current CUDA stream.
+// Quantize BF16 x[M,K] into INT8 q[M,K] and FP16/BF16 scales[M,K/group_size] on the current stream.
 void fastBf16Int8Quantize(at::Tensor x, at::Tensor q, at::Tensor scales, int64_t group_size) {
     checkTensors(x, q, scales, group_size);
     TORCH_CHECK(q.sizes() == x.sizes() && q.is_contiguous(), "Expected contiguous INT8 [M,K]");
     TORCH_CHECK(scales.dim() == 2 && scales.size(0) == x.size(0) && scales.size(1) == x.size(1) / group_size
                     && scales.is_contiguous(),
-                "Expected contiguous BF16 scales [M,K/group_size]");
+                "Expected contiguous FP16 or BF16 scales [M,K/group_size]");
     const c10::cuda::CUDAGuard guard(x.device());
     const int64_t              groups = x.numel() / group_size;
     if (groups == 0) {
         return;
     }
     const int64_t tiles = x.numel() / kElementsPerThread;
-    dispatchGroup(group_size, [&](auto group) {
-        quantizeKernel<decltype(group)::value>
-            <<<(tiles + kThreads - 1) / kThreads, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-                static_cast<const uint4*>(x.data_ptr()),
-                static_cast<uint4*>(q.data_ptr()),
-                static_cast<uint16_t*>(scales.data_ptr()),
-                groups);
+    dispatchScale(scales, [&](auto half_scale) {
+        dispatchGroup(group_size, [&](auto group) {
+            quantizeKernel<decltype(group)::value, decltype(half_scale)::value>
+                <<<(tiles + kThreads - 1) / kThreads, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+                    static_cast<const uint4*>(x.data_ptr()),
+                    static_cast<uint4*>(q.data_ptr()),
+                    static_cast<uint16_t*>(scales.data_ptr()),
+                    groups);
+        });
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -250,7 +292,7 @@ void fastBf16Int8DequantizeReduce(at::Tensor q, at::Tensor scales, at::Tensor ou
                 "Expected INT8 [R,M,K], R > 0");
     TORCH_CHECK(scales.dim() == 3 && scales.size(0) == q.size(0) && scales.size(1) == out.size(0)
                     && scales.size(2) == out.size(1) / group_size,
-                "Expected BF16 scales [R,M,K/group_size]");
+                "Expected FP16 or BF16 scales [R,M,K/group_size]");
     TORCH_CHECK(q.select(0, 0).is_contiguous() && scales.select(0, 0).is_contiguous(),
                 "Each source must be contiguous");
     TORCH_CHECK(q.size(0) == 1
@@ -261,25 +303,27 @@ void fastBf16Int8DequantizeReduce(at::Tensor q, at::Tensor scales, at::Tensor ou
     if (out.numel() == 0) {
         return;
     }
-    dispatchGroup(group_size, [&](auto group) {
-        constexpr int size = decltype(group)::value;
-        switch (q.size(0)) {
-            case 1:
-                launchReduce<size, 1>(q, scales, out);
-                break;
-            case 2:
-                launchReduce<size, 2>(q, scales, out);
-                break;
-            case 4:
-                launchReduce<size, 4>(q, scales, out);
-                break;
-            case 8:
-                launchReduce<size, 8>(q, scales, out);
-                break;
-            default:
-                launchReduce<size, 0>(q, scales, out);
-                break;
-        }
+    dispatchScale(scales, [&](auto half_scale) {
+        dispatchGroup(group_size, [&](auto group) {
+            constexpr int size = decltype(group)::value;
+            switch (q.size(0)) {
+                case 1:
+                    launchReduce<size, 1, decltype(half_scale)::value>(q, scales, out);
+                    break;
+                case 2:
+                    launchReduce<size, 2, decltype(half_scale)::value>(q, scales, out);
+                    break;
+                case 4:
+                    launchReduce<size, 4, decltype(half_scale)::value>(q, scales, out);
+                    break;
+                case 8:
+                    launchReduce<size, 8, decltype(half_scale)::value>(q, scales, out);
+                    break;
+                default:
+                    launchReduce<size, 0, decltype(half_scale)::value>(q, scales, out);
+                    break;
+            }
+        });
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

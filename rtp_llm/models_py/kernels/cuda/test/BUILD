@@ -3,12 +3,28 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_library(
+    name = "fast_bf16_int8_test_utils",
+    srcs = ["fast_bf16_int8_test_utils.py"],
+    deps = ["//rtp_llm:torch"],
+)
+
 py_test(
     name = "fast_bf16_int8_test",
     srcs = ["fast_bf16_int8_test.py"],
-    deps = py_test_deps,
-    tags = ["RTX_5000_PRO"],
-    exec_properties = {"gpu": "RTX_5000_PRO"},
+    deps = py_test_deps + [":fast_bf16_int8_test_utils"],
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
+    name = "fast_bf16_int8_tp_test",
+    srcs = ["fast_bf16_int8_tp_test.py"],
+    deps = py_test_deps + [":fast_bf16_int8_test_utils"],
+    timeout = "long",
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
 )
 
 py_test (

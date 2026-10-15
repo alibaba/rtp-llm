@@ -37,7 +37,7 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 #ifndef USE_PPU
     rtp_ops_m.def("fast_bf16_int8_quantize",
                   &fastBf16Int8Quantize,
-                  "Quantize BF16 groups to INT8 with BF16 scales",
+                  "Quantize BF16 groups to INT8 with FP16 or BF16 scales",
                   py::arg("input"),
                   py::arg("output_q"),
                   py::arg("output_s"),
