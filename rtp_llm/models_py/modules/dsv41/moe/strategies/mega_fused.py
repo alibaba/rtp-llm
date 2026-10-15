@@ -130,7 +130,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_fused_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -243,6 +243,11 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
     ) -> torch.Tensor:
         """Run MegaMoE fused with router gate + input pack fused together."""
+        if not self.can_use_gate_pack_static(gate):
+            raise RuntimeError(
+                "DSV4.1 MegaMoE fused gate-pack is disabled for MaxPander "
+                "adaptation; use explicit gate/Top-K and forward"
+            )
         kernels = _get_gate_pack_kernels()
         fused_mega_moe_gate_pack_nonhash, fused_mega_moe_gate_pack_hash, _ = kernels
         T = x.size(0)

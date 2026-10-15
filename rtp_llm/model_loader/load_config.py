@@ -1,6 +1,7 @@
 import enum
 import json
 import logging
+import os
 from typing import Any, List, Optional, Union
 
 import torch
@@ -147,6 +148,26 @@ class LoadConfig(BaseModel):
 
         phy2log: List[List[int]] = []
 
+        if os.environ.get("MAXPANDER_ENABLE", "0") == "1" and expert_num > 0:
+            if phy2log_path:
+                raise ValueError("MaxPander static placement cannot use phy2log_path")
+            from rtp_llm.eplb.maxpander_plan import build_circulant_plan
+
+            plan, _, _ = build_circulant_plan(
+                expert_num,
+                phy_exp_num,
+                ep_size,
+                seed=int(os.environ.get("MAXPANDER_SEED", "0")),
+            )
+            logging.info(
+                "MaxPander startup placement: logical=%d physical=%d EP=%d seed=%s layers=%d",
+                expert_num,
+                phy_exp_num,
+                ep_size,
+                os.environ.get("MAXPANDER_SEED", "0"),
+                layer_num,
+            )
+            return [plan.tolist() for _ in range(layer_num)]
         if phy2log_path:
             with open(phy2log_path, "r") as f:
                 phy2log = json.load(f)

@@ -1,5 +1,18 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+# Small contract-test closure: no native model/attention/FP4 dependencies.
+py_library(
+    name = "maxpander",
+    srcs = [
+        "modules/__init__.py",
+        "modules/maxpander.py",
+        "modules/maxpander_kernels.py",
+        "//rtp_llm:eplb/maxpander_plan.py",
+    ],
+    deps = ["//rtp_llm:torch", "//rtp_llm:numpy", "//rtp_llm:triton"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([

@@ -508,6 +508,18 @@ class ModelFactory:
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 
+        if os.environ.get("MAXPANDER_ENABLE", "0") == "1":
+            from rtp_llm.eplb.maxpander_plan import draft_redundant_experts
+
+            # Draft configs are created independently, not cloned from target.
+            # Propagate a private static config after its logical E is resolved.
+            propose_model_config.eplb_config = copy.deepcopy(model_config.eplb_config)
+            propose_model_config.eplb_config.redundant_expert = draft_redundant_experts(
+                int(model_config.expert_num),
+                int(model_config.eplb_config.redundant_expert),
+                int(propose_model_config.expert_num),
+            )
+
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(
                 sp_config, model_config, propose_model_config

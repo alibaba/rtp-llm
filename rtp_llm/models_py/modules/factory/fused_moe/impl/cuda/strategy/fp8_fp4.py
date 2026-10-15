@@ -28,7 +28,10 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.moe_strategy in ("auto", cls.strategy_name))
         checker.check(config.moe_quant_method == "FP8_FP4")
-        checker.check(not config.has_redundant_experts)
+        checker.check(
+            not config.has_redundant_experts
+            or (getattr(config, "maxpander_enabled", False) and cls.requires_ep)
+        )
         checker.check((config.ep_size > 1) == cls.requires_ep)
         if cls.requires_shared:
             checker.check(config.n_shared_experts > 0)
@@ -76,6 +79,13 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
         )
 
         if not _mega_moe_se_available():
+            from rtp_llm.models_py.modules.maxpander import maxpander_enabled
+
+            if maxpander_enabled():
+                raise RuntimeError(
+                    "MaxPander mega_moe_se requires DeepGEMM shared_recipe support; "
+                    "refusing to silently replace the anchor's fused shared expert"
+                )
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
                 MegaMoeExecutor,
             )
