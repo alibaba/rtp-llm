@@ -535,7 +535,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseDeadlineAbortsRankZe
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->complete(0, true);
+    tp_result->finishRank(0, true);
 
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("cancel-hold", tp_result);
 
@@ -568,7 +568,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CompletedBeforeDeadlineObservationRe
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->complete(0, true);
+    tp_result->finishRank(0, true);
 
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("completed-before-observation", tp_result);
     auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
@@ -597,7 +597,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_DeadlineBroadcastsCancelWhenReadAlre
 
     auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
-    tp_result->complete(0, true);
+    tp_result->finishRank(0, true);
 
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
     auto context = std::make_shared<P2PConnectorAsyncReadContext>(createValidKVCacheResource(1, 1),
@@ -1399,7 +1399,7 @@ TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadInd
         EXPECT_EQ(collector->decode_schedule_tp_sync_cost_time_us.load(), -1);
         EXPECT_EQ(collector->decode_schedule_server_call_cost_time_us.load(), -1);
         auto generation = notification->generation();
-        rpc->complete(0, true);
+        rpc->finishRank(0, true);
         EXPECT_GT(notification->generation(), generation);
         EXPECT_EQ(collector->decode_schedule_tp_sync_cost_time_us.load(), -1);
         EXPECT_EQ(collector->decode_schedule_server_call_cost_time_us.load(), -1);
@@ -1409,7 +1409,7 @@ TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadInd
         EXPECT_GE(collector->decode_schedule_server_call_cost_time_us.load(), 0);
         EXPECT_EQ(collector->decode_schedule_tp_sync_cost_time_us.load(), -1);
         generation = notification->generation();
-        rpc->complete(1, true);
+        rpc->finishRank(1, true);
         EXPECT_GT(notification->generation(), generation);
         EXPECT_GE(collector->decode_schedule_tp_sync_cost_time_us.load(), 0);
 
@@ -1476,7 +1476,7 @@ TEST_F(P2PConnectorSchedulerTest, StartLoadFirstFailureSurvivesLaterReadCancelAn
     EXPECT_TRUE(context->resourceHoldPending());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
     worker->status = grpc::Status(grpc::StatusCode::CANCELLED, "later READ cancellation");
-    tp->complete(0, true);
+    tp->finishRank(0, true);
     context->checkDone();
     EXPECT_FALSE(context->expireTransferDeadlineIfNeeded());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
@@ -1492,7 +1492,7 @@ TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRan
     group.spec                           = test::makeResolvedMlaSpec(DataType::TYPE_FP16, 16, 8, 1);
     group.policy                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.block_num                      = 16;
-    auto                        topology = test::makeIndexedTestTopology({group});
+    auto                        topology = test::makeIndexedTestTopology({group}, {{0}});
     P2PConnectorSchedulerConfig prefill_config;
     prefill_config.topology                   = topology;
     prefill_config.parallelism_config.tp_size = 8;
