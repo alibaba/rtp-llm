@@ -431,17 +431,19 @@ bool RemoteConnector::init() {
         if (shared_memory_fd >= 0) {
             memory_registrations.host = {memory_connector->hostPoolBaseAddress(),
                                          memory_connector->hostPoolSizeBytes(),
-                                         shared_memory_fd};
+                                         shared_memory_fd,
+                                         memory_connector->hostPoolNumaNode()};
             RTP_LLM_CHECK_WITH_INFO(memory_registrations.host.base != nullptr && memory_registrations.host.size > 0,
                                     "invalid shared host block pool registration: fd=%d base=%p size=%zu",
                                     memory_registrations.host.fd,
                                     memory_registrations.host.base,
                                     memory_registrations.host.size);
             memory_registrations_ptr = &memory_registrations;
-            RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu",
+            RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu numa_node=%d",
                              memory_registrations.host.fd,
                              memory_registrations.host.base,
-                             memory_registrations.host.size);
+                             memory_registrations.host.size,
+                             memory_registrations.host.numa_node);
         }
     }
     if (init_params_->kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled()) {

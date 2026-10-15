@@ -13,7 +13,10 @@
 #include <string>
 
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#include <linux/memfd.h>
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -267,6 +270,41 @@ TEST(NumaMemoryPolicyTest, InvalidMappingReturnsStructuredError) {
     EXPECT_FALSE(result.applied);
     EXPECT_EQ(result.error_number, EINVAL);
     EXPECT_FALSE(result.error_message.empty());
+}
+
+TEST(NumaMemoryPolicyTest, MemfdPagesAreVerifiedOnOneAllowedNode) {
+    constexpr size_t size  = 4 * kMiB;
+    void*            probe = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_NE(probe, MAP_FAILED);
+    const auto allowed = applyAllowedNumaInterleavePolicy(probe, size);
+    ASSERT_EQ(::munmap(probe, size), 0);
+    if (numaPolicySyscallIsBlocked(allowed)) {
+        GTEST_SKIP() << allowed.error_message;
+    }
+    ASSERT_TRUE(allowed.success) << allowed.error_message;
+    ASSERT_FALSE(allowed.allowed_nodes.empty());
+
+    const int fd = static_cast<int>(::syscall(SYS_memfd_create, "numa_bind_test", MFD_CLOEXEC));
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::ftruncate(fd, size), 0);
+    void* mapping = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ASSERT_NE(mapping, MAP_FAILED);
+    const int  node   = allowed.allowed_nodes.front();
+    const auto result = bindAndVerifyNumaNode(mapping, size, node);
+    if (numaPolicySyscallIsBlocked(result)) {
+        ASSERT_EQ(::munmap(mapping, size), 0);
+        ASSERT_EQ(::close(fd), 0);
+        GTEST_SKIP() << result.error_message;
+    }
+    EXPECT_TRUE(result.success) << result.error_message;
+    if (result.success) {
+        const auto info = numaMappingInfo(mapping);
+        EXPECT_NE(info.line.find("bind:"), std::string::npos) << info.line;
+        EXPECT_EQ(info.pages_by_node.size(), 1u) << info.line;
+        EXPECT_EQ(info.pages_by_node.count(node), 1u) << info.line;
+    }
+    ASSERT_EQ(::munmap(mapping, size), 0);
+    ASSERT_EQ(::close(fd), 0);
 }
 
 TEST(NumaMemoryPolicyTest, InvalidHostBlockPoolInterleaveFlagFailsFast) {

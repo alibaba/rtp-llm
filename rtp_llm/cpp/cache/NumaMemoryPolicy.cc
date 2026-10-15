@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/NumaMemoryPolicy.h"
 
 #include <cerrno>
+#include <cstdint>
 #include <climits>
 #include <cstring>
 #include <sstream>
@@ -91,6 +92,75 @@ NumaInterleavePolicyResult applyAllowedNumaInterleavePolicy(void* address, size_
 
     result.success = true;
     result.applied = true;
+    return result;
+}
+
+NumaInterleavePolicyResult bindAndVerifyNumaNode(void* address, size_t size, int node) {
+    if (address == nullptr || size == 0 || node < 0 || static_cast<unsigned long>(node) >= kMaximumMaxNode) {
+        return failureResult("bindAndVerifyNumaNode invalid arguments", EINVAL);
+    }
+    const long page_size = ::sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 || reinterpret_cast<uintptr_t>(address) % static_cast<size_t>(page_size) != 0) {
+        return failureResult("bindAndVerifyNumaNode invalid page alignment", EINVAL);
+    }
+
+    unsigned long              max_node = kInitialMaxNode;
+    std::vector<unsigned long> allowed_mask;
+    for (; max_node <= kMaximumMaxNode; max_node *= 2) {
+        allowed_mask.assign(wordCount(max_node), 0);
+        int mode = MPOL_DEFAULT;
+        errno    = 0;
+        if (::syscall(SYS_get_mempolicy, &mode, allowed_mask.data(), max_node, nullptr, MPOL_F_MEMS_ALLOWED) == 0) {
+            break;
+        }
+        if (errno != EINVAL || max_node == kMaximumMaxNode) {
+            return failureResult("get_mempolicy(MPOL_F_MEMS_ALLOWED)", errno);
+        }
+    }
+    if (static_cast<unsigned long>(node) >= max_node
+        || (allowed_mask[node / kBitsPerWord] & (1UL << (node % kBitsPerWord))) == 0) {
+        return failureResult("GPU NUMA node is not allowed by the process cpuset", EACCES);
+    }
+
+    std::vector<unsigned long> target_mask(wordCount(max_node), 0);
+    target_mask[node / kBitsPerWord] = 1UL << (node % kBitsPerWord);
+    if (::syscall(SYS_mbind, address, size, MPOL_BIND, target_mask.data(), max_node, 0) != 0) {
+        return failureResult("mbind(MPOL_BIND)", errno);
+    }
+
+    // memfd pages must be materialized before CUDA pins them and before PACE
+    // advertises the NUMA hint. A successful mbind alone does not prove placement.
+    auto*        bytes  = static_cast<volatile unsigned char*>(address);
+    const size_t stride = static_cast<size_t>(page_size);
+    for (size_t offset = 0; offset < size; offset += stride) {
+        bytes[offset] = 0;
+    }
+
+    constexpr size_t kBatchPages = 1024;
+    void*            pages[kBatchPages];
+    int              status[kBatchPages];
+    for (size_t offset = 0; offset < size;) {
+        size_t count = 0;
+        for (; count < kBatchPages && offset < size; ++count, offset += stride) {
+            pages[count] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(address) + offset);
+        }
+        if (::syscall(SYS_move_pages, 0, count, pages, nullptr, status, 0) != 0) {
+            return failureResult("move_pages query", errno);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            if (status[i] != node) {
+                NumaInterleavePolicyResult result =
+                    failureResult("Host page is outside GPU NUMA node", status[i] < 0 ? -status[i] : EXDEV);
+                result.error_message += ": expected=" + std::to_string(node) + " actual=" + std::to_string(status[i]);
+                return result;
+            }
+        }
+    }
+
+    NumaInterleavePolicyResult result;
+    result.success       = true;
+    result.applied       = true;
+    result.allowed_nodes = {node};
     return result;
 }
 

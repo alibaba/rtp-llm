@@ -21,4 +21,8 @@ struct NumaInterleavePolicyResult {
 // interleaving is unnecessary. The caller must apply this before first touch.
 NumaInterleavePolicyResult applyAllowedNumaInterleavePolicy(void* address, size_t size);
 
+// Bind an unpopulated mapping to one allowed node, fault every page in, and
+// verify physical placement before the caller advertises the node to PACE.
+NumaInterleavePolicyResult bindAndVerifyNumaNode(void* address, size_t size, int node);
+
 }  // namespace rtp_llm

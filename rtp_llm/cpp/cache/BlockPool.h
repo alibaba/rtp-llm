@@ -92,6 +92,9 @@ public:
     int getSharedMemoryFd() const {
         return shared_memory_fd_;
     }
+    int getRegisteredNumaNode() const {
+        return registered_numa_node_;
+    }
 
 private:
     void initFreeBlocks();
@@ -156,6 +159,7 @@ private:
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_               = nullptr;
     int                         shared_memory_fd_             = -1;
+    int                         registered_numa_node_         = -1;
     bool                        cache_buffer_registered_host_ = false;
     bool                        dedicated_cuda_allocation_    = false;
     size_t                      allocation_size_bytes_        = 0;

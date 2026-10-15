@@ -72,6 +72,7 @@ public:
     void* hostPoolBaseAddress() const;
     size_t hostPoolSizeBytes() const;
     int hostPoolSharedMemoryFd() const;
+    int    hostPoolNumaNode() const;
 
     using MemoryRemoteEvictionItem = MemoryDiskBlockCache::CacheItem;
     using HostBlockBuffer = std::vector<BlockInfo>;

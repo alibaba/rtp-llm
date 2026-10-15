@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -35,6 +36,7 @@ bool shouldPinHostBlockPool();
 bool shouldRegisterHostBlockPool();
 bool shouldUseMemfdHostBlockPool();
 bool shouldInterleaveRegisteredHostBlockPool();
+bool shouldUseGpuLocalHostNuma();
 void validateHostBlockPoolSettings(bool pin_host_pool, bool use_registered_host, bool interleave_numa_nodes);
 
 const bool kShouldPinHostBlockPool = []() {
@@ -118,6 +120,44 @@ bool shouldInterleaveRegisteredHostBlockPool() {
                                 + "', expected '1' or '0'");
 }
 
+bool shouldUseGpuLocalHostNuma() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY");
+    if (value == nullptr || std::string(value) == "none") {
+        return false;
+    }
+    if (std::string(value) == "gpu_local") {
+        return true;
+    }
+    throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY='") + value
+                                + "', expected 'none' or 'gpu_local'");
+}
+
+int currentGpuNumaNode() {
+#if USING_CUDA
+    int  device = -1;
+    auto error  = cudaGetDevice(&device);
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaGetDevice failed: ") + cudaGetErrorString(error));
+    }
+    char pci_bus_id[32] = {};
+    error               = cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), device);
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaDeviceGetPCIBusId failed: ") + cudaGetErrorString(error));
+    }
+    const std::string path = std::string("/sys/bus/pci/devices/") + pci_bus_id + "/numa_node";
+    std::ifstream     node_file(path);
+    int               node = -1;
+    if (!(node_file >> node) || node < 0) {
+        throw std::runtime_error("GPU PCI NUMA node is unavailable: " + path);
+    }
+    RTP_LLM_LOG_INFO(
+        "host block pool GPU locality: cuda_device=%d pci_bus_id=%s numa_node=%d", device, pci_bus_id, node);
+    return node;
+#else
+    throw std::runtime_error("gpu_local host NUMA policy requires CUDA");
+#endif
+}
+
 void validateHostBlockPoolSettings(bool pin_host_pool, bool use_registered_host, bool interleave_numa_nodes) {
     if (!pin_host_pool && (use_registered_host || interleave_numa_nodes)) {
         throw std::invalid_argument(
@@ -154,11 +194,17 @@ void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
 }
 #endif
 
-torch::Tensor
-allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, bool use_memfd, int* shared_memory_fd) {
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
+                                          bool   interleave_numa_nodes,
+                                          bool   use_memfd,
+                                          int    target_numa_node,
+                                          int*   shared_memory_fd,
+                                          int*   registered_numa_node) {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(shared_memory_fd != nullptr, "shared memory fd output must not be null");
+    RTP_LLM_CHECK_WITH_INFO(registered_numa_node != nullptr, "NUMA node output must not be null");
     *shared_memory_fd = -1;
+    *registered_numa_node = -1;
     int fd = -1;
     if (use_memfd) {
         fd = static_cast<int>(::syscall(SYS_memfd_create, "rtp_llm_host_block_pool", MFD_CLOEXEC));
@@ -184,7 +230,19 @@ allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, bool 
         throw std::runtime_error(std::string(use_memfd ? "memfd mmap failed: " : "anonymous mmap failed: ")
                                  + std::strerror(errno));
     }
-    if (interleave_numa_nodes) {
+    if (target_numa_node >= 0) {
+        const auto result = bindAndVerifyNumaNode(ptr, size_bytes, target_numa_node);
+        if (!result.success) {
+            (void)munmap(ptr, size_bytes);
+            if (fd >= 0) {
+                (void)::close(fd);
+            }
+            throw std::runtime_error("failed to bind and verify GPU-local host block pool: " + result.error_message);
+        }
+        *registered_numa_node = target_numa_node;
+        RTP_LLM_LOG_INFO(
+            "registered host block pool NUMA verified: node=%d ptr=%p size=%zu", target_numa_node, ptr, size_bytes);
+    } else if (interleave_numa_nodes) {
         const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
         if (!numa_result.success) {
             (void)munmap(ptr, size_bytes);
@@ -325,17 +383,27 @@ void BlockPool::initializeCacheBuffer() {
         const bool use_registered_host   = shouldRegisterHostBlockPool();
         const bool use_memfd_host        = shouldUseMemfdHostBlockPool();
         const bool interleave_numa_nodes = shouldInterleaveRegisteredHostBlockPool();
+        const bool gpu_local_numa        = shouldUseGpuLocalHostNuma();
         validateHostBlockPoolSettings(pin_host_pool, use_registered_host, interleave_numa_nodes);
+        if (gpu_local_numa && (!pin_host_pool || !use_memfd_host || interleave_numa_nodes)) {
+            throw std::invalid_argument("gpu_local host NUMA policy requires pinned memfd_register mode and "
+                                        "RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE=0");
+        }
         if (pin_host_pool) {
             if (use_registered_host) {
                 // The registered path is strict: falling back would silently lose the
                 // requested NUMA placement and can reproduce single-node OOMs.
                 RTP_LLM_LOG_INFO("registered host block pool allocation requested: backing=%s policy=%s size=%zu",
                                  use_memfd_host ? "memfd_shared" : "anonymous_private",
-                                 interleave_numa_nodes ? "interleave" : "none",
+                                 gpu_local_numa ? "gpu_local" : (interleave_numa_nodes ? "interleave" : "none"),
                                  config_.total_size_bytes);
-                cache_aligned_buffer_ = allocateRegisteredCpuTensor(
-                    config_.total_size_bytes, interleave_numa_nodes, use_memfd_host, &shared_memory_fd_);
+                const int target_numa_node    = gpu_local_numa ? currentGpuNumaNode() : -1;
+                cache_aligned_buffer_         = allocateRegisteredCpuTensor(config_.total_size_bytes,
+                                                                    interleave_numa_nodes,
+                                                                    use_memfd_host,
+                                                                    target_numa_node,
+                                                                    &shared_memory_fd_,
+                                                                    &registered_numa_node_);
                 cache_buffer_registered_host_ = true;
             } else {
                 try {
