@@ -877,7 +877,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.prefill_wrapper._paged_kv_last_page_len_buf = (
                 self.fmha_params.paged_kv_last_page_len_d.view(-1)
             )
-            self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
+            # Dedicated stable buffer for the wrapper's page table: plan()
+            # copies the dense compacted [0..N) table into
+            # _paged_kv_indices_buf on every prepare. Aliasing
+            # fmha_params.page_indice_d here would overwrite the original
+            # page ids that KVCacheWriteOp (dynamic FP8 mode 2) still needs —
+            # corrupting cache writes under CUDA graphs (capture and replay).
+            self.prefill_wrapper._paged_kv_indices_buf = torch.zeros_like(
+                self.fmha_params.page_indice_d
+            )
             self.prefill_wrapper._fixed_batch_size = (
                 len(attn_inputs.cu_seqlens_device) - 1
             )

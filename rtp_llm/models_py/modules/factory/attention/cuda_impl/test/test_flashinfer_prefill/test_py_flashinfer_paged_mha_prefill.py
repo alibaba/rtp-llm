@@ -957,6 +957,66 @@ class TestDynamicFp8PagedPrefillUnit(unittest.TestCase):
         self.assertEqual(gather_args[3].dtype, torch.bfloat16)
         self.assertEqual(gather_args[4:], (32, 8, 4))
 
+    def test_mode2_graph_plan_does_not_clobber_original_page_ids(self) -> None:
+        """flashinfer plan() copies its (compacted) table into the wrapper's
+        _paged_kv_indices_buf. Aliasing fmha_params.page_indice_d to that
+        buffer let plan() overwrite the original page ids that
+        KVCacheWriteOp reads — corrupting mode-2 cache writes under CUDA
+        graphs (capture and replay)."""
+        params = SimpleNamespace(
+            fill_params=mock.Mock(),
+            decode_page_indptr_d=torch.tensor([0, 2], dtype=torch.int32),
+            page_indice_d=torch.tensor([9, 3, 77], dtype=torch.int32),
+            paged_kv_last_page_len_d=torch.tensor([2], dtype=torch.int32),
+        )
+        original = params.page_indice_d.clone()
+
+        def fake_plan(qo_indptr, kv_indptr, kv_indices, *args, **kwargs):
+            # Mirror flashinfer's plan(): copy the table into the wrapper's
+            # stable buffer.
+            wrapper._paged_kv_indices_buf[: kv_indices.numel()].copy_(kv_indices)
+
+        wrapper = SimpleNamespace(_qo_indptr_buf=None, plan=mock.Mock(side_effect=fake_plan))
+        op = _NoReleasePagedAttnOp.__new__(_NoReleasePagedAttnOp)
+        op.g_workspace_buffer = torch.empty(0)
+        op.local_head_num = 4
+        op.local_kv_head_num = 2
+        op.head_dim_qk = 4
+        op.head_dim_vo = 4
+        op.page_size = 8
+        op.dtype = torch.bfloat16
+        op.kv_dtype = torch.bfloat16
+        op.q_dtype = torch.bfloat16
+        op.is_causal = True
+        op.dynamic_fp8 = True
+        op.enable_cuda_graph = True
+        op._workspace_compacted = True
+        op.prefill_cuda_graph_copy_params = None
+        op.fmha_params = params
+        op.prefill_wrapper = wrapper
+        inputs = SimpleNamespace(
+            kv_cache_kernel_block_id=torch.tensor([[9, 3]], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=None,
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            sequence_lengths=torch.tensor([2], dtype=torch.int32),
+            cu_seqlens_device=torch.tensor([0, 2], dtype=torch.int32),
+            prefill_cuda_graph_copy_params=None,
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+            "check_attention_inputs"
+        ):
+            op.prepare(inputs)
+
+        # The original page ids survive plan(); the wrapper buffer holds the
+        # dense compacted table instead.
+        torch.testing.assert_close(params.page_indice_d, original)
+        torch.testing.assert_close(
+            wrapper._paged_kv_indices_buf[:2], torch.tensor([0, 1], dtype=torch.int32)
+        )
+
     def test_mode2_end_to_end_attention_matches_base_reference(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
