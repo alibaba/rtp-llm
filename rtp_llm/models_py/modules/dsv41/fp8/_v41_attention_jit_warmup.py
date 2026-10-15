@@ -705,6 +705,12 @@ def _warm_swa_refresh(device):
     _require_launch(_v41_swa_refresh_triton.warmup(device), "ragged SWA refresh")
 
 
+def _warm_norm_quant(device):
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_norm_quant
+
+    _require_launch(_v41_norm_quant.warmup(device), "attention RMSNorm quantization")
+
+
 def _warm_candidate_topk(device):
     from . import _v41_candidate_topk
 
@@ -1232,6 +1238,7 @@ def warmup_v41_attention_jit(
 
     with torch.inference_mode(), torch.cuda.device(device):
         run(("swa_refresh",), partial(_warm_swa_refresh, device))
+        run(("norm_quant",), partial(_warm_norm_quant, device))
         for key, attn in attentions.items():
             run(("flash_mla", key), partial(_warm_flash_mla, attn, device))
             run(("q_norm_rope", key), partial(_warm_q_norm_rope, attn, device))

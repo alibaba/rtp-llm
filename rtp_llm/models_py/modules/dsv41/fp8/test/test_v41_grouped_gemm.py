@@ -23,6 +23,20 @@ op = load()
 
 
 class HostContractTest(unittest.TestCase):
+    def test_blackwell_family_warmup_gate_is_cached(self):
+        op._device_supported.cache_clear()
+        self.addCleanup(op._device_supported.cache_clear)
+        for index, capability in enumerate(
+            ((9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
+        ):
+            device = torch.device("cuda", index)
+            with self.subTest(capability=capability), mock.patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as query:
+                self.assertEqual(op._device_supported(device), capability[0] == 10)
+                self.assertEqual(op._device_supported(device), capability[0] == 10)
+                query.assert_called_once_with(device)
+
     def test_valid_supplied_output_preserves_launch_arguments(self):
         x = SimpleNamespace(device=torch.device("cuda:0"), shape=(12, 512))
         weight, out, library = object(), object(), object()
@@ -67,12 +81,12 @@ class HostContractTest(unittest.TestCase):
                 self.assertFalse(op._rows_supported(rows, total))
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA13 SM100")
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA13 Blackwell SM10x")
 class CUDAContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability() != (10, 0):
-            raise unittest.SkipTest("requires SM100")
+        if torch.cuda.get_device_capability()[0] != 10:
+            raise unittest.SkipTest("requires Blackwell SM10x")
         cls.env = mock.patch.dict(os.environ, {"DSV41_GROUPED_INDEX_GEMM": "1"})
         cls.env.start()
         torch.manual_seed(1931)
