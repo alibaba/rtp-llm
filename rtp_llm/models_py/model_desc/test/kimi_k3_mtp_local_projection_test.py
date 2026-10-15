@@ -103,6 +103,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             input_ids=torch.randint(0, 128, (32,)),
             combo_position_ids=torch.arange(32),
             input_hiddens=torch.randn(32, 16),
+            multimodal_inputs=SimpleNamespace(multimodal_features=[]),
         )
         embedding = full_embedding(inputs.input_ids)
         full = model.eh_proj(torch.cat((
