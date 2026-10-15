@@ -411,6 +411,59 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [2], struct.pack("<2i", 1, 2))
         return req
 
+    async def test_pd_prompt_cache_usage_reaches_every_stream_frame(self) -> None:
+        for prefill_reuse in (343040, 0):
+            with self.subTest(prefill_reuse=prefill_reuse):
+                aux = AuxInfo(
+                    input_len=347211,
+                    pd_sep=True,
+                    reuse_len=prefill_reuse,
+                    prefill_total_reuse_len=prefill_reuse,
+                    decode_total_reuse_len=347136,
+                )
+                outputs = [
+                    GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.tensor([token], dtype=torch.int32),
+                                finished=finished,
+                                aux_info=aux,
+                            )
+                        ]
+                    )
+                    for token, finished in ((3, False), (4, True))
+                ]
+                visitor = _FakeVisitor(_FakeAsyncStream(outputs))
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        self._minimal_request(),
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(),
+                        visitor,
+                        rtp_llm_request_id=1,
+                        yield_access_stats=True,
+                    )
+                )
+                self.assertEqual(len(chunks), 2)
+                for response, stats in chunks:
+                    infer = response.infer_response
+                    by_name = {
+                        output.name: raw
+                        for output, raw in zip(infer.outputs, infer.raw_output_contents)
+                    }
+                    self.assertEqual(
+                        _unpack_int32_le(by_name["prompt_cached_token_num"]),
+                        [prefill_reuse],
+                    )
+                    self.assertEqual(
+                        infer.parameters["prompt_cached_token_num"].int64_param,
+                        prefill_reuse,
+                    )
+                    self.assertEqual(stats[3:5], (347211, prefill_reuse))
+                # Billing metadata must not overwrite decode-side diagnostics.
+                self.assertEqual(aux.decode_total_reuse_len, 347136)
+
     async def test_yields_one_chunk_from_mock_enqueue(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(

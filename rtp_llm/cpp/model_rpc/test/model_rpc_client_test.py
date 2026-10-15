@@ -1220,6 +1220,57 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
 
+    def test_trans_output_preserves_prefill_reuse_and_decode_diagnostics(self):
+        for prefill_reuse in (343040, 0):
+            for streaming in (True, False):
+                with self.subTest(prefill_reuse=prefill_reuse, streaming=streaming):
+                    input_py = GenerateInput(
+                        token_ids=torch.zeros(347211, dtype=torch.int32),
+                        generate_config=GenerateConfig(
+                            aux_info=True, is_streaming=streaming
+                        ),
+                        request_id=1,
+                        mm_inputs=[],
+                    )
+                    response = GenerateOutputsPB()
+                    output = response.flatten_output
+                    output.finished.append(True)
+                    output.output_ids.data_type = TensorPB.INT32
+                    output.output_ids.shape.extend([1, 1])
+                    output.output_ids.int32_data = struct.pack("<i", 42)
+                    aux = output.aux_info.add()
+                    aux.pd_sep = True
+                    aux.input_len = 347211
+                    aux.output_len = 1
+                    aux.total_reuse_len = prefill_reuse
+                    aux.local_reuse_len = prefill_reuse
+                    aux.memory_reuse_len = prefill_reuse
+                    aux.prefill_total_reuse_len = prefill_reuse
+                    aux.prefill_local_reuse_len = prefill_reuse
+                    aux.prefill_memory_reuse_len = prefill_reuse
+                    aux.decode_total_reuse_len = 347136
+                    aux.decode_local_reuse_len = 347136
+
+                    wire_response = GenerateOutputsPB.FromString(
+                        response.SerializeToString()
+                    )
+                    actual = (
+                        trans_output(input_py, wire_response, StreamState())
+                        .generate_outputs[0]
+                        .aux_info
+                    )
+
+                    self.assertTrue(actual.pd_sep)
+                    self.assertEqual(actual.input_len, 347211)
+                    self.assertEqual(actual.reuse_len, prefill_reuse)
+                    self.assertEqual(actual.local_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.memory_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.prefill_total_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.prefill_memory_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.decode_total_reuse_len, 347136)
+                    self.assertEqual(actual.decode_local_reuse_len, 347136)
+                    self.assertEqual(actual.decode_memory_reuse_len, 0)
+
     def test_trans_output_generation_prefill_cuda_graph_status_compatibility(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2], dtype=torch.int32),
@@ -1433,13 +1484,16 @@ class ModelRpcClientTest(TestCase):
             enqueued_by_master=True,
         )
 
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
-            return_value=(None, []),
-        ) as start_span:
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                return_value=(None, []),
+            ) as start_span,
+        ):
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
@@ -1468,13 +1522,16 @@ class ModelRpcClientTest(TestCase):
             mm_inputs=[],
         )
 
-        with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
-            return_value=stub,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
-            return_value=(None, []),
-        ) as start_span:
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                return_value=(None, []),
+            ) as start_span,
+        ):
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
@@ -2022,12 +2079,15 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
                 mm_inputs=[],
             )
             try:
-                with patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
-                    return_value=(span, []),
-                ), patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
-                    0.01,
+                with (
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                        return_value=(span, []),
+                    ),
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                        0.01,
+                    ),
                 ):
                     responses = [
                         response async for response in client.enqueue(input_py)
@@ -2063,12 +2123,15 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
                 mm_inputs=[],
             )
             try:
-                with patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
-                    return_value=(span, []),
-                ), patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
-                    0.2,
+                with (
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+                        return_value=(span, []),
+                    ),
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                        0.2,
+                    ),
                 ):
                     gen = client.enqueue(input_py)
                     response = await gen.__anext__()
@@ -2517,11 +2580,16 @@ class ClientSpanSettlementTest(TestCase):
                 client = self._build_client(span, total=1)
                 input_pb = GenerateInputPB(request_id=7)
                 input_pb.multimodal_inputs.add(multimodal_url="image://test")
-                with patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
-                    return_value=input_pb,
-                ), patch.object(
-                    client, "_wait_greennet_verdict", new=AsyncMock(side_effect=error)
+                with (
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+                        return_value=input_pb,
+                    ),
+                    patch.object(
+                        client,
+                        "_wait_greennet_verdict",
+                        new=AsyncMock(side_effect=error),
+                    ),
                 ):
 
                     async def run():
@@ -2567,13 +2635,16 @@ class ClientSpanSettlementTest(TestCase):
                 ]
                 stub = MagicMock()
                 stub.WaitGreenNetVerdict = AsyncMock(side_effect=error)
-                with patch.object(
-                    greennet_hook,
-                    "greennet_enabled",
-                    return_value=True,
-                ), patch(
-                    "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
-                    return_value=stub,
+                with (
+                    patch.object(
+                        greennet_hook,
+                        "greennet_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                        return_value=stub,
+                    ),
                 ):
                     with self.assertRaises(FtRuntimeException) as raised:
                         asyncio.run(

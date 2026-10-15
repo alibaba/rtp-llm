@@ -641,8 +641,6 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
     auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
-    const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const size_t      group_num                = cache_manager ? cache_manager->cacheConfig().groupNums() : 0;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -680,8 +678,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
-                                prefill_disk_reuse_len,
-                                group_num);
+                                prefill_disk_reuse_len);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -702,8 +699,7 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
-                                           int        prefill_disk_reuse_len,
-                                           size_t     group_num) {
+                                           int        prefill_disk_reuse_len) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
@@ -722,21 +718,13 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
     aux_info.set_decode_disk_reuse_len(decode_disk_reuse_len);
 
-    // Preserve single-group prefill attribution. Multi-group handoff may
-    // complete additional reuse, so expose the longer proven phase.
-    if (group_num > 1 && decode_total_reuse_len > prefill_total_reuse_len) {
-        aux_info.set_total_reuse_len(decode_total_reuse_len);
-        aux_info.set_local_reuse_len(decode_local_reuse_len);
-        aux_info.set_remote_reuse_len(decode_remote_reuse_len);
-        aux_info.set_memory_reuse_len(decode_memory_reuse_len);
-        aux_info.set_disk_reuse_len(decode_disk_reuse_len);
-    } else {
-        aux_info.set_total_reuse_len(prefill_total_reuse_len);
-        aux_info.set_local_reuse_len(prefill_local_reuse_len);
-        aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
-        aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
-        aux_info.set_disk_reuse_len(prefill_disk_reuse_len);
-    }
+    // Request-level cache usage measures prefill work avoided, including a cold
+    // prefill's zero hit. Decode handoff/cache reuse is reported separately.
+    aux_info.set_total_reuse_len(prefill_total_reuse_len);
+    aux_info.set_local_reuse_len(prefill_local_reuse_len);
+    aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
+    aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
+    aux_info.set_disk_reuse_len(prefill_disk_reuse_len);
 }
 
 void PrefillRpcServer::mergeMultimodalLengths(GenerateOutputsPB&        response,
