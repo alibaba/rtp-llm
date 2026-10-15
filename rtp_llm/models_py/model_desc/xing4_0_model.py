@@ -69,6 +69,14 @@ def _xing4_fused_norm_quant_enabled() -> bool:
     return os.environ.get("XING4_FUSED_NORM_QUANT", "1") != "0"
 
 
+def _xing4_hc_l0_fold_enabled() -> bool:
+    # Layer-0 replicated-input fold: keep the expand as a broadcast view and
+    # fold the hc_fn GEMM 4x->1x (RMS(x^4)=RMS(x); fn.view(out,hc,H).sum(1)).
+    # Default OFF until the UT+golden gauntlet lands (plan:
+    # fusion_workflow/p1_8_mean_norm_fusion.md).
+    return os.environ.get("XING4_HC_L0_FOLD", "0") == "1"
+
+
 def _xing4_hc_chunk_tokens() -> int:
     raw = os.environ.get("XING4_HC_FALLBACK_CHUNK_TOKENS", "16384")
     try:
@@ -137,7 +145,37 @@ class Xing4HCUnit(HCUnitBase):
         self._scale = maybe_squeeze_hc_1d(self.scale)
         self._fn_stream_dtype: Optional[torch.Tensor] = None
         self._fn_stream_dtype_ref = None
+        self._fn_fold_stream_dtype: Optional[torch.Tensor] = None
+        self._fn_fold_stream_dtype_ref = None
         self._mix_constants_fp32: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+
+    def _fn_fold_for(self, dtype: torch.dtype) -> torch.Tensor:
+        """hc_fn with the hc streams summed: [fn_out, hc*H] -> [fn_out, H].
+
+        For a replicated (broadcast) input the 4-stream GEMM degenerates to
+        the folded single-stream GEMM with identical math (1-ulp fold class:
+        the summed-weight accumulation order differs from the wide GEMM).
+        """
+        if (
+            self._fn_fold_stream_dtype is None
+            or self._fn_fold_stream_dtype.dtype != dtype
+            or self._fn_fold_stream_dtype.device != self.fn.device
+            or self._fn_fold_stream_dtype_ref is not self._fn_for(dtype)
+        ):
+            fn = self._fn_for(dtype)
+            self._fn_fold_stream_dtype = (
+                fn.view(fn.shape[0], self.hc_mult, self.dim)
+                .sum(1)
+                .contiguous()
+            )
+            self._fn_fold_stream_dtype_ref = fn
+        return self._fn_fold_stream_dtype
+
+    @staticmethod
+    def _is_replicated(x: torch.Tensor) -> bool:
+        # Broadcast hc view (stride 0 on the hc axis) — the layer-0 expand
+        # without materialization.
+        return x.dim() == 3 and x.stride(-2) == 0
 
     def _fn_for(self, dtype: torch.dtype) -> torch.Tensor:
         if (
@@ -191,7 +229,16 @@ class Xing4HCUnit(HCUnitBase):
         hc = self.hc_mult
         entries = xing4_hc_triton_entries()
         rows = x.numel() // (hc * self.dim)
-        if rows <= entries.fn_gemv_max_tokens():
+        if self._is_replicated(x):
+            # Layer-0 fold: K1 on the single stream (RMS(x^hc)=RMS(x)) and
+            # the folded hc_fn GEMM; K2/K3 are stream-count agnostic and K3
+            # reads the broadcast view through its x strides.
+            single = x[:, 0, :]
+            flat_normed = entries.row_rms_norm(single, self.norm_eps)
+            mixes = torch.nn.functional.linear(
+                flat_normed, self._fn_fold_for(dtype)
+            )
+        elif rows <= entries.fn_gemv_max_tokens():
             # K1+GEMM fusion (round-2): one kernel produces the hc_fn mixes
             # directly from the stream — no flat_normed materialization, no
             # cuBLAS split-K pair. The rows gate exists because the fused
@@ -237,9 +284,71 @@ class Xing4HCUnit(HCUnitBase):
         flat_normed = (x_flat.float() * rsqrt).to(dtype)
         return torch.nn.functional.linear(flat_normed, self._fn_for(dtype)).float()
 
+    def _pre_impl_folded(self, x: torch.Tensor):
+        """Eager reference chain for a replicated (broadcast) input.
+
+        Same math as ``_pre_impl`` on the single stream: the hc_fn GEMM takes
+        the folded weight, the sinkhorn/comb tail is verbatim, and the
+        collapse ``sum(pre * x, dim=-2)`` reads the broadcast view directly
+        (torch handles stride-0 reductions without materializing).
+        """
+        shape, dtype = x.size(), x.dtype
+        hc = self.hc_mult
+        single = x[:, 0, :]
+        T = single.shape[0]
+        chunk = _xing4_hc_chunk_tokens()
+        fn_fold = self._fn_fold_for(dtype)
+
+        def _mixes_fold(seg: torch.Tensor) -> torch.Tensor:
+            rsqrt = torch.rsqrt(
+                seg.float().square().mean(-1, keepdim=True) + self.norm_eps
+            )
+            flat_normed = (seg.float() * rsqrt).to(dtype)
+            return torch.nn.functional.linear(flat_normed, fn_fold).float()
+
+        if T > chunk:
+            mixes = torch.cat(
+                [_mixes_fold(single[s : s + chunk]) for s in range(0, T, chunk)],
+                dim=0,
+            ).contiguous()
+        else:
+            mixes = _mixes_fold(single)
+
+        pre_w, post_w, comb_w = mixes.split([hc, hc, hc * hc], dim=-1)
+        pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
+        pre_scale, post_scale, comb_scale = self._scale.unbind(0)
+
+        pre = torch.sigmoid(pre_w * pre_scale + pre_b)
+        post = 2.0 * torch.sigmoid(post_w * post_scale + post_b)
+
+        comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
+        comb_logits = comb_logits.clamp(
+            min=self.h_res_clamp_min, max=self.h_res_clamp_max
+        )
+        comb = torch.exp(comb_logits - comb_logits.amax(dim=-1, keepdim=True))
+        for _ in range(self.hc_sinkhorn_iters):
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
+            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+
+        if T > chunk:
+            y = torch.empty((T, shape[-1]), dtype=dtype, device=x.device)
+            pre_dt = pre.to(dtype)
+            for s in range(0, T, chunk):
+                e = min(s + chunk, T)
+                y[s:e] = torch.sum(pre_dt[s:e].unsqueeze(-1) * x[s:e], dim=-2)
+        else:
+            y = torch.sum(pre.to(dtype).unsqueeze(-1) * x, dim=-2)
+        return y.to(dtype), post.to(dtype).unsqueeze(-1), comb.to(dtype)
+
     def _pre_impl(self, x: torch.Tensor, dbg_tag: Optional[str] = None):
         if self._use_fused_pre(x):
             return self._pre_fused(x, x.dtype)
+        if self._is_replicated(x):
+            # Folded eager path: the plain chain would copy at
+            # x.flatten(-2) (broadcast views are not flat-viewable); run the
+            # identical math on the single stream with the folded weight,
+            # chunked like the plain path to bound the fp32 intermediate.
+            return self._pre_impl_folded(x)
         shape, dtype = x.size(), x.dtype
         hc = self.hc_mult
         x_flat = x.flatten(-2)
@@ -615,7 +724,12 @@ class Xing4Model(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         capture = self.capture_context(inputs.capture_hidden_states)
-        h = hidden_states.unsqueeze(-2).expand(-1, self.hc_mult, -1).contiguous()
+        h = hidden_states.unsqueeze(-2).expand(-1, self.hc_mult, -1)
+        if not _xing4_hc_l0_fold_enabled():
+            # Materialize the replicated streams; the fold path keeps the
+            # broadcast view (stride 0 on the hc axis) and lets layer 0 read
+            # the single stream through kernel strides.
+            h = h.contiguous()
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             layer_fmha_impl = select_fmha_impl_for_layer(
                 fmha_impl, self.kv_cache, i
