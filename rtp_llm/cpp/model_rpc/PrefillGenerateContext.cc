@@ -138,6 +138,7 @@ void PrefillGenerateContext::closeGrpcConnection() {
 void PrefillGenerateContext::reset() {
     const bool discard_incomplete_input = hasError() && multimodal_attempt_started_ && !multimodal_processed_;
     GenerateContext::reset();
+    supports_prefill_completion = false;
     if (discard_incomplete_input) {
         // Rebuild from the immutable PB after an incomplete multimodal attempt.
         RTP_LLM_CHECK_WITH_INFO(!token_ids_expanded_, "incomplete multimodal input cannot contain expanded ids");

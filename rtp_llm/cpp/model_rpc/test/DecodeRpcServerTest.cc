@@ -89,6 +89,95 @@ TEST(ModelRpcProtoTest, GenerateRequestCarriesPpTopologyFields) {
     EXPECT_EQ(group->FindFieldByName("peer_addrs")->number(), 3);
 }
 
+TEST(ModelRpcProtoTest, PdHandoffFieldsDoNotAliasPipelineRouting) {
+    const auto* request = GenerateRequestPB::descriptor();
+    EXPECT_EQ(request->FindFieldByName("proposal_is_point_mass")->number(), 13);
+    EXPECT_EQ(request->FindFieldByName("pd_handoff_version")->number(), 14);
+    EXPECT_EQ(GenerateOutputsPB::descriptor()->FindFieldByName("supports_prefill_completion")->number(), 10);
+    EXPECT_EQ(GenerateOutputsPB::descriptor()->FindFieldByName("pd_handoff_version")->number(), 11);
+    EXPECT_EQ(BroadcastLoadRequestPB::descriptor()->FindFieldByName("pd_handoff_version")->number(), 16);
+    EXPECT_EQ(BroadcastLoadResponsePB::descriptor()->FindFieldByName("loaded_cache_block_count")->number(), 3);
+    EXPECT_EQ(BroadcastLoadResponsePB::descriptor()->FindFieldByName("pd_handoff_version")->number(), 4);
+    EXPECT_EQ(static_cast<int>(RemoteStage::PREFILL_COMPLETE), 3);
+
+    GenerateRequestPB original;
+    original.set_pd_handoff_version(PD_HANDOFF_V1);
+    original.set_proposal_is_point_mass(true);
+    auto* stage = original.add_stage_peer_groups();
+    stage->set_layer_begin(22);
+    stage->set_layer_count(21);
+    stage->set_is_last_stage(true);
+    stage->add_peer_addrs("prefill-stage-1");
+    GenerateRequestPB decoded;
+    ASSERT_TRUE(decoded.ParseFromString(original.SerializeAsString()));
+    EXPECT_EQ(decoded.pd_handoff_version(), PD_HANDOFF_V1);
+    EXPECT_TRUE(decoded.proposal_is_point_mass());
+    ASSERT_EQ(decoded.stage_peer_groups_size(), 1);
+    EXPECT_EQ(decoded.stage_peer_groups(0).layer_begin(), 22);
+    EXPECT_EQ(decoded.stage_peer_groups(0).peer_addrs(0), "prefill-stage-1");
+
+    // The old varint at field 12 must not become a stage group or a proposal marker.
+    GenerateRequestPB conflicting;
+    ASSERT_TRUE(conflicting.ParseFromString(std::string("\x60\x01", 2)));
+    EXPECT_EQ(conflicting.stage_peer_groups_size(), 0);
+    EXPECT_FALSE(conflicting.proposal_is_point_mass());
+    EXPECT_EQ(conflicting.pd_handoff_version(), PD_HANDOFF_UNSPECIFIED);
+}
+
+class AllocationProtocolService: public RpcService::Service {
+public:
+    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
+        DecodeRpcServer              server;
+        DecodeRpcContext             rpc_context{stream};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        request(rpc_context, 1000, context, reporter, nullptr);
+        server.prepareGenerateContext(request);
+        return request.error_status;
+    }
+};
+
+TEST(DecodeRpcProtocolTest, RejectsMissingOrUnknownVersionBeforeAllocation) {
+    AllocationProtocolService service;
+    grpc::ServerBuilder       builder;
+    int                       port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    auto stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+    for (int version : {0, 1, 2}) {
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto              call = stub->RemoteGenerate(&context);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::ALLOCATE);
+        request.set_request_id(42);
+        request.set_client_id("prefill");
+        request.set_pd_handoff_version(static_cast<PdHandoffVersionPB>(version));
+        EXPECT_TRUE(call->Write(request));
+        call->WritesDone();
+        GenerateOutputsPB response;
+        EXPECT_FALSE(call->Read(&response));
+        const auto status = call->Finish();
+        EXPECT_EQ(status.error_code(), version == 1 ? grpc::StatusCode::OK : grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    server->Shutdown();
+    server->Wait();
+}
+
+TEST(DecodeRpcProtocolTest, WorkerRejectsOldSchemaBeforeLookingUpCache) {
+    DecodeRpcServer         server;
+    grpc::ServerContext     context;
+    BroadcastLoadRequestPB  request;
+    BroadcastLoadResponsePB response;
+    EXPECT_EQ(server.RemoteLoad(&context, &request, &response).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    request.set_pd_handoff_version(PD_HANDOFF_V1);
+    request.set_dp_rank(server.maga_init_params_.parallelism_config.dp_rank + 1);
+    EXPECT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
+    EXPECT_EQ(response.pd_handoff_version(), PD_HANDOFF_V1);
+}
+
 TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
     DecodeRpcServer server;
     server.resource_.workers                            = {"decode-0", "decode-1", "decode-2", "decode-3"};
@@ -105,6 +194,7 @@ TEST(DecodeRpcServerTest, PpLoadRequestCarriesStagePeerGroups) {
 
     const auto request = server.buildBroadcastLoadRequest(load_context);
 
+    EXPECT_EQ(request.pd_handoff_version(), PD_HANDOFF_V1);
     // PP routing ignores the flat peer list and ships the stage groups instead.
     EXPECT_EQ(request.peer_addrs_size(), 0);
     ASSERT_EQ(request.stage_peer_groups_size(), 2);
@@ -462,6 +552,10 @@ public:
         decode_context.request_key = std::to_string(stream->streamId());
         decode_context.time_info = {};
         decode_context.setStream(stream);
+        if (expire_request) {
+            decode_context.request_timeout_ms    = 1;
+            decode_context.request_begin_time_us = currentTimeUs() - 10000;
+        }
         try {
             server_.localGenerate(decode_context);
         } catch (const std::exception& error) {
@@ -471,6 +565,7 @@ public:
     }
 
     GenerateStreamPtr stream;
+    bool              expire_request = false;
 
 private:
     DecodeRpcServer& server_;
@@ -504,6 +599,12 @@ protected:
         if (server_) {
             server_->Shutdown();
             server_->Wait();
+        }
+        if (service_) {
+            service_->stream.reset();
+        }
+        if (cache_manager_) {
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), 15);
         }
         DeviceTestBase::TearDown();
     }
@@ -539,6 +640,7 @@ protected:
 
     GenerateRequestPB makeRequest(bool remote_payload = true) {
         GenerateRequestPB request;
+        request.set_request_id(42);
         request.set_stage(RemoteStage::GENERATE);
         request.set_first_generate_token_id(7);
         request.add_position_ids(2);
@@ -567,11 +669,19 @@ protected:
             ++output_count;
         }
         const auto status = call->Finish();
+        service_->stream.reset();
         EXPECT_EQ(output_count, 0) << "D must not emit the anchor a second time";
         EXPECT_TRUE(rpc_.meta_->getEngineScheduleInfo(0).running_task_info_list.empty());
-        EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
-        EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
-        EXPECT_EQ(cache_manager_->freeBlocksNum(), 15);
+        if (status.ok() || stream->getStatus() == StreamState::FINISHED) {
+            EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+            EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), 15);
+        } else {
+            // Rejected, unscheduled streams release cache with their final owner.
+            // The caller retains this owner for inspection; TearDown checks release.
+            EXPECT_TRUE(stream->hasError());
+            EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        }
         return status;
     }
 
@@ -583,6 +693,104 @@ protected:
     std::unique_ptr<grpc::Server> server_;
     std::unique_ptr<RpcService::Stub> stub_;
 };
+
+TEST_F(DecodeRpcBootstrapTest, PrefillCompletionReleasesCacheWithoutGenerating) {
+    auto stream  = makeStream();
+    auto request = makeRequest(false);
+    request.set_stage(RemoteStage::PREFILL_COMPLETE);
+    ASSERT_TRUE(runHandoff(stream, request).ok());
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_EQ(processor_->update_calls, 0);
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3}));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(DecodeRpcBootstrapTest, PrefillCompletionRejectsWrongIdentity) {
+    for (bool wrong_client : {false, true}) {
+        auto stream  = makeStream();
+        auto request = makeRequest(false);
+        request.set_stage(RemoteStage::PREFILL_COMPLETE);
+        if (wrong_client) {
+            request.set_client_id("different-client");
+        } else {
+            request.set_request_id(43);
+        }
+        EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        EXPECT_EQ(engine_->enqueue_count, 0);
+        EXPECT_EQ(processor_->update_calls, 0);
+    }
+}
+
+TEST_F(DecodeRpcBootstrapTest, NonPipelinePointMassHandoffRestoresSeedProbabilities) {
+    rpc_.maga_init_params_.parallelism_config.pp_size = 1;
+    rpc_.maga_init_params_.model_config_.vocab_size   = 128;
+    auto stream                                       = makeStream();
+    auto request                                      = makeRequest();
+    request.mutable_propose_token_ids()->Truncate(2);
+    request.clear_propose_probs();
+    request.set_proposal_is_point_mass(true);
+    ASSERT_TRUE(runHandoff(stream, request).ok());
+    EXPECT_EQ(engine_->enqueue_count, 1);
+    const auto buffer = stream->getSPOutputBuffer();
+    ASSERT_NE(buffer, nullptr);
+    auto expected                 = torch::zeros({1, 128}, torch::kFloat32);
+    expected.data_ptr<float>()[8] = 1.0f;
+    EXPECT_TRUE(torch::equal(buffer->all_probs.cpu(), expected));
+}
+
+TEST_F(DecodeRpcBootstrapTest, NonPipelineTokenOnlyHandoffRejectsMissingHiddenState) {
+    rpc_.maga_init_params_.parallelism_config.pp_size = 1;
+    auto stream                                       = makeStream();
+    auto request                                      = makeRequest();
+    request.clear_propose_probs();
+    request.clear_propose_hidden();
+    request.set_proposal_is_point_mass(true);
+    EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_EQ(processor_->update_calls, 0);
+}
+
+TEST_F(DecodeRpcBootstrapTest, GenerateRejectsWrongIdentityBeforePublishingAnchor) {
+    auto stream  = makeStream();
+    auto request = makeRequest();
+    request.set_request_id(43);
+    EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_EQ(processor_->update_calls, 0);
+}
+
+TEST_F(DecodeRpcBootstrapTest, PointMassDoesNotInventDraftVocabularyMapping) {
+    rpc_.maga_init_params_.parallelism_config.pp_size = 1;
+    rpc_.maga_init_params_.sp_config.type             = SP_TYPE_EAGLE;
+    auto stream                                       = makeStream();
+    auto request                                      = makeRequest();
+    request.set_proposal_is_point_mass(true);
+    EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_EQ(processor_->update_calls, 0);
+}
+
+TEST_F(DecodeRpcBootstrapTest, PrefillCompletionPreservesCancellation) {
+    auto stream = makeStream();
+    stream->reportError(ErrorCode::CANCELLED, "cancelled before completion");
+    auto request = makeRequest(false);
+    request.set_stage(RemoteStage::PREFILL_COMPLETE);
+    EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(DecodeRpcBootstrapTest, PrefillCompletionRejectsExpiredRequest) {
+    service_->expire_request = true;
+    auto stream              = makeStream();
+    auto request             = makeRequest(false);
+    request.set_stage(RemoteStage::PREFILL_COMPLETE);
+    EXPECT_EQ(runHandoff(stream, request).error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(engine_->enqueue_count, 0);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+}
 
 TEST_F(DecodeRpcBootstrapTest, PpMtpAndEaglePreserveUnpaddedHandoff) {
     for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {

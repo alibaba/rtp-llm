@@ -12,6 +12,25 @@
 
 namespace rtp_llm {
 
+torch::Tensor QueryConverter::transMtpProposalProbs(const GenerateRequestPB& request, int64_t target_vocab_size) {
+    if (!request.proposal_is_point_mass()) {
+        RTP_LLM_CHECK_WITH_INFO(request.has_propose_probs(), "dense MTP handoff lacks probabilities");
+        return transTensor(request.propose_probs());
+    }
+    RTP_LLM_CHECK_WITH_INFO(target_vocab_size > 0 && request.propose_token_ids_size() == 2,
+                            "point-mass MTP handoff requires a vocabulary, anchor and single draft seed");
+    RTP_LLM_CHECK_WITH_INFO(request.propose_token_ids(0) == request.first_generate_token_id(),
+                            "point-mass MTP handoff anchor mismatch");
+    for (const auto token : request.propose_token_ids()) {
+        RTP_LLM_CHECK_WITH_INFO(token >= 0 && token < target_vocab_size, "MTP handoff token outside vocabulary");
+    }
+    // The existing non-pipeline executor resumes from the first draft token and
+    // generates the remaining proposals locally. Normalize its seed once at handoff.
+    auto probs                                            = torch::zeros({1, target_vocab_size}, torch::kFloat32);
+    probs.data_ptr<float>()[request.propose_token_ids(1)] = 1.0f;
+    return probs;
+}
+
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \

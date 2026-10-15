@@ -338,7 +338,9 @@ public:
     void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
-    bool         hasEvent(StreamEvents::EventType event) const;
+    bool hasEvent(StreamEvents::EventType event) const;
+    // Complete an allocated decode stream before it is admitted to the scheduler.
+    bool         finishWithoutGenerate();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();

@@ -143,6 +143,7 @@ public:
     std::shared_ptr<RpcService::Stub>    stub;
     std::shared_ptr<grpc::ClientContext> client_context;
     std::shared_ptr<ClientStream>        client_stream;
+    bool                                 supports_prefill_completion = false;
     std::shared_ptr<std::atomic<bool>>   cancel_state;
     bool                                 grpc_stream_closed             = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;

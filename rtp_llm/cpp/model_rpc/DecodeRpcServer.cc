@@ -183,6 +183,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                       "message first status != RemoteStage::ALLOCATE");
     decode_context.request_id  = allocate_request.request_id();
     decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
+    GRPC_RET_IF_ERROR(decode_context,
+                      allocate_request.pd_handoff_version() == PD_HANDOFF_V1,
+                      grpc::StatusCode::FAILED_PRECONDITION,
+                      "PD handoff protocol mismatch; rebuild both peers");
 
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
@@ -235,8 +239,11 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
+    GenerateOutputsPB allocate_response;
+    allocate_response.set_pd_handoff_version(PD_HANDOFF_V1);
+    allocate_response.set_supports_prefill_completion(true);
     GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
+                      decode_context.rpc_context.grpc_stream->Write(allocate_response),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 
@@ -251,6 +258,12 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GenerateRequestPB load_request;
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    GRPC_RET_IF_ERROR(decode_context,
+                      load_request.stage() == RemoteStage::LOAD
+                          && load_request.request_id() == decode_context.request_id
+                          && load_request.client_id() == decode_context.allocate_request.client_id(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "invalid cache-load stage or request identity");
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
@@ -288,9 +301,51 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       grpc::StatusCode::INTERNAL,
                       "poll generate request failed");
     GRPC_RET_IF_ERROR(decode_context,
+                      generate_request.request_id() == decode_context.request_id
+                          && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "generate request identity mismatch");
+    if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
+        GRPC_RET_IF_ERROR(
+            decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
+        GRPC_RET_IF_ERROR(decode_context,
+                          decode_context.request_timeout_ms <= 0
+                              || decode_context.executeTimeMs() < decode_context.request_timeout_ms,
+                          grpc::StatusCode::DEADLINE_EXCEEDED,
+                          "request deadline exhausted");
+        if (!generate_stream->finishWithoutGenerate()) {
+            const auto error            = generate_stream->statusInfo();
+            decode_context.error_status = error.hasError() ?
+                                              serializeErrorMsg(decode_context.request_key, error) :
+                                              grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                                           "decode stream cannot complete before generation");
+        }
+        return;
+    }
+    GRPC_RET_IF_ERROR(decode_context,
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    const bool sp_enabled = maga_init_params_.sp_config.type != SP_TYPE_NONE;
+    if (sp_enabled) {
+        const bool is_dspark = engine_->isDSpark();
+        RTP_LLM_CHECK_WITH_INFO(is_dspark ? generate_request.propose_token_ids_size() == 0 :
+                                            generate_request.propose_token_ids_size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%d for dspark=%d",
+                                generate_request.propose_token_ids_size(),
+                                static_cast<int>(is_dspark));
+        if (!is_dspark && maga_init_params_.parallelism_config.pp_size == 1) {
+            GRPC_RET_IF_ERROR(decode_context,
+                              generate_request.has_propose_hidden(),
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "non-pipeline MTP handoff requires explicit hidden state");
+            GRPC_RET_IF_ERROR(decode_context,
+                              !generate_request.proposal_is_point_mass()
+                                  || maga_init_params_.sp_config.type == SP_TYPE_MTP,
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "point-mass handoff requires matching draft and target vocabularies");
+        }
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -316,7 +371,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
-    const bool sp_enabled = maga_init_params_.sp_config.type != SP_TYPE_NONE;
     if (!sp_enabled) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
@@ -329,15 +383,10 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         const size_t propose_step = maga_init_params_.sp_config.gen_num_per_cycle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
 
-        const bool is_pipeline = maga_init_params_.parallelism_config.pp_size > 1;
-        const bool is_dspark   = engine_->isDSpark();
+        const bool       is_pipeline = maga_init_params_.parallelism_config.pp_size > 1;
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
         /** Preserve the handoff payload; PPScheduler pads PP candidates on admission. */
-        RTP_LLM_CHECK_WITH_INFO(is_dspark ? propose_tokens.empty() : propose_tokens.size() >= 2,
-                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
-                                propose_tokens.size(),
-                                static_cast<int>(is_dspark));
         generate_stream->initSpeculativeHandoffPositions();
         if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
@@ -351,7 +400,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
             if (!is_pipeline) {
-                auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+                auto propose_probs_t  = pinGrpcTensor(QueryConverter::transMtpProposalProbs(
+                    generate_request, maga_init_params_.model_config_.vocab_size));
                 auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
                 sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
                 sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
@@ -412,6 +462,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
 BroadcastLoadRequestPB DecodeRpcServer::buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const {
     BroadcastLoadRequestPB request;
+    request.set_pd_handoff_version(PD_HANDOFF_V1);
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
@@ -602,6 +653,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                 all_success = false;
                 error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
                 error_msg += std::to_string(rank) + ": " + status.error_message() + ", ";
+            } else if (response.pd_handoff_version() != PD_HANDOFF_V1) {
+                all_success = false;
+                error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
+                error_msg += std::to_string(rank) + ": PD handoff protocol mismatch, ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);
@@ -1199,6 +1254,10 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (request->pd_handoff_version() != PD_HANDOFF_V1) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "PD handoff protocol mismatch; rebuild all workers");
+    }
+    response->set_pd_handoff_version(PD_HANDOFF_V1);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;

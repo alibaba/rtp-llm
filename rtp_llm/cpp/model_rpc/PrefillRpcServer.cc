@@ -307,6 +307,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext& prefill_context) {
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
+    alloc_request.set_pd_handoff_version(PD_HANDOFF_V1);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
 
@@ -382,8 +383,17 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
+    prefill_context.supports_prefill_completion = false;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    if (allocate_response.pd_handoff_version() != PD_HANDOFF_V1) {
+        prefill_context.setRetryable(false);
+        setContextError(prefill_context,
+                        ErrorInfo(ErrorCode::INVALID_PARAMS, "PD handoff protocol mismatch; rebuild both peers"),
+                        grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "PD handoff protocol mismatch"));
+        return;
+    }
+    prefill_context.supports_prefill_completion = allocate_response.supports_prefill_completion();
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
@@ -418,6 +428,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     }
     AtomicGuard       request_guard(loading_cache_requests_);
     GenerateRequestPB load_request;
+    load_request.set_stage(RemoteStage::LOAD);
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
@@ -487,6 +498,16 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
     prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        if (prefill_context.supports_prefill_completion
+            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)
+            && !prefill_context.getStream()->hasError()) {
+            GenerateRequestPB completion;
+            completion.set_stage(RemoteStage::PREFILL_COMPLETE);
+            completion.set_client_id(process_id_);
+            completion.set_request_id(prefill_context.request_id);
+            CLIENT_GRPC_RET_IF_ERROR(
+                prefill_context, prefill_context.client_stream->Write(completion), ErrorCode::REMOTE_GENERATE_FAILED);
+        }
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
                           prefill_context.request_id);
@@ -523,6 +544,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     /** PP MTP/EAGLE verifies argmax proposals by token ID and rebuilds draft inputs on D. */
+    generate_request.set_proposal_is_point_mass(maga_init_params_.parallelism_config.pp_size > 1
+                                                && !stream->getProposeToken().empty());
     if (sp_output_buffer && !engine_->isDSpark() && maga_init_params_.parallelism_config.pp_size == 1) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;

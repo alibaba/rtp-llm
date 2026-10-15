@@ -268,6 +268,9 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    // Advertised only by the Decode ALLOCATE response.
+    bool supports_prefill_completion = 10;
+    PdHandoffVersionPB pd_handoff_version = 11;
 }
 
 // return to python client
@@ -303,6 +306,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    INVALID_PARAMS = 26;
+    EXECUTION_EXCEPTION = 27;
 }
 
 // transfer between prefill and decode
@@ -317,6 +322,15 @@ enum RemoteStage {
     ALLOCATE = 0;
     LOAD = 1;
     GENERATE = 2;
+    // Prefill completed after LOAD; no Decode execution is required.
+    PREFILL_COMPLETE = 3;
+}
+
+// Negotiated before cache transfer. All peers still require the same build;
+// this version rejects older schemas that assign field 12 differently.
+enum PdHandoffVersionPB {
+    PD_HANDOFF_UNSPECIFIED = 0;
+    PD_HANDOFF_V1 = 1;
 }
 
 // One PP stage's main-model layer range and the peer subset serving it.
@@ -341,6 +355,10 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
+    // Explicit distribution contract; missing probabilities do not imply a point mass.
+    bool proposal_is_point_mass = 13;
+    // Required in ALLOCATE; subsequent messages use that stream's negotiated version.
+    PdHandoffVersionPB pd_handoff_version = 14;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -365,12 +383,14 @@ message BroadcastLoadRequestPB {
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
     repeated StagePeerGroupPB stage_peer_groups = 15;
-
+    PdHandoffVersionPB pd_handoff_version = 16;
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    int64 loaded_cache_block_count = 3;
+    PdHandoffVersionPB pd_handoff_version = 4;
 }
 
 message RemoteFinishRequestPB {

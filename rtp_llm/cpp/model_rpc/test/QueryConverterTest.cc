@@ -19,6 +19,60 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(MtpProposalProtocolTest, DensePayloadIsPreservedWithoutInferringPointMass) {
+    GenerateRequestPB request;
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 16), std::exception);
+    auto probabilities = torch::full({1, 16}, 1.0f / 16);
+    QueryConverter::transTensorPB(request.mutable_propose_probs(), probabilities);
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(request, 16), probabilities));
+}
+
+TEST(PdRpcErrorCodeTest, PreservesValidationAndExecutionFailuresOnTheWire) {
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::INVALID_PARAMS), 26);
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::EXECUTION_EXCEPTION), 27);
+    for (const auto code : {ErrorCode::INVALID_PARAMS, ErrorCode::EXECUTION_EXCEPTION}) {
+        RpcErrorPB sent;
+        sent.set_error_code(transErrorCodeToRPC(code));
+        RpcErrorPB received;
+        ASSERT_TRUE(received.ParseFromString(sent.SerializeAsString()));
+        EXPECT_EQ(transRPCErrorCode(received.error_code()), code);
+    }
+}
+
+TEST(MtpProposalProtocolTest, ExplicitPointMassRestoresExactFirstDraftDistribution) {
+    GenerateRequestPB request;
+    request.set_first_generate_token_id(3);
+    request.add_propose_token_ids(3);
+    request.add_propose_token_ids(7);
+    request.set_proposal_is_point_mass(true);
+    auto expected                 = torch::zeros({1, 16}, torch::kFloat32);
+    expected.data_ptr<float>()[7] = 1.0f;
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(request, 16), expected));
+    // The explicit marker remains authoritative if a sender also supplies dense q.
+    QueryConverter::transTensorPB(request.mutable_propose_probs(), torch::full({1, 16}, 1.0f / 16));
+    EXPECT_TRUE(torch::equal(QueryConverter::transMtpProposalProbs(request, 16), expected));
+    // Multiple seeds need a matching executor-state contract, not just a marker.
+    request.add_propose_token_ids(9);
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 16), std::exception);
+}
+
+TEST(MtpProposalProtocolTest, PointMassRejectsInvalidAnchorTokensAndVocabulary) {
+    GenerateRequestPB request;
+    request.set_proposal_is_point_mass(true);
+    request.set_first_generate_token_id(3);
+    request.add_propose_token_ids(3);
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 16), std::exception);
+    request.add_propose_token_ids(7);
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 0), std::exception);
+    request.set_first_generate_token_id(4);
+    EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 16), std::exception);
+    request.set_first_generate_token_id(3);
+    for (int token : {-1, 16}) {
+        request.set_propose_token_ids(1, token);
+        EXPECT_THROW(QueryConverter::transMtpProposalProbs(request, 16), std::exception);
+    }
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");

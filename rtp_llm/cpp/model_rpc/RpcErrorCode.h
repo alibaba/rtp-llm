@@ -42,6 +42,8 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
     const static std::unordered_map<ErrorCodePB, ErrorCode> error_code_map = {
         {ErrorCodePB::NONE_ERROR, ErrorCode::NONE_ERROR},
         {ErrorCodePB::UNKNOWN_ERROR, ErrorCode::UNKNOWN_ERROR},
+        {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
+        {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
         {ErrorCodePB::CANCELLED, ErrorCode::CANCELLED},
         {ErrorCodePB::LOAD_CACHE_TIMEOUT, ErrorCode::LOAD_CACHE_TIMEOUT},
         {ErrorCodePB::CACHE_STORE_LOAD_CONNECT_FAILED, ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED},
@@ -87,6 +89,8 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
     const static std::unordered_map<ErrorCode, ErrorCodePB> error_code_map = {
         {ErrorCode::NONE_ERROR, ErrorCodePB::NONE_ERROR},
         {ErrorCode::UNKNOWN_ERROR, ErrorCodePB::UNKNOWN_ERROR},
+        {ErrorCode::INVALID_PARAMS, ErrorCodePB::INVALID_PARAMS},
+        {ErrorCode::EXECUTION_EXCEPTION, ErrorCodePB::EXECUTION_EXCEPTION},
         {ErrorCode::CANCELLED, ErrorCodePB::CANCELLED},
         {ErrorCode::LOAD_CACHE_TIMEOUT, ErrorCodePB::LOAD_CACHE_TIMEOUT},
         {ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED, ErrorCodePB::CACHE_STORE_LOAD_CONNECT_FAILED},

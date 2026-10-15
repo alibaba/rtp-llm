@@ -31,6 +31,8 @@ public:
 
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
 
+    static torch::Tensor transMtpProposalProbs(const GenerateRequestPB& request, int64_t target_vocab_size);
+
     static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
 
 private:

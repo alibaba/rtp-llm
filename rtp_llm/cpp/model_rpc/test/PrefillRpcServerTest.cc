@@ -14,7 +14,8 @@ namespace rtp_llm {
 
 class TestDecodeRpcService final: public RpcService::Service {
 public:
-    explicit TestDecodeRpcService(bool fail_first_allocate): fail_first_allocate_(fail_first_allocate) {}
+    explicit TestDecodeRpcService(bool fail_first_allocate, PdHandoffVersionPB version = PD_HANDOFF_V1):
+        fail_first_allocate_(fail_first_allocate), version_(version) {}
 
     grpc::Status RemoteGenerate(grpc::ServerContext*,
                                 grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
@@ -28,6 +29,8 @@ public:
         }
 
         GenerateOutputsPB response;
+        response.set_pd_handoff_version(version_);
+        response.set_supports_prefill_completion(true);
         if (!stream->Write(response)) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
         }
@@ -40,13 +43,15 @@ public:
     }
 
 private:
-    bool             fail_first_allocate_;
-    std::atomic<int> allocate_count_{0};
+    bool               fail_first_allocate_;
+    PdHandoffVersionPB version_;
+    std::atomic<int>   allocate_count_{0};
 };
 
 class TestDecodeRpcServer {
 public:
-    explicit TestDecodeRpcServer(bool fail_first_allocate): service_(fail_first_allocate) {}
+    explicit TestDecodeRpcServer(bool fail_first_allocate, PdHandoffVersionPB version = PD_HANDOFF_V1):
+        service_(fail_first_allocate, version) {}
     ~TestDecodeRpcServer() {
         if (server_) {
             server_->Shutdown();
@@ -99,6 +104,20 @@ public:
 
     GenerateRequestPB request;
     int write_count = 0;
+};
+
+class LoadAckClientStream: public CapturingGenerateClientStream {
+public:
+    bool Read(GenerateOutputsPB* output) override {
+        if (read_count++ != 0) {
+            return false;
+        }
+        output->mutable_error_info()->set_error_code(load_error);
+        return true;
+    }
+
+    ErrorCodePB load_error = ErrorCodePB::NONE_ERROR;
+    int         read_count = 0;
 };
 
 class TestMultimodalProcessor: public MultimodalProcessor {
@@ -255,6 +274,7 @@ TEST_F(PrefillRpcServerTest, PpMtpAndEagleSendTokensWithoutDraftProbabilitiesOrH
             const auto expected_tokens = type == SP_TYPE_NONE ? std::vector<int>{} : std::vector<int>{7, 8};
             EXPECT_EQ(std::vector<int>(sent.propose_token_ids().begin(), sent.propose_token_ids().end()), expected_tokens);
             const bool has_draft_state = type != SP_TYPE_NONE && pp_size == 1;
+            EXPECT_EQ(sent.proposal_is_point_mass(), type != SP_TYPE_NONE && pp_size > 1);
             EXPECT_EQ(sent.has_propose_probs(), has_draft_state);
             EXPECT_EQ(sent.has_propose_hidden(), has_draft_state);
             if (has_draft_state) {
@@ -262,6 +282,81 @@ TEST_F(PrefillRpcServerTest, PpMtpAndEagleSendTokensWithoutDraftProbabilitiesOrH
                 EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_hidden()), buffer->hidden_states));
             }
         }
+    }
+}
+
+TEST_F(PrefillRpcServerTest, RejectsUnnegotiatedAllocationWithoutRetry) {
+    TestDecodeRpcServer decode_server(false, PD_HANDOFF_UNSPECIFIED);
+    ASSERT_TRUE(decode_server.start());
+    GenerateInputPB request;
+    request.set_request_id(1);
+    auto context            = makeContext(&request);
+    context->generate_input = makeMultimodalInput();
+    context->generate_input->generate_config->role_addrs.emplace_back(
+        RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+    TestPrefillRpcServer server;
+    server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+    auto operation       = [&](PrefillGenerateContext& value) { server.prepareAllocateResource(value); };
+    auto status          = server.runWithRetry(*context, operation, 3);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_FALSE(context->shouldRetry());
+    EXPECT_FALSE(context->supports_prefill_completion);
+    EXPECT_EQ(decode_server.allocateCount(), 1);
+    EXPECT_TRUE(context->closeGrpcStream().ok());
+}
+
+TEST_F(PrefillRpcServerTest, NotifiesCompletionOnlyAfterSuccessfulLoadAndLocalFinish) {
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        SCOPED_TRACE(scenario);
+        GenerateInputPB request;
+        request.set_request_id(42);
+        auto context                           = makeContext(&request);
+        auto input                             = std::make_shared<GenerateInput>();
+        input->request_id                      = 42;
+        input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens = 16;
+        ModelConfig model;
+        model.max_seq_len      = 64;
+        model.vocab_size       = 128;
+        model.input_vocab_size = 128;
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        if (scenario != 2) {
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        if (scenario == 3) {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled");
+        }
+        context->stream_                     = stream;
+        context->generate_input              = input;
+        context->supports_prefill_completion = scenario != 1;
+        auto client                          = std::make_shared<LoadAckClientStream>();
+        if (scenario == 4) {
+            client->load_error = ErrorCodePB::LOAD_CACHE_TIMEOUT;
+        }
+        context->client_stream = client;
+        TestPrefillRpcServer server;
+        server.setProcessIdForTest("prefill");
+        if (scenario == 0) {
+            stream->generate_status_->status = StreamState::RUNNING;
+            server.remoteLoadCacheStart(*context);
+            EXPECT_FALSE(context->hasError());
+            EXPECT_EQ(client->write_count, 1);
+            EXPECT_EQ(client->request.stage(), RemoteStage::LOAD);
+            EXPECT_EQ(client->request.request_id(), 42);
+            EXPECT_EQ(client->request.client_id(), "prefill");
+            client->write_count = 0;
+        }
+        server.remoteLoadCacheEnd(*context);
+        context->stream_.reset();
+        EXPECT_EQ(client->write_count, scenario == 0 ? 1 : 0);
+        if (scenario == 0) {
+            EXPECT_EQ(client->request.stage(), RemoteStage::PREFILL_COMPLETE);
+            EXPECT_EQ(client->request.request_id(), 42);
+            EXPECT_EQ(client->request.client_id(), "prefill");
+            EXPECT_TRUE(context->finished);
+        }
+        EXPECT_EQ(context->hasError(), scenario == 4);
     }
 }
 
@@ -290,9 +385,12 @@ TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatin
     EXPECT_EQ(context->retry_times, 2);
     EXPECT_EQ(decode_server.allocateCount(), 2);
     EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_TRUE(context->supports_prefill_completion);
     EXPECT_TRUE(context->multimodalProcessed());
     EXPECT_TRUE(context->tokenIdsExpanded());
     EXPECT_TRUE(context->closeGrpcStream().ok());
+    context->reset();
+    EXPECT_FALSE(context->supports_prefill_completion);
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
