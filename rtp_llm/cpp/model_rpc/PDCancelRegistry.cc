@@ -161,8 +161,10 @@ bool PDCancelRegistry::complete(const Handle& handle) {
     lock.lock();
     if (handle->terminal || active_reads_.count(handle->unique_key))
         return false;
-    if (!meta_->markCancellationComplete(
-            handle->identity.request_id, handle->cancel_reason.code(), handle->cancel_reason.ToString(), stream))
+    if (!meta_->markCancellationComplete(handle->identity.request_id,
+                                         static_cast<int64_t>(handle->cancel_reason.code()),
+                                         handle->cancel_reason.ToString(),
+                                         stream))
         return false;
     handle->terminal = true;
     handle->stream.reset();
