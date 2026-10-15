@@ -119,8 +119,8 @@ public class KvCacheManager {
         if (engineIpPort == null) {
             return;
         }
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, trace);
+        Set<Long> removedBlocks = engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());

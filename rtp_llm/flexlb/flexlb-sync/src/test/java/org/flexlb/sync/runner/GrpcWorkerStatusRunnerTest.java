@@ -35,6 +35,45 @@ import static org.mockito.Mockito.when;
 class GrpcWorkerStatusRunnerTest {
 
     @ParameterizedTest
+    @CsvSource({"true,1,DECODE,true", "false,1,DECODE,false",
+            "true,0,DECODE,false", "true,1,PREFILL,false"})
+    void onlyValidAliveRpcProtectsQueuedCommit(
+            boolean alive, long version, RoleType responseRole, boolean protectedCommit) {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(
+                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerDirectory directory = directory(registry, status);
+        var lease = status.tryBeginStatusPoll(1L);
+        var rpc = new CompletableFuture<EngineRpcService.WorkerStatusPB>();
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(rpc);
+        java.util.List<Runnable> queue = new java.util.ArrayList<>();
+        new GrpcWorkerStatusRunner("test-model", status.getIpPort(), "test-site",
+                RoleType.DECODE, null, status, lease, directory,
+                mock(EngineHealthReporter.class), grpc, 5_000L,
+                mock(CacheAwareService.class), queue::add).run();
+        assertTrue(status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L));
+        rpc.complete(EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(responseRole.getCode())
+                .setRoleType(responseRole == RoleType.DECODE
+                        ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                        : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setStatusVersion(version).setAlive(alive).build());
+        org.junit.jupiter.api.Assertions.assertEquals(protectedCommit,
+                status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L));
+        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000 + 60_001_000L,
+                60_000_000L), "local commit protection must expire");
+        // Protection does not forge a successful commit or schedulable capacity.
+        org.junit.jupiter.api.Assertions.assertEquals(-1L, status.appliedStatusCursor().statusVersion());
+        queue.removeFirst().run();
+        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L));
+    }
+
+    @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {
             "RPC_THROW", "RPC_FAILED", "CONVERSION_FAILED", "CALLBACK_REJECTED", "CALLBACK_FAILED"})
     void failurePathsReleaseStatusPollAndPreserveBoundary(String failurePoint) {

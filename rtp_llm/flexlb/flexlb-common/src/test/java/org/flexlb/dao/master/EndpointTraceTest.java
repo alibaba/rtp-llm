@@ -171,6 +171,21 @@ class EndpointTraceTest {
     }
 
     @Test
+    void secondWorkerLockWaitDoesNotReuseTheFirstAcquisitionOrRelease() {
+        var trace = new EndpointTrace();
+        var poll = trace.beginPoll("CACHE", 1L);
+        poll.record(Stage.CACHE_LOCK_ATTEMPT);
+        poll.record(Stage.CACHE_LOCK_ACQUIRED);
+        poll.record(Stage.CACHE_LOCK_RELEASED);
+        poll.record(Stage.CACHE_LOCK_ATTEMPT);
+        var waiting = trace.snapshot().poll();
+        assertEquals("CACHE_LOCK_ATTEMPT", waiting.stage());
+        assertTrue(waiting.times().workerAttemptMs() >= 0L);
+        assertEquals(-1L, waiting.times().workerAcquiredMs());
+        assertEquals(-1L, waiting.times().workerReleasedMs());
+    }
+
+    @Test
     void snapshotRecordsCacheLockContentionAndRetirementTiming() {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("CACHE", 1L);

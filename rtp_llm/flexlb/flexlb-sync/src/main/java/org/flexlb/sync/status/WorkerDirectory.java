@@ -210,17 +210,25 @@ public final class WorkerDirectory {
             CacheAwareService cacheAwareService,
             Logger logger) {
         Map<String, WorkerStatus> statuses = statusesByRole.get(role);
-        status.trace().record(Stage.FINALIZE_LOCK_ATTEMPT);
-        status.lock.lock();
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ATTEMPT);
+        status.cacheMutationLock.lock();
         try {
-            status.trace().record(Stage.FINALIZE_LOCK_ACQUIRED);
-            status.requireRetiringGeneration();
-            if (statuses.get(address) != status) {
-                status.trace().record(Stage.FINALIZE_FAILED, "GENERATION_CHANGED");
-                logger.error(
-                        "Status identity changed before retirement finalized for {}#{}",
-                        address, status.getGenerationId());
-                return false;
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ACQUIRED);
+            status.trace().record(Stage.FINALIZE_LOCK_ATTEMPT);
+            status.lock.lock();
+            try {
+                status.trace().record(Stage.FINALIZE_LOCK_ACQUIRED);
+                status.requireRetiringGeneration();
+                if (statuses.get(address) != status) {
+                    status.trace().record(Stage.FINALIZE_FAILED, "GENERATION_CHANGED");
+                    logger.error(
+                            "Status identity changed before retirement finalized for {}#{}",
+                            address, status.getGenerationId());
+                    return false;
+                }
+            } finally {
+                status.lock.unlock();
+                status.trace().record(Stage.FINALIZE_LOCK_RELEASED);
             }
             boolean cacheCleanupSucceeded = true;
             try {
@@ -236,15 +244,23 @@ public final class WorkerDirectory {
                         "Cache cleanup failed while retiring generation {} for {}",
                         status.getGenerationId(), address, cacheCleanupFailure);
             }
-            if (!statuses.remove(address, status)) {
-                status.trace().record(Stage.FINALIZE_FAILED, "STATUS_REMOVAL_FAILED");
-                logger.error(
-                        "Exact status removal failed while its generation lock was held for {}#{}",
-                        address, status.getGenerationId());
-                return false;
+            status.trace().record(Stage.FINALIZE_LOCK_ATTEMPT);
+            status.lock.lock();
+            try {
+                status.trace().record(Stage.FINALIZE_LOCK_ACQUIRED);
+                if (!statuses.remove(address, status)) {
+                    status.trace().record(Stage.FINALIZE_FAILED, "STATUS_REMOVAL_FAILED");
+                    logger.error(
+                            "Exact status removal failed while its generation lock was held for {}#{}",
+                            address, status.getGenerationId());
+                    return false;
+                }
+                status.trace().record(Stage.STATUS_REMOVED);
+                return cacheCleanupSucceeded;
+            } finally {
+                status.lock.unlock();
+                status.trace().record(Stage.FINALIZE_LOCK_RELEASED);
             }
-            status.trace().record(Stage.STATUS_REMOVED);
-            return cacheCleanupSucceeded;
         } catch (Throwable finalizationFailure) {
             status.trace().record(Stage.FINALIZE_FAILED, finalizationFailure);
             logger.error(
@@ -252,8 +268,8 @@ public final class WorkerDirectory {
                     address, status.getGenerationId(), finalizationFailure);
             return false;
         } finally {
-            status.lock.unlock();
-            status.trace().record(Stage.FINALIZE_LOCK_RELEASED);
+            status.cacheMutationLock.unlock();
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_RELEASED);
         }
     }
 
