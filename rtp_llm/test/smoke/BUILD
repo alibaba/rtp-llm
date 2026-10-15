@@ -181,7 +181,7 @@ smoke_test(
 smoke_test(
     name = "xing4_0_fp8_mtp_sm103",
     task_info = "data/model/xing4_0/q_r_xing4_0_fp8_mtp_sm103.json",
-    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/nas1/hf/Xing4.0-29B-A4B-FP8 --sp_act_type BF16 --gen_num_per_cycle 3",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9 --sp_act_type BF16 --gen_num_per_cycle 3",
     gpu_type = ["SM103_CU13"],
 )
 
@@ -193,7 +193,7 @@ smoke_test(
 smoke_test(
     name = "xing4_0_fp8_graph_mtp_sm103",
     task_info = "data/model/xing4_0/q_r_xing4_0_fp8_mtp_sm103.json",
-    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/nas1/hf/Xing4.0-29B-A4B-FP8 --sp_act_type BF16 --gen_num_per_cycle 3",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9 --sp_act_type BF16 --gen_num_per_cycle 3",
     gpu_type = ["SM103_CU13"],
 )
 
