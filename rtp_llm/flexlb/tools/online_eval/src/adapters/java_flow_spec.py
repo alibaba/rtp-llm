@@ -35,13 +35,12 @@ class JavaFlowSpec:
         required = {item.name for item in fields(cls)
                     if item.default is MISSING and item.default_factory is MISSING}
         mapping_fields(value, definitions, 'java_flow', required=required)
-        if value.get("max_requests", 1) is None:
-            raise ValueError("max_requests must be a positive bounded request count")
+        supplied = set(value)
         spec = cls(**deepcopy(value))
         for item in fields(spec):
             rule = item.metadata.get('number')
             value = getattr(spec, item.name)
-            if rule is not None and value is not None:
+            if rule is not None and (item.name in supplied or value is not None):
                 rule.validate(value, 'java_flow.' + item.name)
         if not all(isinstance(value, str) and value for value in
                    (spec.group_id, spec.phase_id, spec.jvm_xms, spec.jvm_xmx)):

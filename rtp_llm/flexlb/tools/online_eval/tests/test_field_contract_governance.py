@@ -147,9 +147,10 @@ def test_capability_scalar_addition_derives_case_numeric_admission(monkeypatch):
     traffic = dict(traffic, probe_budget=3)
     traffic.pop('kind')
     assert extended.read(traffic).probe_budget == 3
-    traffic['probe_budget'] = 11
-    with pytest.raises(ValueError):
-        extended.read(traffic)
+    for invalid in (11, None, True):
+        traffic['probe_budget'] = invalid
+        with pytest.raises(ValueError):
+            extended.read(traffic)
 
 
 def test_new_environment_field_cannot_be_accepted_without_a_decoder(monkeypatch):
