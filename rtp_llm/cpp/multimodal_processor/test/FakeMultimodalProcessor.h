@@ -9,13 +9,16 @@ public:
     FakeMultimodalProcessor(py::object                               mm_process_engine,
                             const std::vector<std::vector<int64_t>>& sep_token_ids,
                             bool                                     include_sep_tokens,
-                            int64_t                                  max_seq_len):
-        MultimodalProcessor(mm_process_engine, MMModelConfig{true, sep_token_ids, include_sep_tokens}, max_seq_len) {}
+                            int64_t                                  max_seq_len,
+                            int64_t                                  feature_width = 1):
+        MultimodalProcessor(mm_process_engine, MMModelConfig{true, sep_token_ids, include_sep_tokens}, max_seq_len),
+        feature_width_(feature_width) {}
 
     static FakeMultimodalProcessor createFakeMultimodalProcessor(const std::vector<std::vector<int64_t>>& sep_token_ids,
                                                                  bool    include_sep_tokens,
-                                                                 int64_t max_seq_len) {
-        return FakeMultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len);
+                                                                 int64_t max_seq_len,
+                                                                 int64_t feature_width = 1) {
+        return FakeMultimodalProcessor(py::none(), sep_token_ids, include_sep_tokens, max_seq_len, feature_width);
     }
 
     float feature_value = 0.0f;
@@ -28,10 +31,12 @@ private:
         MultimodalOutput output;
         for (const auto& input : mm_inputs) {
             int embed_len = std::stoi(input.url);
-            output.mm_features.push_back(torch::full({embed_len, 1}, feature_value));
+            output.mm_features.push_back(torch::full({embed_len, feature_width_}, feature_value));
         }
         return output;
     }
+
+    int64_t feature_width_;
 };
 
 }  // namespace rtp_llm
