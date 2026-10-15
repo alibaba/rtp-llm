@@ -3,13 +3,16 @@ package org.flexlb.dao.pv;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+
 import lombok.Data;
+
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.telemetry.FlexlbTrace;
 
 import java.util.List;
 import java.util.Map;
@@ -53,6 +56,9 @@ public class PvLogData {
 
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> schedulingDiagnostics;
+    private String traceId;
+    private String spanId;
+    private Boolean traceSampled;
 
     private long totalUs;
     private Long arrivalMs;
@@ -89,6 +95,15 @@ public class PvLogData {
             String realMasterHost,
             long completedAtMs) {
         populateCommonFields(ctx);
+        if (!success) {
+            this.schedulingDiagnostics = ctx.getSchedulingDiagnostics();
+            var span = FlexlbTrace.spanContext(ctx.getTraceContext());
+            if (span != null) {
+                this.traceId = span.getTraceId();
+                this.spanId = span.getSpanId();
+                this.traceSampled = span.isSampled();
+            }
+        }
         this.code = code;
         this.admissionRejectReason = admissionRejectReason;
         this.scheduleOrigin = scheduleOrigin;

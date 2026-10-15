@@ -4,9 +4,11 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
+
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
+
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -23,14 +25,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Function;
+
+import javax.annotation.PreDestroy;
 
 /**
  * Engine gRPC client for status, batch enqueue, and cancel requests.
@@ -44,6 +48,18 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
     private final boolean kvcmEnabled;
     private final long enqueueTimeoutMillis;
 
+    private enum MetricOperation {
+        RESPONSE_SIZE,
+        CALL_METRICS,
+        CONNECTION_DURATION
+    }
+
+    private static final int MAX_METRICS_ERROR_MESSAGE_CHARS = 256;
+    private static final long METRICS_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
+    private final AtomicLongArray lastMetricsWarningNanos =
+            new AtomicLongArray(MetricOperation.values().length);
+
+    @Autowired
     public EngineGrpcClient(
             EngineAddressResolver addressResolver,
             GrpcChannelFactory channelFactory,
@@ -155,7 +171,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                     new FutureCallback<>() {
                         @Override
                         public void onSuccess(R value) {
-                            reportCall(serviceType, value, startTime, retry);
+                            reportSuccessfulCall(value, serviceType, startTime, retry, channelKey.ip(), channelKey.port());
                             result.complete(value);
                         }
 
@@ -166,9 +182,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                                     && isConnectionBrokenError(statusError)) {
                                 try {
                                     pooledChannel.markExpired();
-                                    grpcReporter.reportConnectionDuration(
-                                            serviceType.getOperationName(),
-                                            pooledChannel.getConnectionDurationUs());
+                                    reportConnectionDuration(serviceType, pooledChannel.getConnectionDurationUs(), channelKey.ip(), channelKey.port());
                                     GrpcChannelPool.PooledChannel replacement =
                                             channelPool.replace(channelKey, pooledChannel);
                                     invokeAsync(
@@ -195,15 +209,73 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         }
     }
 
-    private <R> void reportCall(
-            ServiceType serviceType, R response, long startTime, boolean retry) {
-        int responseSize =
-                response instanceof MessageLite messageLite ? messageLite.getSerializedSize() : 0;
-        grpcReporter.reportCallMetrics(
-                serviceType.getOperationName(),
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime),
-                responseSize,
-                retry);
+    private <R> void reportSuccessfulCall(
+            R response,
+            ServiceType serviceType,
+            long originalStartTime,
+            boolean retry,
+            String ip,
+            int port) {
+        MetricOperation operation = MetricOperation.RESPONSE_SIZE;
+        try {
+            long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - originalStartTime);
+            int responseSize =
+                    response instanceof MessageLite message ? message.getSerializedSize() : 0;
+            operation = MetricOperation.CALL_METRICS;
+            grpcReporter.reportCallMetrics(
+                    serviceType.getOperationName(), duration, responseSize, retry);
+        } catch (RuntimeException failure) {
+            // Metrics cannot change the response or prevent Future completion.
+            logMetricsFailure(operation, serviceType, ip, port, failure);
+        }
+    }
+
+    private void reportConnectionDuration(
+            ServiceType serviceType, long duration, String ip, int port) {
+        try {
+            grpcReporter.reportConnectionDuration(serviceType.getOperationName(), duration);
+        } catch (RuntimeException failure) {
+            logMetricsFailure(MetricOperation.CONNECTION_DURATION, serviceType, ip, port, failure);
+        }
+    }
+
+    /** At most one warning per failure stage every 30 seconds; successful calls touch no limiter state. */
+    private void logMetricsFailure(
+            MetricOperation operation,
+            ServiceType serviceType,
+            String ip,
+            int port,
+            RuntimeException failure) {
+        long now = System.nanoTime();
+        int slot = operation.ordinal();
+        long previous = lastMetricsWarningNanos.get(slot);
+        if ((previous == 0L || now - previous >= METRICS_WARNING_INTERVAL_NANOS)
+                && lastMetricsWarningNanos.compareAndSet(slot, previous, now)) {
+            try {
+                String message = failure.getMessage();
+                String summary =
+                        message == null
+                                ? "UNKNOWN"
+                                : message.substring(
+                                                0,
+                                                Math.min(
+                                                        message.length(),
+                                                        MAX_METRICS_ERROR_MESSAGE_CHARS))
+                                        .replace('\n', ' ')
+                                        .replace('\r', ' ');
+                Logger.warn(
+                        "event=grpc_metrics_failed stage={} service={} endpoint={}:{} errorType={}"
+                            + " error={}",
+                        operation,
+                        serviceType.getOperationName(),
+                        ip,
+                        port,
+                        failure.getClass().getSimpleName(),
+                        summary);
+            } catch (RuntimeException | LinkageError loggingFailure) {
+                // Failure reporting must not prevent the RPC future from completing.
+            }
+        }
     }
 
     private boolean isConnectionBrokenError(StatusRuntimeException e) {

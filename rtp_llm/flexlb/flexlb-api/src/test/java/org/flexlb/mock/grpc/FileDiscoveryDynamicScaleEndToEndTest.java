@@ -1,6 +1,15 @@
 package org.flexlb.mock.grpc;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.DefaultRouter;
@@ -42,16 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * End-to-end validation of dynamic service discovery through the REAL master
@@ -183,7 +183,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -200,7 +200,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
                         STATUS_STALE_AFTER_US);
@@ -346,7 +346,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 "worker C must keep serving after A's removal");
 
         System.out.printf(
-                "FileDiscoveryDynamicScaleEndToEndTest convergence: initial=%dms, add=%dms, remove=%dms%n",
+                "FileDiscoveryDynamicScaleEndToEndTest convergence: initial=%dms, add=%dms,"
+                    + " remove=%dms%n",
                 initialConvergenceMs, addConvergenceMs, removeConvergenceMs);
     }
 

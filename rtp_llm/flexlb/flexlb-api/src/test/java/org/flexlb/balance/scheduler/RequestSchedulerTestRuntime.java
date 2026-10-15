@@ -198,7 +198,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             if (responseVersion == committedVersion) {
                 projection = endpoint.observeStatusHeartbeat(status, observation);
             } else {
-                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
+                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation, null);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {

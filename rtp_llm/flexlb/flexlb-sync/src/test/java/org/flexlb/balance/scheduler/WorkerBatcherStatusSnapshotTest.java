@@ -1,5 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
@@ -10,13 +17,6 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.when;
 
 class WorkerBatcherStatusSnapshotTest {
 
@@ -112,7 +112,7 @@ class WorkerBatcherStatusSnapshotTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(
-                    status.prepareNewStatus(status.freezeStatusResponse(response)));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null));
         } finally {
             status.lock.unlock();
         }

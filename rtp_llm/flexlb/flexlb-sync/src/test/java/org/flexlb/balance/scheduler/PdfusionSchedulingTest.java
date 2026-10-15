@@ -1,5 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -36,12 +42,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class PdfusionSchedulingTest {
     @ParameterizedTest
@@ -133,8 +133,8 @@ class PdfusionSchedulingTest {
             endpoints.publishPreparedEndpoint(
                     worker.getLogicalIpPort(),
                     worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status)));
-            worker.recordSuccessfulPoll(true);
+                    worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
+            worker.recordSuccessfulPoll(true, null);
         } finally {
             worker.lock.unlock();
         }
@@ -200,7 +200,7 @@ class PdfusionSchedulingTest {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(status)));
+                                worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
             } finally {
                 worker.lock.unlock();
             }

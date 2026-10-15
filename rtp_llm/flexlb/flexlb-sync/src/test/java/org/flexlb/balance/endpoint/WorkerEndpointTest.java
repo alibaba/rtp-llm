@@ -1,5 +1,10 @@
 package org.flexlb.balance.endpoint;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -17,11 +22,6 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerEndpointTest {
 
@@ -233,7 +233,7 @@ class WorkerEndpointTest {
         WorkerStatus.PreparedStatus prepared;
         status.lock.lock();
         try {
-            prepared = status.prepareNewStatus(status.freezeStatusResponse(resp));
+            prepared = status.prepareNewStatus(status.freezeStatusResponse(resp), null);
         } finally {
             status.lock.unlock();
         }
@@ -245,7 +245,7 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(true);
+            status.recordSuccessfulPoll(true, null);
         } finally {
             status.lock.unlock();
         }
@@ -285,7 +285,7 @@ class WorkerEndpointTest {
         newStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    newStatus.prepareNewStatus(newStatus.freezeStatusResponse(resp));
+                    newStatus.prepareNewStatus(newStatus.freezeStatusResponse(resp), null);
             assertThrows(
                     IllegalArgumentException.class,
                     () -> endpoint.applyPreparedStatus(newStatus, prepared));

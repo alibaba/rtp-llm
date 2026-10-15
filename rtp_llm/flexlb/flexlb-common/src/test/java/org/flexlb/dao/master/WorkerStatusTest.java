@@ -1,5 +1,12 @@
 package org.flexlb.dao.master;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -9,20 +16,15 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Contract tests for the redesigned {@link WorkerStatus} status-commit model.
@@ -38,6 +40,76 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("WorkerStatus status-commit contract")
 class WorkerStatusTest {
+
+    @Test
+    void healthUpdateCanFinishWhileAnotherTraceWriterIsReadingExceptionDetails() throws Exception {
+        WorkerStatus status = discovered();
+        long before = status.pollHealth().lastSuccessfulPollUs();
+        var failure = new CompletionException(new IllegalStateException("timeout"));
+        var recording =
+                new FutureTask<Void>(
+                        () -> {
+                            status.trace()
+                                    .record(EndpointTrace.Stage.CACHE_CLEANUP_FAILED, failure);
+                            return null;
+                        });
+        Thread recorder = Thread.ofPlatform().unstarted(recording);
+        try {
+            synchronized (failure) {
+                recorder.start();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (recorder.getState() != Thread.State.BLOCKED
+                        && recorder.isAlive()
+                        && System.nanoTime() < deadline) {
+                    Thread.sleep(1L);
+                }
+                assertEquals(Thread.State.BLOCKED, recorder.getState());
+                var update =
+                        new FutureTask<Void>(
+                                () -> {
+                                    status.lock.lock();
+                                    try {
+                                        status.recordSuccessfulPoll(true, null);
+                                    } finally {
+                                        status.lock.unlock();
+                                    }
+                                    return null;
+                                });
+                Thread.ofPlatform().start(update);
+                update.get(3, TimeUnit.SECONDS);
+                assertTrue(status.pollHealth().lastSuccessfulPollUs() > before);
+                assertTrue(status.lock.tryLock());
+                status.lock.unlock();
+            }
+        } finally {
+            recording.get(3, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void statusCommitAndHealthKeepTheirExactPollAndCycleAcrossRounds() {
+        WorkerStatus status = discovered();
+        List<String> pollIds = new ArrayList<>();
+        for (long cycle = 1L; cycle <= 2L; cycle++) {
+            var lease = status.tryBeginStatusPoll(cycle);
+            status.lock.lock();
+            try {
+                var observation = status.freezeStatusResponse(responseWithMarker(cycle));
+                status.recordSuccessfulPoll(true, lease.pollTrace());
+                status.publishPreparedStatus(
+                        status.prepareNewStatus(observation, lease.pollTrace()));
+            } finally {
+                status.lock.unlock();
+                lease.close();
+            }
+            var poll = status.trace().snapshot().poll();
+            assertEquals(cycle, poll.syncCycleId());
+            assertTrue(poll.times().healthMs() >= 0);
+            assertTrue(poll.times().commitMs() >= poll.times().healthMs());
+            pollIds.add(poll.pollId());
+        }
+        assertNotEquals(pollIds.getFirst(), pollIds.getLast());
+    }
 
     private static WorkerStatus discovered() {
         return WorkerStatus.createDiscovered(
@@ -94,7 +166,7 @@ class WorkerStatusTest {
         status.lock.lock();
         try {
             WorkerStatus.StatusObservation observation = status.freezeStatusResponse(response);
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
+            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation, null);
             status.publishPreparedStatus(prepared);
         } finally {
             status.lock.unlock();
@@ -242,7 +314,8 @@ class WorkerStatusTest {
             try {
                 WorkerStatus.StatusObservation observation = status.freezeStatusResponse(stale);
                 assertThrows(
-                        IllegalArgumentException.class, () -> status.prepareNewStatus(observation));
+                        IllegalArgumentException.class,
+                        () -> status.prepareNewStatus(observation, null));
             } finally {
                 status.lock.unlock();
             }
@@ -254,7 +327,8 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             WorkerStatus.StatusObservation observation =
                     status.freezeStatusResponse(responseWithMarker(1L));
-            assertThrows(IllegalStateException.class, () -> status.prepareNewStatus(observation));
+            assertThrows(
+                    IllegalStateException.class, () -> status.prepareNewStatus(observation, null));
         }
 
         @Test
@@ -266,7 +340,7 @@ class WorkerStatusTest {
             try {
                 prepared =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(1L)));
+                                status.freezeStatusResponse(responseWithMarker(1L)), null);
             } finally {
                 status.lock.unlock();
             }
@@ -287,10 +361,10 @@ class WorkerStatusTest {
             try {
                 first =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(2L)));
+                                status.freezeStatusResponse(responseWithMarker(2L)), null);
                 second =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(3L)));
+                                status.freezeStatusResponse(responseWithMarker(3L)), null);
             } finally {
                 status.lock.unlock();
             }
@@ -318,7 +392,8 @@ class WorkerStatusTest {
                 WorkerStatus.StatusObservation observation =
                         status.freezeStatusResponse(responseWithMarker(2L));
                 assertThrows(
-                        IllegalStateException.class, () -> status.prepareNewStatus(observation));
+                        IllegalStateException.class,
+                        () -> status.prepareNewStatus(observation, null));
             } finally {
                 status.lock.unlock();
             }
@@ -371,7 +446,7 @@ class WorkerStatusTest {
                                                     status.freezeStatusResponse(
                                                             responseWithMarker(next));
                                             status.publishPreparedStatus(
-                                                    status.prepareNewStatus(observation));
+                                                    status.prepareNewStatus(observation, null));
                                         } finally {
                                             status.lock.unlock();
                                         }
@@ -442,7 +517,7 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             status.lock.lock();
             try {
-                WorkerStatus.PollHealth health = status.recordSuccessfulPoll(true);
+                WorkerStatus.PollHealth health = status.recordSuccessfulPoll(true, null);
                 assertTrue(health.reportedAlive());
                 assertEquals(0L, health.consecutiveTransportFailures());
             } finally {
@@ -456,7 +531,7 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             status.lock.lock();
             try {
-                status.recordSuccessfulPoll(true);
+                status.recordSuccessfulPoll(true, null);
                 WorkerStatus.PollHealth afterFirst = status.recordTransportFailure();
                 WorkerStatus.PollHealth afterSecond = status.recordTransportFailure();
                 assertEquals(1L, afterFirst.consecutiveTransportFailures());

@@ -1,6 +1,9 @@
 package org.flexlb.sync.synchronizer;
 
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
+
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
@@ -16,15 +19,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
-import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
+import javax.annotation.PreDestroy;
 
 /**
  * Master engine status synchronizer
@@ -44,7 +46,7 @@ public final class MasterEngineSynchronizer {
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
-    private final LongAdder syncCount = new LongAdder();
+    private final AtomicLong syncCount = new AtomicLong();
     private final Long syncEngineStatusInterval;
     private final long statusStaleAfterUs;
     private final ScheduledThreadPoolExecutor scheduler;
@@ -114,11 +116,8 @@ public final class MasterEngineSynchronizer {
     }
 
     public void syncEngineStatus() {
-        syncCount.increment();
-        logger.debug(
-                "sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(),
-                modelName);
+        long syncCycleId = syncCount.incrementAndGet();
+        logger.debug("sync engine status start, times:{}, modelName:{}", syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(
@@ -133,7 +132,7 @@ public final class MasterEngineSynchronizer {
                                 cacheAwareService,
                                 cacheIntervalService,
                                 syncRequestTimeoutMs,
-                                syncCount,
+                                syncCycleId,
                                 syncEngineStatusInterval,
                                 flexlbConfig.isKvcmCacheMatching(),
                                 flexlbConfig

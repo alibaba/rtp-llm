@@ -1,5 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -24,12 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /** Prefill status must carry stage completion through the real endpoint and slot reducers. */
 class PrefillCompletionProjectionTest {
@@ -69,7 +69,8 @@ class PrefillCompletionProjectionTest {
                                                 worker,
                                                 worker.prepareNewStatus(
                                                         worker.freezeStatusResponse(
-                                                                status(1L, Map.of(), Map.of()))))
+                                                                status(1L, Map.of(), Map.of())),
+                                                        null))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -227,7 +228,8 @@ class PrefillCompletionProjectionTest {
         try {
             projection =
                     endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                            worker,
+                            worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
         } finally {
             worker.lock.unlock();
         }

@@ -86,9 +86,9 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.recordSuccessfulPoll(response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -112,10 +112,10 @@ final class StrategyTestSupport {
                         source.committedEngineObservation(), true, 1L, 0L, Map.of());
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
+            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation, null);
             WorkerEndpoint endpoint =
                     registry.publishPreparedEndpoint(address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(observation.alive());
+            status.recordSuccessfulPoll(observation.alive(), null);
             return endpoint;
         } finally {
             status.lock.unlock();

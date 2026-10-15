@@ -8,6 +8,7 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -35,9 +36,11 @@ public class CacheMetadataUpdateOrchestrator {
                 configuration.isLocalStandbyEnabled());
     }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
+    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) { return updateFromWorkerStatus(workerStatus, null); }
+
+    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         if (configuration.isLocalSyncEnabled()) {
-            return localSyncProvider.updateFromWorkerStatus(workerStatus);
+            return localSyncProvider.updateFromWorkerStatus(workerStatus, pollTrace);
         }
 
         String logicalIpPort = workerStatus == null ? null : workerStatus.getLogicalIpPort();
@@ -48,9 +51,11 @@ public class CacheMetadataUpdateOrchestrator {
                 .build();
     }
 
-    public void removeEngineBlockCache(String engineIpPort) {
+    public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
+
+    public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {
         if (configuration.isLocalSyncEnabled()) {
-            localSyncProvider.removeEngineBlockCache(engineIpPort);
+            localSyncProvider.removeEngineBlockCache(engineIpPort, trace);
         }
     }
 

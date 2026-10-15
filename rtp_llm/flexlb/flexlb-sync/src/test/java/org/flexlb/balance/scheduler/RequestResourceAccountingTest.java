@@ -1,5 +1,14 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -28,15 +37,6 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
 class RequestResourceAccountingTest {
@@ -337,7 +337,8 @@ class RequestResourceAccountingTest {
                                                                         1,
                                                                         Map.of(),
                                                                         Map.of(),
-                                                                        TOTAL_KV))))
+                                                                        TOTAL_KV)),
+                                                        null))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -532,7 +533,8 @@ class RequestResourceAccountingTest {
         try {
             projection =
                     endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                            worker,
+                            worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
         } finally {
             worker.lock.unlock();
         }

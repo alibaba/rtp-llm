@@ -1,7 +1,17 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
+
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -65,15 +75,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.LongStream;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.withSettings;
 
 /** External contract for temporary P/D capacity pressure. */
 class TransientCapacityQueueContractTest {
@@ -652,7 +653,8 @@ class TransientCapacityQueueContractTest {
             assertTrue(
                     fixture.prefillEndpoint.captureRouteProjectionInputs().queue().admissionBlock()
                             != null,
-                    "the third group must observe both batch credits in use before more requests arrive");
+                    "the third group must observe both batch credits in use before more requests"
+                        + " arrive");
             assertEquals(2, fixture.prefillEndpoint.getInflightBatchCount());
             waiting.addAll(
                     LongStream.rangeClosed(407L, 464L)
@@ -676,7 +678,8 @@ class TransientCapacityQueueContractTest {
                     capacityRequests,
                     fixture.decodeEndpoint.resourceSnapshot().reserved().size(),
                     () ->
-                            "batch credits must not become an extra worker request-count limit: prefill="
+                            "batch credits must not become an extra worker request-count limit:"
+                                + " prefill="
                                     + fixture.prefillEndpoint.observedRequestCount()
                                     + ", queued="
                                     + fixture.runtime.scheduler().getQueuedRequestCount()
@@ -698,7 +701,8 @@ class TransientCapacityQueueContractTest {
                     0,
                     fixture.runtime.scheduler().getQueuedRequestCount()
                             - fixture.prefillEndpoint.queuedRequestCount(),
-                    "worker waiting requests are retained without a synthetic batch-times-size queue cap");
+                    "worker waiting requests are retained without a synthetic batch-times-size"
+                        + " queue cap");
         }
     }
 
@@ -797,7 +801,8 @@ class TransientCapacityQueueContractTest {
             assertEquals(
                     2,
                     completedResponses(responses),
-                    "the configured request limit must hold the remaining requests in the global queue");
+                    "the configured request limit must hold the remaining requests in the global"
+                        + " queue");
 
             List<Long> delivered =
                     LongStream.range(0, responses.size())
@@ -823,7 +828,8 @@ class TransientCapacityQueueContractTest {
             assertEquals(
                     3,
                     completedResponses(responses),
-                    "an available request slot permits delivery even when preceding work has no time estimate");
+                    "an available request slot permits delivery even when preceding work has no"
+                        + " time estimate");
             fixture.runtime.applyStatus(
                     fixture.prefillStatus,
                     prefillStatusWithFinishedAndUnknownRunning(4L, List.of(), 0));
@@ -906,7 +912,8 @@ class TransientCapacityQueueContractTest {
             assertEquals(
                     2,
                     completedResponses(waiting),
-                    "a same-version status clearing unknown work must wake the request-count prefix");
+                    "a same-version status clearing unknown work must wake the request-count"
+                        + " prefix");
         }
     }
 
@@ -1380,11 +1387,11 @@ class TransientCapacityQueueContractTest {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
             WorkerEndpoint endpoint =
                     registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
                             .endpoint();
-            status.recordSuccessfulPoll(true);
+            status.recordSuccessfulPoll(true, null);
             return endpoint;
         } finally {
             status.lock.unlock();

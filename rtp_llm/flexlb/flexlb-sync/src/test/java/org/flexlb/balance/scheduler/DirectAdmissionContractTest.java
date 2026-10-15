@@ -1,5 +1,23 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -39,24 +57,6 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /** DIRECT uses real admission ledgers and lifecycle while bypassing waiting queues. */
 class DirectAdmissionContractTest {
@@ -217,7 +217,8 @@ class DirectAdmissionContractTest {
                                         acquired.status());
                                 assertNotNull(
                                         acquired.permit(),
-                                        "accepted preparation must retain an exact handoff capability");
+                                        "accepted preparation must retain an exact handoff"
+                                            + " capability");
                                 fixture.observe(
                                         fixture.decode,
                                         Map.of(),
@@ -298,7 +299,8 @@ class DirectAdmissionContractTest {
                                                 worker.getIpPort(),
                                                 worker,
                                                 worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(response)))
+                                                        worker.freezeStatusResponse(response),
+                                                        null))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -395,7 +397,8 @@ class DirectAdmissionContractTest {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                                worker.prepareNewStatus(
+                                        worker.freezeStatusResponse(response), null));
             } finally {
                 worker.lock.unlock();
             }

@@ -1,12 +1,35 @@
 package org.flexlb.httpserver;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
+
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
@@ -51,26 +74,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
 
@@ -2035,7 +2038,8 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(span.getEvents().isEmpty());
+            assertEquals(1, span.getEvents().size());
+            assertEquals("flexlb.schedule.failed", span.getEvents().getFirst().getName());
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
@@ -2087,7 +2091,8 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(data.getEvents().isEmpty());
+            assertEquals(1, data.getEvents().size());
+            assertEquals("flexlb.schedule.failed", data.getEvents().getFirst().getName());
             verify(routeService, never()).route(any());
         }
     }
@@ -2419,13 +2424,13 @@ class FlexlbServiceImplTest {
         FlexlbConfig queueConfig =
                 ConfigService.parse(
                         """
-                {
-                  "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
-                    "ordering":{"type":"FIFO"}},
-                  "dispatcher":{"type":"NON_BATCH"},
-                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
-                }
-                """);
+                        {
+                          "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
+                            "ordering":{"type":"FIFO"}},
+                          "dispatcher":{"type":"NON_BATCH"},
+                          "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
+                        }
+                        """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
@@ -2452,12 +2457,12 @@ class FlexlbServiceImplTest {
         FlexlbConfig directConfig =
                 ConfigService.parse(
                         """
-                {
-                  "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"},
-                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
-                }
-                """);
+                        {
+                          "scheduler":{"type":"DIRECT"},
+                          "dispatcher":{"type":"NON_BATCH"},
+                          "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
+                        }
+                        """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);

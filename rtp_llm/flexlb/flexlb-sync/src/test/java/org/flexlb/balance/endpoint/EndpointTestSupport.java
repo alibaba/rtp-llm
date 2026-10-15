@@ -42,9 +42,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
             Runnable projection = endpoint.applyPreparedStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.recordSuccessfulPoll(response.isAlive(), null);
             return projection;
         } finally {
             status.lock.unlock();
@@ -56,9 +56,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.recordSuccessfulPoll(response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -84,7 +84,7 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
             return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();

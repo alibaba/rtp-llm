@@ -1,5 +1,14 @@
 package org.flexlb.balance.strategy;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -39,15 +48,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
     private static final int FULL_FLEET_SIZE = 750;
@@ -413,7 +413,8 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             endpoint.applyPreparedStatus(
-                            status, status.prepareNewStatus(status.freezeStatusResponse(response)))
+                            status,
+                            status.prepareNewStatus(status.freezeStatusResponse(response), null))
                     .run();
         } finally {
             status.lock.unlock();

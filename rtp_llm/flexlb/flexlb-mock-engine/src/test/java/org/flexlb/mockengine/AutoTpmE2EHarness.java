@@ -1,7 +1,16 @@
 package org.flexlb.mockengine;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.unary;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import com.google.protobuf.ByteString;
+
 import io.grpc.stub.StreamObserver;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -66,13 +75,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
-
-import static org.flexlb.mockengine.MockEngineTestSupport.unary;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Shared E2E harness for the real FlexLB scheduler, eviction manager,
@@ -435,7 +437,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(initial));
+                    status.prepareNewStatus(status.freezeStatusResponse(initial), null);
             endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
         } finally {
             status.lock.unlock();

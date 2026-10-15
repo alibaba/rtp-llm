@@ -1,6 +1,7 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
+
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.WorkerIdentity;
@@ -8,11 +9,10 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
+import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -20,6 +20,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 
 /**
  * KV cache manager
@@ -99,8 +102,10 @@ public class KvCacheManager implements EngineCacheInvalidator {
         return globalCacheIndex.batchCalculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
     }
 
+    public void updateEngineCache(WorkerStatus worker, String role, Set<Long> keys) { updateEngineCache(worker, role, keys, null); }
+
     public void updateEngineCache(
-            WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks) {
+            WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
         if (workerStatus == null) {
             return;
         }
@@ -108,11 +113,11 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 workerStatus.getWorkerIdentity(),
                 workerStatus.getMetricIpPort(),
                 role,
-                newCacheBlocks);
+                newCacheBlocks, pollTrace);
     }
 
     private void updateEngineCache(
-            WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks) {
+            WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks, EndpointTrace.Poll pollTrace) {
         String engineIPort = identity == null ? null : identity.getLogicalIpPort();
         if (engineIPort == null || newCacheBlocks == null) {
             return;
@@ -137,7 +142,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 // Update local view
                 engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
                 // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
+                globalCacheIndex.addCacheBlock(addedBlock, engineIPort, pollTrace);
             }
         }
 
@@ -146,7 +151,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
             // Remove from local view
             engineLocalView.removeCacheBlock(engineIPort, removedBlock);
             // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
+            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock, pollTrace);
         }
 
         // Report metrics
@@ -158,12 +163,14 @@ public class KvCacheManager implements EngineCacheInvalidator {
     }
 
     /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) {
+    public void removeEngineCache(String engineIpPort) { removeEngineCache(engineIpPort, null); }
+
+    public void removeEngineCache(String engineIpPort, EndpointTrace trace) {
         if (engineIpPort == null) {
             return;
         }
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, trace);
         physicalIpPortByLogicalIpPort.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());

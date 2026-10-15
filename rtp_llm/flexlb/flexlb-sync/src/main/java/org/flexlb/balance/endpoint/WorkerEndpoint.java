@@ -1,6 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
+
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -168,6 +170,7 @@ public class WorkerEndpoint {
      */
     final void beginRetirement() {
         generationLifecycle.beginRetirement();
+        status.trace().record(Stage.ENDPOINT_GATE_CLOSED);
     }
 
     /**
