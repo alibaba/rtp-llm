@@ -144,7 +144,10 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 params.regist_span             = &pool_registrations_[index].span;
                 params.self_location_spec_name = pool_registrations_[index].location_spec_name;
             }
-            auto client = client_factory_->createTransferClient(config_json, params);
+            auto client = pool_registrations_[index].memory_registrations.has_value()
+                              ? client_factory_->createTransferClientWithMemory(
+                                    config_json, params, *pool_registrations_[index].memory_registrations)
+                              : client_factory_->createTransferClient(config_json, params);
             if (!client) {
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
