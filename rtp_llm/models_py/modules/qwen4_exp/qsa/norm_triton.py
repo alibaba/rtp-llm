@@ -1,8 +1,76 @@
 """Graph-capturable Qwen4 Q/K RMSNorm with FP32 ``1 + gamma`` gains."""
 
+import math
+
 import torch
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _indexer_rmsnorm(
+    X,
+    GAMMA,
+    OUT,
+    HEADS: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    HEAD_STRIDE: tl.constexpr,
+    EPS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    lane = tl.arange(0, 32)
+    column = lane * 4
+    offset = row // HEADS * TOKEN_STRIDE + row % HEADS * HEAD_STRIDE
+    a = tl.load(X + offset + column).to(tl.float32)
+    b = tl.load(X + offset + column + 1).to(tl.float32)
+    c = tl.load(X + offset + column + 2).to(tl.float32)
+    d = tl.load(X + offset + column + 3).to(tl.float32)
+    variance = tl.sum(((a * a + b * b) + c * c) + d * d, 0) / 128.0
+    inverse = tl.rsqrt(variance + EPS)
+    for j in tl.static_range(4):
+        value = tl.load(X + offset + column + j).to(tl.float32)
+        gain = 1.0 + tl.load(GAMMA + column + j).to(tl.float32)
+        tl.store(OUT + row * 128 + column + j, (value * inverse) * gain)
+
+
+def try_indexer_rmsnorm(x, gamma, eps):
+    if not (
+        x.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and x.dtype == torch.bfloat16
+        and x.ndim in (2, 3, 4)
+        and x.shape[-1] == 128
+        and 1 <= x.numel() // 128 <= 128
+        and x.stride(-1) == 1
+        and all(stride > 0 for stride in x.stride())
+        and (x.ndim != 4 or x.stride(0) == x.shape[1] * x.stride(1))
+        and gamma.shape == (128,)
+        and gamma.dtype in (torch.bfloat16, torch.float32)
+        and gamma.device == x.device
+        and gamma.is_contiguous()
+        and not (x.requires_grad or gamma.requires_grad)
+        and isinstance(eps, (float, int))
+        and math.isfinite(eps)
+        and eps >= 0
+    ):
+        return None
+    heads = x.shape[-2] if x.ndim > 2 else 1
+    token_stride = x.stride(-3) if x.ndim > 2 else x.stride(0)
+    head_stride = x.stride(-2) if x.ndim > 2 else 128
+    out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    _indexer_rmsnorm[(x.numel() // 128,)](
+        x,
+        gamma,
+        out,
+        HEADS=heads,
+        TOKEN_STRIDE=token_stride,
+        HEAD_STRIDE=head_stride,
+        EPS=eps,
+        num_warps=1,
+        enable_fp_fusion=False,
+    )
+    return out
 
 
 @triton.jit

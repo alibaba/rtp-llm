@@ -67,12 +67,15 @@ def select_target_verify_tokens(
     query_positions = plan.visible_lengths - 1
     flat_query_positions = query_positions.reshape(-1).to(torch.int64)
     block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
+    get_frequency = getattr(indexer, "rope_inv_freq", None)
+    frequency = get_frequency(rope_config) if callable(get_frequency) else None
     rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
         block_starts,
         rope_config,
         token_count=token_count,
         dtype=raw_keys.dtype,
         device=raw_keys.device,
+        inv_freq=frequency,
     )
     current_cos, current_sin = build_qsa_rope_from_logical_positions(
         flat_query_positions,
@@ -80,6 +83,7 @@ def select_target_verify_tokens(
         token_count=token_count,
         dtype=raw_keys.dtype,
         device=raw_keys.device,
+        inv_freq=frequency,
     )
     target_writer = True
     target_writer = target_writer and (

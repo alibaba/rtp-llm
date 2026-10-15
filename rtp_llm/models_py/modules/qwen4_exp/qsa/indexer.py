@@ -306,10 +306,24 @@ def build_qsa_rope_from_logical_positions(
     token_count: int,
     dtype: torch.dtype,
     device: torch.device,
+    inv_freq: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build canonical text positions without rechecking a generated equality."""
     if logical_positions.dim() != 1 or int(logical_positions.numel()) != token_count:
         raise ValueError("qwen4 QSA logical position count does not match tokens")
+    if logical_positions.is_cuda and torch.version.hip is None:
+        from .rope_triton import try_build_text_rope
+
+        result = try_build_text_rope(
+            logical_positions,
+            rope_config,
+            _normalized_rope_style_name(rope_config.style),
+            dtype=dtype,
+            device=device,
+            inv_freq=inv_freq,
+        )
+        if result is not None:
+            return result
     index_factor = int(rope_config.index_factor)
     positions = (
         logical_positions.to(device=device, dtype=torch.long)
@@ -349,6 +363,12 @@ def apply_partial_rope(
 
     ``cos``/``sin`` must already be broadcastable to ``x``.
     """
+    if x.is_cuda and torch.version.hip is None:
+        from .rope_triton import try_apply_partial_rope
+
+        result = try_apply_partial_rope(x, cos, sin)
+        if result is not None:
+            return result
     rotary_dim = cos.shape[-1]
     rotated = x[..., :rotary_dim] * cos + rotate_half(x[..., :rotary_dim]) * sin
     return torch.cat([rotated, x[..., rotary_dim:]], dim=-1)
@@ -376,6 +396,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
         compress_ratio: int,
         norm_eps: float,
         projection_scale=None,
+        rope_config=None,
     ):
         super().__init__()
         expected = (n_heads + kv_heads) * head_dim
@@ -406,6 +427,28 @@ class Qwen4ExpQSAIndexer(nn.Module):
         # Widest possible result: every selected block contributes ratio tokens,
         # plus the unscored tail, which can hold at most ratio - 1 of them.
         self.max_selected = token_budget + compress_ratio - 1
+        # Build with the same Torch pow/divide kernels as the reference before
+        # capture. Device pow approximations can shift BF16 cos/sin values.
+        frequency = None
+        self._rope_inv_freq_key = None
+        if (
+            rope_config is not None
+            and int(rope_config.dim) == 64
+            and qk_proj.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(qk_proj.device) == (12, 0)
+        ):
+            base = float(rope_config.base)
+            frequency = base ** (
+                -2.0 * torch.arange(32, dtype=torch.float32, device=qk_proj.device) / 64
+            )
+            self._rope_inv_freq_key = (base, 64)
+        self.register_buffer("_rope_inv_freq", frequency, persistent=False)
+
+    def rope_inv_freq(self, config):
+        if self._rope_inv_freq_key == (float(config.base), int(config.dim)):
+            return self._rope_inv_freq
+        return None
 
     def project(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """``hidden -> (q [B,S,H,D], raw_keys [B,S,D])``, q normed but unrotated."""

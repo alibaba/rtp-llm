@@ -146,6 +146,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             projection_scale=weights.get(
                 W.qwen4_indexer_qk_proj_w + ".qwen4_fp8_storage_scale"
             ),
+            rope_config=self.qsa_rope_config,
         )
 
         record_projection_consumer(

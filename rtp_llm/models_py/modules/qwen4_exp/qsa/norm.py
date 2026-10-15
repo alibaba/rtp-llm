@@ -11,6 +11,12 @@ def exact_head_rms_norm(
     the ``+1`` happens in fp32, after the cast. ``gamma`` is therefore the raw
     checkpoint tensor and is broadcast across heads.
     """
+    if x.is_cuda and torch.version.hip is None:
+        from .norm_triton import try_indexer_rmsnorm
+
+        result = try_indexer_rmsnorm(x, gamma, eps)
+        if result is not None:
+            return result
     out = x.float()
     out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + eps)
     return (out * (1.0 + gamma.float())).type_as(x)
