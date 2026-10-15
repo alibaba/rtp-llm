@@ -17,12 +17,17 @@ import rtp_llm.model_loader  # noqa: F401  (registers QuantWeight classes)
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     NVFP4_BLOCK_SIZE,
     OnlineModelOptFp4DenseWeight,
     quantize_expert_to_nvfp4,
 )
-from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    LoadQuantPerBlockFp8Weight,
+    PerBlockFp8Weight,
+)
+from rtp_llm.model_loader.weight_module import WeightModule
 from rtp_llm.utils.model_weight import W
 
 
@@ -30,6 +35,14 @@ def _quant_config(flag: bool = True):
     # PerBlockFp8Weight.support() isinstance-checks the real algo config, and
     # init_precision_config injects enable_nvfp4_dense_ffn onto it.
     config = Fp8BlockWiseQuantConfig(is_quanted=True)
+    config.enable_nvfp4_dense_ffn = flag
+    return config
+
+
+def _load_quant_config(flag: bool = True):
+    # Online-quantization path (need_load_quant): BF16 checkpoint plus
+    # FP8_PER_BLOCK, the deployment base the NVFP4 layering targets.
+    config = Fp8BlockWiseQuantConfig(is_quanted=False)
     config.enable_nvfp4_dense_ffn = flag
     return config
 
@@ -73,6 +86,115 @@ class OnlineNvfp4DenseWeightSupportTest(unittest.TestCase):
     def test_per_block_fp8_keeps_non_ffn_weights(self) -> None:
         src = _ffn_weight(W.attn_qkv_w)
         self.assertTrue(PerBlockFp8Weight.support(_quant_config(True), src))
+
+    def test_load_quant_per_block_fp8_yields_ffn_when_layered_flag_on(self) -> None:
+        for name in (W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13):
+            with self.subTest(name=name):
+                src = _ffn_weight(name)
+                self.assertTrue(
+                    LoadQuantPerBlockFp8Weight.support(_load_quant_config(False), src)
+                )
+                self.assertFalse(
+                    LoadQuantPerBlockFp8Weight.support(_load_quant_config(True), src)
+                )
+
+    def test_load_quant_per_block_fp8_keeps_non_ffn_weights(self) -> None:
+        src = _ffn_weight(W.attn_qkv_w)
+        self.assertTrue(LoadQuantPerBlockFp8Weight.support(_load_quant_config(True), src))
+
+
+class OnlineNvfp4DenseWeightDispatchTest(unittest.TestCase):
+    """``WeightModule.create`` must resolve exactly one QuantWeight online.
+
+    Regression for the smoke failure where both OnlineModelOptFp4DenseWeight
+    and LoadQuantPerBlockFp8Weight claimed the dense FFN weights under the
+    online path (BF16 checkpoint + FP8_PER_BLOCK, i.e. ``is_quanted=False``)
+    with the layered flag on, raising "fit too many valid_classes".
+    """
+
+    def test_create_routes_dense_ffn_to_nvfp4_loader_online_path(self) -> None:
+        for name in (W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13):
+            with self.subTest(name=name):
+                created = WeightModule.create(_ffn_weight(name), _load_quant_config(True))
+                self.assertIsInstance(created, OnlineModelOptFp4DenseWeight)
+
+    def test_create_routes_dense_ffn_to_fp8_loader_without_flag(self) -> None:
+        created = WeightModule.create(_ffn_weight(W.ffn_w1), _load_quant_config(False))
+        self.assertIsInstance(created, LoadQuantPerBlockFp8Weight)
+
+    def test_create_routes_attention_to_fp8_loader_with_flag_on(self) -> None:
+        created = WeightModule.create(_ffn_weight(W.attn_qkv_w), _load_quant_config(True))
+        self.assertIsInstance(created, LoadQuantPerBlockFp8Weight)
+
+
+class OnlineNvfp4DenseWeightTpSplitTest(unittest.TestCase):
+    """Regression for the TP-split KeyError on the companion weight names.
+
+    The plain packed kernel and its per-block scale must resolve split funcs
+    (previously ``'ffn_weights.intermediate_weight2.weight_scale_2'`` raised
+    KeyError in ``AtomicWeight._get_split_func``) and stay block-aligned after
+    the split; scale_2 and input_scale replicate.
+    """
+
+    def _load_config(self, tp_size: int, tp_rank: int) -> LoadConfig:
+        return LoadConfig.model_construct(
+            database=None,
+            num_layers=1,
+            hidden_size=4,
+            head_num=1,
+            head_num_kv=1,
+            size_per_head=4,
+            moe_pure_tp_mode=False,
+            align_size=1,
+            moe_align_size=1,
+            moe_layer_index=[],
+            moe_n_group=1,
+            expert_num=2,
+            enable_eplb=False,
+            phy_exp_num=0,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            ep_size=1,
+            ep_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            lm_head_tp_size=1,
+            lm_head_tp_rank=0,
+            ffn_tp_size=tp_size,
+            ffn_tp_rank=tp_rank,
+            num_nodes=1,
+            compute_dtype=torch.bfloat16,
+            exported_device=None,
+        )
+
+    def test_split_keeps_packed_kernel_and_scale_aligned(self) -> None:
+        # gate/up (ffn_w1) splits rows; down (ffn_w2) splits columns.
+        # Kernel [N, K/2] and scale [N, K/16] for a 64x256 BF16 source.
+        cases = {
+            W.ffn_w1: ((32, 128), (32, 16)),  # sp_0 on both
+            W.ffn_w2: ((64, 64), (64, 8)),  # sp_neg1 on both
+        }
+        for name, (kernel_shape, scale_shape) in cases.items():
+            with self.subTest(name=name):
+                quant_weight = OnlineModelOptFp4DenseWeight(
+                    _ffn_weight(name), _load_quant_config(True)
+                )
+                tensors = {
+                    quant_weight.kernel.name: torch.randint(
+                        0, 256, (64, 128), dtype=torch.uint8
+                    ),
+                    quant_weight.scale.name: torch.ones(
+                        (64, 16), dtype=torch.float8_e4m3fn
+                    ),
+                    quant_weight.scale_2.name: torch.ones([1], dtype=torch.float32),
+                    quant_weight.input_scale.name: torch.ones([1], dtype=torch.float32),
+                }
+                split = quant_weight._split(tensors, self._load_config(2, 1))
+                self.assertEqual(tuple(split[quant_weight.kernel.name].shape), kernel_shape)
+                self.assertEqual(tuple(split[quant_weight.scale.name].shape), scale_shape)
+                # scale_2 and input_scale replicate on every rank.
+                self.assertEqual(tuple(split[quant_weight.scale_2.name].shape), (1,))
+                self.assertEqual(tuple(split[quant_weight.input_scale.name].shape), (1,))
 
 
 class OnlineNvfp4QuantMathTest(unittest.TestCase):
@@ -133,18 +255,72 @@ class OnlineNvfp4QuantMathTest(unittest.TestCase):
                 tensor_source=mock.Mock(),
                 layer_id=0,
                 device="cuda",
-                load_config=SimpleNamespace(exported_device=CudaImpl),
+                load_config=SimpleNamespace(
+                    exported_device=CudaImpl, hidden_size=32
+                ),
             )
 
         self.assertEqual(set(tensors), {W.ffn_w2, W.ffn_s2, W.ffn_w2_s2, W.ffn_w2_i_s})
         self.assertEqual(tensors[W.ffn_w2].dtype, torch.uint8)
         self.assertEqual(tensors[W.ffn_s2].dtype, torch.float8_e4m3fn)
-        # The GEMM scale leaves in the 128x4-swizzled layout: M padded to 128
-        # (32 -> 128) and 16 scale columns per 256-wide K.
-        self.assertEqual(tuple(tensors[W.ffn_s2].shape), (128, 16))
+        # _load_raw_tensor emits the PLAIN layouts the TP split consumes:
+        # packed e2m1 kernel [N, K/2] and per-block scale [N, K/16].
+        self.assertEqual(tuple(tensors[W.ffn_w2].shape), (32, 128))
+        self.assertEqual(tuple(tensors[W.ffn_s2].shape), (32, 16))
         self.assertEqual(tensors[W.ffn_w2_s2].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].dtype, torch.float32)
         self.assertEqual(tensors[W.ffn_w2_i_s].flatten().tolist(), [1.0])
+
+        # The GEMM swizzle is applied afterwards in _postprocess (after the TP
+        # split in the real load flow): M padded to 128 (32 -> 128) and the
+        # scale columns interleaved into the 128x4 layout.
+        class _StubExportedDevice:
+            @staticmethod
+            def maybe_rewrite_weight_by_key(key, tensor, use_swizzle_a=None):
+                return tensor
+
+            @staticmethod
+            def convert_fp4_gemm_weight_params(kernel, scale):
+                return CudaImpl.convert_fp4_gemm_weight_params(kernel, scale)
+
+        processed = quant_weight._postprocess(
+            tensors,
+            "cuda",
+            SimpleNamespace(exported_device=_StubExportedDevice, use_swizzleA=False),
+        )
+        self.assertEqual(tuple(processed[W.ffn_s2].shape), (128, 16))
+        self.assertEqual(processed[W.ffn_w2].dtype, torch.uint8)
+
+    def test_weight_class_transposes_k_major_source(self) -> None:
+        """GPT-style weights arrive as [K, N]; kernels must end up [N, K]."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        torch.manual_seed(23)
+        # Down proj delivered as [K=inter, N=hidden] = [256, 32].
+        weight = (torch.randn(256, 32, device="cuda") * 0.1).to(torch.bfloat16)
+        src = _ffn_weight(W.ffn_w2)
+        quant_weight = OnlineModelOptFp4DenseWeight(src, _quant_config(True))
+
+        with mock.patch.object(
+            FfnAtomicWeight,
+            "_load_raw_tensor",
+            return_value={W.ffn_w2: weight},
+        ):
+            tensors = quant_weight._load_raw_tensor(
+                tensor_source=mock.Mock(),
+                layer_id=0,
+                device="cuda",
+                load_config=SimpleNamespace(
+                    exported_device=CudaImpl, hidden_size=32
+                ),
+            )
+
+        # Same packed/scale shapes as the out-major source: [N, K/2] kernel.
+        self.assertEqual(tuple(tensors[W.ffn_w2].shape), (32, 128))
+        self.assertEqual(tuple(tensors[W.ffn_s2].shape), (32, 16))
+        # And the quantization applied to the transposed view, not the raw
+        # [256, 32] tensor (which would pack to [256, 16]).
+        self.assertNotEqual(tuple(tensors[W.ffn_w2].shape), (256, 16))
 
     def test_online_shapes_through_fp4_gemm(self) -> None:
         """B4: the loader's exact output tensors must run through mm_fp4.

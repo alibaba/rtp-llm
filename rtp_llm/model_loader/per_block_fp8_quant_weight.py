@@ -924,7 +924,21 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
+        if name not in cls.w8a8_weight_list:
+            return False
+        # Layered NVFP4 dense FFN claims the dense FFN weights when
+        # enable_nvfp4_dense_ffn is on; exactly one QuantWeight may match
+        # (mirrors the defer in PerBlockFp8Weight.support for the
+        # pre-quantized-checkpoint path; this class serves the online
+        # need_load_quant path from BF16 checkpoints).
+        if getattr(quant_config, "enable_nvfp4_dense_ffn", False) and name in (
+            W.ffn_w1,
+            W.ffn_w2,
+            W.ffn_w3,
+            W.ffn_w13,
+        ):
+            return False
+        return name not in [W.mla_kc, W.mla_vc]
 
     def __init__(
         self,

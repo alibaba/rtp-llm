@@ -14,7 +14,8 @@ input_scale defaults to 1.0 because no calibration data is available; the FP4
 executors fall back to dynamic per-block activation quantization.
 """
 
-from typing import Any, Optional
+import copy
+from typing import Any, Dict, Optional, Union
 
 import torch
 
@@ -27,7 +28,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.model_weight import W, identity
+from rtp_llm.utils.model_weight import W, identity, sp_0, sp_0_w13, sp_id, sp_neg1
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
@@ -307,6 +308,77 @@ def _dense_ffn_input_scale_name(name: str) -> str:
     raise ValueError(f"unsupported dense FFN weight: {name}")
 
 
+def gemm_online_fp4_dense_gpt_style_tp_strategy():
+    """TP split strategies for the online-NVFP4 dense FFN sub-weights.
+
+    Mirrors the checkpoint modelopt_fp4 map in per_group_fp4_quant_weight:
+    the packed e2m1 kernel and its plain ``[N, K/block_size]`` scale split
+    together (sp_0 / sp_neg1 / sp_0_w13), while the per-tensor scale_2 and
+    input_scale replicate (sp_id). The split runs on the PLAIN layouts before
+    the GEMM swizzle (see ``OnlineModelOptFp4DenseWeight._postprocess``) —
+    the same split-then-swizzle order as the checkpoint loader.
+    """
+    online_fp4_dense_tp_strategy: Dict[str, Any] = {
+        W.ffn_w1: sp_0,
+        W.ffn_s1: sp_0,
+        W.ffn_w1_s2: sp_id,
+        W.ffn_w1_i_s: sp_id,
+        W.ffn_w3: sp_0,
+        W.ffn_s3: sp_0,
+        W.ffn_w3_s2: sp_id,
+        W.ffn_w3_i_s: sp_id,
+        W.ffn_w2: sp_neg1,
+        W.ffn_s2: sp_neg1,
+        W.ffn_w2_s2: sp_id,
+        W.ffn_w2_i_s: sp_id,
+        W.ffn_w13: sp_0_w13,
+        W.ffn_s13: sp_0_w13,
+        W.ffn_w13_s2: sp_id,
+        W.ffn_w13_i_s: sp_id,
+    }
+    tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+    tp_strategy.update(online_fp4_dense_tp_strategy)
+    return tp_strategy
+
+
+class OnlineFp4DenseFfnAtomicWeight(FfnAtomicWeight):
+    gpt_style_tp_strategy = gemm_online_fp4_dense_gpt_style_tp_strategy()
+
+    def _get_split_func(self):
+        return self.gpt_style_tp_strategy[self.name]
+
+
+def _to_out_major(weight: torch.Tensor, name: str, hidden_size: int) -> torch.Tensor:
+    """Return the dense FFN weight in out-major [N, K] layout.
+
+    The GPT-style weight system delivers dense FFN weights as [K, N] — the
+    model definitions load HF [out, in] checkpoints through the
+    ``transpose_pad`` process function, and the BF16 executor consumes
+    ``x @ weight`` (see CudaF16Linear's ``weight.T``). The NVFP4 stack (packed
+    kernel + scale layout, 128x4 swizzle, per_group_fp4-style TP splits,
+    CudaFp4GEMMLinear) is out-major [N, K] like modelopt_fp4 checkpoints, so
+    [K, N] sources are transposed here. The layout is disambiguated with the
+    model hidden size: gate/up weights carry hidden on K, the down proj on N.
+    """
+    is_gate_up = name in (W.ffn_w1, W.ffn_w3, W.ffn_w13)
+    rows, cols = weight.shape
+    if is_gate_up:
+        # [K=hidden, N] vs [N, K=hidden]
+        if rows == hidden_size and cols != hidden_size:
+            return weight.t().contiguous()
+        if cols == hidden_size:
+            return weight
+    else:  # down proj: [K=inter, N=hidden] vs [N=hidden, K=inter]
+        if cols == hidden_size and rows != hidden_size:
+            return weight.t().contiguous()
+        if rows == hidden_size:
+            return weight
+    raise ValueError(
+        f"online NVFP4 dense FFN cannot determine the {name} layout from "
+        f"shape {tuple(weight.shape)} with hidden_size={hidden_size}"
+    )
+
+
 class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
     """Online NVFP4 weight loader for dense FFN weights.
 
@@ -338,8 +410,11 @@ class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
         **kwargs: Any,
     ):
         # The kernel sub-weight inherits the original loader so BF16 weights
-        # are read from the checkpoint through the existing FFN path.
-        kernel = FfnAtomicWeight(
+        # are read from the checkpoint through the existing FFN path; the
+        # OnlineFp4DenseFfnAtomicWeight base provides the NVFP4 TP split
+        # strategies (packed kernel + plain scale split together, scale_2 and
+        # input_scale replicate).
+        kernel = OnlineFp4DenseFfnAtomicWeight(
             name=src_weight_info.name,
             weights=src_weight_info.weights,
             process_fun=src_weight_info.process_fun,
@@ -348,21 +423,21 @@ class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
         )
         # Companion sub-weights are synthesized in _load_raw_tensor; their
         # ``weights=[]`` keeps them out of the file-name listing path.
-        scale = FfnAtomicWeight(
+        scale = OnlineFp4DenseFfnAtomicWeight(
             name=_dense_ffn_scale_name(src_weight_info.name),
             weights=[],
             process_fun=identity,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
-        scale_2 = FfnAtomicWeight(
+        scale_2 = OnlineFp4DenseFfnAtomicWeight(
             name=_dense_ffn_scale_2_name(src_weight_info.name),
             weights=[],
             process_fun=identity,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        input_scale = FfnAtomicWeight(
+        input_scale = OnlineFp4DenseFfnAtomicWeight(
             name=_dense_ffn_input_scale_name(src_weight_info.name),
             weights=[],
             process_fun=identity,
@@ -411,22 +486,45 @@ class OnlineModelOptFp4DenseWeight(CompositeWeight, QuantWeight):
             raise ValueError(
                 f"online NVFP4 dense FFN expects 2D weights, got {tuple(weight.shape)}"
             )
+        # Quantize the out-major [N, K] view of the weight (see _to_out_major).
+        weight = _to_out_major(weight, self.kernel.name, load_config.hidden_size)
         # Quantize on the device the tensor already lives on (typically GPU).
         packed, block_scale, scale_2 = quantize_expert_to_nvfp4(
             weight, block_size=self._block_size
         )
-        # mm_fp4 consumes the 128x4-swizzled scale layout (same conversion the
-        # checkpoint modelopt_fp4 loader applies in per_group_fp4_quant_weight);
-        # feeding the plain [N, K/block] scale layout fails kernel init.
-        processed_weight, processed_scale = (
-            load_config.exported_device.convert_fp4_gemm_weight_params(
-                packed, block_scale
-            )
-        )
         input_scale = torch.ones([1], dtype=torch.float32, device=weight.device)
+        # Return the PLAIN packed kernel and its [N, K/block_size] scale: the
+        # loader framework splits these per sub-weight (sp_0/sp_neg1 keep the
+        # kernel rows/columns aligned with their per-block scales), and the
+        # mm_fp4 128x4-swizzled layout is applied per rank afterwards in
+        # _postprocess — the same split-then-swizzle order as the checkpoint
+        # modelopt_fp4 loader in per_group_fp4_quant_weight.
         return {
-            self.kernel.name: processed_weight,
-            self.scale.name: processed_scale,
+            self.kernel.name: packed,
+            self.scale.name: block_scale,
             self.scale_2.name: scale_2.reshape([1]),
             self.input_scale.name: input_scale,
         }
+
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        processed_res = super()._postprocess(tensor, device, load_config)
+        # Apply the mm_fp4 128x4-swizzled scale layout AFTER the TP split
+        # (the checkpoint modelopt_fp4 loader applies the same conversion in
+        # its _postprocess); feeding the plain scale layout to mm_fp4 fails
+        # kernel init.
+        kernel_weight = processed_res[self.kernel.name]
+        scale_weight = processed_res[self.scale.name]
+        if kernel_weight.dim() == 2 and scale_weight.dim() == 2:
+            kernel_weight, scale_weight = (
+                load_config.exported_device.convert_fp4_gemm_weight_params(
+                    kernel_weight, scale_weight
+                )
+            )
+            processed_res[self.kernel.name] = kernel_weight
+            processed_res[self.scale.name] = scale_weight
+        return processed_res
