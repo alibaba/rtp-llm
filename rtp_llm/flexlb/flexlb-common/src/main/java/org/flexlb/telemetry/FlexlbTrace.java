@@ -2,6 +2,7 @@ package org.flexlb.telemetry;
 
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanBuilder;
 import io.opentelemetry.api.trace.SpanContext;
@@ -26,6 +27,7 @@ import java.util.concurrent.TimeUnit;
  * Small fail-open facade for the FlexLB manual tracing points.
  */
 public final class FlexlbTrace {
+    private static final int MAX_DIAGNOSTIC_ATTRIBUTE_CHARS = 256;
 
     public static final String INSTRUMENTATION_NAME = "org.flexlb";
     /**
@@ -191,6 +193,67 @@ public final class FlexlbTrace {
             setScheduleAttribute(context, key,
                     TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
         }
+    }
+
+    /** Record on the existing request span carried explicitly across scheduler threads. */
+    public static void recordPlacement(Context context, long startedNanos, String outcome,
+                                       Map<String, Object> diagnostics, Throwable failure) {
+        if (!enabled) { return; }
+        try {
+            Span span = spanFromContext(context);
+            if (!span.isRecording()) { return; }
+            var attributes = Attributes.builder()
+                    .put("flexlb.placement.outcome", outcome)
+                    .put("flexlb.placement.duration_us",
+                            TimeUnit.NANOSECONDS.toMicros(Math.max(0, System.nanoTime() - startedNanos)));
+            // Overwrite all latest-attempt fields so a later success cannot retain stale failure data.
+            Object workers = diagnostics == null ? null : diagnostics.get("workers");
+            attributes.put("flexlb.placement.registered_workers", workers instanceof Number n ? n.longValue() : -1L)
+                    .put("flexlb.placement.role", diagnosticText(diagnostics, "role"))
+                    .put("flexlb.placement.group", diagnosticText(diagnostics, "group"))
+                    .put("flexlb.placement.cause", diagnosticText(diagnostics, "cause"))
+                    .put("flexlb.placement.exception.type", failure == null ? "" : failure.getClass().getName())
+                    .put("flexlb.placement.exception.message", failure == null ? "" : bounded(failure.getMessage()));
+            // SDK span limits bound events; latest attributes remain useful when the event limit is reached.
+            var values = attributes.build();
+            span.setAllAttributes(values);
+            span.addEvent("flexlb.placement", values);
+        } catch (Throwable ignored) {
+            // Observability cannot change placement or hold a request open.
+        }
+    }
+
+    public static void recordScheduleFailure(Context context, int code, String type,
+                                             Map<String, Object> diagnostics) {
+        if (!enabled) { return; }
+        try {
+            Span span = spanFromContext(context);
+            if (!span.isRecording()) { return; }
+            var attributes = Attributes.builder().put(SCHEDULE_CODE, (long) code).put(ERROR_TYPE, type);
+            if (diagnostics != null) {
+                if (diagnostics.get("queueDepth") instanceof Number depth) {
+                    attributes.put("flexlb.queue.depth", depth.longValue());
+                }
+                if (diagnostics.get("cause") instanceof String cause) {
+                    attributes.put("flexlb.failure.cause", bounded(cause));
+                }
+            }
+            var values = attributes.build();
+            span.setAllAttributes(values);
+            span.addEvent("flexlb.schedule.failed", values);
+        } catch (Throwable ignored) {
+            // The response and existing PV failure log remain authoritative.
+        }
+    }
+
+    private static String diagnosticText(Map<String, Object> diagnostics, String key) {
+        Object value = diagnostics == null ? null : diagnostics.get(key);
+        return value instanceof String text ? bounded(text) : "UNKNOWN";
+    }
+
+    private static String bounded(String value) {
+        return value == null ? "UNKNOWN"
+                : value.substring(0, Math.min(MAX_DIAGNOSTIC_ATTRIBUTE_CHARS, value.length()));
     }
 
     public static void finish(Span span) {

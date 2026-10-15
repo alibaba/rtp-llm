@@ -9,6 +9,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -354,12 +355,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (handle == null) {
             return Plan.done(entry, availabilitySequence);
         }
+        long decisionStartedNanos = System.nanoTime();
         try {
             // A wakeup grants a fresh fleet-wide decision, not an obligation
             // to return to the endpoint which published the capacity event.
             PlacementResult<RouteAdmission, PlacementKey> result =
                     router.select(entry.context, entry.routingGroup);
             handle.recordDiagnostics(result.diagnostics());
+            FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
+                    result.status().name(), result.diagnostics(), null);
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
                         entry, handle, result, availabilitySequence);
@@ -368,6 +372,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Plan.result(entry, result, availabilitySequence);
         } catch (Throwable failure) {
             handle.close();
+            FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
+                    "ERROR", null, failure);
             return Plan.failure(entry, failure, availabilitySequence);
         }
     }

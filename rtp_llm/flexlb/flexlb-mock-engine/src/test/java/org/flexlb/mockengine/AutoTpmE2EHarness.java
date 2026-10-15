@@ -335,7 +335,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(initial));
+                    status.freezeStatusResponse(initial), null);
             endpointRegistry.publishPreparedEndpoint(
                     status.getIpPort(), status, prepared);
         } finally {
