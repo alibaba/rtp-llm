@@ -419,10 +419,17 @@ class DeepSeekV4Model(GptModelBase):
             f"got {self._max_generate_batch_size}"
         )
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
-        self._prefill_scheduler_chunked = model_config.prefill_chunk_size > 0
+        # Mainline tests construct configs without the chunked-prefill
+        # binding; treat a missing field as "chunking disabled".
+        self._prefill_scheduler_chunked = (
+            getattr(model_config, "prefill_chunk_size", 0) or 0
+        ) > 0
+        moe_prefill_cap = getattr(
+            model_config, "moe_prefill_max_tokens_per_rank", None
+        )
         self._prefill_scheduler_token_capacity = int(
-            model_config.moe_prefill_max_tokens_per_rank
-            if model_config.moe_prefill_max_tokens_per_rank is not None
+            moe_prefill_cap
+            if moe_prefill_cap is not None
             else (int(model_config.max_seq_len) or 4096)
         )
         # Python-only DSpARK config, populated on the target model by the

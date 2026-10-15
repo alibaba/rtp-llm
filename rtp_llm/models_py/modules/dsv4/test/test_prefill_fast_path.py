@@ -134,6 +134,9 @@ class _FakeV4:
     def _embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
+    # Mainline tests assert through the pre-TP public name.
+    embed = _embed
+
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)

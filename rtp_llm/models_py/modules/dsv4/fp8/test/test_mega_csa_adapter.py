@@ -55,6 +55,11 @@ def _block_stub(adapter: object | None) -> Block:
     block.attn_hc.post.side_effect = lambda value, *_args: value.unsqueeze(-2)
     block.ffn_hc = MagicMock()
     block.ffn_hc.pre.side_effect = block.attn_hc.pre.side_effect
+    # The merged block forward normalizes through pre_norm (TP-aware), which
+    # combines pre + norm; return pre's tuple shape with the input already
+    # [B, q_len, dim] here so the stub feeds the same downstream flow.
+    block.ffn_hc.pre_norm.side_effect = block.attn_hc.pre.side_effect
+    block.attn_hc.pre_norm.side_effect = block.attn_hc.pre.side_effect
     block.ffn_hc.post.side_effect = lambda value, *_args: value.unsqueeze(-2)
     block.ffn = MagicMock(side_effect=lambda value, _input_ids, **_kwargs: value)
     return block
