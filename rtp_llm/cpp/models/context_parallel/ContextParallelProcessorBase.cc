@@ -408,15 +408,18 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                             input_padding_length);
         RTP_LLM_CHECK_WITH_INFO(success, "Context parallel planning failed for prefill stream %zu", p);
 
-        const int prefix_length = has_prefix_lengths ? prefix_lengths_ptr[p] : 0;
-        for (int& index : shuffle_index) {
-            index += prefix_length;
-        }
-
         std::memcpy(input_token_ptr + input_token_idx, chunk_input_token.data(), input_chunk_length * sizeof(int));
         std::memcpy(prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream,
                     shuffle_index.data(),
                     input_chunk_length * sizeof(int));
+        const int prefix_length = has_prefix_lengths ? prefix_lengths_ptr[p] : 0;
+        auto*     absolute_indices = prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream;
+        for (int i = 0; i < input_chunk_length; ++i) {
+            if (absolute_indices[i] >= 0) {
+                absolute_indices[i] += prefix_length;
+            }
+        }
+        // Source selection must keep chunk-relative indices and the -1 padding sentinel.
         if (need_source_map || should_split_hidden_states) {
             for (int i = 0; i < input_chunk_length; ++i) {
                 const int  src_idx = shuffle_index[i];
@@ -455,10 +458,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                            pinned_i32);
     }
 
-    // shuffle indices are relative to the uncached input chunk. Materialize
-    // absolute one-axis positions once when prefix reuse is active so every
-    // transformer layer sees the same cache-aware positions without rebuilding
-    // offsets in Python.
+    // Shuffle indices already include the cached prefix. Reuse these absolute
+    // positions without adding the prefix again, and zero padded token positions.
     if (!has_explicit_position_ids && has_prefix_reuse) {
         auto  absolute_position_ids = torch::empty({local_token_num}, pinned_i32);
         auto* position_ids_ptr      = absolute_position_ids.data_ptr<int32_t>();
@@ -473,9 +474,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         for (size_t p = 0; p < num_prefill_stream; ++p) {
             for (int i = 0; i < chunk_lengths[p]; ++i) {
                 auto& position_id = position_ids_ptr[local_offset + i];
-                if (cp_valid_mask[local_offset + i]) {
-                    position_id += prefix_lengths_ptr[p];
-                } else {
+                if (!cp_valid_mask[local_offset + i]) {
                     position_id = 0;
                 }
             }

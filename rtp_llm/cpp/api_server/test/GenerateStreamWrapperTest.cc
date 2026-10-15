@@ -3,7 +3,6 @@
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
-#include "rtp_llm/cpp/api_server/Exception.h"
 
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockGenerateStream.h"

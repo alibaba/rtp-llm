@@ -1959,12 +1959,15 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConnectorRefPreservesCpKeysAndLoca
             resource.rebuildLinearBlockDependencies();
             resource.setLastBlockAligned(key_count == 4);
             resource.setDeviceReuseBlockNum(1);
-            resource.mutableBlockIds(resource.groupTags().at(0)).assign(blocks);
+            auto snapshot = blocks;
+            snapshot.push_back(0);  // Reserved slots are retained but never referenced.
+            snapshot.push_back(NULL_BLOCK_IDX);
+            resource.mutableBlockIds(resource.groupTags().at(0)).assign(snapshot);
 
             auto ref = allocator_->incrKVCacheRef(resource, resource.cacheKeys(), true);
             ASSERT_NE(ref, nullptr);
             EXPECT_EQ(ref->cacheKeys(), resource.cacheKeys());
-            EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), blocks);
+            EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), snapshot);
             EXPECT_EQ(ref->lastBlockAligned(), resource.lastBlockAligned());
             EXPECT_EQ(ref->reuseBlockNum(), resource.reuseBlockNum());
             EXPECT_EQ(ref->blockDependencies().size(), resource.blockDependencies().size());
@@ -1974,7 +1977,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConnectorRefPreservesCpKeysAndLoca
 
             // Mutating the stream table must not change the connector's release set.
             resource.mutableBlockIds(resource.groupTags().at(0)).resize(0);
-            EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), blocks);
+            EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), snapshot);
             block_pool->decRef(blocks);
             EXPECT_EQ(allocator_->freeBlocksNum(), free_before - blocks.size());
             ref.reset();
