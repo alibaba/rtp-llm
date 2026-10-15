@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import partial
+from itertools import product
 
 _WARMED: set[tuple] = set()
 
@@ -305,6 +306,37 @@ def _warm_joint_pool(main_layout, index_layout, cp_size, cp_rank, device):
             )
 
 
+def _warm_chunk_metadata(meta, ratio, window, device):
+    import torch
+
+    # CP lengths and prefixes may have different integer dtypes. Independently
+    # cover their pointer alignment and request offsets, not just equal pairs.
+    for prefix_dtype, length_dtype in product((torch.int32, torch.int64), repeat=2):
+        for prefix_offset, length_offset, request_offset in product((0, 1), repeat=3):
+            prefixes = torch.zeros(
+                3 + prefix_offset, dtype=prefix_dtype, device=device
+            )[prefix_offset:]
+            lengths = torch.ones(3 + length_offset, dtype=length_dtype, device=device)[
+                length_offset:
+            ]
+            requests = torch.zeros(
+                3 + request_offset, dtype=torch.int64, device=device
+            )[request_offset:]
+            for replay, compact_replay in product((False, True), repeat=2):
+                _require_launch(
+                    meta.try_chunk_metadata(
+                        prefixes,
+                        lengths,
+                        requests,
+                        ratio,
+                        window,
+                        replay,
+                        compact_replay=compact_replay,
+                    ),
+                    "chunk metadata",
+                )
+
+
 def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
     import torch
 
@@ -324,29 +356,7 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
     starts = torch.zeros((1,), dtype=torch.int64, device=device)
     slots = _private_slots(rows, layout.entries, device)
     if layout.region != SWA_KV:
-        for dtype in (torch.int32, torch.int64):
-            for offset in (0, 1):
-                chunk_prefix = torch.zeros(3 + offset, dtype=dtype, device=device)[
-                    offset:
-                ]
-                chunk_lengths = torch.ones_like(chunk_prefix)
-                chunk_req = torch.zeros(3 + offset, dtype=torch.int64, device=device)[
-                    offset:
-                ]
-                for replay in (False, True):
-                    for compact_replay in (False, True):
-                        _require_launch(
-                            meta.try_chunk_metadata(
-                                chunk_prefix,
-                                chunk_lengths,
-                                chunk_req,
-                                layout.ratio,
-                                attn.window_size,
-                                replay,
-                                compact_replay=compact_replay,
-                            ),
-                            "chunk metadata",
-                        )
+        _warm_chunk_metadata(meta, layout.ratio, attn.window_size, device)
         for offset, table_offset in _slot_metadata_layouts():
             metadata_positions = _indexer_warmup_vector(
                 rows, torch.int64, device, 1, offset
