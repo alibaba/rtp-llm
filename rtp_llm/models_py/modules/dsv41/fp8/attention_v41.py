@@ -1258,6 +1258,7 @@ class AttentionV41FP8(AttentionFP8):
         raw_tiles=None,
         grouped_projection=False,
         batched_groups=False,
+        swa=None,
     ):
         """Publish global pools in sequence order, carrying pairs across tiles."""
         owner = self._owner()
@@ -1733,10 +1734,12 @@ class AttentionV41FP8(AttentionFP8):
                     if producer_seq_ends is not None
                     else starts + lengths
                 ),
+                swa=swa,
             )
             if batched is not None:
                 self._shared_attention["global"] = {self.layer_id: batched}
                 self._shared_attention.pop("prefill_chunk_meta", None)
+                self._shared_attention.pop("prefill_kv_workspace", None)
                 return
         for b, end in enumerate(ends):
             count = int(end) // ratio
@@ -1802,8 +1805,8 @@ class AttentionV41FP8(AttentionFP8):
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
         globals_by_req = shared["global"][self.kv_source_layer_id]
-        out = torch.full(
-            (x.shape[0], self.index_topk), -1, dtype=torch.int32, device=x.device
+        out = torch.empty(
+            (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
         )
         config = getattr(self, "v41_config", {})
         candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -1831,9 +1834,8 @@ class AttentionV41FP8(AttentionFP8):
                 default=0,
             )
             shared["candidates"] = (
-                torch.full(
+                torch.empty(
                     (x.shape[0], candidate_blocks),
-                    -1,
                     dtype=torch.int32,
                     device=x.device,
                 )
@@ -1862,8 +1864,11 @@ class AttentionV41FP8(AttentionFP8):
                     ),
                     candidate_size,
                 )
+        candidates_out = shared.get("candidates") if publish_candidates else None
         # Short prompts select all causal candidates, as in the vLLM backend.
         if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
+            if candidates_out is not None:
+                candidates_out.fill_(-1)
             ids = torch.arange(self.index_topk, device=x.device)
             out.copy_(
                 torch.where(
@@ -1894,6 +1899,8 @@ class AttentionV41FP8(AttentionFP8):
                     positions,
                     self.rope_head_dim,
                     weights_out_dtype=torch.bfloat16,
+                    selection_out=out,
+                    candidates_out=candidates_out,
                 )
                 if fused_indexer
                 else None
@@ -1901,6 +1908,9 @@ class AttentionV41FP8(AttentionFP8):
             if prepared is not None:
                 q_fp4, q_sf, weights = (value.squeeze(1) for value in prepared)
             else:
+                out.fill_(-1)
+                if candidates_out is not None:
+                    candidates_out.fill_(-1)
                 q = rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
                 weights = (
                     raw_weights.float()
@@ -2497,6 +2507,7 @@ class AttentionV41FP8(AttentionFP8):
                     raw_tiles=raw_tiles,
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
+                    swa=swa,
                 )
             finally:
                 if raw_tiles is not None:
