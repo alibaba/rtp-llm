@@ -46,7 +46,7 @@ def is_supported(indices: torch.Tensor, offsets: torch.Tensor) -> bool:
 
 def offset_cp_topk(indices: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     """Return independent global indices; negative local entries remain -1."""
-    if os.environ.get("RTP_CP_FUSED_TOPK_OFFSETS", "0") != "1" or not is_supported(
+    if os.environ.get("RTP_CP_FUSED_TOPK_OFFSETS", "1") != "1" or not is_supported(
         indices, offsets
     ):
         result = indices + offsets.unsqueeze(1)
