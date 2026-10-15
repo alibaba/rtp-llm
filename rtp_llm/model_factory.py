@@ -457,6 +457,9 @@ class ModelFactory:
             sp_config.checkpoint_path
         )
         propose_model_config.enable_w4a16_sm120_dense_ffn = False
+        propose_model_config.enable_int8_allreduce_fp16_scale = getattr(
+            model_config, "enable_int8_allreduce_fp16_scale", False
+        )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

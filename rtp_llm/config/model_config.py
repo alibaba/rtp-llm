@@ -66,6 +66,7 @@ class ModelConfig(CppModelConfig):
         "tie_word_embeddings",
         "quantization",
         "enable_w4a16_sm120_dense_ffn",
+        "enable_int8_allreduce_fp16_scale",
         "mm_related_params",
         "src_quantization_bit",
         "config_dtype",
@@ -555,6 +556,7 @@ class ModelConfig(CppModelConfig):
             ""  # Quantization method string (e.g., "INT8", "FP8", etc.)
         )
         self.enable_w4a16_sm120_dense_ffn: bool = False
+        self.enable_int8_allreduce_fp16_scale: bool = False
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -917,6 +919,9 @@ def build_model_config(
         model_config.quantization = quantization_config.get_quantization()
         model_config.enable_w4a16_sm120_dense_ffn = (
             quantization_config.enable_w4a16_sm120_dense_ffn
+        )
+        model_config.enable_int8_allreduce_fp16_scale = getattr(
+            quantization_config, "enable_int8_allreduce_fp16_scale", False
         )
 
     # Initialize precision configuration (uses self.ckpt_path and self.quantization)

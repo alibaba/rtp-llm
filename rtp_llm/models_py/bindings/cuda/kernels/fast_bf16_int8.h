@@ -5,7 +5,7 @@
 
 namespace rtp_llm {
 
-// Quantize finite BF16 x[M,K] into INT8 q[M,K] and BF16 scales[M,K/group_size] on the current stream.
+// Quantize finite BF16 x[M,K] into INT8 q[M,K] and FP16/BF16 scales[M,K/group_size] on the current stream.
 // group_size is 16, 32, 64 or 128; outputs must not overlap inputs. Requires SM90+.
 void fastBf16Int8Quantize(at::Tensor x, at::Tensor q, at::Tensor scales, int64_t group_size);
 
