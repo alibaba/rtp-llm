@@ -168,7 +168,7 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             dtype=torch.float32,
         )
 
-        tokens0, lengths0, hidden0, shuffle0 = cp_test.handle_inputs_with_hidden(
+        tokens0, lengths0, hidden0, shuffle0, output0 = cp_test.handle_inputs_with_hidden(
             total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
         )
         self.assertTrue(
@@ -177,6 +177,9 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         self.assertTrue(torch.equal(lengths0, torch.tensor([4], dtype=torch.int32)))
         self.assertTrue(
             torch.equal(shuffle0, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(output0, torch.tensor([0, 1, 4, 5, 6, 7], dtype=torch.int32))
         )
         self.assertTrue(
             torch.equal(
@@ -188,7 +191,7 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
-        tokens1, lengths1, hidden1, shuffle1 = cp_test.handle_inputs_with_hidden(
+        tokens1, lengths1, hidden1, shuffle1, output1 = cp_test.handle_inputs_with_hidden(
             total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
         )
         self.assertTrue(
@@ -198,6 +201,7 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         self.assertTrue(
             torch.equal(shuffle1, torch.tensor([2, 3, 4, 5], dtype=torch.int32))
         )
+        self.assertTrue(torch.equal(output1, output0))
         self.assertTrue(
             torch.equal(
                 hidden1,
@@ -207,6 +211,22 @@ class TestHandleInputsWithHidden(unittest.TestCase):
                 ),
             )
         )
+
+    def test_output_indices_for_mixed_prefill_lengths(self):
+        tokens = torch.arange(15, dtype=torch.int32)
+        input_lengths = torch.tensor([6, 9], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        hidden = torch.arange(30, dtype=torch.float32).reshape(15, 2)
+        expected = torch.tensor(
+            [0, 1, 10, 11, 12, 13, 4, 5, 6, 14, 15, 16, 17, 18, 19],
+            dtype=torch.int32,
+        )
+
+        for rank in (0, 1):
+            _, _, _, _, output_indices = cp_test.handle_inputs_with_hidden(
+                tokens, input_lengths, sequence_lengths, hidden, rank, 2
+            )
+            self.assertTrue(torch.equal(output_indices, expected))
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
@@ -441,6 +461,15 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
         # Reference restored hidden (original valid-seq order), like handleOutputs.
         valid_indices = torch.nonzero(padding_mask).squeeze(-1)
+        output_indices = cp_test.generate_output_indices(
+            restore_indice, chunk_lengths, padding_lengths, cp_size
+        )
+        self.assertTrue(
+            torch.equal(
+                output_indices,
+                restore_indice.index_select(0, valid_indices),
+            )
+        )
         restored = orig_hidden_padded.index_select(0, valid_indices.to(torch.long))
 
         # Pick last valid token of each stream (positions into valid-seq order).
@@ -460,8 +489,7 @@ class TestComputeLocalLastHidden(unittest.TestCase):
         for r in range(cp_size):
             local_buf = cp_test.compute_local_last_hidden(
                 rank_chunks[r].contiguous(),
-                restore_indice,
-                padding_mask,
+                output_indices,
                 lm_output_indexes,
                 r,
                 cp_size,
@@ -499,6 +527,11 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+    def test_empty_prefill_output_indices(self):
+        empty = torch.empty((0,), dtype=torch.int32)
+        output_indices = cp_test.generate_output_indices(empty, empty, empty, 2)
+        self.assertEqual(output_indices.numel(), 0)
 
 
 if __name__ == "__main__":

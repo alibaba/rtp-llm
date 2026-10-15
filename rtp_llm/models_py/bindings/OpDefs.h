@@ -289,6 +289,7 @@ struct PyContextParallelParams {
     torch::Tensor prefill_shuffle_indices;
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
+    torch::Tensor prefill_cp_output_indices;
     torch::Tensor prefill_actual_input_lengths_cpu;
 };
 
