@@ -167,7 +167,11 @@ class MlaAttention(nn.Module):
         ):
             return False
         # m-aware: a CudaFp8GEMMLinear wrapper dispatches m < 32 to its
-        # FlashInfer backend, which must keep reading the bf16 normed input.
+        # FlashInfer backend, which must keep reading the bf16 normed input;
+        # large eager batches (prefill) are host-bound and lose to the plain
+        # two-kernel chain, so cap the fusion to the decode/graph regime.
+        if q.shape[0] > 64:
+            return False
         return linear_supports_quantized_input(
             self.q_b_proj, self.q_lora_rank, m_rows=q.shape[0]
         )

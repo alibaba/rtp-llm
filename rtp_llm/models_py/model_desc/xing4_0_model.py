@@ -61,12 +61,12 @@ logger = logging.getLogger(__name__)
 def _xing4_fused_norm_quant_enabled() -> bool:
     # Fused RMSNorm + ue8m0 FP8 quant for input/post_attention layernorm
     # consumers. Per-call resolution, same discipline as XING4_HC_IMPL.
-    # Default OFF: the DSV4 one-CTA-per-row kernel measured net-negative on
-    # Xing4 shapes at every M (decode +0.9~8.2% TPOT, prefill +7.0~9.2%
-    # TTFT; see fusion_workflow/p1_4_norm_quant_fusion.md). The injection
-    # plumbing is golden-verified — flip to "1" after a smem-cached row
-    # kernel replaces the double-read layout.
-    return os.environ.get("XING4_FUSED_NORM_QUANT", "0") == "1"
+    # Default ON since the register-resident kernel (single read, whole row
+    # in registers, tl.reshape group scales) replaced the DSV4 double-read
+    # layout: 2.31us/launch in-graph vs the 4.74us norm+quant pair it
+    # replaces, decode TPOT -2.1%..-2.6% E2E (see
+    # fusion_workflow/p1_4_norm_quant_fusion.md).
+    return os.environ.get("XING4_FUSED_NORM_QUANT", "1") != "0"
 
 
 def _xing4_hc_chunk_tokens() -> int:
@@ -447,6 +447,13 @@ class Xing4DecoderLayer(nn.Module):
             or not x.is_cuda
             or not x.is_contiguous()
         ):
+            return False
+        # Decode/graph regime only (m <= 64 = the capture buckets): the
+        # fused kernel wins in-graph (2.31us vs the 4.74us pair, TPOT
+        # -2.1~-2.6% E2E), but eager prefill is host-bound and the per-call
+        # wrapper overhead measured +6~24% TTFT at m=1024/4096 — larger
+        # batches take the plain two-kernel chain.
+        if x.shape[0] > 64:
             return False
         n = x.shape[1]
         if n % 128 != 0:
