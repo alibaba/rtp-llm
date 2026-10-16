@@ -1,3 +1,6 @@
+#if defined(USING_CUDA)
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
@@ -18,6 +21,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -200,6 +207,10 @@ private:
     size_t                  written_keys_{0};
 };
 
+std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t matched_blocks) {
+    return makeAllocatorLoadContext(matched_blocks, {});
+}
+
 class StreamCacheResourceTest: public DeviceTestBase {
 protected:
     StreamCacheResourceTest(): perf_scope("PERF_TEST", "1") {}
@@ -213,6 +224,26 @@ protected:
 
     void prepareResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
         prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
+    }
+
+    void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
+        PDSepConfig pd;
+        pd.role_type = RoleType::PREFILL;
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd);
+        stream_->generateConfig()->pd_separation      = query_pd;
+        stream_->generateConfig()->unique_key         = key;
+        stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
+        P2PConnectorConfig config;
+        config.role_type = RoleType::PREFILL;
+        config.tp_rank   = 0;
+        auto connector   = std::make_unique<P2PConnector>(config, nullptr, nullptr);
+        // Exercise real registration without starting transport workers.
+        connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 100);
+        cache_manager_->p2p_connector_     = std::move(connector);
+        ASSERT_TRUE(cache_manager_->hasP2PConnector());
+        ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
+        ASSERT_FALSE(stream_->cacheKeys().empty());
     }
 
     void prepareHybridResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
@@ -242,9 +273,16 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
-        cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+                                        const KVCacheConfig&    kv_cache_config      = {},
+                                        const PDSepConfig&      pd_sep_config        = {}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          RuntimeConfig{},
+                                                          SpeculativeExecutionConfig{},
+                                                          pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
@@ -265,6 +303,7 @@ protected:
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
         RuntimeConfig runtime_config;
+        model_config.vocab_size = 1024;
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
@@ -878,6 +917,65 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
     ASSERT_FALSE(resource.asyncLoadCache());
 }
 
+TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusinessKey) {
+    for (const std::string key : {std::string{}, std::string{"business-key"}}) {
+        SCOPED_TRACE(key);
+        prepareP2PRegistrationResource(/*query_pd=*/false, key);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_FALSE(stream_->queryPdSep());
+        EXPECT_FALSE(resource.asyncLoadCache());
+        EXPECT_EQ(resource.p2p_load_context_, nullptr);
+        EXPECT_TRUE(cache_manager_->p2p_connector_->streamStore()->resource_map_.empty());
+        EXPECT_TRUE(resource.loadCacheDone());
+        EXPECT_FALSE(stream_->hasError());
+        resource.releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, NonPDRequestStillWaitsForAllocatorLoadWithP2PConnector) {
+    prepareP2PRegistrationResource(/*query_pd=*/false, "business-key");
+    auto& resource                   = stream_->streamCacheResource();
+    auto  load_context               = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    resource.allocator_load_context_ = load_context;
+    EXPECT_TRUE(resource.asyncLoadCache());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, load_context);
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+    EXPECT_TRUE(cache_manager_->p2p_connector_->streamStore()->resource_map_.empty());
+    EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
+    prepareP2PRegistrationResource(/*query_pd=*/true, "handoff-key");
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_NE(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(resource.p2p_load_context_->success());
+    EXPECT_EQ(cache_manager_->p2p_connector_->streamStore()->resource_map_.count("handoff-key"), 1u);
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testTreeCoveredBlockNumFallsBackToDeviceReuseWithoutLoadContext) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    resource.batch_kv_cache_resource_->cacheResource(0).setDeviceReuseBlockNum(2);
+
+    EXPECT_EQ(resource.treeCoveredBlockNum(), 2u);
+}
+
+TEST_F(StreamCacheResourceTest, testTreeCoveredBlockNumUsesAllocatorLogicalMatch) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+    resource.batch_kv_cache_resource_->cacheResource(0).setDeviceReuseBlockNum(1);
+    resource.allocator_load_context_ = makeAllocatorLoadContext(/*logical_matched_blocks=*/3);
+
+    EXPECT_EQ(resource.treeCoveredBlockNum(), 3u);
+}
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();
@@ -1460,15 +1558,426 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
     stream_->setInitialReuseLength(2);
     stream_->setLocalReuseLength(2);
 
-    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
+    resource.allocator_load_context_ = std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "original allocator failure"));
     EXPECT_TRUE(resource.asyncLoadCache());
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream_->statusInfo().ToString(), "allocator load failed: original allocator failure");
+    EXPECT_TRUE(resource.allocator_load_error_.ok());
     EXPECT_EQ(stream_->reuseLength(), 0);
     EXPECT_EQ(stream_->initialReuseLength(), 0);
     EXPECT_EQ(stream_->localReuseLength(), 0);
     EXPECT_EQ(stream_->deviceReuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureWaitsForP2PCancelBeforeTerminal) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    resource.allocator_load_context_ = std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "original allocator failure"));
+    auto matched_resource            = std::make_shared<KVCacheResource>();
+    auto p2p_context = std::make_shared<P2PConnectorAsyncReadContext>(
+        matched_resource, "tree-load-failure", nullptr, /*lease_query_timeout_ms=*/1000);
+    resource.p2p_load_context_ = p2p_context;
+
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_TRUE(resource.p2p_cancel_requested_);
+    EXPECT_EQ(resource.p2p_load_context_, p2p_context);
+    EXPECT_FALSE(stream_->hasError());
+
+    // Cancellation completion alone is insufficient while the Decode target
+    // lease still reports an in-flight transfer.
+    p2p_context->cancel(nullptr);
+    ASSERT_TRUE(p2p_context->done());
+    p2p_context->lease_hold_pending_.store(true);
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
+
+    p2p_context->lease_hold_pending_.store(false);
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream_->statusInfo().ToString(), "allocator load failed: original allocator failure");
+    EXPECT_TRUE(resource.allocator_load_error_.ok());
+}
+
+TEST_F(StreamCacheResourceTest, testP2PLoadFailureIsTerminalWithoutRetry) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    const auto local_covered_blocks = resource.batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum();
+    matched_resource->cacheKeys().resize(local_covered_blocks + 1, 1);
+    auto load_context = std::make_shared<P2PConnectorAsyncReadContext>(
+        matched_resource, "test-p2p-no-retry", nullptr, /*lease_query_timeout_ms=*/0);
+    load_context->markStartFailed(
+        ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED, "injected P2P transfer failure"));
+    resource.p2p_load_context_ = load_context;
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(stream_->hasError());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED);
+}
+
+TEST_F(StreamCacheResourceTest, testP2PNoTransferFailureIsTerminal) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    const auto local_covered_blocks = resource.batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum();
+    matched_resource->cacheKeys().resize(local_covered_blocks, 1);
+    auto load_context = std::make_shared<P2PConnectorAsyncReadContext>(
+        matched_resource, "test-p2p-no-transfer-failure", nullptr, /*lease_query_timeout_ms=*/0);
+    load_context->markStartFailed(
+        ErrorInfo(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, "injected no-transfer StartLoad failure"));
+    resource.p2p_load_context_ = load_context;
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testP2PPrefillRegistrationFailureIsTerminal) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    resource.p2p_load_context_ = std::make_shared<CompletedAsyncContext>(ErrorInfo(
+        ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "injected Prefill registration failure"));
+
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(stream_->hasError());
+}
+
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppression) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation = true;
+    auto& resource = stream_->streamCacheResource();
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    matched_resource->cacheKeys().push_back(1);
+    auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("first-token");
+    auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
+    server_result->done_                                = true;
+    server_result->success_                             = true;
+    server_result->side_channel_payload.has_data        = true;
+    server_result->side_channel_payload.has_first_token = true;
+    server_result->side_channel_payload.first_token_id   = 7;
+    auto collector                                       = std::make_shared<P2PConnectorMetricsCollector>();
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                    broadcast_result,
+                                                                    server_result,
+                                                                    collector,
+                                                                    /*lease_query_timeout_ms=*/0,
+                                                                    /*no_transfer=*/true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    resource.p2p_load_context_ = context;
+
+    const size_t old_seq_length = stream_->seqLength();
+    const size_t old_output_pos = stream_->last_output_pos_;
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->seqLength(), old_seq_length + 1);
+    EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
+    EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
+    EXPECT_TRUE(stream_->hasOutput());
+}
+
+#if defined(USING_CUDA)
+TEST_F(StreamCacheResourceTest, testP2PRngHandoffContinuesPrefillRandomSequence) {
+    for (bool advance : {false, true}) {
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        stream_->generateConfig()->random_seed   = 42;
+        stream_->generator_                      = torch::make_generator<at::CUDAGeneratorImpl>();
+        stream_->generator_.set_current_seed(42);
+        auto prefill_generator = torch::make_generator<at::CUDAGeneratorImpl>();
+        prefill_generator.set_current_seed(42);
+        auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat);
+        if (advance) {
+            torch::rand({8}, prefill_generator, std::nullopt, options);
+        }
+        uint64_t offset;
+        {
+            std::lock_guard<std::mutex> lock(prefill_generator.mutex());
+            offset = prefill_generator.get_offset();
+        }
+        if (advance) {
+            ASSERT_GT(offset, 0u);
+        } else {
+            EXPECT_EQ(offset, 0u);
+        }
+        auto  expected = torch::rand({8}, prefill_generator, std::nullopt, options);
+        auto& resource = stream_->streamCacheResource();
+
+        auto matched_resource = std::make_shared<KVCacheResource>();
+        matched_resource->cacheKeys().push_back(1);
+        auto broadcast_result                        = std::make_shared<P2PBroadcastClient::Result>("first-token");
+        auto server_result                           = std::make_shared<DecodeLoadHelper::Result>();
+        server_result->done_                         = true;
+        server_result->success_                      = true;
+        server_result->side_channel_payload.has_data = true;
+        server_result->side_channel_payload.has_first_token = true;
+        server_result->side_channel_payload.first_token_id  = 7;
+        server_result->side_channel_payload.has_rng_state   = true;
+        server_result->side_channel_payload.rng_offset      = offset;
+        auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                      broadcast_result,
+                                                                      server_result,
+                                                                      collector,
+                                                                      /*lease_query_timeout_ms=*/0,
+                                                                      /*no_transfer=*/true);
+        context->checkDone();
+        ASSERT_TRUE(context->success());
+        resource.p2p_load_context_ = context;
+
+        const size_t old_seq_length = stream_->seqLength();
+        const size_t old_output_pos = stream_->last_output_pos_;
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_EQ(stream_->seqLength(), old_seq_length + 1);
+        EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
+        EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
+        EXPECT_TRUE(stream_->hasOutput());
+        {
+            auto                        generator = stream_->getGenerator();
+            std::lock_guard<std::mutex> lock(generator.mutex());
+            EXPECT_EQ(generator.get_offset(), offset);
+        }
+        auto actual = torch::rand({8}, stream_->getGenerator(), std::nullopt, options);
+        EXPECT_TRUE(torch::equal(actual, expected));
+        // A second load completion must not rewind the generator to the handoff offset.
+        ASSERT_TRUE(resource.loadCacheDone());
+        auto expected_next = torch::rand({8}, prefill_generator, std::nullopt, options);
+        auto actual_next   = torch::rand({8}, stream_->getGenerator(), std::nullopt, options);
+        EXPECT_TRUE(torch::equal(actual_next, expected_next));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testP2PSeededHandoffRejectsMissingOrInvalidRngOffset) {
+    for (bool has_state : {false, true}) {
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        stream_->generateConfig()->random_seed   = 42;
+        stream_->generator_                      = torch::make_generator<at::CUDAGeneratorImpl>();
+        stream_->generator_.set_current_seed(42);
+        auto& resource = stream_->streamCacheResource();
+
+        auto matched_resource = std::make_shared<KVCacheResource>();
+        matched_resource->cacheKeys().push_back(1);
+        auto broadcast_result                        = std::make_shared<P2PBroadcastClient::Result>("first-token");
+        auto server_result                           = std::make_shared<DecodeLoadHelper::Result>();
+        server_result->done_                         = true;
+        server_result->success_                      = true;
+        server_result->side_channel_payload.has_data = true;
+        server_result->side_channel_payload.has_first_token = true;
+        server_result->side_channel_payload.first_token_id  = 7;
+        server_result->side_channel_payload.has_rng_state   = has_state;
+        server_result->side_channel_payload.rng_offset      = 1;  // Invalid Philox alignment.
+        auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                      broadcast_result,
+                                                                      server_result,
+                                                                      collector,
+                                                                      /*lease_query_timeout_ms=*/0,
+                                                                      /*no_transfer=*/true);
+        context->checkDone();
+        ASSERT_TRUE(context->success());
+        resource.p2p_load_context_ = context;
+
+        const size_t old_seq_length = stream_->seqLength();
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_TRUE(stream_->hasError());
+        EXPECT_EQ(stream_->seqLength(), old_seq_length);
+        EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    }
+}
+
+#endif
+
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfterLoad) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation = true;
+    auto& resource = stream_->streamCacheResource();
+    stream_->generateConfig()->max_new_tokens = 1;
+    stream_->generate_status_->status         = StreamState::LOADING_CACHE;
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    matched_resource->cacheKeys().push_back(1);
+    auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("single-token");
+    auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
+    server_result->done_                                = true;
+    server_result->success_                             = true;
+    server_result->side_channel_payload.has_data        = true;
+    server_result->side_channel_payload.has_first_token = true;
+    server_result->side_channel_payload.first_token_id  = 7;
+    auto collector                                      = std::make_shared<P2PConnectorMetricsCollector>();
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
+                                                                    broadcast_result,
+                                                                    server_result,
+                                                                    collector,
+                                                                    /*lease_query_timeout_ms=*/0,
+                                                                    /*no_transfer=*/true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    resource.p2p_load_context_ = context;
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream_->isFinished());
+    EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
+}
+
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    for (bool requested : {false, true}) {
+        for (bool eos : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", eos=" << eos);
+            const std::string key = "first-token-outputs";
+            prepareP2PRegistrationResource(true, key);
+            auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
+            const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
+            const auto make_stream       = [&](RoleType role) {
+                auto input                      = std::make_shared<GenerateInput>();
+                input->input_ids                = torch::tensor({1, 2, 3, 4, 5, 6}, torch::kInt32);
+                input->request_deadline_ms      = deadline_ms;
+                input->generate_config          = std::make_shared<GenerateConfig>();
+                auto& config                    = *input->generate_config;
+                config.unique_key               = key;
+                config.pd_separation            = true;
+                config.max_new_tokens           = 2;
+                config.is_streaming             = true;
+                config.aux_info                 = requested;
+                config.return_logits            = requested;
+                config.select_tokens_id         = {2, 0};
+                config.return_hidden_states     = requested;
+                config.hidden_states_cut_dim    = 2;
+                config.return_all_hidden_states = requested;
+                config.return_softmax_probs     = requested;
+                config.return_cum_log_probs     = requested;
+                config.return_all_probs         = requested ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
+                config.calculate_loss           = requested ? 2 : 0;
+                ModelConfig model;
+                model.max_seq_len                  = 32;
+                model.vocab_size                   = 16;
+                model.attn_config.tokens_per_block = 2;
+                model.special_tokens.eos_token_id  = eos ? 7 : 15;
+                ResourceContext resources;
+                resources.role_type       = role;
+                resources.reuse_cache     = false;
+                resources.cache_manager   = cache_manager_;
+                auto result = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+                result->generate_status_->status = StreamState::RUNNING;
+                return result;
+            };
+            auto prefill    = make_stream(RoleType::PREFILL);
+            auto decode     = make_stream(RoleType::DECODE);
+            auto logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
+            auto hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
+            auto all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
+            auto probs      = torch::full({1, 16}, 0.0625f);
+            auto loss       = torch::arange(5, torch::kFloat32);
+            const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
+                                            GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
+            prefill->step();
+            prefill->update({.new_tokens                           = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                             .num_new_tokens                       = 1,
+                             .hidden_states                        = hidden,
+                             .logits                               = logits,
+                             .softmax_probs                        = torch::full({1, 1}, 0.75f),
+                             .cum_log_probs                        = torch::full({1}, -0.5f),
+                             .all_probs                            = probs,
+                             .loss                                 = requested ? loss : torch::Tensor{},
+                             .all_hidden_states                    = all_hidden,
+                             .generation_prefill_cuda_graph_status = graph_status});
+            ASSERT_FALSE(prefill->hasError());
+            PrefillResultStore::SideChannelData published;
+            ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
+            EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
+            EXPECT_TRUE(published.prefill_use_independent_block_pools);
+            EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
+            // Reusing executor buffers after publication must not change the payload.
+            logits.fill_(-1);
+            hidden.fill_(-1);
+            all_hidden.fill_(-1);
+            probs.fill_(-1);
+            loss.fill_(-1);
+
+            auto result = std::make_shared<DecodeLoadHelper::Result>();
+            ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(published, result->response).ok());
+            result->complete(true);
+            ASSERT_TRUE(result->success());
+            EXPECT_EQ(result->side_channel_payload.generation_prefill_cuda_graph_status,
+                      static_cast<uint32_t>(graph_status));
+            auto broadcast = std::make_shared<P2PBroadcastClient::Result>(key);
+            auto context =
+                std::make_shared<P2PConnectorAsyncReadContext>(std::make_shared<KVCacheResource>(),
+                                                               broadcast,
+                                                               result,
+                                                               std::make_shared<P2PConnectorMetricsCollector>(),
+                                                               0,
+                                                               true);
+            context->checkDone();
+            ASSERT_TRUE(context->success());
+            decode->streamCacheResource().p2p_load_context_ = context;
+            ASSERT_TRUE(decode->streamCacheResource().loadCacheDone());
+            ASSERT_FALSE(decode->hasError());
+            ASSERT_TRUE(decode->hasOutput());
+            auto output_result = decode->nextOutput();
+            ASSERT_TRUE(output_result.ok());
+            ASSERT_EQ(output_result.value().generate_outputs.size(), 1u);
+            const auto& output = output_result.value().generate_outputs.front();
+            EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
+            EXPECT_EQ(output.finished, eos);
+            EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), requested);
+            EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
+            if (requested) {
+                EXPECT_EQ(output.aux_info.generation_prefill_cuda_graph_status,
+                          generationPrefillCudaGraphStatusString(graph_status));
+            }
+            EXPECT_FALSE(decode->hasOutput());
+            // Rechecking completion must not enqueue the first token a second time.
+            ASSERT_TRUE(decode->streamCacheResource().loadCacheDone());
+            EXPECT_FALSE(decode->hasOutput());
+            ASSERT_EQ(output.logits.has_value(), requested);
+            ASSERT_EQ(output.hidden_states.has_value(), requested);
+            ASSERT_EQ(output.all_hidden_states.has_value(), requested);
+            ASSERT_EQ(output.loss.has_value(), requested);
+            ASSERT_EQ(output.aux_info.softmax_probs.has_value(), requested);
+            ASSERT_EQ(output.aux_info.cum_log_probs.has_value(), requested);
+            ASSERT_EQ(output.aux_info.all_probs.has_value(), requested);
+            if (requested) {
+                EXPECT_TRUE(torch::equal(*output.logits, torch::tensor({2.f, 0.f}).reshape({1, 2})));
+                EXPECT_TRUE(torch::equal(*output.hidden_states,
+                                         torch::arange(eos ? 2 : 4, torch::kFloat32).reshape({1, eos ? 2 : 4})));
+                EXPECT_TRUE(
+                    torch::equal(*output.all_hidden_states, torch::arange(24, torch::kFloat32).reshape({6, 4})));
+                EXPECT_TRUE(torch::equal(*output.loss, torch::arange(5, torch::kFloat32)));
+                EXPECT_FLOAT_EQ(output.aux_info.softmax_probs->item<float>(), 0.75f);
+                EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), -0.5f);
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, torch::full({1, 16}, 0.0625f)));
+            }
+            if (!eos) {
+                // Later Decode updates default to NOT_REQUESTED and must retain Prefill's status.
+                decode->step();
+                decode->update({.new_tokens = torch::tensor({8}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+                ASSERT_FALSE(decode->hasError());
+                EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
+                auto next_result = decode->nextOutput();
+                ASSERT_TRUE(next_result.ok());
+                if (requested) {
+                    EXPECT_EQ(
+                        next_result.value().generate_outputs.front().aux_info.generation_prefill_cuda_graph_status,
+                        generationPrefillCudaGraphStatusString(graph_status));
+                }
+            }
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
@@ -1539,6 +2048,27 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
     ASSERT_TRUE(status.has_value());
     EXPECT_TRUE(status->ok());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
+}
+
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+
+TEST_F(StreamCacheResourceTest, testCancelCompletionRetainsP2PLeaseProofAfterStreamRelease) {
+    prepareResource(/*reuse_cache=*/false);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(), "cancel-cleanup-lease", nullptr, /*lease_query_timeout_ms=*/1000);
+    context->cancel(nullptr);
+    ASSERT_TRUE(context->done());
+    context->lease_hold_pending_.store(true);
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    stream_->releaseResource();
+    EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
+    // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
+    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    context->lease_hold_pending_.store(false);
+    EXPECT_FALSE(stream_->hasPendingP2PResourceHold());
 }
 
 }  // namespace rtp_llm

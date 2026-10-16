@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+
 load("//bazel:device_defs.bzl", "device_impl_target")
 
 test_copts = [
@@ -21,12 +22,13 @@ cc_library(
 
 cc_library(
     name = "mock_generate_stream",
+    visibility = ["//rtp_llm/cpp/model_rpc/test:__pkg__"],
     hdrs = [
         "MockGenerateStream.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cache/connector/p2p:legacy_support",
-        "//rtp_llm/cpp/engine_base/stream",
+        "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/engine_base/stream:stream",
     ],
     copts = test_copts,
 )
@@ -34,19 +36,22 @@ cc_library(
 cc_test(
     name = "components_test",
     srcs = [
-        "AsymmetricTpUtilTest.cc",
-        "ComputedLayerCacheBufferTest.cc",
-        "P2PBroadcastClientTest.cc",
-        "P2PConnectorResourceStoreTest.cc",
-        "PrefillLoadCallerTest.cc",
-        "StoreWaitContextTest.cc",
         "main.cc",
+        "P2PBroadcastClientTest.cc",
+        "DecodeLoadHelperTest.cc",
+        "ComputedLayerCacheBufferTest.cc",
+        "LayerCacheBufferUtilFilterTest.cc",
+        "StoreWaitContextTest.cc",
+        "P2PConnectorResourceStoreTest.cc",
+        "PrefillResultStoreTest.cc",
     ],
     deps = [
         ":mock_generate_stream",
         ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:components",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
@@ -79,6 +84,8 @@ cc_test(
 cc_test(
     name = "p2p_connector_scheduler_test",
     srcs = [
+        "KVCacheManagerP2PReadTest.cc",
+        "P2PQueueSaturationTest.cc",
         "P2PConnectorSchedulerTest.cc",
         "main.cc",
     ],
@@ -87,6 +94,8 @@ cc_test(
         ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
@@ -108,6 +117,26 @@ cc_test(
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
+    ] + device_impl_target(),
+    copts = test_copts,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "p2p_connector_worker_decode_lease_test",
+    srcs = [
+        "DecodeLeaseMemoryTest.cc",
+        "P2PConnectorWorkerDecodeLeaseTest.cc",
+        "main.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {"gpu": "L20_CU13"},

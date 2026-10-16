@@ -56,6 +56,7 @@ public:
 
     virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
+    virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams);
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 

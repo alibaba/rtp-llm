@@ -10,6 +10,38 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
+namespace {
+
+class StreamErrorPayload: public autil::legacy::Jsonizable {
+public:
+    class StreamErrorBody: public autil::legacy::Jsonizable {
+    public:
+        void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+            json.Jsonize("message", message, message);
+            json.Jsonize("type", type, type);
+        }
+
+    public:
+        std::string message;
+        std::string type = "stream_error";
+    };
+
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        json.Jsonize("error", error, error);
+    }
+
+public:
+    StreamErrorBody error;
+};
+
+std::string createStreamErrorJson(const std::string& message) {
+    StreamErrorPayload payload;
+    payload.error.message = message;
+    return ToJsonString(payload, true);
+}
+
+}  // namespace
+
 // ChatService::ChatService() {}
 
 std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
@@ -83,6 +115,10 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
         }
         ctx->render_stream_response_blocking(outputs, config, chat_request.stream.value_or(false));
         index += 1;
+    }
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
     }
     if (index != 0) {
         ctx->render_stream_response_flush_blocking(outputs, config, chat_request.stream.value_or(false));
@@ -168,6 +204,21 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
             ctx->render_stream_response(output_status.value(), config, chat_request.stream.value_or(false));
         write_sse_response(json_response);
     }
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        if (index > 0) {
+            std::string error_json = createStreamErrorJson(error_info.ToString());
+            write_sse_response(error_json);
+            writer->WriteDone();
+            if (metric_reporter_) {
+                metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"),
+                                                      transErrorCodeToHttpExceptionType(error_info.code()));
+            }
+            AccessLogWrapper::logExceptionAccess(body, request_id, error_info.ToString());
+            return;
+        }
+        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
+    }
     if (index != 0) {
         std::string json_response =
             ctx->render_stream_response_flush(outputs, config, chat_request.stream.value_or(false));
@@ -201,6 +252,16 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        HttpApiServerException e(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
+        if (metric_reporter_) {
+            metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), e.getType());
+        }
+        AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
+        WriteExceptionResponse(writer, e);
+        return;
+    }
 
     if (chat_request.stream.value_or(false) == false) {
         generateResponse(input->generate_config,

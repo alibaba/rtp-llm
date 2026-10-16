@@ -30,6 +30,7 @@ test_deps = [
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     "//rtp_llm/cpp/cache/test:mock_async_context",
     "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+    "//rtp_llm/cpp/cache/connector/p2p:connector",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 cc_test(

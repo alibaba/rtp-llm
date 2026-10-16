@@ -1,10 +1,9 @@
 #pragma once
 
-#include <c10/core/Event.h>
+#include <torch/extension.h>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "autil/LoopThread.h"
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -14,21 +13,24 @@
 namespace rtp_llm {
 
 struct StoreWaitContext {
-    int64_t                                             request_id;
-    std::shared_ptr<c10::Event>                         event;
-    std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer;
-    int64_t                                             deadline_ms;
-    std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector;
+    int64_t                                       request_id;
+    std::shared_ptr<torch::Event>                 event;
+    std::shared_ptr<LayerCacheBuffer>             layer_cache_buffer;
+    int64_t                                       deadline_ms;
+    int64_t                                       request_deadline_ms;
+    std::shared_ptr<P2PConnectorMetricsCollector> collector;
 
-    StoreWaitContext(int64_t                                             request_id,
-                     std::shared_ptr<c10::Event>                         event,
-                     std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer,
-                     int64_t                                             deadline_ms,
-                     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector):
+    StoreWaitContext(int64_t                                       request_id,
+                     std::shared_ptr<torch::Event>                 event,
+                     std::shared_ptr<LayerCacheBuffer>             layer_cache_buffer,
+                     int64_t                                       deadline_ms,
+                     std::shared_ptr<P2PConnectorMetricsCollector> collector,
+                     int64_t                                       request_deadline_ms = 0):
         request_id(request_id),
         event(std::move(event)),
         layer_cache_buffer(layer_cache_buffer),
         deadline_ms(deadline_ms),
+        request_deadline_ms(request_deadline_ms > 0 ? request_deadline_ms : deadline_ms),
         collector(collector) {}
 };
 
@@ -48,6 +50,9 @@ public:
     void checkOnce();
 
 private:
+    // Called with contexts_mutex_ held; true means the context is terminal.
+    bool checkContext(StoreWaitContext& context);
+
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
 

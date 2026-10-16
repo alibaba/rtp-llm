@@ -183,14 +183,20 @@ class CacheStoreConfig:
     messager_worker_thread_count: int
     rdma_transfer_wait_timeout_ms: int
     rdma_max_block_pairs_per_connection: int
-    p2p_read_steal_before_deadline_ms: int
-    p2p_read_return_before_deadline_ms: int
     p2p_transfer_not_done_resource_hold_ms: int
+    p2p_lease_query_timeout_ms: int
     p2p_resource_store_timeout_check_interval_ms: int
-    p2p_layer_cache_buffer_store_timeout_ms: int
     p2p_cancel_broadcast_timeout_ms: int
+    p2p_cancelled_keys_ttl_ms: int
     cache_store_tcp_anet_rpc_thread_num: int
     cache_store_tcp_anet_rpc_queue_num: int
+    cache_store_tcp_worker_queue_size: int
+    rdma_transfer_worker_thread_count: int
+    rdma_transfer_worker_queue_size: int
+    p2p_rdma_enable_h2d_copy: bool
+    p2p_rdma_staging_total_bytes: int
+    p2p_prefill_sender_thread_count: int
+    p2p_prefill_sender_queue_size: int
 
     def __getstate__(self) -> tuple:
         ...
@@ -1311,20 +1317,8 @@ class PDSepConfig:
     cache_store_rdma_connect_port: int
     cache_store_rdma_listen_port: int
     cache_store_rdma_mode: bool
-    decode_entrance: bool
-    decode_polling_call_prefill_ms: int
-    decode_polling_kv_cache_step_ms: int
-    decode_retry_interval_ms: int
-    decode_retry_timeout_ms: int
-    decode_retry_times: int
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
-    prefill_max_wait_timeout_ms: int
-    prefill_prepare_resource_pool_size: int
-    prefill_retry_timeout_ms: int
-    prefill_retry_times: int
-    prefill_stop_stream_wait_timeout_ms: int
-    rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
     worker_port_offset: int

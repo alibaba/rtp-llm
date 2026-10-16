@@ -284,7 +284,7 @@ class TestContextParallelProcessor(unittest.TestCase):
             torch.tensor([4], dtype=torch.int32),
         )
 
-        self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
+        self.assertEqual(shuffle_indices.cpu().tolist(), [4, 5, 10, 11])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 11])
 
     def test_prefix_reuse_zeros_padding_position_ids(self):
@@ -301,8 +301,25 @@ class TestContextParallelProcessor(unittest.TestCase):
             torch.tensor([4], dtype=torch.int32),
         )
 
-        self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
+        self.assertEqual(shuffle_indices.cpu().tolist(), [4, 5, 10, 11])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
+
+    def test_prefix_reuse_preserves_explicit_position_remap(self):
+        _, _, _, position_ids, shuffle_indices = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            torch.arange(100, 108, dtype=torch.int32),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+        )
+
+        self.assertEqual(shuffle_indices.cpu().tolist(), [4, 5, 10, 11])
+        self.assertEqual(position_ids.tolist(), [100, 101, 106, 107])
 
     def test_rank_chunk_fully_inside_image_slices_feature_and_deepstack(self):
         combo_tokens = torch.arange(14, dtype=torch.int32)
@@ -993,6 +1010,25 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class TestHandleInputsWithPrefix(unittest.TestCase):
+    def test_cp2_rank0_uses_absolute_positions(self):
+        tokens, input_lengths, positions = cp_test.handle_inputs(
+            [101, 102, 103, 104, 105, 106], 8, 0, 2
+        )
+        self.assertEqual(tokens.tolist(), [101, 102, 0, 0])
+        self.assertEqual(input_lengths.tolist(), [4])
+        self.assertEqual(positions.tolist(), [8, 9, 14, 15])
+
+    def test_cp2_rank1_uses_absolute_positions(self):
+        tokens, input_lengths, positions = cp_test.handle_inputs(
+            [101, 102, 103, 104, 105, 106], 8, 1, 2
+        )
+        self.assertEqual(tokens.tolist(), [103, 104, 105, 106])
+        self.assertEqual(input_lengths.tolist(), [4])
+        self.assertEqual(positions.tolist(), [10, 11, 12, 13])
 
 
 if __name__ == "__main__":

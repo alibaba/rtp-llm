@@ -1,4 +1,5 @@
 #include <chrono>
+#include <exception>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -8,15 +9,14 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
-
-// Prefill reads through ClientReaderWriterInterface. Explicitly instantiate
-// the stream so HIP also emits Read's secondary-base virtual thunk.
-template class grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB>;
 
 namespace rtp_llm::test {
 namespace {
@@ -143,69 +143,21 @@ private:
     OutputAction action_;
 };
 
-// Isolate remote computation/cache transport, not the handler under test.
-class LifecyclePeer: public RpcService::Service {
+class LifecycleService: public RpcService::Service {
 public:
-    explicit LifecyclePeer(bool send_load_response = true): send_load_response_(send_load_response) {}
+    explicit LifecycleService(LocalRpcServer& handler): handler_(handler) {}
 
-    grpc::Status RemoteGenerate(grpc::ServerContext*, ServerStream* rpc) override {
-        GenerateRequestPB request;
-        GenerateOutputsPB response;
-        if (!rpc->Read(&request) || !rpc->Write(response)) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "allocate exchange failed");
-        }
-        if (rpc->Read(&request) && send_load_response_ && !rpc->Write(response)) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "load exchange failed");
-        }
-        while (rpc->Read(&request)) {}
-        return grpc::Status::OK;
-    }
-    grpc::Status
-    RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB* response) override {
-        response->set_done_time_us(currentTimeUs());
-        return grpc::Status::OK;
-    }
-
-private:
-    // An early local failure never consumes LOAD's response. Keep this peer
-    // quiescent so Finish tests handler teardown, not unread-message draining.
-    bool send_load_response_;
-};
-
-class ScopedRpcServer {
-public:
-    explicit ScopedRpcServer(RpcService::Service* service) {
-        grpc::ServerBuilder builder;
-        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
-        builder.RegisterService(service);
-        server_ = builder.BuildAndStart();
-        if (!server_ || port == 0) {
-            throw std::runtime_error("test gRPC server failed to start");
-        }
-    }
-    ~ScopedRpcServer() {
-        server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
-        server_->Wait();
-    }
-    std::string address() const {
-        return "127.0.0.1:" + std::to_string(port);
-    }
-    int port = 0;
-
-private:
-    std::unique_ptr<grpc::Server> server_;
-};
-
-class LifecycleGenerateService: public RpcService::Service {
-public:
-    explicit LifecycleGenerateService(LocalRpcServer& handler): handler_(handler) {}
-
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                    const GenerateInputPB*                 request,
+    grpc::Status GenerateStreamCall(grpc::ServerContext* context,
+                                    const GenerateInputPB* request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        auto status = handler_.GenerateStreamCall(context, request, writer);
-        returned.set_value(status);
-        return status;
+        try {
+            auto status = handler_.GenerateStreamCall(context, request, writer);
+            returned.set_value(status);
+            return status;
+        } catch (...) {
+            returned.set_exception(std::current_exception());
+            return grpc::Status(grpc::StatusCode::INTERNAL, kFailureReason);
+        }
     }
 
     std::promise<grpc::Status> returned;
@@ -214,15 +166,28 @@ private:
     LocalRpcServer& handler_;
 };
 
-class LifecycleDecodeService: public RpcService::Service {
+class ScopedRpcServer {
 public:
-    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* rpc) override {
-        auto status = handler.RemoteGenerate(context, rpc);
-        returned.set_value(status);  // The real context destructor has already run.
-        return status;
+    explicit ScopedRpcServer(RpcService::Service* service) {
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(service);
+        server_ = builder.BuildAndStart();
+        if (!server_ || port_ == 0) {
+            throw std::runtime_error("test gRPC server failed to start");
+        }
     }
-    DecodeRpcServer            handler;
-    std::promise<grpc::Status> returned;
+    ~ScopedRpcServer() {
+        server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        server_->Wait();
+    }
+    std::string address() const {
+        return "127.0.0.1:" + std::to_string(port_);
+    }
+
+private:
+    int port_ = 0;
+    std::unique_ptr<grpc::Server> server_;
 };
 
 GenerateInputPB lifecycleRequest() {
@@ -252,8 +217,7 @@ protected:
         if (error == ErrorCode::PRIORITY_PREEMPTED || error == ErrorCode::EXECUTION_EXCEPTION) {
             EXPECT_NE(task.error_message.find(kFailureReason), std::string::npos);
         }
-        // Decode's ordinary completion must not invent the Prefill control
-        // owner's CANCELING/CANCELED overlay or emit a duplicate completion.
+        // Ordinary completion must not invent a cancellation overlay or emit a duplicate completion.
         EXPECT_EQ(task.priority_preemption_progress, PriorityPreemptionProgress::NONE);
     }
 
@@ -268,175 +232,77 @@ protected:
         EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), free_before);
     }
 
-    void runSynchronousHandler(Handler kind, OutputAction action, bool prefill_only = false) {
+    void runSynchronousHandler(Handler kind, OutputAction action) {
         TestLogCapture   capture("rpc_handler_lifecycle");
         auto             engine      = std::make_shared<SteppedEngine>(action);
         auto             meta        = std::make_shared<RpcServerRuntimeMeta>();
         const auto       free_before = engine->getCacheManager()->freeBlocksNum();
-        LifecyclePeer    peer(action == OutputAction::COMPLETE);
-        ScopedRpcServer  peer_server(&peer);
         LocalRpcServer   local;
         PrefillRpcServer prefill;
         auto&            handler          = kind == Handler::LOCAL ? local : static_cast<LocalRpcServer&>(prefill);
         handler.engine_                   = engine;
         handler.meta_                     = meta;
         handler.propose_maga_init_params_ = nullptr;
-        handler.maga_init_params_.pd_sep_config.prefill_retry_times                 = 0;
-        handler.maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms = 1;
-        // No local cache-store transport is needed for this handler test.
-        prefill.resource().workers.clear();
+        prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+        if (kind == Handler::PREFILL) {
+            P2PConnectorConfig config;
+            config.role_type = RoleType::PREFILL;
+            auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+            connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+            connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 1000);
+            engine->getCacheManager()->p2p_connector_ = connector;
+        }
         auto request = lifecycleRequest();
         request.mutable_generate_config()->set_can_use_pd_separation(kind == Handler::PREFILL);
-        if (prefill_only) {
-            request.mutable_generate_config()->set_prefill_only(true);
-            request.mutable_generate_config()->set_max_new_tokens(0);
-        }
-        auto* role = request.mutable_generate_config()->add_role_addrs();
-        role->set_role(RoleAddrPB::DECODE);
-        role->set_ip("127.0.0.1");
-        role->set_grpc_port(peer_server.port);
-        LifecycleGenerateService service(handler);
-        ScopedRpcServer          server(&service);
+        request.mutable_generate_config()->set_unique_key("lifecycle-p2p");
+        LifecycleService service(handler);
+        ScopedRpcServer  server(&service);
         auto stub = RpcService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
         grpc::ClientContext client;
-        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
-        auto       polling        = engine->polling.get_future();
-        auto       call           = service.returned.get_future();
-        auto       rpc            = stub->GenerateStreamCall(&client, request);
+        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        auto polling = engine->polling.get_future();
+        auto call    = service.returned.get_future();
+        auto response_call = std::async(std::launch::async, [&] {
+            auto reader = stub->GenerateStreamCall(&client, request);
+            GenerateOutputsPB response;
+            while (reader->Read(&response)) {}
+            return reader->Finish();
+        });
         const bool reached_output = polling.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
         const bool returned       = call.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
         if (!returned) {
             // A regression must fail the test rather than leave a future blocked.
-            client.TryCancel();
             (void)engine->stop();
         }
         EXPECT_TRUE(reached_output);
         EXPECT_TRUE(returned) << "handler waited for scheduler completion";
-        ASSERT_EQ(call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        const auto        status = call.get();
-        GenerateOutputsPB response;
-        while (rpc->Read(&response)) {}
-        const auto client_status = rpc->Finish();
+        auto status = call.get();
         EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
-        EXPECT_EQ(client_status.ok(), action == OutputAction::COMPLETE);
         if (action != OutputAction::COMPLETE) {
             EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
-            ErrorDetailsPB details;
-            ASSERT_TRUE(details.ParseFromString(status.error_details()));
-            EXPECT_EQ(details.error_code(),
-                      static_cast<int>(action == OutputAction::FAIL ? ErrorCode::PRIORITY_PREEMPTED :
-                                                                      ErrorCode::EXECUTION_EXCEPTION));
         }
+        EXPECT_EQ(response_call.get().ok(), action == OutputAction::COMPLETE);
         ASSERT_TRUE(reached_output);
         ASSERT_TRUE(returned);
         ASSERT_NE(engine->stream, nullptr);
         EXPECT_EQ(engine->stream->getStatus(), StreamState::RUNNING);
         const auto expected_error = action == OutputAction::COMPLETE ? ErrorCode::NONE_ERROR :
                                     action == OutputAction::FAIL     ? ErrorCode::PRIORITY_PREEMPTED :
-                                    kind == Handler::LOCAL           ? ErrorCode::CANCELLED :
-                                                                       ErrorCode::EXECUTION_EXCEPTION;
+                                                                     ErrorCode::CANCELLED;
         EXPECT_EQ(engine->stream->statusInfo().code(), expected_error);
         expectFinishedOnce(meta, expected_error);
         const auto diagnostic = capture.content().find(kUnexpectedExit);
-        if (kind == Handler::LOCAL && action == OutputAction::THROW) {
+        if (action == OutputAction::THROW) {
             EXPECT_NE(diagnostic, std::string::npos);
             EXPECT_EQ(capture.content().find(kUnexpectedExit, diagnostic + std::string(kUnexpectedExit).size()),
                       std::string::npos);
         } else {
-            EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
-        }
-        if (prefill_only) {
-            EXPECT_TRUE(engine->stream->generateConfig()->isPrefillOnly());
-            EXPECT_EQ(engine->stream->outputTokenLen(), 0);
+            EXPECT_EQ(diagnostic, std::string::npos);
         }
         if (action == OutputAction::COMPLETE) {
             engine->stream->reportEvent(StreamEvents::GenerateDone);
         }
         reap(engine, free_before);
-    }
-
-    void runDecodeHandler(OutputAction action) {
-        TestLogCapture         capture("decode_handler_lifecycle");
-        auto                   engine      = std::make_shared<SteppedEngine>(action);
-        auto                   meta        = std::make_shared<RpcServerRuntimeMeta>();
-        const auto             free_before = engine->getCacheManager()->freeBlocksNum();
-        LifecyclePeer          peer;
-        ScopedRpcServer        peer_server(&peer);
-        LifecycleDecodeService service;
-        service.handler.engine_                   = engine;
-        service.handler.meta_                     = meta;
-        service.handler.propose_maga_init_params_ = nullptr;
-        // Exercise real async RemoteLoad fan-out, with only remote KV transport faked.
-        service.handler.resource().workers      = {"rank0", "rank1"};
-        service.handler.resource().grpc_workers = {peer_server.address(), peer_server.address()};
-        ScopedRpcServer server(&service);
-        auto stub = RpcService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
-        grpc::ClientContext client;
-        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
-        auto              polling  = engine->polling.get_future();
-        auto              returned = service.returned.get_future();
-        auto              rpc      = stub->RemoteGenerate(&client);
-        GenerateRequestPB request;
-        request.set_stage(RemoteStage::ALLOCATE);
-        request.set_request_id(kRequestId);
-        request.set_client_id("lifecycle");
-        *request.mutable_input() = lifecycleRequest();
-        request.add_peer_addrs("prefill:1:2");
-        ASSERT_TRUE(rpc->Write(request));
-        GenerateOutputsPB response;
-        ASSERT_TRUE(rpc->Read(&response));
-        ASSERT_TRUE(response.supports_prefill_completion());
-        request.set_stage(RemoteStage::LOAD);
-        ASSERT_TRUE(rpc->Write(request));
-        ASSERT_TRUE(rpc->Read(&response));
-        ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
-        request.set_stage(RemoteStage::GENERATE);
-        request.set_first_generate_token_id(3);
-        ASSERT_TRUE(rpc->Write(request));
-        ASSERT_EQ(polling.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        if (action == OutputAction::WAIT) {
-            EXPECT_EQ(engine->stream->getStatus(), StreamState::RUNNING);
-            EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
-            client.TryCancel();
-        }
-        const bool returned_before_tick = returned.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
-        if (!returned_before_tick) {
-            client.TryCancel();
-            (void)engine->stop();
-        }
-        EXPECT_TRUE(returned_before_tick) << "Decode handler waited for scheduler completion";
-        ASSERT_EQ(returned.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        const auto server_status = returned.get();
-        rpc->WritesDone();
-        while (rpc->Read(&response)) {}
-        const auto client_status = rpc->Finish();
-        ASSERT_TRUE(returned_before_tick);
-        EXPECT_EQ(server_status.ok(), action == OutputAction::COMPLETE);
-        EXPECT_EQ(client_status.ok(), action == OutputAction::COMPLETE);
-        if (action == OutputAction::WAIT) {
-            EXPECT_EQ(server_status.error_code(), grpc::StatusCode::CANCELLED);
-            EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
-        }
-        const auto expected_error = action == OutputAction::COMPLETE ? ErrorCode::NONE_ERROR :
-                                    action == OutputAction::FAIL     ? ErrorCode::PRIORITY_PREEMPTED :
-                                    action == OutputAction::THROW    ? ErrorCode::EXECUTION_EXCEPTION :
-                                                                       ErrorCode::CANCELLED;
-        EXPECT_EQ(engine->stream->statusInfo().code(), expected_error);
-        EXPECT_EQ(engine->stream->getStatus(), StreamState::RUNNING);
-        EXPECT_EQ(engine->scheduler().runningStreamsSize(), 1);
-        EXPECT_EQ(engine->scheduler().onflightStreams(), 1);
-        const auto running_tasks = engine->scheduler().runningTaskList();
-        ASSERT_EQ(running_tasks.size(), 1);
-        EXPECT_EQ(running_tasks.front().request_id, kRequestId);
-        EXPECT_EQ(running_tasks.front().batch_id, kBatchId);
-        EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
-        expectFinishedOnce(meta, expected_error);
-        EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
-        if (action == OutputAction::COMPLETE) {
-            engine->stream->reportEvent(StreamEvents::GenerateDone);
-        }
-        reap(engine, free_before);
-        expectFinishedOnce(meta, expected_error);
     }
 };
 
@@ -449,32 +315,46 @@ TEST_F(RpcHandlerLifecycleTest, LocalFailurePreservesPriorityPreemption) {
 TEST_F(RpcHandlerLifecycleTest, LocalExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::THROW);
 }
-TEST_F(RpcHandlerLifecycleTest, LocalPrefillOnlySuccessReturnsBeforeSchedulerWithoutCanceling) {
-    runSynchronousHandler(Handler::LOCAL, OutputAction::COMPLETE, true);
-}
-TEST_F(RpcHandlerLifecycleTest, PrefillOnlyFallbackReturnsBeforeSchedulerWithoutCanceling) {
-    runSynchronousHandler(Handler::PREFILL, OutputAction::COMPLETE, true);
-}
 TEST_F(RpcHandlerLifecycleTest, PrefillSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::COMPLETE);
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillEarlyFailurePreservesPriorityPreemption) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::FAIL);
 }
-TEST_F(RpcHandlerLifecycleTest, PrefillCaughtExceptionCompletesHandlingWithoutUnexpectedExit) {
+TEST_F(RpcHandlerLifecycleTest, PrefillExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::THROW);
 }
-TEST_F(RpcHandlerLifecycleTest, DecodeSuccessReturnsBeforeSchedulerWithoutCanceling) {
-    runDecodeHandler(OutputAction::COMPLETE);
-}
-TEST_F(RpcHandlerLifecycleTest, DecodePriorityPreemptionReclaimsKvOnNextSchedulerTick) {
-    runDecodeHandler(OutputAction::FAIL);
-}
-TEST_F(RpcHandlerLifecycleTest, DecodeCaughtExceptionPreservesCauseAndReclaimsKv) {
-    runDecodeHandler(OutputAction::THROW);
-}
-TEST_F(RpcHandlerLifecycleTest, DecodeRunningCancellationReturnsBeforeSchedulerReclaimsKv) {
-    runDecodeHandler(OutputAction::WAIT);
+
+TEST_F(RpcHandlerLifecycleTest, PrefillBatchTerminalCleanupMarksHandlingCompleted) {
+    for (auto action : {OutputAction::COMPLETE, OutputAction::FAIL}) {
+        TestLogCapture capture("prefill_batch_lifecycle");
+        auto engine = std::make_shared<SteppedEngine>(action);
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        PrefillRpcServer prefill;
+        prefill.engine_ = engine;
+        prefill.meta_ = meta;
+        prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+        const auto free_before = engine->getCacheManager()->freeBlocksNum();
+        auto request = lifecycleRequest();
+        auto stream = engine->enqueue(QueryConverter::transQuery(&request));
+        auto context = std::make_unique<GenerateContext>(kRequestId, 10000, nullptr, prefill.metrics_reporter_, meta);
+        context->setStream(stream);
+        auto& entry = prefill.batch_entries_["lifecycle-batch"];
+        entry.reserved = true;
+        entry.context = std::move(context);
+        if (action == OutputAction::COMPLETE) {
+            stream->reportEvent(StreamEvents::GenerateDone);
+            reap(engine, free_before);
+        } else {
+            stream->reportError(ErrorCode::PRIORITY_PREEMPTED, kFailureReason);
+        }
+        prefill.batchContextCleanupTick();
+        EXPECT_TRUE(prefill.batch_entries_.empty());
+        EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
+        if (action == OutputAction::FAIL) {
+            reap(engine, free_before);
+        }
+    }
 }
 
 }  // namespace

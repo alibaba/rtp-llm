@@ -1,10 +1,12 @@
 #include <thread>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
-#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
@@ -41,9 +43,6 @@ protected:
                 waited_ms += 10;
             }
         }
-        // done() is updated by BroadcastManager's completion thread; consume
-        // the terminal status even when it changed between loop iterations.
-        result->checkDone();
     }
 
 protected:
@@ -51,15 +50,27 @@ protected:
     std::vector<std::string>                    server_addrs_;
     std::unique_ptr<P2PBroadcastClient>         client_;
 
-    // 创建测试用的 LayerCacheBuffer
-    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "default");
-        for (int i = 0; i < num_blocks; ++i) {
-            int64_t cache_key = layer_id * 1000 + i;
-            int     block_id  = i;
-            buffer->addBlockId(cache_key, block_id);
-        }
-        return buffer;
+    /// 本 worker 的一份传输计划：一条 route 带它自己的块视图。
+    static TransferRoutePB createRoute(int32_t route_id, int64_t cache_key, int32_t block_id) {
+        TransferRoutePB route;
+        route.set_route_id(route_id);
+        route.set_cache_tag("full");
+        auto* layer_block = route.add_layer_blocks();
+        layer_block->set_layer_id(0);
+        layer_block->add_cache_keys(cache_key);
+        layer_block->add_block_ids(block_id);
+        return route;
+    }
+
+    static P2PBroadcastClient::BroadcastParams
+    createParams(int64_t request_id, const std::string& unique_key, int64_t deadline_ms, int64_t request_deadline_ms) {
+        P2PBroadcastClient::BroadcastParams params;
+        params.request_id          = request_id;
+        params.unique_key          = unique_key;
+        params.deadline_ms         = deadline_ms;
+        params.request_deadline_ms = request_deadline_ms;
+        params.type                = P2PConnectorBroadcastType::READ;
+        return params;
     }
 };
 
@@ -69,24 +80,13 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     std::string unique_key  = "test_broadcast_1";
     int64_t     request_id  = 1001;
     int64_t     deadline_ms = currentTimeMs() + 5000;
+    int64_t     request_deadline_ms = deadline_ms + 5000;
 
-    // 创建 LayerCacheBuffer
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
-    layer_cache_buffers.push_back(createLayerCacheBuffer(1, 2));
-
-    // 创建 decode_transfer_servers
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-    decode_transfer_servers.push_back({"127.0.0.1", 12346});
+    auto params         = createParams(request_id, unique_key, deadline_ms, request_deadline_ms);
+    params.peer_workers = {{"127.0.0.1", 12345}, {"127.0.0.1", 12346}};
 
     // 执行 broadcast
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(std::move(params));
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -99,7 +99,62 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     for (size_t i = 0; i < servers_.size(); ++i) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().peer_workers_size(), 2);
     }
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastSendsEachWorkerItsOwnRoutes) {
+    const int64_t  deadline_ms = currentTimeMs() + 5000;
+    const uint64_t plan_digest = 0xfeedface;
+
+    auto params        = createParams(1010, "cp-rank-view", deadline_ms, deadline_ms);
+    params.routes      = {{createRoute(0, 100, 10)}, {createRoute(1, 101, 11)}};
+    params.plan_digest = plan_digest;
+
+    auto result = client_->broadcast(std::move(params));
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+    ASSERT_TRUE(result->success());
+
+    // 每个 worker 只拿到自己那份 route，块视图随 route 内嵌下发。
+    for (size_t rank = 0; rank < servers_.size(); ++rank) {
+        const auto request = servers_[rank]->service()->getLastBroadcastTpRequest();
+        ASSERT_EQ(request.routes_size(), 1);
+        EXPECT_EQ(request.routes(0).route_id(), static_cast<int32_t>(rank));
+        ASSERT_EQ(request.routes(0).layer_blocks_size(), 1);
+        EXPECT_EQ(request.routes(0).layer_blocks(0).cache_keys(0), 100 + static_cast<int64_t>(rank));
+        EXPECT_EQ(request.routes(0).layer_blocks(0).block_ids(0), 10 + static_cast<int32_t>(rank));
+        EXPECT_EQ(request.plan_digest(), plan_digest);
+    }
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastAllowsEmptyRoutesForOneWorker) {
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+
+    auto params   = createParams(1011, "cp-empty-rank-view", deadline_ms, deadline_ms);
+    params.routes = {{createRoute(0, 100, 10)}, {}};
+
+    auto result = client_->broadcast(std::move(params));
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+    ASSERT_TRUE(result->success());
+
+    // rank1 的空 routes 即权威的「本 worker 无任务」；顶层 layer_blocks 不再上线。
+    EXPECT_EQ(servers_[0]->service()->getLastBroadcastTpRequest().routes_size(), 1);
+    EXPECT_EQ(servers_[1]->service()->getLastBroadcastTpRequest().routes_size(), 0);
+    EXPECT_EQ(servers_[0]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 0);
+    EXPECT_EQ(servers_[1]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 0);
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastRejectsMismatchedRouteCount) {
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+
+    auto params   = createParams(1012, "cp-invalid-rank-view", deadline_ms, deadline_ms);
+    params.routes = {{createRoute(0, 100, 10)}};
+
+    EXPECT_EQ(client_->broadcast(std::move(params)), nullptr);
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
@@ -112,24 +167,14 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
     int64_t     request_id  = 1002;
     int64_t     deadline_ms = currentTimeMs() + 10;  // 很短的超时时间
 
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
     // 执行 broadcast
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(createParams(request_id, unique_key, deadline_ms, deadline_ms));
 
     ASSERT_NE(result, nullptr);
 
-    // broadcast gRPC 超时时 BroadcastManager::waitDone 抛 RTPException
     EXPECT_THROW(waitDone(result, 500), RTPException);
+    EXPECT_THROW(result->done(), RTPException);
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {
@@ -140,18 +185,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {
     int64_t     request_id  = 1003;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(createParams(request_id, unique_key, deadline_ms, deadline_ms));
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -175,18 +209,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllResponseFailed) {
     int64_t     request_id  = 1004;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(createParams(request_id, unique_key, deadline_ms, deadline_ms));
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -201,6 +224,20 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllResponseFailed) {
     }
 }
 
+TEST_F(P2PBroadcastClientTest, Broadcast_MissingP2PResponseHasNonSuccessError) {
+    servers_[0]->service()->setOmitP2PResponse(true);
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+
+    auto result = client_->broadcast(createParams(1006, "test_broadcast_missing_response", deadline_ms, deadline_ms));
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->errorCode(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(result->errorMessage().find("missing p2p_response"), std::string::npos);
+}
+
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     // 设置第一个服务器返回 RPC 错误
     servers_[0]->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
@@ -209,18 +246,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     int64_t     request_id  = 1005;
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(createParams(request_id, unique_key, deadline_ms, deadline_ms));
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -229,10 +255,14 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
 }
 
 TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
-    std::string unique_key = "test_cancel_success";
+    std::string unique_key          = "test_cancel_success";
+    int64_t     request_id          = 3013;
+    int64_t     deadline_ms         = currentTimeMs() + 1000;
+    int64_t     request_deadline_ms = currentTimeMs() + 5000;
 
     // 执行 cancel
-    auto result = client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ);
+    auto result = client_->cancel(
+        unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms, request_id, deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -245,7 +275,113 @@ TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     for (size_t i = 0; i < servers_.size(); ++i) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 0);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_id(), request_id);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
     }
+}
+
+
+TEST_F(P2PBroadcastClientTest, CancelSurvivesCallerReleaseAndReclaimsAfterFinish) {
+    for (auto& server : servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, 50);
+    }
+    auto result = client_->cancel("cancel-release", P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                  currentTimeMs() + 5000, 3014, currentTimeMs() + 1000);
+    ASSERT_NE(result, nullptr);
+    std::weak_ptr<P2PBroadcastClient::TpBroadcastResult> pending = result->tp_broadcast_result_;
+    result.reset();
+    const auto deadline = currentTimeMs() + 2000;
+    while (!pending.expired() && currentTimeMs() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(pending.expired());
+    for (auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
+class P2PCancelLifetimeTest: public ::testing::Test {
+protected:
+    void checkLifetime(P2PConnectorBroadcastType type, bool expire) {
+        class GatedService: public RpcService::Service {
+        public:
+            GatedService(): released_(release_.get_future().share()) {}
+
+            grpc::Status ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB*,
+                                         FunctionResponsePB* response) override {
+                entered.set_value();
+                released_.wait();
+                response->mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
+                return grpc::Status::OK;
+            }
+
+            void release() {
+                std::call_once(release_once_, [this] { release_.set_value(); });
+            }
+
+            std::promise<void> entered;
+
+        private:
+            std::promise<void> release_;
+            std::shared_future<void> released_;
+            std::once_flag release_once_;
+        } service;
+
+        grpc::ServerBuilder builder;
+        int port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        // Release the handler before shutdown, including on fatal assertions.
+        auto shutdown = std::shared_ptr<void>(nullptr, [&](void*) {
+            service.release();
+            server->Shutdown();
+        });
+
+        auto client = std::make_unique<P2PBroadcastClient>(
+            std::vector<std::string>{"127.0.0.1:" + std::to_string(port)}, expire ? 2000 : 5000);
+        ASSERT_TRUE(client->init());
+        const auto deadline_ms = currentTimeMs() + 10000;
+        auto result = client->cancel("cancel_lifetime", type, deadline_ms, 3014, deadline_ms);
+        ASSERT_NE(result, nullptr);
+        ASSERT_EQ(service.entered.get_future().wait_for(std::chrono::seconds(1)), std::future_status::ready);
+        std::weak_ptr<P2PBroadcastClient::TpBroadcastResult> weak_result = result->tp_broadcast_result_;
+        // Keep only the RPC storage for checking status, not the result owner.
+        auto context = result->tp_broadcast_result_->worker_contexts_.front();
+        auto completed = std::make_shared<std::promise<void>>();
+        auto completion = completed->get_future();
+        auto complete_once = std::make_shared<std::once_flag>();
+        result->setDoneCallback([weak_result, completed, complete_once] {
+            if (auto current = weak_result.lock(); current && current->done()) {
+                std::call_once(*complete_once, [&] { completed->set_value(); });
+            }
+        });
+
+        result.reset();
+        ASSERT_FALSE(weak_result.expired());
+        if (!expire) {
+            service.release();
+        }
+        ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(context->status.error_code(), expire ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::OK);
+
+        const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!weak_result.expired() && std::chrono::steady_clock::now() < release_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(weak_result.expired());
+        client.reset();
+    }
+};
+
+TEST_F(P2PCancelLifetimeTest, CancelHandleReadSurvivesCallerReleaseUntilCompletion) {
+    checkLifetime(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, false);
+}
+
+TEST_F(P2PCancelLifetimeTest, CancelReadReleasesKeepaliveAfterRpcTimeout) {
+    checkLifetime(P2PConnectorBroadcastType::CANCEL_READ, true);
 }
 
 }  // namespace rtp_llm

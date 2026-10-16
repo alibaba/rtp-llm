@@ -951,6 +951,23 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(config_.topologyPtr());
 
+    if (is_connector && cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cache_keys == resource_keys) {
+        // P2P projects the complete logical keys onto each rank's physical table later.
+        // Keep each group's local layout intact, including sparse and reserved slots.
+        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+            const auto& blocks = *source_blocks_by_group[group_id];
+            BlockIndicesType valid_blocks;
+            for (auto block : blocks) {
+                if (!isNullBlockIdx(block) && block > 0) {
+                    valid_blocks.push_back(block);
+                }
+            }
+            kv_cache_groups_[group_id]->reference(valid_blocks);
+            selected_resource->mutableBlockIds(groups[group_id].tag).assign(blocks);
+        }
+        return selected_resource;
+    }
+
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;
     std::vector<BlockIndicesType> selected_blocks(kv_cache_groups_.size());
@@ -1017,7 +1034,13 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
         blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
+        BlockIndicesType valid_blocks;
+        for (auto block : *blocks_by_group[group_id]) {
+            if (!isNullBlockIdx(block) && block > 0) {
+                valid_blocks.push_back(block);
+            }
+        }
+        kv_cache_groups_[group_id]->unreference(valid_blocks);
     }
 }
 

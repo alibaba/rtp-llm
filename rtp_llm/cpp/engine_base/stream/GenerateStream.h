@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <type_traits>
@@ -168,6 +169,7 @@ public:
     void update(const StreamUpdateInfo& update_info);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    void updateWithoutLock(const StreamUpdateInfo& update_info);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -249,11 +251,14 @@ public:
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
-    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
+    void    setPrefillReuseLength(
+           int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
     int64_t prefillMemoryReuseLen() const;
+    int64_t prefillDiskReuseLen() const;
+    bool    prefillUsesIndependentBlockPools() const;
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
@@ -313,7 +318,7 @@ public:
             generation_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
         }
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
-            || event == StreamEvents::NeedRemoteGenerate) {
+            || event == StreamEvents::PrefillHandoffReady) {
             consumer_cv_->notify_all();
         }
     }
@@ -332,6 +337,7 @@ public:
     void         clearCanRun();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
+    FirstError::Snapshot firstError();
     std::string  stopReason();
 
     void   setReserveStep(size_t reserve_step);
@@ -448,9 +454,6 @@ public:
     bool needReturnHiddenStates() {
         return return_all_hidden_states_;
     }
-
-    void holdKVCacheForPDSep();
-    void releaseKVCacheForPDSep();
 
     std::vector<int> getLatestTokens(size_t token_num);
 
@@ -591,6 +594,7 @@ public:
     void waitPendingAsyncBookkeeping();
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
+    bool hasPendingP2PResourceHold() const;
 
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
@@ -811,8 +815,14 @@ public:
     }
 
     int64_t deadlineMs() const {
-        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
-        return deadline_ms;
+        if (generate_input_->request_deadline_ms > 0) {
+            return generate_input_->request_deadline_ms;
+        }
+        const int timeout_ms = generate_input_->generate_config->timeout_ms;
+        if (timeout_ms <= 0) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return static_cast<int64_t>(timeout_ms) + begin_time_us_ / 1000;
     }
 
     std::pair<std::string, uint32_t> prefillAddr() const;
@@ -825,6 +835,12 @@ public:
     }
     void setPrefillTpSize(int prefill_tp_size) {
         prefill_tp_size_ = prefill_tp_size;
+    }
+    int getPrefillCpSize() const {
+        return prefill_cp_size_;
+    }
+    void setPrefillCpSize(int prefill_cp_size) {
+        prefill_cp_size_ = prefill_cp_size;
     }
 
 public:
@@ -910,10 +926,12 @@ protected:
     int                                host_reuse_length_    = 0;
     int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
+    bool    prefill_independent_block_pools_ = false;
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
     int64_t prefill_remote_reuse_len_ = 0;
     int64_t prefill_memory_reuse_len_ = 0;
+    int64_t prefill_disk_reuse_len_   = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -1000,6 +1018,8 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+    // Effective Prefill KV-cache CP size; independent from TP size.
+    int prefill_cp_size_ = -1;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

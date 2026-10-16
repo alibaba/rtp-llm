@@ -114,28 +114,20 @@ def init_cache_store_group_args(parser, cache_store_config):
     )
 
     cache_store_group.add_argument(
-        "--p2p_read_steal_before_deadline_ms",
-        env_name="P2P_READ_STEAL_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_steal_before_deadline_ms"),
-        type=int,
-        default=250,
-        help="Decode read：距 deadline 小于该毫秒数时从 recv store steal，阻止新 transfer 匹配。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_read_return_before_deadline_ms",
-        env_name="P2P_READ_RETURN_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_return_before_deadline_ms"),
-        type=int,
-        default=100,
-        help="Decode read 与 Prefill send：transfer 须在 deadline 前该毫秒数内完成（与对端对齐）。",
-    )
-    cache_store_group.add_argument(
         "--p2p_transfer_not_done_resource_hold_ms",
         env_name="P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS",
         bind_to=(cache_store_config, "p2p_transfer_not_done_resource_hold_ms"),
         type=int,
         default=10000,
-        help="Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口（毫秒）。",
+        help="RDMA：到达 transfer deadline 后等待该时长，再 close 相关 connection（毫秒）。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_lease_query_timeout_ms",
+        env_name="P2P_LEASE_QUERY_TIMEOUT_MS",
+        bind_to=(cache_store_config, "p2p_lease_query_timeout_ms"),
+        type=int,
+        default=20000,
+        help="Decode：到达 transfer deadline 后查询 lease 的期限，超时由 rank 0 abort（毫秒）。",
     )
 
     cache_store_group.add_argument(
@@ -147,20 +139,20 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="P2P decode 侧资源 store 周期扫描超时资源的间隔（毫秒）。",
     )
     cache_store_group.add_argument(
-        "--p2p_layer_cache_buffer_store_timeout_ms",
-        env_name="P2P_LAYER_CACHE_BUFFER_STORE_TIMEOUT_MS",
-        bind_to=(cache_store_config, "p2p_layer_cache_buffer_store_timeout_ms"),
-        type=int,
-        default=100000,
-        help="P2P LayerCacheBufferStore 条目保留时长（毫秒），默认 100s。",
-    )
-    cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
         env_name="P2P_CANCEL_BROADCAST_TIMEOUT_MS",
         bind_to=(cache_store_config, "p2p_cancel_broadcast_timeout_ms"),
         type=int,
         default=1000,
         help="P2P Scheduler 广播 CANCEL 时的 gRPC 超时（毫秒）。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_cancelled_keys_ttl_ms",
+        env_name="P2P_CANCELLED_KEYS_TTL_MS",
+        bind_to=(cache_store_config, "p2p_cancelled_keys_ttl_ms"),
+        type=int,
+        default=3600000,
+        help="P2P cancelled key tombstone 的 TTL（毫秒），用于拒绝迟到的 prefill 资源。",
     )
     cache_store_group.add_argument(
         "--cache_store_tcp_anet_rpc_thread_num",
@@ -177,4 +169,60 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=100,
         help="P2P TCP 控制面 ANetRPCServer queueNum。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_tcp_worker_queue_size",
+        env_name="CACHE_STORE_TCP_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "cache_store_tcp_worker_queue_size"),
+        type=int,
+        default=500,
+        help="P2P TCP/RDMA 控制面 worker 线程池（tcp_server_rpc_threadpool）队列深度，默认 500。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_thread_count",
+        env_name="RDMA_TRANSFER_WORKER_THREAD_COUNT",
+        bind_to=(cache_store_config, "rdma_transfer_worker_thread_count"),
+        type=int,
+        default=16,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）线程数，默认 16。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_queue_size",
+        env_name="RDMA_TRANSFER_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "rdma_transfer_worker_queue_size"),
+        type=int,
+        default=100,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 100。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_rdma_enable_h2d_copy",
+        env_name="P2P_RDMA_ENABLE_H2D_COPY",
+        bind_to=(cache_store_config, "p2p_rdma_enable_h2d_copy"),
+        type=str2bool,
+        default=False,
+        help="P2P RDMA 是否先读入 pinned host staging buffer，再执行 H2D copy。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_rdma_staging_total_bytes",
+        env_name="P2P_RDMA_STAGING_TOTAL_BYTES",
+        bind_to=(cache_store_config, "p2p_rdma_staging_total_bytes"),
+        type=int,
+        default=0,
+        help="P2P RDMA H2D pinned-host staging 总字节数；开启 H2D copy 时必须至少容纳一个 LLM KV block。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_prefill_sender_thread_count",
+        env_name="P2P_PREFILL_SENDER_THREAD_COUNT",
+        bind_to=(cache_store_config, "p2p_prefill_sender_thread_count"),
+        type=int,
+        default=4,
+        help="P2P Prefill 异步发送线程池的线程数，必须大于 0。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_prefill_sender_queue_size",
+        env_name="P2P_PREFILL_SENDER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "p2p_prefill_sender_queue_size"),
+        type=int,
+        default=10000,
+        help="P2P Prefill 异步发送线程池的队列容量，必须大于 0。",
     )

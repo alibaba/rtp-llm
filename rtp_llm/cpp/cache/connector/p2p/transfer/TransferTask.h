@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -28,6 +29,7 @@ public:
     void              cancel() override;
     TransferErrorCode errorCode() const override;
     std::string       errorMessage() const override;
+    void              setDoneCallback(std::function<void()> callback) override;
 
 public:
     // 内部使用（TcpTransferService / RdmaTransferService 通知完成）
@@ -37,11 +39,14 @@ public:
     void
     notifyDone(bool success, TransferErrorCode error_code = TransferErrorCode::OK, const std::string& error_msg = "");
 
+    /// Record the first logical failure while outstanding DMA still owns the buffers.
+    void recordError(TransferErrorCode error_code, const std::string& error_message);
+
     /// @brief 原子地将任务从 PENDING 迁移到 TRANSFERRING 状态。
     /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
     bool startTransfer();
 
-    /// @brief 强制终止任务，无论当前状态如何（仅供 P2PConnectorWorker 超时安全网使用）。
+    /// @brief 强制终止任务，无论当前状态如何（仅供 P2P connector worker 超时安全网使用）。
     void forceCancel() override;
 
     int64_t totalCostTimeUs() const {
@@ -59,8 +64,9 @@ private:
     bool                      done_             = false;
     bool                      transferring_     = false;
     bool                      cancel_requested_ = false;
-    TransferErrorCode         error_code_       = TransferErrorCode::OK;
-    std::string               error_msg_;
+    mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
+    mutable std::string       error_msg_;
+    std::function<void()>     done_callback_;
 };
 
 /// @brief 内部 task store，被 TcpKVCacheReceiver / RdmaKVCacheReceiver 私有持有

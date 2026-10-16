@@ -114,6 +114,7 @@ cc_library(
     deps = [
         ":op_data",
         ":device_data",
+        "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
@@ -153,6 +154,7 @@ cc_library(
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/pybind:th_utils",
@@ -237,6 +239,7 @@ cc_library(
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/pybind:th_utils",

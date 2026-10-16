@@ -821,6 +821,13 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
+std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        stream->setReserveStep(reserve_step_);
+    }
+    return scheduler_->enqueueGroup(streams).second;
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_) {

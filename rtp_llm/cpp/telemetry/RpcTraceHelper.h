@@ -306,7 +306,7 @@ inline void setUsageTokenAttributes(SpanLike& span_like, int64_t input_tokens, i
 // On destruction it maps the final RPC status to span status + low-cardinality
 // error.type, then ends the span exactly once. MUST be declared AFTER the
 // status owner (e.g. GenerateContext) so it destructs first and the pointed-to
-// status is still alive. Covers CHECK_ERROR_STATUS / EXECUTE_STAGE_FUNC early
+// status is still alive. Covers CHECK_ERROR_STATUS early
 // returns and exceptions via stack unwinding.
 enum class SpanStatusSemantics {
     Rpc,

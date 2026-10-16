@@ -903,7 +903,7 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
         GenerateOutputs             outputs;
         outputs.request_id = 123;
         normal_stream->enqueueGenerateOutput(std::move(outputs));
-        normal_stream->reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+        normal_stream->reportEventWithoutLock(StreamEvents::PrefillHandoffReady);
     }
 
     const auto status = server.poll(&writer, stream);
@@ -911,7 +911,7 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_TRUE(status.ok());
     ASSERT_EQ(writer.outputs_.size(), 1);
     EXPECT_EQ(writer.outputs_[0].request_id(), 123);
-    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());

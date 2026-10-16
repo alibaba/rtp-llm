@@ -111,6 +111,7 @@ public:
     // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
     // tagging only — never used for engine-side scheduling decisions.
     int32_t priority = 0;
+    int64_t request_deadline_ms = 0;  // Local P2P deadline.
 
     // Selected position in input_ids; -1 means no custom output.
     int custom_output_token_position = -1;
@@ -222,8 +223,8 @@ public:
         CanRun             = 1 << 1,  // 调度器允许运行
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
-        NeedRemoteGenerate = 1 << 4,  // 需要远程生成
-        CachePrepared      = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
+        PrefillHandoffReady = 1 << 4,  // Prefill output is ready for Decode handoff
+        CachePrepared = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {

@@ -406,30 +406,37 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
-    int64_t p2p_read_steal_before_deadline_ms =
-        250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
-    int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
-                                                       // 须在 D 前该毫秒数完成（与对端 recv/send 对齐）
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
-        10 * 1000;  // Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口
+        10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
+    int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // D 后查询 lease 的期限；到期仍未确认则 rank 0 abort
 
     int     p2p_resource_store_timeout_check_interval_ms = 100;
-    int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
-    int     cache_store_tcp_anet_rpc_thread_num          = 3;
-    int     cache_store_tcp_anet_rpc_queue_num           = 100;
+    // TTL for cancelled_keys_ tombstones; should cover the longest expected
+    // decode StartLoad arrival skew so we can tell "request expired" vs
+    // "request never seen". Keep ≥ business deadline upper bound.
+    int64_t p2p_cancelled_keys_ttl_ms           = 3600 * 1000;
+    int     cache_store_tcp_anet_rpc_thread_num     = 3;
+    int     cache_store_tcp_anet_rpc_queue_num      = 100;
+    int     cache_store_tcp_worker_queue_size        = 500;
+    int     rdma_transfer_worker_thread_count        = 16;
+    int     rdma_transfer_worker_queue_size           = 100;
+    bool    p2p_rdma_enable_h2d_copy                  = false;
+    int64_t p2p_rdma_staging_total_bytes              = 0;
+    int     p2p_prefill_sender_thread_count          = 4;
+    int     p2p_prefill_sender_queue_size            = 10000;
 
     std::string to_string() const;
 };
@@ -514,34 +521,16 @@ struct RuntimeConfig {
 };
 
 struct PDSepConfig {
-    RoleType role_type                       = RoleType::PDFUSION;
-    bool     cache_store_rdma_mode           = true;
-    int64_t  cache_store_listen_port         = 0;
-    int64_t  cache_store_connect_port        = 0;
-    int64_t  cache_store_rdma_listen_port    = 0;
-    int64_t  cache_store_rdma_connect_port   = 0;
-    int64_t  remote_rpc_server_port          = 0;
-    int64_t  prefill_retry_times             = 0;
-    int64_t  prefill_retry_timeout_ms        = 20;
-    int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
-    int64_t  decode_retry_times              = 100;
-    int64_t  decode_retry_timeout_ms         = 100;
-    int64_t  decode_retry_interval_ms        = 1;
-    int64_t  decode_polling_kv_cache_step_ms = 30;
-    int64_t  decode_polling_call_prefill_ms  = 30;
-    int64_t  rdma_connect_retry_times        = 0;
-    int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
-    int64_t  worker_port_offset              = 0;
-    bool     decode_entrance                 = false;
-    // ========== Prefill Thread Pool Configuration ==========
-    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
-    int64_t prefill_prepare_resource_pool_size = 0;
-    // Max wait time in stopStream() for Engine Loop to call finish_internal().
-    // When GenerateDone is set and stream has no error, stopStream() waits up to
-    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
-    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
-
+    RoleType    role_type                     = RoleType::PDFUSION;
+    bool        cache_store_rdma_mode         = true;
+    int64_t     cache_store_listen_port       = 0;
+    int64_t     cache_store_connect_port      = 0;
+    int64_t     cache_store_rdma_listen_port  = 0;
+    int64_t     cache_store_rdma_connect_port = 0;
+    int64_t     remote_rpc_server_port        = 0;
+    int64_t     load_cache_timeout_ms         = 5000;
+    int64_t     max_rpc_timeout_ms            = 2 * 3600 * 1000;  // 2h default
+    int64_t     worker_port_offset            = 0;
     std::string to_string() const;
 };
 

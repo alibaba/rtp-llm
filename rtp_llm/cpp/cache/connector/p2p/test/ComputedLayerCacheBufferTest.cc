@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <set>
@@ -21,8 +22,8 @@ protected:
     }
 
     // 创建测试用的 LayerCacheBuffer
-    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
-        return std::make_shared<LayerCacheBuffer>(layer_id, "default");
+    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, const std::string& tag = "full") {
+        return std::make_shared<LayerCacheBuffer>(layer_id, tag);
     }
 
     // 获取当前时间（毫秒）+ 偏移量
@@ -47,9 +48,9 @@ TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
     int64_t deadline_ms1 = getDeadlineMs();
 
     computed_buffer.addBuffer(buffer, deadline_ms1);
-    ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
+    ASSERT_EQ(std::min(deadline_ms0, deadline_ms1), computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -66,9 +67,9 @@ TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
     int64_t deadline_ms1 = getDeadlineMs();
 
     computed_buffer.addBuffer(nullptr, deadline_ms1);
-    ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
+    ASSERT_EQ(std::min(deadline_ms0, deadline_ms1), computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -93,7 +94,7 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
 
     producer.join();
 
-    std::set<int> layer_ids     = {0, 1};
+    std::set<std::string> layer_ids = {"0:full", "1:full"};
     auto [layer_count, buffers] = computed_buffer->getBuffers(layer_ids);
     EXPECT_EQ(layer_count, 2);
     EXPECT_EQ(buffers.size(), 2);
@@ -123,6 +124,34 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChangeTimeout)
     EXPECT_LE(elapsed, 200);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, GetBuffersReturnsStoredLayerCountForWaitChange) {
+    int64_t request_id  = 1008;
+    auto    buffer0     = createLayerCacheBuffer(0);
+    int64_t deadline_ms = getDeadlineMs();
+
+    auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(request_id, buffer0, deadline_ms);
+    auto [stored_layer_count, ready_buffers] = computed_buffer->getBuffers({"1:full"});
+    EXPECT_EQ(stored_layer_count, 1);
+    EXPECT_TRUE(ready_buffers.empty());
+
+    std::thread producer([computed_buffer, deadline_ms, this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        computed_buffer->addBuffer(createLayerCacheBuffer(1), deadline_ms);
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    computed_buffer->waitChange(stored_layer_count, 1000);
+    auto end     = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    producer.join();
+
+    EXPECT_GE(elapsed, 30);
+    auto [final_layer_count, final_buffers] = computed_buffer->getBuffers({"0:full", "1:full"});
+    EXPECT_EQ(final_layer_count, 2);
+    EXPECT_EQ(final_buffers.size(), 2);
+}
+
 // ==================== ComputedLayerCacheBufferStore 类测试 ====================
 
 TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
@@ -130,18 +159,19 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
     auto    buffer      = createLayerCacheBuffer(0);
     int64_t deadline_ms = getDeadlineMs();
 
-    ASSERT_TRUE(store_->getBuffer(request_id) == nullptr);
+    ASSERT_TRUE(store_->getBuffer(request_id, deadline_ms) == nullptr);
 
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     auto computed_buffer = store_->addBuffer(request_id, buffer, deadline_ms);
     ASSERT_NE(computed_buffer, nullptr);
     EXPECT_EQ(computed_buffer->deadlineMs(), deadline_ms);
 
-    auto retrieved = store_->getBuffer(request_id);
+    auto retrieved = store_->getBuffer(request_id, deadline_ms);
     ASSERT_NE(retrieved, nullptr);
     EXPECT_EQ(retrieved->deadlineMs(), deadline_ms);
 
     // add null buffer
-    auto computed_buffer1 = store_->addBuffer(request_id, nullptr, deadline_ms - 10);
+    auto computed_buffer1 = store_->addBuffer(request_id, nullptr, deadline_ms);
     ASSERT_EQ(computed_buffer, computed_buffer1);
     EXPECT_EQ(computed_buffer1->deadlineMs(), deadline_ms);
 
@@ -150,7 +180,7 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
     auto computed_buffer2 = store_->addBuffer(request_id, buffer1, deadline_ms);
     ASSERT_EQ(computed_buffer2, computed_buffer);
 
-    auto [layer_count, buffers] = retrieved->getBuffers({0, 2});
+    auto [layer_count, buffers] = retrieved->getBuffers({"0:full", "2:full"});
     EXPECT_EQ(layer_count, 2);
     ASSERT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffers[0]->getLayerId(), 0);
@@ -161,13 +191,14 @@ TEST_F(ComputedLayerCacheBufferTest, RemoveBuffer) {
     auto    buffer      = createLayerCacheBuffer(0);
     int64_t deadline_ms = getDeadlineMs();
 
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     store_->addBuffer(request_id, buffer, deadline_ms);
 
-    auto retrieved = store_->getBuffer(request_id);
+    auto retrieved = store_->getBuffer(request_id, deadline_ms);
     ASSERT_NE(retrieved, nullptr);
 
-    store_->removeBuffer(request_id);
-    retrieved = store_->getBuffer(request_id);
+    store_->removeBuffer(request_id, deadline_ms);
+    retrieved = store_->getBuffer(request_id, deadline_ms);
     EXPECT_EQ(retrieved, nullptr);
 }
 
@@ -180,22 +211,206 @@ TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
     auto    buffer2      = createLayerCacheBuffer(0);
     int64_t deadline_ms2 = getDeadlineMs(-100);  // 已经过期
 
+    store_->registerRequestHorizon(request_id1, deadline_ms1, deadline_ms1);
     store_->addBuffer(request_id1, buffer1, deadline_ms1);
     store_->addBuffer(request_id2, buffer2, deadline_ms2);
 
-    EXPECT_EQ(store_->getBuffersCount(), 2);
+    EXPECT_EQ(store_->getBuffersCount(), 1);
 
     // 检查超时
     store_->checkTimeout();
 
     // 只有过期的被删除
-    auto retrieved1 = store_->getBuffer(request_id1);
+    auto retrieved1 = store_->getBuffer(request_id1, deadline_ms1);
     ASSERT_NE(retrieved1, nullptr);
 
-    auto retrieved2 = store_->getBuffer(request_id2);
+    auto retrieved2 = store_->getBuffer(request_id2, deadline_ms2);
     EXPECT_EQ(retrieved2, nullptr);
 
     EXPECT_EQ(store_->getBuffersCount(), 1);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
+    int64_t request_id  = 4001;
+    auto    buffer      = createLayerCacheBuffer(0);
+    int64_t deadline_ms = getDeadlineMs();
+
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
+    auto result = store_->addBuffer(request_id, buffer, deadline_ms);
+    ASSERT_NE(result, nullptr);
+
+    store_->removeBuffer(request_id, deadline_ms);
+
+    // Late-arriving addBuffer should be rejected
+    auto buffer2 = createLayerCacheBuffer(1);
+    auto result2 = store_->addBuffer(request_id, buffer2, deadline_ms);
+    EXPECT_EQ(result2, nullptr);
+    EXPECT_EQ(store_->getBuffer(request_id, deadline_ms), nullptr);
+    EXPECT_EQ(store_->getBuffersCount(), 0);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, RequestHorizonDoesNotRollWithLaterLayers) {
+    const int64_t request_id       = 4005;
+    const int64_t initial_horizon  = currentTimeMs() + 1000;
+    const int64_t later_candidate  = initial_horizon + 5000;
+
+    auto first = store_->registerRequestHorizon(request_id, initial_horizon, later_candidate);
+    auto later = store_->registerRequestHorizon(request_id, later_candidate, later_candidate);
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(later.has_value());
+    EXPECT_EQ(*first, initial_horizon);
+    EXPECT_EQ(*later, initial_horizon);
+
+    store_->removeBuffer(request_id, later_candidate);
+    EXPECT_FALSE(store_->registerRequestHorizon(request_id, later_candidate, later_candidate).has_value());
+}
+
+TEST_F(ComputedLayerCacheBufferTest, StartLoadTightensDeadlineAndLateLayerCannotExtendIt) {
+    const int64_t request_id = 4007;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    const int64_t load_deadline_ms = currentTimeMs() + 1000;
+    ASSERT_EQ(store_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms),
+              request_deadline_ms);
+    auto buffer = store_->addBuffer(request_id, createLayerCacheBuffer(0), request_deadline_ms);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_EQ(store_->activateRequestHorizon(request_id, load_deadline_ms, request_deadline_ms), load_deadline_ms);
+    store_->addBuffer(request_id, createLayerCacheBuffer(1), request_deadline_ms);
+    EXPECT_EQ(buffer->deadlineMs(), load_deadline_ms);
+    EXPECT_EQ(store_->activateRequestHorizon(request_id, load_deadline_ms + 1000, request_deadline_ms),
+              load_deadline_ms);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, StartLoadBeforeLayersKeepsLoadDeadline) {
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    const int64_t load_deadline_ms = currentTimeMs() + 1000;
+    ASSERT_TRUE(store_->activateRequestHorizon(4008, load_deadline_ms, request_deadline_ms).has_value());
+    ASSERT_EQ(store_->registerRequestHorizon(4008, request_deadline_ms, request_deadline_ms), load_deadline_ms);
+    auto buffer = store_->addBuffer(4008, createLayerCacheBuffer(0), request_deadline_ms);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->deadlineMs(), load_deadline_ms);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, TerminalTombstoneOutlivesLayerHorizon) {
+    const int64_t request_id          = 4006;
+    const int64_t expired_horizon_ms  = currentTimeMs() + 1000;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+
+    ASSERT_TRUE(store_->registerRequestHorizon(request_id, expired_horizon_ms, request_deadline_ms).has_value());
+    store_->removeBuffer(request_id, request_deadline_ms);
+    store_->checkTimeout();
+
+    EXPECT_FALSE(store_->registerRequestHorizon(request_id, currentTimeMs() + 1000, request_deadline_ms).has_value());
+    EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(0), request_deadline_ms), nullptr);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, SameLayerDifferentTagsDoNotCollide) {
+    const int64_t request_id  = 4002;
+    const int64_t deadline_ms = getDeadlineMs();
+    auto          full_buffer = createLayerCacheBuffer(0, "full");
+    auto          swa_buffer  = createLayerCacheBuffer(0, "swa");
+
+    ComputedLayerCacheBuffer computed_buffer(request_id, full_buffer, deadline_ms);
+    computed_buffer.addBuffer(swa_buffer, deadline_ms);
+
+    auto [buffer_count, buffers] = computed_buffer.getBuffers({"0:full", "0:swa"});
+    EXPECT_EQ(buffer_count, 2);
+    ASSERT_EQ(buffers.size(), 2);
+    EXPECT_EQ(buffers[0], full_buffer);
+    EXPECT_EQ(buffers[1], swa_buffer);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, RemoveBeforeEitherSideArrivesRetainsTombstoneForOneHour) {
+    // Missing, already-expired and long request deadlines all use the same retention.
+    int64_t request_id = 5000;
+    for (const auto deadline : {int64_t{0}, currentTimeMs() - 1, currentTimeMs() + 7200000}) {
+        ++request_id;
+        const auto before_remove = currentTimeMs();
+        store_->removeBuffer(request_id, deadline);
+        const auto expires_at = store_->removed_requests_.at({request_id, deadline});
+        EXPECT_GE(expires_at, before_remove + 3600000);
+        EXPECT_LE(expires_at, currentTimeMs() + 3600000);
+        const auto late_deadline = deadline;
+        EXPECT_FALSE(store_->registerRequestHorizon(request_id, late_deadline, late_deadline));
+        EXPECT_FALSE(store_->activateRequestHorizon(request_id, late_deadline, late_deadline));
+        EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(0), late_deadline), nullptr);
+        store_->removeBuffer(request_id, late_deadline);
+        EXPECT_EQ(store_->removed_requests_.at({request_id, deadline}), expires_at);
+        EXPECT_EQ(store_->removed_request_expiry_queue_.size(), 1u);
+        store_->checkTimeout(expires_at - 1);
+        EXPECT_EQ(store_->removed_requests_.count({request_id, deadline}), 1u);
+        store_->checkTimeout(expires_at);
+        EXPECT_TRUE(store_->removed_requests_.empty());
+        EXPECT_TRUE(store_->removed_request_expiry_queue_.empty());
+    }
+}
+
+TEST_F(ComputedLayerCacheBufferTest, LayerAndLoadTimeoutsReleaseBuffersBeforeTombstoneExpiry) {
+    const auto request_deadline = currentTimeMs() + 60000;
+    const auto load_deadline = currentTimeMs() + 10000;
+    ASSERT_TRUE(store_->registerRequestHorizon(5101, request_deadline, request_deadline));
+    auto buffer = store_->addBuffer(5101, createLayerCacheBuffer(0), request_deadline);
+    std::weak_ptr<ComputedLayerCacheBuffer> weak_buffer = buffer;
+    buffer.reset();
+    ASSERT_TRUE(store_->activateRequestHorizon(5101, load_deadline, request_deadline));
+    // Another request has only P-side layers; its original timeout must also be preserved.
+    ASSERT_TRUE(store_->registerRequestHorizon(5102, request_deadline, request_deadline));
+    ASSERT_NE(store_->addBuffer(5102, createLayerCacheBuffer(0), request_deadline), nullptr);
+
+    store_->checkTimeout(load_deadline - 1);
+    EXPECT_FALSE(weak_buffer.expired());
+    store_->checkTimeout(load_deadline);
+    EXPECT_TRUE(weak_buffer.expired());
+    EXPECT_EQ(store_->removed_requests_.at({5101, request_deadline}), load_deadline + 3600000);
+    EXPECT_NE(store_->getBuffer(5102, request_deadline), nullptr);
+    store_->checkTimeout(request_deadline);
+    EXPECT_EQ(store_->getBuffer(5102, request_deadline), nullptr);
+    EXPECT_EQ(store_->removed_requests_.at({5102, request_deadline}), request_deadline + 3600000);
+    EXPECT_EQ(store_->removed_requests_.count({5101, request_deadline}), 1u);
+
+    store_->checkTimeout(load_deadline + 3600000);
+    EXPECT_EQ(store_->removed_requests_.count({5101, request_deadline}), 0u);
+    EXPECT_EQ(store_->removed_requests_.count({5102, request_deadline}), 1u);
+    store_->checkTimeout(request_deadline + 3600000);
+    EXPECT_TRUE(store_->removed_requests_.empty());
+}
+
+TEST_F(ComputedLayerCacheBufferTest, SameRequestIdUsesOriginalDeadlineForAllState) {
+    const int64_t request_id        = 5200;
+    const auto    deadline_a        = currentTimeMs() + 60000;
+    const auto    deadline_b        = deadline_a + 1000;
+    const auto    transfer_deadline = deadline_a - 10000;
+    ASSERT_TRUE(store_->registerRequestHorizon(request_id, deadline_a, deadline_a));
+    ASSERT_TRUE(store_->registerRequestHorizon(request_id, deadline_b, deadline_b));
+    auto layer_a  = createLayerCacheBuffer(0);
+    auto layer_b  = createLayerCacheBuffer(0);
+    auto buffer_a = store_->addBuffer(request_id, layer_a, deadline_a);
+    auto buffer_b = store_->addBuffer(request_id, layer_b, deadline_b);
+    ASSERT_NE(buffer_a, nullptr);
+    ASSERT_NE(buffer_b, nullptr);
+    ASSERT_NE(buffer_a, buffer_b);
+    EXPECT_EQ(buffer_a->getBuffers({"0:full"}).second.at(0), layer_a);
+    EXPECT_EQ(buffer_b->getBuffers({"0:full"}).second.at(0), layer_b);
+    ASSERT_EQ(store_->activateRequestHorizon(request_id, transfer_deadline, deadline_a), transfer_deadline);
+    EXPECT_EQ(store_->requestHorizon(request_id, deadline_b), deadline_b);
+    EXPECT_EQ(store_->getBuffer(request_id, transfer_deadline), nullptr);
+
+    store_->checkTimeout(transfer_deadline);
+    EXPECT_EQ(store_->getBuffer(request_id, deadline_a), nullptr);
+    EXPECT_EQ(store_->getBuffer(request_id, deadline_b), buffer_b);
+    EXPECT_FALSE(store_->registerRequestHorizon(request_id, deadline_a, deadline_a));
+    EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(1), deadline_a), nullptr);
+    // Late completion for A must neither erase B nor refresh A's tombstone.
+    const auto expiry_a = store_->removed_requests_.at({request_id, deadline_a});
+    store_->removeBuffer(request_id, deadline_a);
+    EXPECT_EQ(store_->removed_requests_.at({request_id, deadline_a}), expiry_a);
+    EXPECT_EQ(store_->getBuffer(request_id, deadline_b), buffer_b);
+
+    store_->checkTimeout(deadline_b);
+    EXPECT_EQ(store_->removed_requests_.size(), 2u);
+    store_->checkTimeout(expiry_a);
+    EXPECT_EQ(store_->removed_requests_.count({request_id, deadline_a}), 0u);
+    EXPECT_EQ(store_->removed_requests_.count({request_id, deadline_b}), 1u);
 }
 
 }  // namespace rtp_llm

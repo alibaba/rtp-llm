@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <unordered_map>
+#include <limits>
 
 namespace rtp_llm {
 namespace transfer {
@@ -20,11 +22,13 @@ TcpTaskContext::TcpTaskContext(::google::protobuf::RpcController*               
     metrics_reporter_(metrics_reporter),
     unique_key_(request->unique_key()),
     collector_(std::make_shared<TransferServerMetricsCollector>()),
-    start_time_us_(currentTimeUs()) {}
+    start_time_us_(currentTimeUs()),
+    deadline_ms_(request->timeout_ms() > 0 && request->timeout_ms() <= std::numeric_limits<int32_t>::max()
+                     ? start_time_us_ / 1000 + request->timeout_ms() : 0) {}
 
 TcpTaskContext::~TcpTaskContext() {
     if (done_) {
-        run(false, TransferErrorCode::UNKNOWN, "TcpTaskContext destroyed without completion");
+        run(false, TransferErrorCode::CONTEXT_DESTROYED, "TcpTaskContext destroyed without completion");
     }
 }
 
@@ -46,60 +50,96 @@ const std::string& TcpTaskContext::getUniqueKey() const {
 }
 
 bool TcpTaskContext::isTimeout() const {
-    return currentTimeMs() > request_->deadline_ms();
+    return currentTimeMs() > deadline_ms_;
 }
 
 uint64_t TcpTaskContext::getDeadlineMs() const {
-    return static_cast<uint64_t>(request_->deadline_ms());
+    return static_cast<uint64_t>(deadline_ms_);
 }
 
 bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
+    const auto fail = [&](TransferErrorCode code, const std::string& reason) {
+        copy_error_code_    = code;
+        copy_error_message_ = "location=TcpTaskContext::executeCopy partition_layer_key=" + unique_key_ + ": " + reason;
+        return false;
+    };
     if (!task_) {
         RTP_LLM_LOG_WARNING("executeCopy: task is null, unique_key: %s", unique_key_.c_str());
-        return false;
+        return fail(TransferErrorCode::NOT_INITIALIZED, "recv task is null");
     }
 
     // Build a lookup index from the request for O(1) access by cache_key.
     std::unordered_map<int64_t, const ::tcp_transfer::TcpCacheKeyBlockBufferInfo*> request_index;
     request_index.reserve(request_->blocks_size());
     for (const auto& cache_key_block : request_->blocks()) {
-        request_index[cache_key_block.key()] = &cache_key_block;
+        if (!cache_key_block.has_key()
+            || !request_index.emplace(cache_key_block.key(), &cache_key_block).second) {
+            RTP_LLM_LOG_WARNING("executeCopy: missing or duplicate request cache key, unique_key: %s",
+                                unique_key_.c_str());
+            return fail(TransferErrorCode::BUFFER_MISMATCH,
+                        cache_key_block.has_key() ?
+                            "duplicate request cache_key=" + std::to_string(cache_key_block.key()) :
+                            "request block is missing cache key");
+        }
     }
 
     // Iterate over task's expected blocks as the authoritative source of truth.
-    // Every non-empty BlockInfo in the task must be present in the request with a matching size.
+    // Every BlockInfo in the task must be present in the request with a matching size.
     std::vector<CopyTask> copy_tasks;
     for (const auto& [cache_key, kbi_ptr] : task_->getBlockInfos()) {
+        if (!kbi_ptr || kbi_ptr->blocks.empty()) {
+            RTP_LLM_LOG_WARNING("executeCopy: empty Decode block set for cache_key %lld, unique_key: %s",
+                                cache_key,
+                                unique_key_.c_str());
+            return fail(TransferErrorCode::BUFFER_MISMATCH,
+                        (kbi_ptr ? "empty Decode block set cache_key=" : "null Decode block info cache_key=")
+                            + std::to_string(cache_key));
+        }
         auto req_it = request_index.find(cache_key);
         if (req_it == request_index.end()) {
             RTP_LLM_LOG_WARNING(
                 "executeCopy: cache_key %lld missing in request, unique_key: %s", cache_key, unique_key_.c_str());
-            return false;
+            return fail(TransferErrorCode::BUFFER_MISMATCH, "request missing cache_key=" + std::to_string(cache_key));
         }
         const auto* req_block = req_it->second;
 
         for (int i = 0; i < static_cast<int>(kbi_ptr->blocks.size()); ++i) {
             const BlockInfo& bi = kbi_ptr->blocks[i];
             if (bi.addr == nullptr || bi.size_bytes == 0) {
-                continue;
+                RTP_LLM_LOG_WARNING("executeCopy: invalid Decode buffer cache_key %lld sub %d, unique_key: %s",
+                                    cache_key,
+                                    i,
+                                    unique_key_.c_str());
+                return fail(TransferErrorCode::BUFFER_MISMATCH,
+                            "invalid Decode buffer cache_key=" + std::to_string(cache_key)
+                                + " sub_block=" + std::to_string(i));
             }
             if (i >= req_block->blocks_size()) {
                 RTP_LLM_LOG_WARNING("executeCopy: cache_key %lld sub_block %d missing in request, unique_key: %s",
                                     cache_key,
                                     i,
                                     unique_key_.c_str());
-                return false;
+                return fail(TransferErrorCode::BUFFER_MISMATCH,
+                            "request missing sub_block cache_key=" + std::to_string(cache_key)
+                                + " sub_block=" + std::to_string(i));
             }
             const auto& proto_block = req_block->blocks(i);
-            if (proto_block.len() != static_cast<uint32_t>(bi.size_bytes)) {
+            if (!proto_block.has_len() || proto_block.len() != static_cast<uint32_t>(bi.size_bytes)
+                || proto_block.content().size() != bi.size_bytes) {
                 RTP_LLM_LOG_WARNING(
-                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu got %u, unique_key: %s",
+                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu declared %u actual %zu, "
+                    "unique_key: %s",
                     cache_key,
                     i,
                     bi.size_bytes,
                     proto_block.len(),
+                    proto_block.content().size(),
                     unique_key_.c_str());
-                return false;
+                return fail(TransferErrorCode::BUFFER_MISMATCH,
+                            "size mismatch cache_key=" + std::to_string(cache_key) + " sub_block=" + std::to_string(i)
+                                + " expected=" + std::to_string(bi.size_bytes)
+                                + " declared=" + std::to_string(proto_block.len())
+                                + " actual=" + std::to_string(proto_block.content().size()));
             }
             CopyTask task;
             task.src_ptr = const_cast<char*>(proto_block.content().data());
@@ -113,9 +153,16 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
 
     if (copy_tasks.empty()) {
         RTP_LLM_LOG_WARNING("executeCopy: no blocks to transfer, unique_key: %s", unique_key_.c_str());
-        return false;
+        return fail(TransferErrorCode::BUFFER_MISMATCH, "no blocks to transfer");
     }
-    return cuda_copy_util.batchCopyToDevice(copy_tasks);
+    const bool copy_success = cuda_copy_util.batchCopyToDevice(copy_tasks);
+    if (!copy_success) {
+        RTP_LLM_LOG_WARNING("P2P TCP H2D copy failed, partition_layer_key=%s stage=cuda_h2d copy_tasks=%zu",
+                            unique_key_.c_str(), copy_tasks.size());
+    }
+    if (!copy_success)
+        return fail(TransferErrorCode::COPY_FAILED, "H2D copy returned false");
+    return true;
 }
 
 namespace {
@@ -130,6 +177,14 @@ inline ::tcp_transfer::TcpTransferErrorCodePB toTcpProtoErrorCode(TransferErrorC
             return ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT;
         case TransferErrorCode::CANCELLED:
             return ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED;
+        case TransferErrorCode::NOT_INITIALIZED:
+            return ::tcp_transfer::TCP_TRANSFER_NOT_INITIALIZED;
+        case TransferErrorCode::QUEUE_REJECTED:
+            return ::tcp_transfer::TCP_TRANSFER_QUEUE_REJECTED;
+        case TransferErrorCode::CONTEXT_DESTROYED:
+            return ::tcp_transfer::TCP_TRANSFER_CONTEXT_DESTROYED;
+        case TransferErrorCode::COPY_FAILED:
+            return ::tcp_transfer::TCP_TRANSFER_COPY_FAILED;
         default:
             return ::tcp_transfer::TCP_TRANSFER_UNKNOWN_ERROR;
     }
@@ -143,13 +198,17 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
     }
 
     collector_->total_cost_latency_us = currentTimeUs() - start_time_us_;
+    std::string final_error_message    = error_message;
 
     if (task_) {
         task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
-        // Read back the authoritative error code so sender and receiver see the same outcome.
+        // Read back the authoritative result so sender and receiver see the same outcome.
         error_code = task_->errorCode();
         success    = (error_code == TransferErrorCode::OK);
+        if (!success) {
+            final_error_message = task_->errorMessage();
+        }
     }
 
     auto proto_error_code = toTcpProtoErrorCode(error_code);
@@ -159,8 +218,18 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
         metrics_reporter_->report<TransferMetric, TransferServerMetricsCollector>(nullptr, collector_.get());
     }
 
+    if (!success) {
+        RTP_LLM_LOG_WARNING("P2P TCP receive failed, partition_layer_key=%s transfer_code=%d transfer_name=%s "
+                            "wire_code=%d deadline_ms=%ld error=%s",
+                            unique_key_.c_str(),
+                            static_cast<int>(error_code),
+                            transferErrorCodeToString(error_code),
+                            static_cast<int>(proto_error_code),
+                            deadline_ms_,
+                            final_error_message.c_str());
+    }
     response_->set_error_code(proto_error_code);
-    response_->set_error_message(error_message);
+    response_->set_error_message(final_error_message);
     done_->Run();
     done_ = nullptr;
 }

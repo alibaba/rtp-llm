@@ -1,8 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 
-#include <utility>
-
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -10,9 +7,7 @@ namespace rtp_llm {
 // ==================== LayerCacheBuffer ====================
 
 LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag):
-    layer_id_(layer_id), cache_tag_(std::move(cache_tag)) {
-    RTP_LLM_CHECK_WITH_INFO(!cache_tag_.empty(), "LayerCacheBuffer requires a non-empty cache tag");
-}
+    layer_id_(layer_id), cache_tag_(std::move(cache_tag)) {}
 
 void LayerCacheBuffer::addBlockId(int64_t key, int block_id) {
     block_id_map_[key] = block_id;
@@ -33,9 +28,8 @@ LayerCacheBufferStore::LayerCacheBufferStore(uint64_t timeout_ms): timeout_ms_(t
 void LayerCacheBufferStore::addLayerCacheBuffer(const std::string&                       unique_key,
                                                 const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
-    layer_cache_buffer_map_[unique_key][{layer_cache_buffer->getLayerId(), layer_cache_buffer->cacheTag()}] =
-        layer_cache_buffer;
-    expired_time_map_[unique_key] = currentTimeMs() + timeout_ms_;
+    layer_cache_buffer_map_[unique_key][layer_cache_buffer->bufferKey()] = layer_cache_buffer;
+    expired_time_map_[unique_key]                                         = currentTimeMs() + timeout_ms_;
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferStore::getLayerCacheBuffer(const std::string& unique_key,
@@ -46,7 +40,7 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferStore::getLayerCacheBuffer(con
     if (it == layer_cache_buffer_map_.end()) {
         return nullptr;
     }
-    auto it2 = it->second.find({layer_id, cache_tag});
+    auto it2 = it->second.find(std::to_string(layer_id) + ":" + cache_tag);
     if (it2 == it->second.end()) {
         return nullptr;
     }

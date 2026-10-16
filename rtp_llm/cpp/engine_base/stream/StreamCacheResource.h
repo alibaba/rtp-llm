@@ -98,6 +98,8 @@ public:
         need_release_resource_ = need_release_resource;
     }
 
+    bool p2pReleasePending() const;
+
     bool isResourceReleased() const {
         return resource_released_;
     }
@@ -117,9 +119,6 @@ public:
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
 
-    void holdKVCacheForPDSep();
-    void releaseKVCacheForPDSep();
-
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
@@ -136,6 +135,7 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    size_t treeCoveredBlockNum() const;
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -149,11 +149,14 @@ private:
     bool                             resource_released_     = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
-    int64_t                          malloc_begin_time_us_    = 0;
-    int64_t                          load_wait_begin_time_us_ = 0;
+    int64_t                       malloc_begin_time_us_    = 0;
+    int64_t                       load_wait_begin_time_us_ = 0;
+    std::shared_ptr<AsyncContext> p2p_load_context_;
+    std::weak_ptr<AsyncContext>      released_p2p_load_context_;
+    absl::Status                  allocator_load_error_;
+    bool                          p2p_cancel_requested_{false};
 
     // Physical block pins held for PD separation.
-    std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
 };
 
 }  // namespace rtp_llm

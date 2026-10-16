@@ -134,6 +134,17 @@ public:
         return stream_ptr;
     };
 
+    GenerateStreamPtr createMockStream(std::vector<int> input_ids, int64_t /*batch_padding*/) {
+        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        ResourceContext                 resource_context;
+        generate_input->generate_config = generate_config;
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
+    }
+
 private:
     ModelConfig   model_config_;
     RuntimeConfig runtime_config_;
@@ -600,7 +611,7 @@ TEST_F(GenerateStreamTest, outputQueueCapacityReportsFullWithoutDeadlock) {
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
 }
 
-TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
+TEST_F(GenerateStreamTest, consumerWaitWakesOnPrefillHandoffReady) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
 
@@ -611,7 +622,7 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
         return stream->nextOutput();
     });
     consumer_ready.get();
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     waitForConsumer(consumer, stream);
     auto result = consumer.get();
@@ -641,7 +652,7 @@ TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion)
                     true,
                     false});
 
-    ASSERT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     auto output_result = stream->nextOutput();
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
@@ -780,7 +791,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideRemoteHandoff) {
     stream->generateConfig()->timeout_ms = 10;
     stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 20 * 1000);
 
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
@@ -1326,6 +1337,15 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
     EXPECT_TRUE(final_info.running_started);
     EXPECT_TRUE(final_info.first_token_committed);
     EXPECT_TRUE(final_info.generation_done);
+}
+
+TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createMockStream({1, 2, 3}, 1001);
+    const int64_t deadline_ms = autil::TimeUtility::currentTimeInMicroSeconds() / 1000 + 1000;
+    stream->generate_input_->request_deadline_ms = deadline_ms;
+    stream->resetBeginTime((deadline_ms + 5000) * 1000);
+    EXPECT_EQ(stream->deadlineMs(), deadline_ms);
 }
 
 }  // namespace rtp_llm

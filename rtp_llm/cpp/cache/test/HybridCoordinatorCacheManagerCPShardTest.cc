@@ -89,6 +89,58 @@ protected:
     }
 };
 
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, ConnectorRefPreservesKeysAndDifferentGroupLayouts) {
+    for (bool aligned : {true, false}) {
+        SCOPED_TRACE(::testing::Message() << "aligned=" << aligned);
+        auto config = makeCPHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+        ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+        auto linear_pool = allocator->groupBlockPools()[0];
+        auto full_pool = allocator->groupBlockPools()[1];
+        const auto free_before = allocator->freeBlocksNum();
+        auto linear_ids = linear_pool->malloc(1).value();
+        auto full_ids = full_pool->malloc(2).value();
+        linear_pool->incRef(linear_ids);
+        full_pool->incRef(full_ids);
+
+        KVCacheResource resource;
+        resource.initGroups(config.topologyPtr());
+        resource.cacheKeys() = {100, 101, 102, 103};
+        resource.rebuildLinearBlockDependencies();
+        resource.setLastBlockAligned(aligned);
+        resource.setDeviceReuseBlockNum(1);
+        const BlockIndicesType linear_blocks{NULL_BLOCK_IDX, linear_ids[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX};
+        const BlockIndicesType full_blocks = full_ids;
+        resource.mutableBlockIds(resource.groupTags().at(0)).assign(linear_blocks);
+        resource.mutableBlockIds(resource.groupTags().at(1)).assign(full_blocks);
+
+        auto ref = allocator->incrKVCacheRef(resource, resource.cacheKeys(), true);
+        ASSERT_NE(ref, nullptr);
+        EXPECT_EQ(ref->cacheKeys(), resource.cacheKeys());
+        EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), linear_blocks);
+        EXPECT_EQ(ref->blocks(ref->groupTags().at(1)), full_blocks);
+        EXPECT_EQ(ref->lastBlockAligned(), aligned);
+        EXPECT_EQ(ref->reuseBlockNum(), resource.reuseBlockNum());
+        EXPECT_EQ(ref->blockDependencies().size(), resource.blockDependencies().size());
+        EXPECT_EQ(linear_pool->refCount(linear_ids[0]), 2u);
+        for (auto block : full_ids) {
+            EXPECT_EQ(full_pool->refCount(block), 2u);
+        }
+
+        resource.mutableBlockIds(resource.groupTags().at(0)).resize(0);
+        resource.mutableBlockIds(resource.groupTags().at(1)).resize(0);
+        EXPECT_EQ(ref->blocks(ref->groupTags().at(0)), linear_blocks);
+        EXPECT_EQ(ref->blocks(ref->groupTags().at(1)), full_blocks);
+        linear_pool->decRef(linear_ids);
+        full_pool->decRef(full_ids);
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before - linear_ids.size() - full_ids.size());
+        ref.reset();
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    }
+}
+
 // 1) When cp_slot_mapper is null/passthrough, behavior is identical to the non-CP baseline:
 //    a request occupying 4 logical blocks allocates 4 blocks in the full group.
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, NullMapperIsPassthrough) {

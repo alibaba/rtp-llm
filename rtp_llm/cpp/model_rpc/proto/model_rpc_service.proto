@@ -165,6 +165,7 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    google.protobuf.Int32Value logits_index = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -314,6 +315,8 @@ message GenerateInputPB {
     // token_ids are already expanded when this field is present.
     MultimodalTokenLayoutPB multimodal_token_layout = 11;
     V41RequestInputsPB v41_inputs = 12;
+    // Master has already admitted this request to the selected Prefill.
+    bool enqueued_by_master = 13;
 }
 
 message AuxInfoPB {
@@ -420,8 +423,50 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
-    INVALID_PARAMS = 26;
-    EXECUTION_EXCEPTION = 27;
+    LONG_PROMPT_ERROR = 511;
+    MALLOC_FAILED = 602;
+    GENERATE_TIMEOUT = 603;
+    ERROR_GENERATE_CONFIG_FORMAT = 604;
+    INVALID_PARAMS = 605;
+    EXECUTION_EXCEPTION = 606;
+    EXCEEDS_KV_CACHE_MAX_LEN = 607;
+    MM_LONG_PROMPT_ERROR = 901;
+    MM_WRONG_FORMAT_ERROR = 902;
+    MM_PROCESS_ERROR = 903;
+    MM_EMPTY_ENGINE_ERROR = 904;
+    MM_NOT_SUPPORTED_ERROR = 905;
+    MM_DOWNLOAD_FAILED = 906;
+    OUT_OF_VOCAB_RANGE = 8101;
+    OUTPUT_QUEUE_FULL = 8102;
+    OUTPUT_QUEUE_IS_EMPTY = 8103;
+    FINISHED = 8104;
+    GET_HOST_FAILED = 8200;
+    GET_CONNECTION_FAILED = 8201;
+    CONNECT_FAILED = 8202;
+    CONNECT_TIMEOUT = 8203;
+    DEADLINE_EXCEEDED = 8204;
+    CONNECTION_RESET_BY_PEER = 8205;
+    REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED = 8206;
+    REMOTE_ALLOCATE_RESOURCE_READ_FAILED = 8207;
+    REMOTE_LOAD_KV_CACHE_FAILED = 8208;
+    REMOTE_GENERATE_FAILED = 8209;
+    RPC_FINISH_FAILED = 8210;
+    DECODE_MALLOC_FAILED = 8211;
+    LOAD_KV_CACHE_FAILED = 8212;
+    WAIT_TO_RUN_TIMEOUT = 8213;
+    KEEP_ALIVE_TIMEOUT = 8214;
+    CACHE_STORE_PUSH_ITEM_FAILED = 8301;
+    CACHE_STORE_LOAD_UNKNOWN_ERROR = 8308;
+    CACHE_STORE_STORE_FAILED = 8309;
+    P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED = 8326;
+    P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED = 8327;
+    P2P_CONNECTOR_TRANSFER_RPC_FAILED = 8328;
+    P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED = 8329;
+    P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED = 8330;
+    P2P_CONNECTOR_TRANSFER_COPY_FAILED = 8331;
+    P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED = 8332;
+    GET_PART_NODE_STATUS_FAILED = 8400;
+    GET_ALL_NODE_STATUS_FAILED = 8401;
 }
 
 // transfer between prefill and decode
@@ -769,6 +814,41 @@ enum P2PConnectorBroadcastType {
     HANDLE_READ = 1;
     CANCEL_READ = 2;
     CANCEL_HANDLE_READ = 3;
+    QUERY_LEASE_STATUS = 4;
+    HANDLE_READ_NO_TRANSFER = 5;
+}
+
+// One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
+// receives it. rank0 sends each worker only that worker's own routes, and only that
+// worker's own partition/slice — the peer's half never crosses this wire.
+//
+// A route is layer-independent: it expands at execution time into one transfer unit per
+// layer owned by cache_tag, keyed by <unique_key>_<layer_id>_<cache_tag>_r<route_id>.
+message TransferRoutePB {
+    // Orchestrator-minted id. This is the ONLY thing that names the transfer key, so both
+    // sides agree without any independent partition arithmetic.
+    int32 route_id = 1;
+    string cache_tag = 2;
+
+    // Prefill direction: index into peer_workers identifying the decode target.
+    // Decode direction: unused (this route's blocks are carried inline below).
+    int32 peer_index = 3;
+
+    // This side's head-dimension partition, fed to LayerBlockConverter.
+    int32 partition_count = 4;
+    int32 partition_id = 5;
+
+    // This side's CP byte slice, fed to CPSlotMapper::sliceBlockForPeer.
+    // slice_mode mirrors CpBlockSliceMode: 0=NONE, 1=EQUAL_BYTES, 2=PAYLOAD_BYTES.
+    int32 slice_mode = 6;
+    int32 slice_count = 7;
+    int32 slice_index = 8;
+
+    // Decode direction: the concrete (cache_key, block_id) pairs this route covers, per
+    // layer. rank0 resolves the key rule itself, so decode workers stay pure executors and
+    // never re-derive a key set. Empty in the prefill direction, where each worker's own
+    // local projection already equals its route's key set.
+    repeated LayerCacheBlockPB layer_blocks = 9;
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -778,29 +858,74 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
-    int32 remote_tp_size = 8;
+    // Removed: remote_tp_size (8) - its only consumer was
+    // P2PWorkerDecodeRead::calculateRecvPartitionCount, which the transfer plan replaced.
+    // Removed: allow_empty_projection (10) - an empty `routes` list is now the authoritative
+    // "this worker has nothing to do" signal.
+    reserved 8, 10;
+    reserved "remote_tp_size", "allow_empty_projection";
+    // Original user-request deadline. deadline_ms remains the physical
+    // transfer deadline used by this broadcast and its worker operation.
+    int64 request_deadline_ms = 9;
+
+    // This worker's slice of the transfer plan. Empty means no work for this worker.
+    // Additive for now: carried alongside the legacy fields so the plan can be shadow-
+    // compared (P1) before it drives execution (P2).
+    repeated TransferRoutePB routes = 11;
+    // Stable hash of the whole plan, appended to every transfer key so that two sides whose
+    // plans diverged (config drift) fail as "no matching recv task within deadline" rather
+    // than silently copying into the wrong byte range.
+    uint64 plan_digest = 12;
 }
 
-// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+// GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
 message GetPeerInfoRequestPB {
     string requester_ip = 1;
     int32  requester_tp_size = 2;
 }
 
 message GetPeerInfoResponsePB {
-    int32  tp_size = 1;
+    int32  tp_size                = 1;
+    reserved 2, 3;
+    reserved "dp_size", "dp_grpc_addrs";
+    // Effective KV-cache context-parallel size. This is 1 when TP is enabled
+    // but Prefill CP KV-cache sharding is disabled.
+    int32  cp_size                = 4;
 }
 
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
+    // Populated when request type == QUERY_LEASE_STATUS
+    LeaseStatusResponsePB lease_status = 3;
+}
+
+message LeaseStatusResponsePB {
+    bool sealed = 1;       // no_more_new_ops
+    int32 started_ops = 2;
+    int32 finished_ops = 3;
+    bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
-    int64 deadline_ms = 3;
+    // Load budget includes waiting for GenerateStream request registration on Prefill.
+    int64 timeout_ms = 3;
+    // Decode already has all matched KV blocks locally. Prefill should still
+    // complete the StartLoad lifecycle and return side-channel data, but must
+    // not dispatch a data transfer.
+    bool no_transfer = 4;
+    // Request timeout is carried only by GenerateStream.
+    reserved 5;
+    reserved "request_timeout_ms";
+    // Digest of the Decode-side transfer plan. Prefill computes its mirror
+    // plan before resource wait and rejects a mismatch immediately.
+    uint64 plan_digest = 6;
+    // Route ids that remain after Decode projects the static transfer plan onto
+    // this request's concrete key range. Prefill uses the same ids to avoid
+    // dispatching routes whose key set is empty for short/windowed requests.
+    repeated int32 active_route_ids = 7;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode
@@ -818,6 +943,14 @@ message SideChannelPayloadPB {
     int32  local_reuse_len         = 4;
     int32  remote_reuse_len        = 5;
     int32  memory_reuse_len        = 6;
+    bool   has_first_generate_token = 7;
+    int32  disk_reuse_len          = 8;
+    // GenerationPrefillCudaGraphStatus value; zero means NOT_REQUESTED.
+    uint32 generation_prefill_cuda_graph_status = 9;
+    bool prefill_use_independent_block_pools = 10;
+    // Post-Prefill request-local CUDA RNG position; seed is in GenerateConfigPB.
+    bool has_rng_state = 11;
+    uint64 rng_offset = 12;
 }
 
 message P2PConnectorStartLoadResponsePB {
@@ -945,16 +1078,21 @@ message FetchRequestPB {
 
 message CancelRequestPB {
     int64 request_id = 1;
+    // Selected Prefill endpoint, needed when Cancel precedes Decode admission.
+    string prefill_address = 2;
+    // Zero means an explicit FlexLB priority preemption; cleanup forwards its exact ErrorCode.
+    int64 cancel_error_code = 3;
+    string cancel_error_message = 4;
 }
 
 enum CancelStatusPB {
     CANCEL_STATUS_UNSPECIFIED = 0;
-    // The original Prefill atomically installed the priority-preemption
-    // latch/intent and triggered current-or-future P-to-D cancellation. This
+    // The receiving endpoint atomically installed the priority-preemption
+    // latch/intent. Decode forwards cancellation to Prefill. This
     // is not a resource-release acknowledgement.
     CANCEL_STATUS_ACCEPTED = 1;
     CANCEL_STATUS_NOT_FOUND = 2;
-    // No active request was visible, so Prefill installed (or found) a
+    // No active request was visible, so the endpoint installed (or found) a
     // short-lived request-id tombstone. A later Enqueue for the same id is
     // rejected with 8429 before it can reach the Engine scheduler.
     CANCEL_STATUS_TOMBSTONED = 3;
@@ -995,10 +1133,10 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
-    // AutoTPM priority-preemption Cancel targets the original Prefill role.
-    // Prefill triggers the existing Prefill->Decode stream cancellation;
-    // Decode does not implement this RPC. Completion is reported separately
-    // by Prefill WorkerStatus as priority_preemption_progress=CANCELED with
+    // AutoTPM priority-preemption Cancel targets the selected Decode role.
+    // Decode forwards Cancel to Prefill, including cancel-before-attach fences.
+    // Prefill cancels only local work. Completion is reported separately
+    // by Decode WorkerStatus after both endpoints release resources, as priority_preemption_progress=CANCELED with
     // error code 8429. The original Enqueue/Fetch path also returns 8429.
     rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }

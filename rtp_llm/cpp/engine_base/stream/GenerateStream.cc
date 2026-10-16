@@ -259,6 +259,11 @@ void GenerateStream::markDeferredRelease() {
     async_bookkeeping_->defer_release.store(true, std::memory_order_release);
 }
 
+bool GenerateStream::hasPendingP2PResourceHold() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return stream_cache_resource_->p2pReleasePending();
+}
+
 bool GenerateStream::isDeferredReleasePending() const {
     return async_bookkeeping_->defer_release.load(std::memory_order_acquire);
 }
@@ -542,11 +547,18 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
 
-void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
+void GenerateStream::setPrefillReuseLength(
+    int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools) {
+    prefill_independent_block_pools_ = independent_pools;
     prefill_total_reuse_len_  = total;
     prefill_local_reuse_len_  = local;
     prefill_remote_reuse_len_ = remote;
     prefill_memory_reuse_len_ = memory;
+    prefill_disk_reuse_len_   = disk;
+}
+
+bool GenerateStream::prefillUsesIndependentBlockPools() const {
+    return prefill_independent_block_pools_;
 }
 
 int64_t GenerateStream::prefillTotalReuseLen() const {
@@ -563,6 +575,10 @@ int64_t GenerateStream::prefillRemoteReuseLen() const {
 
 int64_t GenerateStream::prefillMemoryReuseLen() const {
     return prefill_memory_reuse_len_;
+}
+
+int64_t GenerateStream::prefillDiskReuseLen() const {
+    return prefill_disk_reuse_len_;
 }
 
 void GenerateStream::incLastOutputPos() {
@@ -691,7 +707,10 @@ void GenerateStream::checkTimeoutWithoutLock() {
 
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
-    if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+    const bool timed_out = generate_input_->request_deadline_ms > 0 ?
+                               autil::TimeUtility::currentTimeInMicroSeconds() / 1000 >= deadlineMs() :
+                               timeout_ms > 0 && timeout_ms < running_time_ms;
+    if (timed_out) {
         reportTimeoutWithoutLock(running_time_ms, timeout_ms);
     }
 }
@@ -916,6 +935,10 @@ bool GenerateStream::isSubGenerateDoneWithoutLock(int batch_id) const {
     return getStatus() == StreamState::FINISHED || sub_generate_status_[batch_id] == StreamState::FINISHED;
 }
 
+FirstError::Snapshot GenerateStream::firstError() {
+    return generate_status_->first_error.snapshot();
+}
+
 ErrorInfo GenerateStream::statusInfo() {
     std::lock_guard<std::mutex> lock(*mutex_);
     return statusInfoWithoutLock();
@@ -928,7 +951,7 @@ ErrorInfo GenerateStream::statusInfoWithoutLock() const {
 bool GenerateStream::consumerFinishedWithoutLock() const {
     // Consumer completion includes pending GenerateDone, but lifecycle commit and
     // resource release remain scheduler-owned through moveToNext().
-    return hasEventWithoutLock(StreamEvents::NeedRemoteGenerate) || generate_status_->checkFinished();
+    return hasEventWithoutLock(StreamEvents::PrefillHandoffReady) || generate_status_->checkFinished();
 }
 
 bool GenerateStream::consumerReadyWithoutLock() const {
@@ -1100,8 +1123,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -1199,6 +1221,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    updateWithoutLock(update_info);
+}
+
+void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
@@ -1264,7 +1290,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
-            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            reportErrorWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;
         }
     }
@@ -1587,14 +1613,6 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
             sub_generate_status_[i] = StreamState::RUNNING;
         }
     }
-}
-
-void GenerateStream::holdKVCacheForPDSep() {
-    stream_cache_resource_->holdKVCacheForPDSep();
-}
-
-void GenerateStream::releaseKVCacheForPDSep() {
-    stream_cache_resource_->releaseKVCacheForPDSep();
 }
 
 std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {

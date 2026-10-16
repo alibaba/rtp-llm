@@ -126,6 +126,7 @@ enum GptModelInputIndex : size_t {
     // [group, batch, blocks].
     kvCacheKernelBlockIdRank,
     kvCacheBlockIdRank,
+    requestDeadlineMsLength,
     // Root-owned execution flags used by target-prefill and hidden-state capture.
     // Keep these at the end so existing shape-hint indices remain unchanged.
     skipLmHead,
@@ -160,6 +161,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitComboPositionIds    = 1u << 12,
     kDeviceBitTextTokensMask      = 1u << 13,
     kDeviceBitMmFeaturesLocs      = 1u << 14,
+    kDeviceBitRequestDeadlineMs   = 1u << 17,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
 };
@@ -173,7 +175,6 @@ enum GptModelInputControlFlag : uint32_t {
     kControlFakeStream          = 1u << 5,
     kControlTargetVerify        = 1u << 6,
     kControlPdSeparation        = 1u << 7,
-    kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
 };
 
