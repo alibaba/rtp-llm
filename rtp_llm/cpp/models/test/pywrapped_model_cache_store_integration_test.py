@@ -1097,6 +1097,24 @@ class AttentionInputMetadataTest(unittest.TestCase):
                         result.cu_kv_seqlens_device.cpu().tolist(), [0, 9, 23]
                     )
 
+    def test_cp_cache_store_keeps_global_host_geometry(self):
+        builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
+        local = torch.tensor([2, 3], dtype=torch.int32).pin_memory()
+        global_lengths = torch.tensor([5, 11], dtype=torch.int32).pin_memory()
+        prefixes = torch.tensor([0, 1024], dtype=torch.int32).pin_memory()
+        blocks = torch.tensor([[2, 4], [7, 9]], dtype=torch.int32).pin_memory()
+        device_blocks = blocks.cuda()
+        snapshot = builder.build_cache_store_inputs(
+            local, global_lengths, prefixes, blocks, device_blocks
+        )
+        result = snapshot["attention_inputs"]
+        self.assertEqual(snapshot["input_lengths_host"].tolist(), [5, 11])
+        self.assertEqual(snapshot["prefix_lengths_host"].tolist(), [0, 1024])
+        self.assertEqual(snapshot["host_kv_cache_offset"].tolist(), [[2, 4], [7, 9]])
+        self.assertEqual(snapshot["host_kv_cache_offset"].data_ptr(), blocks.data_ptr())
+        self.assertEqual(result.input_lengths.tolist(), [2, 3])
+        self.assertEqual(result.cu_seqlens_device.cpu().tolist(), [0, 2, 5])
+
     def test_decode_and_mixed_batch_contract(self):
         builder = _extension.AttentionInputBuilder(AttentionInputMetadataModel(True))
         for device in ("cpu", "cuda"):

@@ -675,14 +675,69 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
         input_lengths = torch.tensor([6], dtype=torch.int32)
 
-        caller_view, published = cp_test.handle_inputs_caller_lengths(
-            total_tokens, input_lengths, 0, 2
+        caller_view, published, _, global_snapshot = (
+            cp_test.handle_inputs_caller_lengths(total_tokens, input_lengths, 0, 2)
         )
         self.assertTrue(torch.equal(caller_view, torch.tensor([6], dtype=torch.int32)))
         self.assertTrue(torch.equal(published, torch.tensor([4], dtype=torch.int32)))
         self.assertTrue(
             torch.equal(input_lengths, torch.tensor([6], dtype=torch.int32))
         )
+        self.assertEqual(published.device.type, "cpu")
+        self.assertTrue(published.is_pinned())
+        self.assertEqual(global_snapshot.tolist(), [6])
+
+    def test_cp_host_lengths_cover_ragged_ranks_and_preserve_mixed_device_inputs(self):
+        lengths = [1, 3, 5, 13, 37, 1025]
+        for cp_size in (2, 4):
+            for cp_rank in range(cp_size):
+                for decode_rows in (0, 2):
+                    for pinned in (False, True):
+                        with self.subTest(
+                            cp_size=cp_size,
+                            cp_rank=cp_rank,
+                            decode_rows=decode_rows,
+                            pinned=pinned,
+                        ):
+                            original = [1] * decode_rows + lengths
+                            # A strided caller view also verifies that CP's host
+                            # planning snapshot is independently contiguous.
+                            backing = torch.empty(
+                                len(original) * 2,
+                                dtype=torch.int32,
+                                pin_memory=pinned,
+                            )
+                            caller = backing[::2]
+                            caller.copy_(torch.tensor(original, dtype=torch.int32))
+                            tokens = torch.arange(sum(original), dtype=torch.int32)
+                            sequences = torch.tensor(
+                                [7, 11][:decode_rows], dtype=torch.int32
+                            )
+                            caller_view, local, sequence_view, global_snapshot = (
+                                cp_test.handle_inputs_caller_lengths(
+                                    tokens, caller, cp_rank, cp_size, sequences
+                                )
+                            )
+                            self.assertEqual(caller_view.data_ptr(), caller.data_ptr())
+                            self.assertEqual(caller.tolist(), original)
+                            self.assertEqual(global_snapshot.tolist(), original)
+                            self.assertTrue(global_snapshot.is_pinned())
+                            self.assertTrue(global_snapshot.is_contiguous())
+                            self.assertNotEqual(
+                                global_snapshot.data_ptr(), caller.data_ptr()
+                            )
+                            expected = [1] * decode_rows + [
+                                2 * ((length + 2 * cp_size - 1) // (2 * cp_size))
+                                for length in lengths
+                            ]
+                            self.assertEqual(local.tolist(), expected)
+                            self.assertEqual(local.is_cuda, decode_rows > 0)
+                            self.assertEqual(sequence_view.is_cuda, decode_rows > 0)
+                            if decode_rows == 0:
+                                self.assertTrue(local.is_pinned())
+                            local.fill_(-99)
+                            self.assertEqual(caller.tolist(), original)
+                            self.assertEqual(global_snapshot.tolist(), original)
 
     def test_rank_local_hidden_states_pass_through_standard_split(self):
         """MTP/DSpARK draft commit may re-enter CP with local feature rows."""

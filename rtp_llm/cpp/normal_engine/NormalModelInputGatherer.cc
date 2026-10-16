@@ -723,8 +723,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+    // Keep the CPU producer's metadata until the final placement decision.
+    // Prefill CP planning and cache publication both need these host lengths;
+    // uploading them here would force a D2H read inside the model forward.
+    model_input.prefix_lengths = prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
     }
@@ -877,10 +879,11 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
-    // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
-    // in place (device-side clone + per-device c10::Event) and only pays the D2H
-    // on its own worker thread, so it reads post-publish CUDA members directly.
-    if (deviceInputEnabled()) {
+    // Prefill starts from known host tokens, lengths and block tables. Preserve
+    // that representation for CP planning and cache-store metadata; the model
+    // publishes the device views asynchronously immediately before use. Decode
+    // keeps its device-state contract, including mixed-batch compatibility.
+    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0) {
         publishModelInputCoreTensorsToCuda(model_input, host_holder);
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {

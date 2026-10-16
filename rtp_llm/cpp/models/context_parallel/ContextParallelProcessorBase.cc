@@ -509,10 +509,17 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.last_hidden_states = split_hidden;
     }
 
-    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.sequence_lengths =
-        sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.combo_tokens = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    if (num_decode_stream == 0) {
+        // These local lengths were computed on the CPU above. Keep them for
+        // PyWrappedModel's host metadata planner instead of uploading and then
+        // reading them back. Its device views are staged before GPU consumers.
+        model_input.input_lengths = input_lengths;
+    } else {
+        model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+        model_input.sequence_lengths =
+            sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    }
 
     auto cp_padding_lengths = prefill_cp_padding_lengths;
     auto cp_chunk_lengths   = prefill_cp_chunk_lengths;
