@@ -190,7 +190,10 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+    // Layered prefill already uses MEMORY_CACHE_SIZE_MB for the host suffix.
+    // The placement marker survives warmup, so neither path allocates a second pool.
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache
+        && cache_config_.dsa_prefill_hbm_layers < 0) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }

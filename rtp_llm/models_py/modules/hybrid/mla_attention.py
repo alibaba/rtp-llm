@@ -1,3 +1,4 @@
+from contextlib import ExitStack, nullcontext
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
@@ -310,37 +311,62 @@ class MlaAttention(nn.Module):
         else:
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        if not early_prefetch:
-            topk_indices = self._run_sparse_indexer(
-                hidden_states,
-                q_c,
-                q_view,
-                kv_cache,
-                fmha_impl,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-                prev_topk_indices,
-                force_reuse_topk_indices,
-            )
-        # q_c and its quantized representation are Indexer-only. Releasing
-        # the local references here lets SparseMLA reuse their blocks;
-        # q_view, compressed_kv and k_pe must stay live through attention.
-        del q_c, q_c_fp8, q_c_scale
-        attn_output = fmha_impl.forward(
-            q_view,
-            compressed_kv,
-            k_pe,
-            kv_cache,
-            self.layer_idx,
-            topk_indices,
-            **({"kv_prefetched": True} if early_prefetch else {}),
+        layered = getattr(fmha_impl, "layered_prefill_cache", None)
+        independent_prefetch = getattr(layered, "prefetch_before_indexer", None)
+        if independent_prefetch is not None:
+            independent_prefetch(self.layer_idx)
+
+        cache_context = (
+            layered.attention(self.layer_idx, fmha_impl, kv_cache)
+            if layered is not None
+            else nullcontext(kv_cache)
         )
+        with ExitStack() as stack:
+            prepared_kv = None
+            # With Q-LoRA the Indexer reads q_c, so rotating q_view early is
+            # independent. Preserve the original ordering for other backends.
+            if self.q_lora_rank > 0 and getattr(fmha_impl, "overlap_kv", False):
+                attention_cache = stack.enter_context(cache_context)
+                prepared_kv = stack.enter_context(
+                    fmha_impl.prepare_kv(
+                        q_view,
+                        compressed_kv,
+                        k_pe,
+                        attention_cache,
+                        layer_id=self.layer_idx,
+                    )
+                )
+            if not early_prefetch:
+                topk_indices = self._run_sparse_indexer(
+                    hidden_states,
+                    q_c,
+                    q_view,
+                    kv_cache,
+                    fmha_impl,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    prev_topk_indices,
+                    force_reuse_topk_indices,
+                )
+            del q_c, q_c_fp8, q_c_scale
+            if prepared_kv is None:
+                attention_cache = stack.enter_context(cache_context)
+            attn_output = fmha_impl.forward(
+                q_view,
+                compressed_kv,
+                k_pe,
+                attention_cache,
+                self.layer_idx,
+                topk_indices,
+                **({"kv_prefetched": True} if early_prefetch else {}),
+                **({"prepared_kv": prepared_kv} if prepared_kv is not None else {}),
+            )
 
         # The sparse-attention launch has consumed these projections. PyTorch's
         # stream-aware allocator delays physical reuse until the launch is safe.
-        del q_view, compressed_kv, k_pe, fused_qkv, q
+        del q_view, compressed_kv, k_pe, fused_qkv, q, prepared_kv
 
         if attn_output is not None:
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()

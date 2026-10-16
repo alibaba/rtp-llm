@@ -450,7 +450,10 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Fixed before CUDA graph capture; graph clones retain the same policy.
         self._drain_pinned_mla_before_moe = (
-            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
+            (
+                os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
+                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") == "1"
+            )
             and layer_idx in config.moe_layer_index
             and str(moe_config.moe_strategy).startswith("mega_moe")
         )
@@ -600,6 +603,16 @@ class GenericMoeDecoderLayer(nn.Module):
     def _wait_pinned_mla_before_moe(self, fmha_impl: FMHAImplBase) -> None:
         if not getattr(self, "_drain_pinned_mla_before_moe", False):
             return
+        # Each prefill cache owns its transfer policy: window scheduling drains
+        # submitted copies here; layer-order scheduling keeps DMA asynchronous.
+        # Decode retains its existing explicit exclusion policy.
+        layered = getattr(fmha_impl, "layered_prefill_cache", None)
+        if layered is None:
+            layered = getattr(
+                getattr(fmha_impl, "fmha_impl", None), "layered_prefill_cache", None
+            )
+        if layered is not None:
+            layered.wait_prefetch_complete()
         implementation = fmha_impl
         groups = getattr(implementation, "pinned_mla_groups", None)
         if groups is None:
@@ -840,7 +853,29 @@ class GenericMoeModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        failed = True
+        try:
+            result = self._forward(inputs, fmha_impl)
+            failed = False
+            return result
+        finally:
+            if (
+                self.layered_prefill_cache is not None
+                and self.layered_prefill_cache.active
+            ):
+                self.layered_prefill_cache.end_forward(failed=failed)
+            diagnostics = getattr(self, "_prefill_cache_diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.finish(self.layered_prefill_cache, failed)
+
+    def _forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
+        if self.layered_prefill_cache is not None:
+            if fmha_impl is None:
+                fmha_impl = self.prepare_fmha_impl(inputs)
+            # Metadata is sufficient to prefetch; do not wait for embeddings,
+            # residual initialization, or the first layer's projections.
+            self.layered_prefill_cache.begin_forward(fmha_impl)
         hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
@@ -866,7 +901,22 @@ class GenericMoeModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
         fmha_impl.pinned_mla_groups = self.pinned_mla_groups
-        enable_cmp = should_enable_glm5_cmp(
+        fmha_impl.layered_prefill_cache = self.layered_prefill_cache
+        diagnostics = None
+        if (
+            os.environ.get("RTP_LLM_PREFILL_CACHE_STATS") == "1"
+            and fmha_impl.attn_inputs.is_prefill
+        ):
+            diagnostics = getattr(self, "_prefill_cache_diagnostics", None)
+            if diagnostics is None:
+                from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.prefill_cache_diagnostics import (
+                    PrefillCacheDiagnostics,
+                )
+
+                diagnostics = PrefillCacheDiagnostics(self.parallelism_config.tp_rank)
+                self._prefill_cache_diagnostics = diagnostics
+            diagnostics.begin(fmha_impl)
+        enable_cmp = self.layered_prefill_cache is None and should_enable_glm5_cmp(
             self.layers,
             self.layer_num,
             hidden_states,
@@ -875,6 +925,8 @@ class GenericMoeModel(GptModelBase):
         )
         layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            if self.layered_prefill_cache is not None:
+                self.layered_prefill_cache.before_layer(i)
             select_block_map_for_layer(inputs.attention_inputs, i, layer_group_ids)
             output = decoder_layer(
                 hidden_states,
@@ -886,6 +938,10 @@ class GenericMoeModel(GptModelBase):
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            if diagnostics is not None and getattr(
+                decoder_layer.self_attn, "has_indexer", False
+            ):
+                diagnostics.indexer(i, output.topk_indices)
             prev_topk_indices = output.topk_indices
             if _rt_on:
                 _rt.record(f"layer{i:02d}_hidden", hidden_states)

@@ -138,10 +138,13 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     if (config_.state_block_size_bytes > 0 || config_.swa_block_size_bytes > 0) {
         config_.fixed_pool_uses_pinned_cpu = kv_cache_config_.dsv4_fixed_pool_use_memory;
     }
+    RTP_LLM_CHECK_WITH_INFO(!config_.dsa_prefill_staging_tokens || pd_sep_config_.role_type == RoleType::PREFILL,
+                            "layered MLA cache supports PREFILL services only");
     if (warmup) {
         config_.block_num = 1;
         config_.dsa_mla_resident_tokens = 0;
         config_.dsa_mla_hbm_blocks = 0;
+        config_.dsa_prefill_staging_tokens = 0;
     } else {
         allocateAndSync();
     }
@@ -380,6 +383,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto  all_layout        = allocator_->allLayerCacheBase();
     layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;
     layout.dsa_mla_hbm_blocks = all_layout.dsa_mla_hbm_blocks;
+    layout.dsa_prefill_staging_tokens = all_layout.dsa_prefill_staging_tokens;
+    layout.dsa_prefill_hbm_layers     = all_layout.dsa_prefill_hbm_layers;
+    layout.dsa_prefill_staging_layers = all_layout.dsa_prefill_staging_layers;
     layout.block_generations = all_layout.block_generations;
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
@@ -810,6 +816,14 @@ void KVCacheManager::allocateAndSync() {
     }
     if (config_.use_independent_block_pools) {
         config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    }
+    if (config_.dsa_prefill_staging_tokens) {
+        config_.dsa_prefill_staging_tokens = std::min(
+            config_.dsa_prefill_staging_tokens, static_cast<size_t>(config_.block_num) * config_.seq_size_per_block);
+        for (auto& sub : config_.mtp_sub_configs) {
+            sub->block_num = config_.block_num;
+            sub->finalizeBlockNums(config_.block_num, runtime_config_);
+        }
     }
     if (config_.dsa_mla_resident_tokens) {
         RTP_LLM_CHECK_WITH_INFO(config_.block_num > 1, "tiered MLA needs at least two logical blocks");
