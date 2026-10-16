@@ -325,7 +325,7 @@ TEST(NumaMemoryPolicyTest, ExplicitInterleaveRejectsPinnedAllocatorMode) {
     EXPECT_THROW(pool.init(), std::invalid_argument);
 }
 
-TEST(NumaMemoryPolicyTest, GpuLocalPolicyRequiresSingleMemfdPool) {
+TEST(NumaMemoryPolicyTest, GpuLocalPolicyRequiresRegisteredPool) {
     ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "allocator");
     ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "0");
     ScopedEnvVar numa_policy("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "gpu_local");

@@ -391,8 +391,8 @@ void BlockPool::initializeCacheBuffer() {
         const bool interleave_numa_nodes = shouldInterleaveRegisteredHostBlockPool();
         const bool gpu_local_numa        = shouldUseGpuLocalHostNuma();
         validateHostBlockPoolSettings(pin_host_pool, use_registered_host, interleave_numa_nodes);
-        if (gpu_local_numa && (!pin_host_pool || !use_memfd_host || interleave_numa_nodes)) {
-            throw std::invalid_argument("gpu_local host NUMA policy requires pinned memfd_register mode and "
+        if (gpu_local_numa && (!pin_host_pool || !use_registered_host || interleave_numa_nodes)) {
+            throw std::invalid_argument("gpu_local host NUMA policy requires pinned register or memfd_register mode and "
                                         "RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE=0");
         }
         if (pin_host_pool) {
