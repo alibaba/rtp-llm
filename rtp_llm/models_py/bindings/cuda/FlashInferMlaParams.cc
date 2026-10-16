@@ -550,6 +550,20 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         size_t       total_bytes = static_cast<size_t>(input_token_num) * sizeof(int64_t);
         cudaMemcpyAsync(
             slot_mapping_d_.data_ptr(), slot_mapping_h_.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
+        if (slot_mapping_d_.numel() > input_token_num) {
+            // CUDA-graph replays (generation-prefill) run the forward at the
+            // captured padded row count: the captured concat_and_cache_mla
+            // kernel reads slot_mapping_d_ by buffer pointer for every padded
+            // row, past the live entries staged here. Zero the tail so those
+            // padding rows land on reserved block 0 (the same safety rule the
+            // runner applies with kv_cache_kernel_block_id.fill_(0)) instead
+            // of stale slots from a previous replay. Eager consumers never
+            // read past input_token_num, so the tail value is inert for them.
+            cudaMemsetAsync(slot_mapping_d_.data_ptr<int64_t>() + input_token_num,
+                            0,
+                            (slot_mapping_d_.numel() - input_token_num) * sizeof(int64_t),
+                            stream);
+        }
 
         slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num});
         slot_mapping = slot_mapping_d_;
