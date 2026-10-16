@@ -1943,6 +1943,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // the tensors the broadcast overwrites in place on non-root ranks are
     // consumed inside the forward, after the join.
     launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
+    // Keep the hidden rows selected from this round's target-forward result.
+    // A Python-side hidden buffer is stale after Graph replay, and replacing
+    // last_hidden_states here would also undo rejection sampling's compaction.
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
