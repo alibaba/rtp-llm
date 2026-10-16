@@ -344,14 +344,18 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         descriptors.push_back(std::move(*eviction_desc));
     }
     if (descriptors.empty()) {
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
 
     auto target_blocks =
         tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
         rollbackTransferLocked(descriptors);
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
         descriptors[desc_index].target_blocks = {(*target_blocks)[desc_index]};
@@ -830,6 +834,32 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
         resource.transfer_state       = GroupSetTransferState::IDLE;
         resource.transfer_detached    = false;
         tree_->refreshPublishedState(desc.node);
+    }
+}
+
+void BlockTreeEvictor::invalidateSources(const std::vector<InvalidationSource>& sources) {
+    for (const auto& source : sources) {
+        const auto path = tree_->findNode(source.cache_keys);
+        // findNode returns the surviving prefix when an earlier drop removed this source.
+        if (path.size() != source.cache_keys.size()) {
+            continue;
+        }
+        TreeNode*               node     = path.back();
+        const GroupSetResource& resource = node->group_set_resources[source.group_set_id];
+        if (!resource.hasTier(source.source_tier)) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(resource.transfer_state == GroupSetTransferState::IDLE,
+                                "invalidated source must be settled: group_set=%zu node_key=%ld",
+                                source.group_set_id,
+                                node->cache_key);
+        runDropTask(TransferDescriptor(node,
+                                       source.group_set_id,
+                                       /*path_index=*/0,
+                                       source.source_tier,
+                                       Tier::NONE,
+                                       resource.getBlocks(source.source_tier)),
+                    /*notify_settled=*/false);
     }
 }
 

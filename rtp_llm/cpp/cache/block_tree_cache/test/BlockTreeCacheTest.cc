@@ -27,7 +27,8 @@ namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
 
-double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags) {
+double
+snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, const char* expected_name = nullptr) {
     if (metric == nullptr) {
         ADD_FAILURE() << "metric is null";
         return -1;
@@ -43,6 +44,9 @@ double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags&
     if (record.Values().size() != 1) {
         ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
         return -1;
+    }
+    if (expected_name != nullptr) {
+        EXPECT_NE(record.Values().front()->Name().find(expected_name), std::string::npos);
     }
     return std::stod(record.Values().front()->Value());
 }
@@ -549,6 +553,85 @@ TEST(BlockTreeCacheMetricsTest, FailureMetricsPublishExpectedValues) {
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_fail_qps_metric, tags), 1);
 }
 
+TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagnosticCategories) {
+    kmonitor::MetricsTags common_tags("dp_rank", "7");
+    common_tags.AddTag("model", "crc-test-model");
+    common_tags.AddTag("biz", "crc-test-biz");
+    common_tags.AddTag("host_ip", "192.0.2.1");
+    common_tags.AddTag("container_ip", "192.0.2.2");
+    common_tags.AddTag("hippo_role", "crc-test-role");
+    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+    const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+    for (const auto error : {CacheCopyError::COPY_FAILED,
+                             CacheCopyError::INVALID_REQUEST,
+                             CacheCopyError::IO_FAILED,
+                             CacheCopyError::RPC_FAILED,
+                             CacheCopyError::CRC_COMPUTE_FAILED,
+                             CacheCopyError::CRC_MISMATCH}) {
+        for (auto descriptor : {TransferDescriptor::deviceToHost(0, {1}, 2),
+                                TransferDescriptor::hostToDevice(0, 2, {1}),
+                                TransferDescriptor::deviceToDisk(0, {1}, 2),
+                                TransferDescriptor::diskToDevice(0, 2, {1}),
+                                TransferDescriptor::hostToDisk(0, 1, 2),
+                                TransferDescriptor::diskToHost(0, 2, 1)}) {
+            reporter.maybeReportCopyError(descriptor.source_tier, descriptor.target_tier, {failure, error});
+        }
+    }
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
+    EXPECT_EQ(metricSeriesCount(metric), 24u);
+    for (const char* direction : {"TO_GPU", "FROM_GPU", "TO_DISK", "FROM_DISK"}) {
+        for (const char* error :
+             {"COPY_FAILED", "INVALID_REQUEST", "IO_FAILED", "RPC_FAILED", "CRC_COMPUTE_FAILED", "CRC_MISMATCH"}) {
+            auto tags = common_tags;
+            tags.AddTag("copy_direction", direction);
+            tags.AddTag("error_type", error);
+            const double expected = std::string(direction).find("GPU") != std::string::npos ? 2 : 1;
+            EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_kv_cache_memory_cache_copy_error_qps"), expected);
+        }
+    }
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("copy_direction").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("error_type").empty());
+}
+
+TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesWithReporter) {
+    auto  metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    BlockTreeCacheMetricsReporter worker(nullptr);
+    BlockTreeCacheMetricsReporter leader(metrics_reporter);
+    const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
+    worker.maybeReportCopyError(Tier::HOST, Tier::DEVICE, failure);
+    worker.maybeReportCopyError(Tier::HOST, Tier::DISK, failure);
+    worker.maybeReportCopyError(Tier::DISK, Tier::HOST, failure);
+    leader.maybeReportCopyError(Tier::HOST, Tier::DEVICE, ErrorInfo::OkStatus());
+    leader.maybeReportCopyError(Tier::HOST, Tier::DISK, ErrorInfo::OkStatus());
+    leader.maybeReportCopyError(Tier::DISK, Tier::HOST, ErrorInfo::OkStatus());
+    EXPECT_EQ(metricSeriesCount(metric), 0u);
+    leader.maybeReportCopyError(Tier::HOST, Tier::DEVICE, failure);
+    kmonitor::MetricsTags ordinary_tags("copy_direction", "TO_GPU");
+    ordinary_tags.AddTag("error_type", "COPY_FAILED");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, ordinary_tags), 1);
+    EXPECT_EQ(metricSeriesCount(metric), 1u);
+}
+
+TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnce) {
+    for (bool mismatch : {false, true}) {
+        auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+        const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer failed");
+        TransferResult                result(failure, CacheCopyError::RPC_FAILED);
+        result.merge({failure, mismatch ? CacheCopyError::CRC_MISMATCH : CacheCopyError::CRC_COMPUTE_FAILED});
+        reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+        auto* metric =
+            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+        EXPECT_EQ(metricSeriesCount(metric), 1u);
+        kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
+        tags.AddTag("error_type", mismatch ? "CRC_MISMATCH" : "CRC_COMPUTE_FAILED");
+        EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
+    }
+}
+
 TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
     kmonitor::MetricsTags tags("pool", "host");
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
@@ -686,6 +769,25 @@ TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
     const BlockTreeKeySnapshot changed = cache_->getKeySnapshot(empty.version);
     EXPECT_EQ(changed.version, snapshot.version);
     EXPECT_EQ(changed.keys, snapshot.keys);
+}
+
+TEST_F(BlockTreeCacheTest, InvalidationReleasesIdleSubtreeImmediately) {
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
+
+    const auto                  before_drop = cache_->getKeySnapshot();
+    std::lock_guard<std::mutex> lock(cache_->mutex_);
+    cache_->evictor_.invalidateSources({{{100}, 0, Tier::DEVICE}});
+
+    EXPECT_TRUE(cache_->tree_->findNode({100, 200}).empty());
+    EXPECT_TRUE(cache_->tree_->pending_node_pool_.empty());
+    EXPECT_TRUE(cache_->tree_->cacheKeys().empty());
+    EXPECT_GT(cache_->tree_->keyVersion(), before_drop.version);
+    const auto& pool = cache_->tree_->groupSets()[0]->devicePools()[0];
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_FALSE(pool->isAllocated(43));
 }
 
 TEST_F(BlockTreeCacheTest, MatchPartialPath) {
