@@ -373,6 +373,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "overload"},
             )
+            self.engine.report_vit_error(e)
+            _mark_vit_error_reported(context)
             context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 format_mm_rpc_error(
@@ -386,6 +388,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "timeout"},
             )
+            self.engine.report_vit_error(e)
+            _mark_vit_error_reported(context)
             context.abort(
                 grpc.StatusCode.DEADLINE_EXCEEDED,
                 format_mm_rpc_error(
@@ -400,6 +404,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 1,
                 {"source": "vit_server", "reason": "request_too_large"},
             )
+            self.engine.report_vit_error(e)
+            _mark_vit_error_reported(context)
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 format_mm_rpc_error(
@@ -416,17 +422,19 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             self.engine.report_vit_error(e)
             _abort_ft_runtime(context, e)
         except TimeoutError as error:
+            self.engine.report_vit_error(error)
             timeout_error = FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT, str(error)
             )
-            self.engine.report_vit_error(timeout_error)
             _abort_ft_runtime(context, timeout_error)
-        except Exception:
+        except Exception as error:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
                 {"source": "vit_server", "reason": "exception"},
             )
+            self.engine.report_vit_error(error)
+            _mark_vit_error_reported(context)
             raise
         finally:
             if not callback_added:
