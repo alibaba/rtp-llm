@@ -396,19 +396,6 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
     return global_ok;
 }
 
-void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                                       ModelBase&      source,
-                                                       bool            request_actual_rows) {
-    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
-        return;
-    }
-    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
-    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
-    if (pre_hc.defined() && pre_hc.numel() > 0) {
-        model_input.last_hidden_states = pre_hc;
-    }
-}
-
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
@@ -1998,12 +1985,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    // A target-forward output may own the MTP features (Qwen4 and DSpARK).
-    // Graph replay does not update mutable Python model state, so the input
-    // accessor is only a fallback for models without that explicit output.
-    if (!is_dspark_ && !model_output.mtp_target_hidden_states.defined()) {
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
-    }
     // The post-rejection input is final here: fork the draft-prefill prepare so
     // its host work and mirror D2H waits overlap the post-rejection broadcast
     // and the commit's GPU tail instead of serializing the step boundary. The
@@ -2013,6 +1994,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // the tensors the broadcast overwrites in place on non-root ranks are
     // consumed inside the forward, after the join.
     launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
+    // Keep the hidden rows selected from this round's target-forward result.
+    // A Python-side hidden buffer is stale after Graph replay, and replacing
+    // last_hidden_states here would also undo rejection sampling's compaction.
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
