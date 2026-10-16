@@ -1,5 +1,7 @@
 # type: ignore
+import statistics
 import sys
+import time
 from pathlib import Path
 from unittest import SkipTest, TestCase, main
 
@@ -180,6 +182,66 @@ class LinearCacheConverterTest(TestCase):
 
         conv_view[1, 1, 3] = torch.tensor(-7, dtype=torch.bfloat16, device=self.device)
         self.assertEqual(conv_view[1, 1, 3].item(), -7)
+
+    def test_cached_views_alias_invalidate_and_reduce_cpu_overhead(self) -> None:
+        kwargs = dict(
+            local_num_v_heads=4,
+            head_v_dim=16,
+            head_k_dim=16,
+            ssm_state_dtype=torch.float32,
+            linear_conv_kernel_dim=4,
+            qkv_size=384,
+            conv_state_dtype=torch.bfloat16,
+        )
+        cached = LinearCacheConverter(**kwargs, cache_views=True)
+        uncached = LinearCacheConverter(**kwargs, cache_views=False)
+        block_elements = (cached.block_size_bytes + 1) // 2 + 64
+        base = torch.zeros(9, block_elements, dtype=torch.bfloat16, device=self.device)
+
+        conv = cached.get_conv_state_tensor(base)
+        ssm = cached.get_ssm_state_tensor(base.reshape(base.shape[0], -1))
+        self.assertIs(conv, cached.get_conv_state_tensor(base.reshape_as(base)))
+        self.assertIs(ssm, cached.get_ssm_state_tensor(base.reshape_as(base)))
+        conv[2, 1, 7] = 11
+        self.assertEqual(cached.get_conv_state_tensor(base)[2, 1, 7].item(), 11)
+
+        sliced = base[1:]
+        sliced_conv = cached.get_conv_state_tensor(sliced)
+        sliced_ssm = cached.get_ssm_state_tensor(sliced)
+        self.assertIsNot(sliced_conv, conv)
+        self.assertIsNot(sliced_ssm, ssm)
+        self.assertEqual(sliced_conv.shape[0], base.shape[0] - 1)
+        sliced_conv[0, 0, 3] = -5
+        self.assertEqual(
+            uncached.get_conv_state_tensor(base)[1, 0, 3].item(), -5
+        )
+
+        other = torch.zeros_like(base)
+        other_conv = cached.get_conv_state_tensor(other)
+        self.assertIsNot(other_conv, sliced_conv)
+        other_conv[0, 0, 0] = 17
+        self.assertEqual(uncached.get_conv_state_tensor(base)[0, 0, 0].item(), 0)
+
+        for _ in range(20):
+            uncached.get_conv_state_tensor(base)
+            uncached.get_ssm_state_tensor(base)
+            cached.get_conv_state_tensor(base)
+            cached.get_ssm_state_tensor(base)
+        samples = {"uncached": [], "cached": []}
+        for _ in range(50):
+            for name, converter in (("uncached", uncached), ("cached", cached)):
+                begin = time.thread_time_ns()
+                for _ in range(100):
+                    converter.get_conv_state_tensor(base)
+                    converter.get_ssm_state_tensor(base)
+                samples[name].append((time.thread_time_ns() - begin) / 100_000.0)
+        uncached_us = statistics.median(samples["uncached"])
+        cached_us = statistics.median(samples["cached"])
+        print(
+            "typed cache views CPU us/pair: "
+            f"uncached={uncached_us:.3f}, cached={cached_us:.3f}"
+        )
+        self.assertLess(cached_us, uncached_us)
 
 
 if __name__ == "__main__":

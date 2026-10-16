@@ -179,3 +179,9 @@ py_test(
     ],
     main = "modules/glm5_mega_moe/test_fp8_capacity.py",
 )
+
+py_test(
+    name = "block_map_test",
+    srcs = ["model_desc/block_map_test.py"],
+    deps = [":models"],
+)

@@ -45,6 +45,9 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.gate import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.wy_fast import (
     recompute_w_u_fwd_kda_kernel,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
+    _fused_rope_qk_had_k_kernel,
+)
 from triton.runtime.interpreter import (
     InterpretedFunction,
     TensorHandle,
@@ -157,6 +160,42 @@ class SparseMemory:
 
 
 class AddressOverflowTest(unittest.TestCase):
+    def test_rope_position_and_head_stride_boundary(self):
+        for position, neox in product(
+            ((1 << 25) - 1, 1 << 25, (1 << 25) + 1), (False, True)
+        ):
+            with self.subTest(position=position, neox=neox):
+                mem = SparseMemory()
+                q, k, out, cache = [mem.buffer(n) for n in ("q", "k", "out", "cache")]
+                pos = mem.buffer("pos", tl.int32)
+                mem.window(pos, 0, [position])
+                mem.window(cache, position * 64, np.r_[np.ones(32), np.zeros(32)])
+                q_heads = [mem.window(q, h * (1 << 30), np.ones(128)) for h in range(4)]
+                mem.window(k, 0, np.ones(128))
+                output = mem.window(out, 0, np.full(128, np.nan))
+                mem.run(
+                    _fused_rope_qk_had_k_kernel,
+                    (0, 0, 0),
+                    q_ptr=q,
+                    k_ptr=k,
+                    pos_ptr=pos,
+                    cos_sin_cache_ptr=cache,
+                    k_out_ptr=out,
+                    HAD_SCALE=128**-0.5,
+                    stride_qt=4 * (1 << 30),
+                    stride_qh=1 << 30,
+                    stride_kt=128,
+                    stride_kot=128,
+                    stride_csc_p=64,
+                    H=4,
+                    HEAD_DIM=128,
+                    ROPE_HALF=32,
+                    IS_NEOX=neox,
+                )
+                for head in q_heads:
+                    np.testing.assert_array_equal(head, np.ones(128))
+                np.testing.assert_array_equal(output, np.r_[11.3125, np.zeros(127)])
+
     def _conv_memory(
         self, sequence=0, map_stride=1, feature_stride=1, state_page=None, padded=False
     ):

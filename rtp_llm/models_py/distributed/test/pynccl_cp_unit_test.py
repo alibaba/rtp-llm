@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from rtp_llm.models_py.distributed import pynccl_cp
 
 
@@ -19,9 +18,7 @@ class PyncclCPUnitTest(unittest.TestCase):
             pynccl_cp,
             "_resolve_process_group",
             return_value=process_group,
-        ), patch.object(
-            pynccl_cp.dist, "all_gather_into_tensor"
-        ) as torch_all_gather:
+        ), patch.object(pynccl_cp.dist, "all_gather_into_tensor") as torch_all_gather:
             pynccl_cp.all_gather_into_tensor(
                 output,
                 input_tensor,
@@ -165,9 +162,7 @@ class PyncclCPUnitTest(unittest.TestCase):
         first_lib.destroy_comm.assert_called_once_with(first_comm)
         second_lib.destroy_comm.assert_called_once_with(second_comm)
         first_lib.window_deregister.assert_called_once_with(first_comm, first_window)
-        second_lib.window_deregister.assert_called_once_with(
-            second_comm, second_window
-        )
+        second_lib.window_deregister.assert_called_once_with(second_comm, second_window)
 
     def test_master_switch_controls_optimization_stack(self):
         with patch.object(pynccl_cp, "_OPT_ENABLED", True):
@@ -184,9 +179,7 @@ class PyncclCPUnitTest(unittest.TestCase):
 
         with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
             pynccl_cp, "_resolve_process_group", return_value=process_group
-        ), patch.object(
-            pynccl_cp, "_world_size", return_value=4
-        ), patch.object(
+        ), patch.object(pynccl_cp, "_world_size", return_value=4), patch.object(
             pynccl_cp, "_symm_output", return_value=output
         ) as symm_output, patch.object(
             pynccl_cp.torch.cuda, "current_stream", return_value=stream

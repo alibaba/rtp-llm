@@ -148,3 +148,13 @@ py_test(
     deps = py_test_deps,
     tags = ["L20A_DEV"],
 )
+
+py_test(
+    name = "glm53_local_router_gpu_test",
+    srcs = ["glm53_local_router_test.py"],
+    main = "glm53_local_router_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib", "//rtp_llm:testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)

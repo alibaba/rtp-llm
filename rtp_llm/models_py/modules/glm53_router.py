@@ -32,11 +32,12 @@ class Glm53FP32Router(nn.Module):
         )
 
     def forward_fixed_rows(self, hidden_states: torch.Tensor, rows: int):
+        from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
         from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
             fixed_projection_graph,
         )
 
-        if rows > self.chunk_rows:
+        if rows > self.chunk_rows or metadata_cache() is None:
             return None
         return fixed_projection_graph(hidden_states, self.weight, rows)
 

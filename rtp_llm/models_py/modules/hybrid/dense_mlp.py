@@ -1,5 +1,7 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
+import os
+
 from typing import Dict, Optional, Type
 
 import torch
@@ -39,8 +41,25 @@ class ClampedSiluAndMul(nn.Module):
     def __init__(self, limit: float):
         super().__init__()
         self.limit = limit
+        self._prefill_fusion = None
+        if (
+            _DEVICE_TYPE == DeviceType.Cuda
+            and os.environ.get("GLM53_PREFILL_FUSED_CLAMPED_SWIGLU", "0") == "1"
+        ):
+            from rtp_llm.models_py.triton_kernels.common.clamped_swiglu import (
+                clamped_swiglu,
+            )
+
+            self._prefill_fusion = clamped_swiglu
 
     def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        if self._prefill_fusion is not None:
+            from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+            if metadata_cache() is not None:
+                fused = self._prefill_fusion(gate_up, self.limit)
+                if fused is not None:
+                    return fused
         gate, up = gate_up.chunk(2, dim=-1)
         gate = gate.clamp(max=self.limit)
         up = up.clamp(min=-self.limit, max=self.limit)

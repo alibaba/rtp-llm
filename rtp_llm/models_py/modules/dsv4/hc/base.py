@@ -129,6 +129,17 @@ class HCUnitBase(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
+    def pre_assume_valid(
+        self, x: torch.Tensor, dbg_tag: Optional[str] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run pre after an equivalent HC unit validated the shape contract.
+
+        This inference-only entry skips Python shape checks and profiler ranges.
+        The caller must validate the same implementation, ``dim`` and
+        ``hc_mult`` earlier in the current model forward.
+        """
+        return self._pre_impl(x, dbg_tag=dbg_tag)
+
     def post(
         self,
         x: torch.Tensor,
@@ -186,6 +197,16 @@ class HCUnitBase(nn.Module):
         comb: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def post_assume_valid(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run post after an equivalent HC unit validated the shape contract."""
+        return self._post_impl(x, residual, post, comb)
 
     def fused_post_pre(
         self,

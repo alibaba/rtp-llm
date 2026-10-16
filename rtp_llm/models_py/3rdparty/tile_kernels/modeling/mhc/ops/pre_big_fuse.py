@@ -9,6 +9,41 @@ from ....mhc.pre_big_fuse_kernel import (
     _mhc_pre_big_fuse,
 )
 
+_COMPILED_DISPATCH = os.environ.get("GLM53_MHC_COMPILED_DISPATCH", "0") == "1"
+
+
+@functools.lru_cache(maxsize=128)
+def _single_gemm_runner(device, mhc_mult3, mhc_hidden_size):
+    # Code only: retain the same validated adapter and its current-stream
+    # dispatch, without rebuilding the TileLang specialization key per layer.
+    kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    return kernel.torch_function
+
+
+@functools.lru_cache(maxsize=128)
+def _pre_fuse_runner(
+    device,
+    hidden_size,
+    rms_eps,
+    pre_eps,
+    sinkhorn_eps,
+    post_mult,
+    repeats,
+    splits,
+    mhc_mult,
+):
+    kernel = _mhc_pre_big_fuse(
+        hidden_size,
+        rms_eps,
+        pre_eps,
+        sinkhorn_eps,
+        post_mult,
+        repeats,
+        n_splits=splits,
+        mhc_mult=mhc_mult,
+    )
+    return kernel.torch_function
+
 
 def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
@@ -46,14 +81,20 @@ def _run_tilelang_single_gemm(
     gemm_out_sqrsum: torch.Tensor,
     mhc_mult3: int,
     mhc_hidden_size: int,
+    fn_rounded: torch.Tensor | None = None,
 ) -> int:
-    fn = round_to_tf32(fn)
-    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    # tilelang_single allocates exactly one split; slicing [:1] is redundant.
+    fn = round_to_tf32(fn) if fn_rounded is None else fn_rounded
+    fwd_mul_kernel = (
+        _single_gemm_runner(residual_flat.device.index, mhc_mult3, mhc_hidden_size)
+        if _COMPILED_DISPATCH
+        else _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    )
     fwd_mul_kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,
-        gemm_out_mul[:1].view(-1, 1, mhc_mult3),
-        gemm_out_sqrsum[:1].view(-1, 1),
+        gemm_out_mul.view(-1, 1, mhc_mult3),
+        gemm_out_sqrsum.view(-1, 1),
     )
     return 1
 
@@ -87,6 +128,7 @@ def mhc_pre_big_fuse(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 16,
+    fn_rounded: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -151,9 +193,8 @@ def mhc_pre_big_fuse(
             gemm_out_sqrsum,
             mhc_mult3,
             mhc_hidden_size,
+            fn_rounded=fn_rounded,
         )
-        gemm_out_mul = gemm_out_mul[:1]
-        gemm_out_sqrsum = gemm_out_sqrsum[:1]
     elif backend == "tilelang_splitk":
         raise RuntimeError(
             "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
@@ -165,16 +206,30 @@ def mhc_pre_big_fuse(
             f"{backend!r}; expected deepgemm, tilelang_splitk, or tilelang_single."
         )
 
-    _mhc_pre_big_fuse(
-        hidden_size,
-        rms_eps,
-        mhc_pre_eps,
-        mhc_sinkhorn_eps,
-        mhc_post_mult_value,
-        sinkhorn_repeat,
-        n_splits=n_splits,
-        mhc_mult=mhc_mult,
-    )(
+    if _COMPILED_DISPATCH:
+        kernel = _pre_fuse_runner(
+            residual.device.index,
+            hidden_size,
+            rms_eps,
+            mhc_pre_eps,
+            mhc_sinkhorn_eps,
+            mhc_post_mult_value,
+            sinkhorn_repeat,
+            n_splits,
+            mhc_mult,
+        )
+    else:
+        kernel = _mhc_pre_big_fuse(
+            hidden_size,
+            rms_eps,
+            mhc_pre_eps,
+            mhc_sinkhorn_eps,
+            mhc_post_mult_value,
+            sinkhorn_repeat,
+            n_splits=n_splits,
+            mhc_mult=mhc_mult,
+        )
+    kernel(
         gemm_out_mul,
         gemm_out_sqrsum,
         mhc_scale,

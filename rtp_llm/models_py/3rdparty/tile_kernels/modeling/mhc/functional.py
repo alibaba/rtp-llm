@@ -42,6 +42,7 @@ def mhc_pre(
     sinkhorn_eps: float = 1e-6,
     sinkhorn_repeat: int = 10,
     n_splits: int = 16,
+    fn_rounded: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """MHC pre-processing for one sublayer (attention or FFN).
 
@@ -79,6 +80,7 @@ def mhc_pre(
             mhc_post_mult_value=post_mult_value,
             sinkhorn_repeat=sinkhorn_repeat,
             n_splits=n_splits,
+            fn_rounded=fn_rounded,
         )
         return layer_input, (post_mix, comb_mix)
 

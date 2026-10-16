@@ -1,14 +1,23 @@
 import itertools
+import json
 import logging
 import math
 import os
 import random
+import statistics
+import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d as conv_ops
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
+from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
+    prepare_causal_conv1d_metadata,
+)
 
 logging.basicConfig(
     level="INFO",
@@ -60,6 +69,60 @@ def causal_conv1d_ref(
 
 
 class TestCausalConv1dPrefill(unittest.TestCase):
+    def test_compiled_prefill_dispatch_exact_and_benchmark(self):
+        torch.manual_seed(531015)
+        tokens, dim, width = 419, 6144, 4
+        x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16).T
+        weight = torch.randn(dim, width, device="cuda")
+        cu = torch.tensor([0, tokens], device="cuda", dtype=torch.int32)
+        prefix = torch.zeros(1, device="cuda", dtype=torch.int32)
+        block_map = torch.tensor([[1, 2, 3, 4]], device="cuda", dtype=torch.int32)
+        state = torch.randn(
+            5, width - 1, dim, device="cuda", dtype=torch.bfloat16
+        )
+        metadata = prepare_causal_conv1d_metadata(cu, x.device)
+
+        def run(enabled, target):
+            with mock.patch.object(conv_ops, "_COMPILED_PREFILL_DISPATCH", enabled):
+                return causal_conv1d_fn(
+                    x,
+                    weight,
+                    None,
+                    target.transpose(1, 2),
+                    cu,
+                    block_map,
+                    prefix,
+                    128,
+                    metadata=metadata,
+                    output_groups=3,
+                )
+
+        expected_state, actual_state = state.clone(), state.clone()
+        expected = run(False, expected_state)
+        actual = run(True, actual_state)
+        self.assertTrue(torch.equal(actual.view(torch.int16), expected.view(torch.int16)))
+        self.assertTrue(
+            torch.equal(actual_state.view(torch.int16), expected_state.view(torch.int16))
+        )
+
+        samples = {False: [], True: []}
+        for enabled in (False, True):
+            for _ in range(3):
+                run(enabled, actual_state)
+        for repeat in range(40):
+            for enabled in ((False, True) if repeat % 2 else (True, False)):
+                torch.cuda.synchronize()
+                begin = time.perf_counter_ns()
+                run(enabled, actual_state)
+                samples[enabled].append((time.perf_counter_ns() - begin) / 1000)
+        medians = {
+            str(enabled): statistics.median(values)
+            for enabled, values in samples.items()
+        }
+        print("CAUSAL_CONV_COMPILED_DISPATCH", medians, flush=True)
+        output = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]) / "dispatch.json"
+        output.write_text(json.dumps({"samples": samples, "medians": medians}, indent=2))
+
     def test_packed_qkv_preserves_outputs_and_prefix_state(self):
         torch.manual_seed(531809)
         lengths = [1, 3, 127, 128, 129, 513]

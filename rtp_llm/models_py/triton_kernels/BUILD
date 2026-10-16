@@ -25,6 +25,7 @@ py_library(
 py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
+    deps = [":common"],
     visibility = ["//visibility:public"]
 )
 

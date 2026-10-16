@@ -125,7 +125,7 @@ def _fused_rope_qk_had_k_kernel(
     IS_NEOX=False (interleaved / GPT-J):  pairs (x[2i], x[2i+1])
     """
     t = tl.program_id(0).to(tl.int64)
-    pos = tl.load(pos_ptr + t)
+    pos = tl.load(pos_ptr + t).to(tl.int64)
 
     rope_idx = tl.arange(0, ROPE_HALF)
     full_idx = tl.arange(0, HEAD_DIM)
@@ -134,7 +134,7 @@ def _fused_rope_qk_had_k_kernel(
     sin = tl.load(cos_sin_cache_ptr + pos * stride_csc_p + ROPE_HALF + rope_idx).to(tl.float32)
 
     # ===== Q RoPE in-place (all H heads) =====
-    head_offs = tl.arange(0, H)
+    head_offs = tl.arange(0, H).to(tl.int64)
     if IS_NEOX:
         q_first = tl.load(
             q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :]

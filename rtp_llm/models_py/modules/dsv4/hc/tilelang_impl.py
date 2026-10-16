@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import NoReturn
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_fused_post_pre,
@@ -16,6 +16,8 @@ from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_pre,
 )
 from rtp_llm.models_py.modules.dsv4.hc.utils import squeeze_hc_batch, wrap_hc_batch
+
+_FLAT_PREFILL = os.environ.get("GLM53_MHC_FLAT_PREFILL", "0") == "1"
 
 
 def _require_contiguous(t: torch.Tensor, *, name: str) -> torch.Tensor:
@@ -42,11 +44,26 @@ def _raise_unavailable(
 
 
 class TileLangHCUnit(HCUnitBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        rounded = None
+        if os.environ.get("GLM53_MHC_PRECOMPUTE_FN", "0") == "1" and os.environ.get(
+            "DSV4_MHC_PRE_GEMM_BACKEND", ""
+        ).strip().lower() in ("tilelang_single", "tilelang", "single"):
+            # Serving weights are immutable. Match round_to_tf32's integer add
+            # exactly, once, without changing the original FP32 weight used by
+            # other backends. Storage is bounded by this module's weight size.
+            assert self.fn.dtype == torch.float32
+            rounded = (self.fn.view(torch.int32) + 0x1000).view(torch.float32)
+        self.register_buffer("_fn_rounded", rounded, persistent=False)
+
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
-        # Public HC pre input is [T, hc, dim] or [B, S, hc, dim].
-        # TileLang requires [B, S, hc, dim], so flat prefill is wrapped as
-        # [1, T, hc, dim] after rank/trailing-dim checks in HCUnitBase.
-        tk_x, wrapped = wrap_hc_batch(x, 4, name="mhc_pre residual")
+        # HCUnitBase has checked the public rank and trailing dimensions.
+        # The inference kernels accept the flat token layout directly.
+        if _FLAT_PREFILL and x.ndim == 3:
+            tk_x, wrapped = x, False
+        else:
+            tk_x, wrapped = wrap_hc_batch(x, 4, name="mhc_pre residual")
         # TileLang kernels assume dense row-major tensors. Flat prefill
         # unsqueeze is a metadata-only view that remains contiguous; any
         # non-contiguous input means an upstream layout change must be fixed
@@ -63,6 +80,7 @@ class TileLangHCUnit(HCUnitBase):
                 sinkhorn_eps=self.hc_eps,
                 sinkhorn_iters=self.hc_sinkhorn_iters,
                 hc_mult=self.hc_mult,
+                fn_rounded=self._fn_rounded,
             )
         if out is None:
             _raise_unavailable("pre", x, self.hc_mult)
@@ -84,10 +102,14 @@ class TileLangHCUnit(HCUnitBase):
         # x [T, dim] / [B, S, dim], residual [T, hc, dim] /
         # [B, S, hc, dim], post [T, hc, 1] / [B, S, hc, 1], and comb
         # [T, hc, hc] / [B, S, hc, hc]. TileLang consumes the batched form.
-        tk_x, wrapped = wrap_hc_batch(x, 3, name="mhc_post x")
-        tk_residual, _ = wrap_hc_batch(residual, 4, name="mhc_post residual")
-        tk_post, _ = wrap_hc_batch(post, 4, name="mhc_post post")
-        tk_comb, _ = wrap_hc_batch(comb, 4, name="mhc_post comb")
+        if _FLAT_PREFILL and residual.ndim == 3:
+            tk_x, tk_residual, tk_post, tk_comb = x, residual, post, comb
+            wrapped = False
+        else:
+            tk_x, wrapped = wrap_hc_batch(x, 3, name="mhc_post x")
+            tk_residual, _ = wrap_hc_batch(residual, 4, name="mhc_post residual")
+            tk_post, _ = wrap_hc_batch(post, 4, name="mhc_post post")
+            tk_comb, _ = wrap_hc_batch(comb, 4, name="mhc_post comb")
         # Keep TileLang layout requirements explicit. In the normal path these
         # are already contiguous: ``x`` comes from attention/MoE outputs and
         # ``post``/``comb`` come directly from TileLang pre.

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+from rtp_llm.models_py.triton_kernels.common.host_math import ceil_div
 
 try:
     import triton
@@ -115,7 +116,7 @@ def fused_expand_indexer_groups_with_tail(
     if rows == 0:
         return output
     block_cols = 128
-    grid = (rows, triton.cdiv(output_width, block_cols))
+    grid = (rows, ceil_div(output_width, block_cols))
     _expand_groups_append_tail_kernel[grid](
         group_indices,
         raw_sequence_lengths,

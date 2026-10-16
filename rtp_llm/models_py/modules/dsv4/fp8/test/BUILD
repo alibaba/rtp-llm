@@ -228,6 +228,17 @@ py_test(
 )
 
 py_test(
+    name = "test_glm53_fixed_projection_graph_gpu",
+    srcs = ["test_glm53_fixed_projection_graph.py"],
+    main = "test_glm53_fixed_projection_graph.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
     name = "test_glm53_kda_padding_precision",
     srcs = ["test_glm53_kda_padding_precision.py"],
     deps = _DSV4_FP8_TEST_DEPS,

@@ -13,9 +13,56 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
     store_ssm_state_to_block_map_kernel,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk import chunk_kda
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
+    _fused_rope_qk_had_k_kernel,
+)
 
 
 class AddressOverflowGpuTest(unittest.TestCase):
+    def test_rope_large_cache_and_head_stride(self):
+        stride = 1 << 30
+        q_storage = torch.empty(3 * stride + 128, device="cuda", dtype=torch.bfloat16)
+        q = q_storage.as_strided((1, 4, 128), (4 * stride, stride, 1))
+        cache_storage = torch.empty(2 * stride + 64, device="cuda", dtype=torch.float32)
+        cache = cache_storage.as_strided((3, 64), (stride, 1))
+        angles = (
+            torch.arange(96, device="cuda", dtype=torch.float32).reshape(3, 32) / 100
+        )
+        compact_cache = torch.cat((angles.cos(), angles.sin()), dim=1)
+        cache.copy_(compact_cache)
+        position = torch.tensor([2], device="cuda", dtype=torch.int32)
+        original = torch.randn((1, 4, 128), device="cuda", dtype=torch.bfloat16)
+        k = torch.randn((1, 128), device="cuda", dtype=torch.bfloat16)
+        for neox in (False, True):
+            with self.subTest(neox=neox):
+                q.copy_(original)
+                compact_q = original.clone()
+                out, expected = torch.empty_like(k), torch.empty_like(k)
+                for q_input, c_input, k_output in (
+                    (q, cache, out),
+                    (compact_q, compact_cache, expected),
+                ):
+                    _fused_rope_qk_had_k_kernel[(1,)](
+                        q_input,
+                        k,
+                        position,
+                        c_input,
+                        k_output,
+                        128**-0.5,
+                        q_input.stride(0),
+                        q_input.stride(1),
+                        k.stride(0),
+                        k_output.stride(0),
+                        c_input.stride(0),
+                        H=4,
+                        HEAD_DIM=128,
+                        ROPE_HALF=32,
+                        IS_NEOX=neox,
+                        num_warps=2,
+                    )
+                torch.testing.assert_close(q, compact_q, rtol=0, atol=0)
+                torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():
@@ -52,6 +99,8 @@ class AddressOverflowGpuTest(unittest.TestCase):
             width,
             1e-5,
             BLOCK_N=128,
+            HAS_BIAS=False,
+            HAS_Z=True,
             NORM_BEFORE_GATE=True,
             IS_RMS_NORM=True,
             SIGMOID_GATE=True,

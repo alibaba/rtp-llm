@@ -350,11 +350,12 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         && linear.ssm_state_dtype == DataType::TYPE_FP32 && linear.conv_state_dtype == DataType::TYPE_BF16
         && gen_num_per_cycle < 8 && config.seq_size_per_block >= 8
         && (!kv_cache_config.reuse_cache || config.enable_linear_attention_request_cache);
-    // Explicit opt-in retains strict validation. Default-on replay must fall
-    // back before allocation, so Python and the cache reserve the same states.
-    const bool replay_requested = replay_env != nullptr ? std::string(replay_env) == "1" : replay_supported;
-    config.linear_replay = replay_requested && model_config.model_type == "glm5_3_flash" && !is_mtp
-                           && gen_num_per_cycle > 0 && config.role_type != RoleType::PREFILL;
+    // Keep replay opt-in so cache allocation and Python model initialization
+    // select the same conservative default. Unsupported explicit requests fall
+    // back before allocating replay-only cache state.
+    const bool replay_requested = replay_env != nullptr && std::string(replay_env) == "1";
+    config.linear_replay = replay_requested && replay_supported && model_config.model_type == "glm5_3_flash"
+                           && !is_mtp && gen_num_per_cycle > 0 && config.role_type != RoleType::PREFILL;
     if (config.linear_replay) {
         RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle < 8 && config.seq_size_per_block >= 8,
                                 "GLM53 KDA replay supports verify widths <=8 and cache pages >=8 tokens");

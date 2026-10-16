@@ -134,3 +134,71 @@ py_test(
     tags = ["manual"],
     timeout = "long",
 )
+
+
+
+py_test(
+    name = "full_reuse_graph_gpu_group_test",
+    main = "full_reuse_graph_test.py",
+    srcs = ["full_reuse_graph_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "packed_lowrank_gpu_test",
+    main = "packed_lowrank_test.py",
+    srcs = ["packed_lowrank_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "state_update_gpu_test",
+    srcs = ["state_update_test.py"],
+    main = "state_update_test.py",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+
+
+py_test(
+    name = "state_prefetch_gpu_test",
+    srcs = ["state_prefetch_test.py", "full_reuse_graph_test.py"],
+    main = "state_prefetch_test.py",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)

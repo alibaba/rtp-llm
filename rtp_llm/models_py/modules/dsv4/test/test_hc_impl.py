@@ -1,6 +1,7 @@
 import os
 import unittest
 from contextlib import contextmanager
+from unittest import mock
 
 import torch
 
@@ -251,6 +252,39 @@ class TestHCImpl(unittest.TestCase):
                 comb = torch.randn(2, 5, hc, hc)
                 with self.assertRaises(ValueError):
                     unit.post(x, residual, bad_post, comb)
+
+    def test_assume_valid_dispatch_matches_and_skips_python_checks(self) -> None:
+        hc, dim = 4, 16
+        fn, base, scale = _weights(hc, dim)
+        unit = FallbackHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        residual = torch.randn(2, 3, hc, dim, dtype=torch.bfloat16)
+        expected_pre = unit.pre(residual)
+        with mock.patch.object(
+            unit, "_check_residual_shape", side_effect=AssertionError("unexpected")
+        ), mock.patch.object(
+            unit, "_check_pre_output", side_effect=AssertionError("unexpected")
+        ):
+            actual_pre = unit.pre_assume_valid(residual)
+        for actual, expected in zip(actual_pre, expected_pre):
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+        expected_post = unit.post(expected_pre[0], residual, *expected_pre[1:])
+        with mock.patch.object(
+            unit, "_check_residual_shape", side_effect=AssertionError("unexpected")
+        ):
+            actual_post = unit.post_assume_valid(
+                expected_pre[0], residual, *expected_pre[1:]
+            )
+        torch.testing.assert_close(actual_post, expected_post, rtol=0.0, atol=0.0)
 
     def test_fused_post_pre_fallback_matches_composition(self) -> None:
         hc, dim = 4, 32

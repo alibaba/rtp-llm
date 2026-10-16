@@ -76,3 +76,24 @@ py_test (
 # #     tags = ["H20"],
 #     exec_properties = {'gpu':'H20'},
 # )
+
+py_test(
+    name = "per_token_group_quant_gpu_test",
+    main = "per_token_group_quant_8bit_test.py",
+    srcs = ["per_token_group_quant_8bit_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "fp8_scale_layout_gpu_test",
+    main = "fp8_scale_layout_test.py",
+    srcs = ["fp8_scale_layout_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+)

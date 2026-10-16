@@ -647,8 +647,9 @@ class AtomicWeight(WeightModule):
 
         ts = (
             self.__split_tensor(split_func, raw_tensor, load_config)
-            .contiguous()
-            .clone()
+            # Own a dense shard with one allocation. contiguous().clone()
+            # temporarily held two copies of a noncontiguous MTP shard.
+            .clone(memory_format=torch.contiguous_format)
         )
         return {self.name: ts}
 

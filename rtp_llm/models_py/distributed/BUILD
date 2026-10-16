@@ -1,5 +1,15 @@
 load("//bazel:arch_select.bzl", "deep_ep_py_deps")
 
+py_test(
+    name = "stable_tp_reduce_test",
+    srcs = ["stable_tp_reduce_test.py"],
+    deps = [":collective_torch", "//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu_count": "4"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
 deep_ep_py_deps()
 
 py_library(

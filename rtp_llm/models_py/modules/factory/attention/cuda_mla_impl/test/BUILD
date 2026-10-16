@@ -4,6 +4,20 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton", "flash-mla"])
 
 py_test(
+    name = "padded_topk_gpu_test",
+    srcs = ["padded_topk_test.py"],
+    main = "padded_topk_test.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+    timeout = "long",
+)
+
+py_test(
     name = "pinned_mla_cache_test",
     srcs = ["pinned_mla_cache_test.py"],
     deps = [

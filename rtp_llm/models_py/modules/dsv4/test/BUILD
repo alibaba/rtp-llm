@@ -315,3 +315,133 @@ py_test(
     tags = ["manual", "SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
 )
+
+py_test(
+    name = "test_glm53_prefill_metadata_gpu",
+    srcs = ["test_glm53_prefill_metadata_gpu.py"],
+    main = "test_glm53_prefill_metadata_gpu.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_glm53_mhc_precompute_gpu",
+    srcs = ["test_glm53_mhc_precompute.py"],
+    main = "test_glm53_mhc_precompute.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_kda_host_metadata_gpu",
+    srcs = ["test_kda_host_metadata.py"],
+    main = "test_kda_host_metadata.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_profiler_ranges",
+    srcs = ["test_profiler_ranges.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
+    name = "test_clamped_swiglu_gpu",
+    srcs = ["test_clamped_swiglu.py"],
+    main = "test_clamped_swiglu.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_topk_canonicalize_scope_gpu",
+    srcs = ["test_topk_canonicalize_scope.py"],
+    main = "test_topk_canonicalize_scope.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_glm53_mhc_post_inference_gpu",
+    srcs = ["test_glm53_mhc_post_inference.py"],
+    main = "test_glm53_mhc_post_inference.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+
+py_test(
+    name = "test_glm53_cuda_wait_policy_gpu",
+    srcs = ["test_glm53_cuda_wait_policy.py"],
+    main = "test_glm53_cuda_wait_policy.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+
+py_test(
+    name = "test_glm53_moe_pack_dispatch_gpu",
+    srcs = ["test_glm53_moe_pack_dispatch.py"],
+    main = "test_glm53_moe_pack_dispatch.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_glm53_mhc_flat_gpu",
+    srcs = ["test_glm53_mhc_flat.py"],
+    main = "test_glm53_mhc_flat.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+py_test(
+    name = "test_glm53_moe_pack_vector_gpu",
+    srcs = ["test_glm53_moe_pack_vector.py", "test_glm53_moe_pack_dispatch.py"],
+    main = "test_glm53_moe_pack_vector.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+
+
+
+py_test(
+    name = "test_glm53_mhc_dispatch_cache_gpu",
+    srcs = ["test_glm53_mhc_dispatch_cache.py", "test_glm53_mhc_flat.py"],
+    main = "test_glm53_mhc_dispatch_cache.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+
+
+
+py_test(
+    name = "test_pool_context",
+    srcs = ["test_pool_context.py"],
+    deps = _DSV4_TEST_DEPS,
+)

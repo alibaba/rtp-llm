@@ -1,5 +1,9 @@
 import itertools
+import json
 import os
+import statistics
+import time
+from pathlib import Path
 from typing import Tuple
 from unittest import SkipTest, TestCase, main
 from unittest.mock import patch
@@ -7,15 +11,14 @@ from unittest.mock import patch
 import torch
 import triton
 import triton.language as tl
-from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
-
-from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
 )
+from torch import dtype as _dtype
+from torch.profiler import ProfilerActivity, profile, record_function
 
 _is_hip = is_hip()
 
@@ -328,6 +331,36 @@ class PerTokenGroupQuantTest(TestCase):
         print(f"x_s_triton = {x_s_triton}")
         print(f"x_q_sglang = {x_q_sglang}")
         print(f"x_s_sglang = {x_s_sglang}")
+
+    def test_output_allocation_submission(self):
+        records = []
+        for tokens in (1, 81, 419, 9889):
+            x = torch.empty(tokens, 4096, device="cuda", dtype=torch.bfloat16)
+            row = {"tokens": tokens}
+            for name, allocate in (
+                (
+                    "empty",
+                    lambda: torch.empty(x.shape, device=x.device, dtype=fp8_type_),
+                ),
+                ("empty_like", lambda: torch.empty_like(x, dtype=fp8_type_)),
+            ):
+                out = allocate()
+                self.assertEqual(out.shape, x.shape)
+                self.assertEqual(out.dtype, fp8_type_)
+                self.assertTrue(out.is_contiguous())
+                for _ in range(100):
+                    allocate()
+                timings = []
+                for _ in range(5):
+                    before = time.perf_counter()
+                    for _ in range(1000):
+                        allocate()
+                    timings.append((time.perf_counter() - before) * 1000)
+                row[name + "_cpu_us"] = statistics.median(timings)
+            records.append(row)
+        Path(
+            os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp"), "fp8_allocation.json"
+        ).write_text(json.dumps(records, indent=2))
 
     def test_per_token_group_quant(self):
         for params in itertools.product(

@@ -18,6 +18,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+_PREFILL_PAD_TOPK = os.environ.get("GLM53_PREFILL_PAD_TOPK", "0") == "1"
+
 # flash_mla requires CUDA >= 12.9. On unsupported envs the symbols stay
 # undefined and any caller using sparse MLA will fail fast at use time.
 try:
@@ -267,6 +269,14 @@ class SparseMlaOp(object):
         topk_2d = self._prepare_local_topk_indices(topk_indices, raw_lengths)
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
+        output_topk = topk
+        if _PREFILL_PAD_TOPK and (
+            self.num_heads != 8 or self.bf16_backend == "flashmla"
+        ):
+            from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+            if metadata_cache() is not None:
+                output_topk = self.kernel_top_k
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
@@ -281,6 +291,7 @@ class SparseMlaOp(object):
             PHYSICAL_ENTRIES_PER_BLOCK=physical_entries_per_block,
             BLOCKS_PER_PHYSICAL_BLOCK=blocks_per_physical_block,
             NUM_TOPK_TOKENS=topk,
+            OUTPUT_TOPK_TOKENS=output_topk,
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )

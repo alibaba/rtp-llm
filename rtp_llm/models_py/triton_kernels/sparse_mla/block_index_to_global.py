@@ -20,6 +20,7 @@ def _convert_req_index_to_global_index_kernel(
     PHYSICAL_ENTRIES_PER_BLOCK: tl.constexpr,
     BLOCKS_PER_PHYSICAL_BLOCK: tl.constexpr,
     NUM_TOPK_TOKENS: tl.constexpr,
+    OUTPUT_TOPK_TOKENS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     # strides (in elements)
@@ -33,14 +34,14 @@ def _convert_req_index_to_global_index_kernel(
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
     token_id = tl.program_id(0).to(tl.int64)
-    tile_id = tl.program_id(1)
+    tile_id = tl.program_id(1).to(tl.int64)
 
     # Each program covers BLOCK_N consecutive columns
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
     valid_indice = indice_id < NUM_TOPK_TOKENS
 
     # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
+    req = tl.load(req_id_ptr + token_id).to(tl.int64)
 
     # Load token indices for this tile
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
@@ -58,7 +59,7 @@ def _convert_req_index_to_global_index_kernel(
 
     # Guard block_table access
     valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+    bt_ptr = block_table_ptr + req * bt_stride0 + block_id.to(tl.int64) * bt_stride1
     is_invalid_tok |= ~valid_block
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
     is_invalid_tok |= (base <= 0) & ~is_prefill
@@ -85,7 +86,7 @@ def _convert_req_index_to_global_index_kernel(
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val, mask=valid_indice)
+    tl.store(out_ptr_ij, out_val, mask=indice_id < OUTPUT_TOPK_TOKENS)
 
 
 def triton_convert_req_index_to_global_index(
@@ -101,6 +102,7 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_starts: torch.Tensor | None = None,
     PHYSICAL_ENTRIES_PER_BLOCK: int | None = None,
     BLOCKS_PER_PHYSICAL_BLOCK: int = 1,
+    OUTPUT_TOPK_TOKENS: int | None = None,
 ):
     """
     out[token_id, indice_id] =
@@ -113,6 +115,9 @@ def triton_convert_req_index_to_global_index(
     physical cache blocks. Split each id into its parent and child before
     applying PHYSICAL_ENTRIES_PER_BLOCK; token offsets still use the logical
     ENTRIES_PER_BLOCK, not the gap between physical blocks.
+
+    OUTPUT_TOPK_TOKENS optionally right-pads the result with -1 in the same
+    launch. It must be at least NUM_TOPK_TOKENS.
 
     Negative token_indices propagate as -1. For safety, we also output -1
         if the derived block_id would be out-of-bounds, or if the block-table
@@ -153,13 +158,21 @@ def triton_convert_req_index_to_global_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = triton.cdiv(NUM_TOPK_TOKENS, BLOCK_N)
+    output_width = NUM_TOPK_TOKENS if OUTPUT_TOPK_TOKENS is None else OUTPUT_TOPK_TOKENS
+    assert output_width >= NUM_TOPK_TOKENS
+    tiles_per_row = (output_width + BLOCK_N - 1) // BLOCK_N
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    out = torch.empty(
+        (num_tokens, output_width),
+        dtype=token_indices.dtype,
+        device=token_indices.device,
+    )
+    if num_tokens == 0:
+        return out
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
@@ -190,6 +203,7 @@ def triton_convert_req_index_to_global_index(
         PHYSICAL_ENTRIES_PER_BLOCK,
         BLOCKS_PER_PHYSICAL_BLOCK,
         NUM_TOPK_TOKENS,
+        output_width,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         # strides

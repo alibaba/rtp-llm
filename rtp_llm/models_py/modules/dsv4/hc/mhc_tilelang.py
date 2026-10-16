@@ -194,6 +194,7 @@ def tk_mhc_pre(
     sinkhorn_eps: float,
     sinkhorn_iters: int,
     hc_mult: int = 4,
+    fn_rounded: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """TK ``mhc_pre`` wrapper.
 
@@ -222,6 +223,7 @@ def tk_mhc_pre(
             pre_eps=pre_eps,
             sinkhorn_eps=sinkhorn_eps,
             sinkhorn_repeat=sinkhorn_iters,
+            fn_rounded=fn_rounded,
         )
         return out, post_mix, comb_mix
     except Exception as e:

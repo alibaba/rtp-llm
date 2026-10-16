@@ -81,21 +81,31 @@ def create_per_token_group_quant_fp8_output_scale(
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
         # TODO(FIXME): Fix cuda kernel and recover here to empty.
-        return torch.empty(
+        storage = torch.empty(
             (*x_batch, aligned_k // 4, aligned_mn),
             device=device,
             dtype=torch.int,
-        ).transpose(-1, -2)[..., :x_s_mn, :]
+        )
+        if not x_batch and x_s_mn > 0:
+            # Keep the full padded allocation: quant kernels also write rows
+            # beyond logical M. Only the redundant intermediate views disappear.
+            return storage.as_strided((x_s_mn, aligned_k // 4), (1, aligned_mn))
+        return storage.transpose(-1, -2)[..., :x_s_mn, :]
     elif column_major_scales:
         if scale_tma_aligned:
             # TODO extract "align" function
             # aligned to 4 * sizeof(float)
             aligned_size = (x_shape[-2] + 3) // 4 * 4
-            return torch.empty(
+            storage = torch.empty(
                 x_shape[:-2] + (x_shape[-1] // group_size, aligned_size),
                 device=device,
                 dtype=torch.float32,
-            ).permute(-1, -2)[: x_shape[-2], :]
+            )
+            if len(x_shape) == 2 and x_shape[0] > 0:
+                return storage.as_strided(
+                    (x_shape[0], x_shape[1] // group_size), (1, aligned_size)
+                )
+            return storage.permute(-1, -2)[: x_shape[-2], :]
         else:
             return torch.empty(
                 (x_shape[-1] // group_size,) + x_shape[:-1],
@@ -126,7 +136,11 @@ def sgl_per_token_group_quant_fp8(
     assert x.is_contiguous(), "`x` is not contiguous"
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
-    x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
+    x_q = (
+        torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
+        if fuse_silu_and_mul
+        else torch.empty_like(x, dtype=fp8_dtype)
+    )
     x_s = create_per_token_group_quant_fp8_output_scale(
         x_shape=out_shape,
         device=x.device,
@@ -469,9 +483,7 @@ def requant_weight_ue8m0(
     )
     *batch_dims, n, k = weight_dequant.shape
     weight_dequant_flat = weight_dequant.view((-1, k))
-    out_w_flat, out_s_flat = per_block_cast_to_fp8(
-        weight_dequant_flat, use_ue8m0=True
-    )
+    out_w_flat, out_s_flat = per_block_cast_to_fp8(weight_dequant_flat, use_ue8m0=True)
 
     out_w = out_w_flat.view((*batch_dims, n, k))
     out_s = out_s_flat.view(

@@ -114,9 +114,7 @@ class _NCCLLib:
                 ctypes.POINTER(_ncclWindow_t),
                 ctypes.c_int,
             ]
-        self._has_window_deregister = hasattr(
-            self._lib, "ncclCommWindowDeregister"
-        )
+        self._has_window_deregister = hasattr(self._lib, "ncclCommWindowDeregister")
         if self._has_window_deregister:
             self._lib.ncclCommWindowDeregister.restype = _ncclResult_t
             self._lib.ncclCommWindowDeregister.argtypes = [
@@ -140,26 +138,18 @@ class _NCCLLib:
         unique_id_cpu = torch.empty(128, dtype=torch.uint8)
         if rank == 0:
             self._check(self._lib.ncclGetUniqueId(ctypes.byref(unique_id)))
-            ctypes.memmove(
-                unique_id_cpu.data_ptr(), ctypes.addressof(unique_id), 128
-            )
+            ctypes.memmove(unique_id_cpu.data_ptr(), ctypes.addressof(unique_id), 128)
 
         # A NCCL process group cannot broadcast a CPU tensor. Use the existing
         # torch communicator once to distribute the new communicator's ID.
         unique_id_device = unique_id_cpu.to(device)
-        dist.broadcast(
-            unique_id_device, src=root_global_rank, group=process_group
-        )
+        dist.broadcast(unique_id_device, src=root_global_rank, group=process_group)
         unique_id_cpu = unique_id_device.cpu().contiguous()
-        ctypes.memmove(
-            ctypes.addressof(unique_id), unique_id_cpu.data_ptr(), 128
-        )
+        ctypes.memmove(ctypes.addressof(unique_id), unique_id_cpu.data_ptr(), 128)
 
         comm = _ncclComm_t()
         self._check(
-            self._lib.ncclCommInitRank(
-                ctypes.byref(comm), world_size, unique_id, rank
-            )
+            self._lib.ncclCommInitRank(ctypes.byref(comm), world_size, unique_id, rank)
         )
         return comm
 
@@ -223,9 +213,7 @@ _SYMM_POOLS: Dict[Tuple[Any, int], Any] = {}
 _SYMM_POOL_FAILED: set[Tuple[Any, int]] = set()
 _SYMM_INIT_DONE: set[Tuple[Any, int]] = set()
 _SYMM_BASES: Dict[Tuple[Any, int, str, torch.dtype], torch.Tensor] = {}
-_SYMM_VIEWS: Dict[
-    Tuple[Any, int, str, torch.dtype, Tuple[int, ...]], torch.Tensor
-] = {}
+_SYMM_VIEWS: Dict[Tuple[Any, int, str, torch.dtype, Tuple[int, ...]], torch.Tensor] = {}
 _SYMM_WINDOWS: Dict[Tuple[Any, int, int], Any] = {}
 _SYMM_CAPACITY_NBYTES: Dict[Tuple[Any, int, int], int] = {}
 _SYMM_ROLE_STREAMS: Dict[Tuple[Any, int, str], int] = {}
@@ -360,9 +348,9 @@ def _symm_max_nbytes(process_group, device: torch.device) -> int | None:
         )
 
         capability_major = torch.cuda.get_device_capability(device)[0]
-        return TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES.get(
-            capability_major, {}
-        ).get(_world_size(process_group))
+        return TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES.get(capability_major, {}).get(
+            _world_size(process_group)
+        )
     except Exception:
         return None
 
@@ -553,6 +541,13 @@ def warmup(
         _init_symm_windows(process_group, resolved_device)
 
 
+def init_direct_all_gather(process_group, device: torch.device) -> None:
+    """Initialize transport only, without reserving CP symmetric windows."""
+    if device.type != "cuda" or str(dist.get_backend(process_group)).lower() != "nccl":
+        raise RuntimeError("direct AllGather requires a CUDA NCCL process group")
+    _get_comm(process_group, device)
+
+
 def init(process_group, device: Any) -> None:
     """Distributed-startup entry point for all optional GLM5 CP resources."""
     warmup(process_group, device)
@@ -590,6 +585,7 @@ def all_gather_into_tensor(
     *,
     group: Any = None,
     stream: torch.cuda.Stream | None = None,
+    direct: bool = False,
 ) -> None:
     """Gather into ``output`` using pynccl or the original C10D fallback.
 
@@ -597,7 +593,7 @@ def all_gather_into_tensor(
     ``output`` on the same stream, which supplies the required dependency.
     """
     process_group = _resolve_process_group(group)
-    if not enabled():
+    if not enabled() and not direct:
         dist.all_gather_into_tensor(output, input, group=process_group)
         return
 
@@ -606,7 +602,7 @@ def all_gather_into_tensor(
     # on the fixed GLM5 call-site contracts; opt in when diagnosing a new path.
     if _PYNCCL_VALIDATE:
         _validate_all_gather(output, input, process_group)
-    gather_stream = stream or torch.cuda.current_stream(input.device)
+    gather_stream = stream or torch.cuda.current_stream(input.device.index)
     lib, comm = _require_comm(process_group, input.device)
     lib.all_gather(
         input.data_ptr(),
@@ -628,7 +624,9 @@ def all_gather(
     if not enabled():
         return _torch_all_gather(input, group=group)
     if input.dim() == 0:
-        raise ValueError("GLM5 CP AllGather expects a tensor with at least one dimension")
+        raise ValueError(
+            "GLM5 CP AllGather expects a tensor with at least one dimension"
+        )
 
     process_group = _resolve_process_group(group)
     world_size = _world_size(process_group)
@@ -642,10 +640,8 @@ def all_gather(
     )
     gather_stream = None
     if output is not None:
-        gather_stream = torch.cuda.current_stream(input.device)
-        if not _symm_stream_allowed(
-            role, gather_stream, process_group, input.device
-        ):
+        gather_stream = torch.cuda.current_stream(input.device.index)
+        if not _symm_stream_allowed(role, gather_stream, process_group, input.device):
             # A separate stream could still be reading the persistent role
             # buffer. Use an ordinary output instead of adding hot-path events.
             output = None

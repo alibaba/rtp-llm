@@ -18,6 +18,15 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
+_PREFILL_DIRECT_TP_GATHER = (
+    os.environ.get("GLM53_PREFILL_DIRECT_TP_GATHER", "0") == "1"
+)
+_GLM53_STABLE_TP_REDUCE = False
+_GLM53_PREFILL_STABLE_TP_REDUCE = False
+_GLM53_PREFILL_STABLE_TP_FUSION = False
+_GLM53_TP_REDUCE_WORKSPACE_REUSE = False
+_TP_REDUCE_WORKSPACE_LIMIT_BYTES = 256 * 1024**2
+_TP_REDUCE_WORKSPACE_MAX_ENTRIES = 32
 
 
 class Group(Enum):
@@ -37,6 +46,82 @@ _cpu_tp_broadcaster_base_path: Optional[str] = None
 _cpu_world_group: Optional[torch.distributed.ProcessGroup] = None
 _rocm_rccl = None
 _symm_mem = None
+_tp_process_group = None
+_tp_world_size = 0
+_tp_reduce_workspaces = {}
+_tp_reduce_workspace_bytes = 0
+
+
+def _refresh_glm53_collective_options() -> None:
+    """Freeze service-level GLM53 collective options outside the hot path."""
+    global _GLM53_STABLE_TP_REDUCE
+    global _GLM53_PREFILL_STABLE_TP_REDUCE
+    global _GLM53_PREFILL_STABLE_TP_FUSION
+    global _GLM53_TP_REDUCE_WORKSPACE_REUSE
+    _GLM53_STABLE_TP_REDUCE = (
+        os.environ.get("GLM53_STABLE_TP_REDUCE", "0") == "1"
+    )
+    _GLM53_PREFILL_STABLE_TP_REDUCE = (
+        os.environ.get("GLM53_PREFILL_STABLE_TP_REDUCE", "0") == "1"
+    )
+    _GLM53_PREFILL_STABLE_TP_FUSION = (
+        os.environ.get("GLM53_PREFILL_STABLE_TP_FUSION", "0") == "1"
+    )
+    _GLM53_TP_REDUCE_WORKSPACE_REUSE = (
+        os.environ.get("GLM53_TP_REDUCE_WORKSPACE_REUSE", "0") == "1"
+    )
+
+
+def _reset_tp_collective_context() -> None:
+    global _tp_process_group, _tp_world_size
+    global _tp_reduce_workspaces, _tp_reduce_workspace_bytes
+    _tp_process_group = None
+    _tp_world_size = 0
+    _tp_reduce_workspaces.clear()
+    _tp_reduce_workspace_bytes = 0
+
+
+def _get_tp_collective_context():
+    """Resolve the immutable TP group and size once per distributed lifetime."""
+    global _tp_process_group, _tp_world_size
+    if _tp_process_group is None:
+        _tp_process_group = _get_group(Group.TP)
+        if _parallelism_config is not None:
+            _tp_world_size = _parallelism_config.tp_size
+        else:
+            _tp_world_size = torch.distributed.get_world_size(_tp_process_group)
+    return _tp_process_group, _tp_world_size
+
+
+def _get_tp_reduce_workspace(tensor: torch.Tensor, world: int) -> torch.Tensor:
+    """Return a same-stream reusable gather buffer, bounded without eviction."""
+    if not _GLM53_TP_REDUCE_WORKSPACE_REUSE:
+        return tensor.new_empty((world, *tensor.shape))
+    global _tp_reduce_workspace_bytes
+    stream = torch.cuda.current_stream(tensor.device)
+    key = (
+        tensor.device.index,
+        stream.cuda_stream,
+        tensor.dtype,
+        tuple(tensor.shape),
+        world,
+    )
+    workspace = _tp_reduce_workspaces.get(key)
+    if workspace is not None:
+        return workspace
+    workspace = tensor.new_empty((world, *tensor.shape))
+    workspace_bytes = workspace.numel() * workspace.element_size()
+    if (
+        len(_tp_reduce_workspaces) < _TP_REDUCE_WORKSPACE_MAX_ENTRIES
+        and _tp_reduce_workspace_bytes + workspace_bytes
+        <= _TP_REDUCE_WORKSPACE_LIMIT_BYTES
+    ):
+        _tp_reduce_workspaces[key] = workspace
+        _tp_reduce_workspace_bytes += workspace_bytes
+    return workspace
+
+
+_refresh_glm53_collective_options()
 
 
 def _get_or_create_mtp_indexer_cpu_world_group() -> torch.distributed.ProcessGroup:
@@ -160,6 +245,9 @@ def init_distributed_environment(
         RuntimeError: If already initialized and not destroyed
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+
+    _refresh_glm53_collective_options()
+    _reset_tp_collective_context()
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -329,11 +417,16 @@ def _init_glm5_cp_comm(parallelism_config: ParallelismConfig) -> None:
 
     from rtp_llm.models_py.distributed import pynccl_cp
 
-    if not pynccl_cp.enabled():
+    if not pynccl_cp.enabled() and not _PREFILL_DIRECT_TP_GATHER:
+        return
+    if torch.version.hip is not None:
         return
     process_group = _get_group(Group.TP)
     device = torch.device("cuda", parallelism_config.local_rank)
-    pynccl_cp.init(process_group, device)
+    if pynccl_cp.enabled():
+        pynccl_cp.init(process_group, device)
+    else:
+        pynccl_cp.init_direct_all_gather(process_group, device)
     logging.info(
         "[rank: %s] initialized GLM5 pynccl CP resources",
         parallelism_config.world_rank,
@@ -649,6 +742,7 @@ def destroy_distributed_environment():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
+    _reset_tp_collective_context()
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
@@ -773,21 +867,54 @@ def all_reduce(
     Returns:
         All-reduced tensor.
     """
-    stable_prefill = False
-    if os.environ.get("GLM53_PREFILL_STABLE_TP_REDUCE", "0") == "1":
+    stable_reduce = _GLM53_STABLE_TP_REDUCE
+    if not stable_reduce and _GLM53_PREFILL_STABLE_TP_REDUCE:
         from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
 
         # This scope exists only for GLM53 prefill, and excludes target verify.
-        stable_prefill = metadata_cache() is not None
-    if group == Group.TP and tensor.dtype == torch.bfloat16 and stable_prefill:
+        stable_reduce = metadata_cache() is not None
+    if group == Group.TP and tensor.dtype == torch.bfloat16 and stable_reduce:
         # Cold and cached prefills have different message sizes. BF16
         # collectives can select different trees and round partial sums
         # differently for identical per-rank inputs. Transport BF16 values,
         # then add every source in the same rank order with FP32 accumulation.
-        process_group = _get_group(group)
+        process_group, world = _get_tp_collective_context()
+        if _GLM53_PREFILL_STABLE_TP_FUSION:
+            from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+            if (
+                metadata_cache() is not None
+                and tensor.is_cuda
+                and torch.version.hip is None
+                and tensor.is_contiguous()
+                and tensor.ndim > 0
+                and tensor.numel() > 0
+                and not tensor.requires_grad
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                from rtp_llm.models_py.triton_kernels.common.stable_tp_reduce import (
+                    sum_bf16_rank_order,
+                )
+
+                parts = _get_tp_reduce_workspace(tensor, world)
+                gathered = parts.view(world * tensor.shape[0], *tensor.shape[1:])
+                if _PREFILL_DIRECT_TP_GATHER and world > 1:
+                    from rtp_llm.models_py.distributed import pynccl_cp
+
+                    # Both transport and ordered reduction use the caller's
+                    # stream; no per-layer C10D Work or cross-stream events.
+                    pynccl_cp.all_gather_into_tensor(
+                        gathered, tensor, group=process_group, direct=True
+                    )
+                else:
+                    torch.distributed.all_gather_into_tensor(
+                        gathered, tensor, group=process_group
+                    )
+                sum_bf16_rank_order(parts, tensor)
+                return tensor
         parts = [
             torch.empty_like(tensor)
-            for _ in range(torch.distributed.get_world_size(process_group))
+            for _ in range(world)
         ]
         torch.distributed.all_gather(parts, tensor.contiguous(), group=process_group)
         reduction = torch.zeros_like(tensor, dtype=torch.float32)
@@ -848,18 +975,40 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # AllGather writes every element, including any padding supplied by the
+    # sender. Initializing this destination adds an unnecessary CUDA launch.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,
     )
+    if (
+        _PREFILL_DIRECT_TP_GATHER
+        and group == Group.TP
+        and world_size > 1
+        and tensor.is_cuda
+        and torch.version.hip is None
+        and tensor.dtype == torch.bfloat16
+        and tensor.is_contiguous()
+        and tensor.numel() > 0
+        and not tensor.requires_grad
+    ):
+        from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+        if (
+            metadata_cache() is not None
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.distributed import pynccl_cp
+
+            # MoE token gathering uses the same TP group as ordered reduction.
+            # Submit and consume on the caller stream, preserving rank order.
+            pynccl_cp.all_gather_into_tensor(
+                tensor_list, tensor, group=process_group, direct=True
+            )
+            return tensor_list
     torch.distributed.all_gather_into_tensor(tensor_list, tensor, group=process_group)
     return tensor_list
-
-    # reference old implementation
-    # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
-    # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
-    # return torch.cat(tensor_list, dim=0)
 
 
 def reduce_scatter(tensor: torch.Tensor, group: Group) -> torch.Tensor:

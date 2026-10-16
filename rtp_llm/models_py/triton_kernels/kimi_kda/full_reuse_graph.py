@@ -4,6 +4,7 @@ import logging
 import os
 from collections import Counter, OrderedDict
 from contextlib import nullcontext
+from functools import lru_cache
 from itertools import accumulate
 
 import torch
@@ -23,6 +24,10 @@ _MAX_GRAPHS = 256
 _MAX_BYTES = 16 * 1024**3
 _BUDGETS = {}
 _BASE_LENGTHS = {}
+_PREPARED_SMALL_PAIRS = OrderedDict()
+_RECENT_CAPTURES = []
+_COMPILED_DISPATCH = os.environ.get("GLM53_KDA_COMPILED_DISPATCH", "0") == "1"
+_COMPACT_SINGLE_LONG = os.environ.get("GLM53_KDA_COMPACT_SINGLE_LONG", "0") == "1"
 
 
 def _workspace_budget(device):
@@ -47,6 +52,10 @@ def graph_stats():
         **_STATS,
         "entries": len(_GRAPHS),
         "estimated_bytes": sum(e[4] for e in _GRAPHS.values()),
+        "single_long_entries": sum(
+            len(key[3]) == 1 and key[3][0] > 8192 for key in _GRAPHS
+        ),
+        **({"recent_captures": list(_RECENT_CAPTURES)} if _RECENT_CAPTURES else {}),
     }
 
 
@@ -73,11 +82,12 @@ def _pack_inputs(
     pcu,
     HD: tl.constexpr,
     H: tl.constexpr,
+    BETA_STRIDE: tl.constexpr,
     STATE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    slot = tl.program_id(0).to(tl.int64)
-    i = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+    slot = tl.program_id(1).to(tl.int64)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     seq = tl.load(inverse + slot).to(tl.int64)
     start = tl.load(cu + seq, seq >= 0, 0).to(tl.int64)
     target = tl.load(pcu + slot).to(tl.int64)
@@ -90,7 +100,8 @@ def _pack_inputs(
     tl.store(pv + dst, tl.load(v + src, m & (seq >= 0), 0), m)
     tl.store(pg + dst, tl.load(g + src, m & (seq >= 0), 0), m)
     mb = i < length * H
-    tl.store(pb + target * H + i, tl.load(beta + start * H + i, mb & (seq >= 0), 0), mb)
+    beta_src = (start + i // H) * BETA_STRIDE + i % H
+    tl.store(pb + target * H + i, tl.load(beta + beta_src, mb & (seq >= 0), 0), mb)
     ms = i < STATE
     tl.store(
         ps + slot * STATE + i, tl.load(state + seq * STATE + i, ms & (seq >= 0), 0), ms
@@ -119,10 +130,10 @@ def _unpack_outputs(
     selected=None,
     SUBSET: tl.constexpr = False,
 ):
-    seq = tl.program_id(0).to(tl.int64)
+    seq = tl.program_id(1).to(tl.int64)
     if SUBSET:
         seq = tl.load(selected + seq).to(tl.int64)
-    i = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     slot = tl.load(forward + seq).to(tl.int64)
     start = tl.load(cu + seq).to(tl.int64)
     length = tl.load(cu + seq + 1).to(tl.int64) - start
@@ -141,14 +152,55 @@ def _unpack_outputs(
     )
 
 
+@lru_cache(maxsize=128)
+def _pack_runner(device, heads, beta_dtype, beta_stride, cu_dtype, grid):
+    # Cache code/grid only. The public runner reads the current stream per call.
+    types = (torch.bfloat16,) * 4 + (beta_dtype,) + (torch.float32,) * 3
+    kernel = _pack_inputs.warmup(
+        *types,
+        cu_dtype,
+        torch.int64,
+        *types,
+        torch.int32,
+        heads * 128,
+        heads,
+        beta_stride,
+        heads * 128 * 128,
+        1024,
+        grid=grid,
+    )
+    return kernel[grid]
+
+
+@lru_cache(maxsize=128)
+def _unpack_runner(device, heads, cu_dtype, grid, subset):
+    types = (torch.bfloat16, torch.float32, torch.float32)
+    kernel = _unpack_outputs.warmup(
+        *types,
+        *types,
+        cu_dtype,
+        torch.int64,
+        torch.int64,
+        torch.int32,
+        torch.int64,
+        heads * 128,
+        heads * 128 * 128,
+        1024,
+        torch.int64 if subset else None,
+        subset,
+        grid=grid,
+    )
+    return kernel[grid]
+
+
 def _device_indices(values, device):
     host = torch.tensor(values, dtype=torch.int64, device="cpu", pin_memory=True)
     return host.to(device, non_blocking=True), host
 
 
-def _layout(lengths, device):
+def _layout(lengths, device, minimum_capacity=1):
     cache = metadata_cache()
-    key = ("kda_full_graph_layout", lengths, device)
+    key = ("kda_full_graph_layout", lengths, device, minimum_capacity)
     if cache is not None and key in cache:
         return cache[key]
     groups = {}
@@ -162,12 +214,12 @@ def _layout(lengths, device):
         capacity = (
             triton.next_power_of_2(len(lengths))
             if len(lengths) <= 16
-            else triton.cdiv(len(lengths), 8) * 8
+            else ((len(lengths) + 7) // 8) * 8
         )
         capacities = {length: capacity for length in groups}
     else:
         capacities = {
-            length: triton.next_power_of_2(len(sequences))
+            length: max(minimum_capacity, triton.next_power_of_2(len(sequences)))
             for length, sequences in groups.items()
         }
     packed_lengths, inverse = [], []
@@ -179,7 +231,7 @@ def _layout(lengths, device):
         inverse.extend(sequences + [-1] * (capacity - len(sequences)))
         for index, seq in enumerate(sequences):
             forward[seq] = first + index
-    real_offsets = (0, *accumulate(triton.cdiv(length, 64) for length in lengths))
+    real_offsets = (0, *accumulate(((length + 63) // 64) for length in lengths))
     gpu = [_device_indices(v, device) for v in (inverse, forward, real_offsets)]
     result = (tuple(packed_lengths), tuple(v[0] for v in gpu), tuple(v[1] for v in gpu))
     if cache is not None:
@@ -187,13 +239,18 @@ def _layout(lengths, device):
     return result
 
 
-def _reference(buffers, cu, indices, norm_rows):
+def _reference(buffers, cu, indices, norm_rows, beta_logits):
     # Import lazily to keep chunk.py's public wrapper free of an import cycle.
     from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_fwd import chunk_kda_fwd
 
     q, k, v, g, beta, state, a, bias = buffers
     q = l2norm_fwd(q, config_rows=norm_rows)
     k = l2norm_fwd(k, config_rows=norm_rows)
+    if beta_logits:
+        # Capture the same PyTorch FP32 sigmoid that the caller used to launch
+        # before every replay. The packed BF16 logits are graph-private, so the
+        # conversion allocation is also graph-private and reused on replay.
+        beta = beta.float().sigmoid()
     result = chunk_kda_fwd(
         q,
         k,
@@ -253,29 +310,42 @@ def _unpack_group_outputs(
 
 def _length_group_plans(lengths, device, skip=0):
     cache = metadata_cache()
-    key = ("kda_length_group_plans", lengths, device, skip)
+    key = ("kda_direct_group_plans", lengths, device, skip)
     if key in cache:
         return cache[key]
     real_chunks, real_host = _device_indices(
-        (0, *accumulate(triton.cdiv(n, 64) for n in lengths)), device
+        (0, *accumulate(((n + 63) // 64) for n in lengths)), device
     )
     groups = {}
+    skip_counts = dict(skip) if isinstance(skip, tuple) else None
     for seq, length in enumerate(lengths):
         groups.setdefault(length, []).append(seq)
     plans = []
     for length, sequences in sorted(groups.items()):
-        sequences = sequences[skip:]
+        sequences = sequences[
+            skip_counts.get(length, 0) if skip_counts is not None else skip :
+        ]
         if not sequences:
             continue
-        ids, ids_host = _device_indices(sequences, device)
-        boundaries = tuple(i * length for i in range(len(sequences) + 1))
-        host = torch.tensor(boundaries, dtype=torch.int32, pin_memory=True)
-        cu = host.to(device, non_blocking=True)
-        cache[("kda_sequence_boundaries", tensor_key(cu), boundaries[-1])] = boundaries
-        plans.append((length, len(sequences), ids, cu, ids_host, host))
-    result = (plans, real_chunks, real_host)
-    cache[key] = result
-    return result
+        # Overflow frequency must not create another graph family during
+        # admission. Replay the same two-request template for each tile.
+        for start in range(0, len(sequences), 2):
+            tile = sequences[start : start + 2]
+            inverse = tile + [-1] * (2 - len(tile))
+            forward = [-1] * len(lengths)
+            for slot, seq in enumerate(tile):
+                forward[seq] = slot
+            gpu = [_device_indices(v, device) for v in (inverse, forward, tile)]
+            plans.append(
+                (
+                    (length, length),
+                    (gpu[0][0], gpu[1][0], real_chunks, gpu[2][0]),
+                    (gpu[0][1], gpu[1][1], real_host, gpu[2][1]),
+                    2,
+                )
+            )
+    cache[key] = plans
+    return plans
 
 
 def _base_layout(lengths, device, heads):
@@ -283,11 +353,12 @@ def _base_layout(lengths, device, heads):
         return None
     # Reserve only 1/2 complete requests per observed length. Excess requests
     # retain their exact length graph. This never pads a real partial GEMM.
-    capacity = 1 if len(lengths) <= 48 else 2
-    stream = torch.cuda.current_stream(device).cuda_stream
+    capacity = 2
+    stream = torch.cuda.current_stream(device.index).cuda_stream
     identity = (device.index, stream, heads, capacity)
-    universe = _BASE_LENGTHS.setdefault(identity, set())
-    universe.update(lengths)
+    # Keep the first busy family's graph stable. Later lengths use independent
+    # tiles; growing this union captured another large private pool each time.
+    universe = _BASE_LENGTHS.setdefault(identity, frozenset(lengths))
     if len(universe) > 64 or capacity * sum(universe) > 3 * sum(lengths):
         return None
     cache = metadata_cache()
@@ -307,7 +378,7 @@ def _base_layout(lengths, device, heads):
         for slot, seq in enumerate(sequences):
             forward[seq] = first + slot
             selected.append(seq)
-    chunks = (0, *accumulate(triton.cdiv(n, 64) for n in lengths))
+    chunks = (0, *accumulate(((n + 63) // 64) for n in lengths))
     gpu = [_device_indices(v, device) for v in (inverse, forward, chunks, selected)]
     result = (
         tuple(packed),
@@ -319,10 +390,178 @@ def _base_layout(lengths, device, heads):
     return result
 
 
-def _length_group_reuse(inputs, cu, lengths, norm_rows):
+def _prepare_single_length_families(inputs, cu, lengths, beta_logits):
+    q = inputs[0]
+    if q.shape[2] > 32 or max(lengths) > 512:
+        return
+    cache = metadata_cache()
+    stream = torch.cuda.current_stream(q.device.index).cuda_stream
+    ready = (
+        "kda_prepare_lengths",
+        tuple(sorted(set(lengths))),
+        q.device,
+        stream,
+        q.shape[2],
+        beta_logits,
+    )
+    if cache is not None and ready in cache:
+        return
+    if cache is not None:
+        cache[ready] = True
+    chunks = (0, *accumulate(((n + 63) // 64) for n in lengths))
+    unique = sorted(set(lengths))
+    # Prioritize two-request leaves across every length before reserving the
+    # draining capacities. This preserves headroom for mixed-length batches.
+    families = [(length, 2, small) for length in unique for small in (True, False)]
+    # Heterogeneous medium groups use two-request tiles. Homogeneous batches
+    # up to 512 tokens also use whole-batch graphs: prepare their smaller
+    # capacities now, so draining a busy queue cannot trigger a cold capture.
+    peak_capacity = (
+        triton.next_power_of_2(len(lengths))
+        if len(unique) == 1 or (len(unique) == 2 and unique[-1] <= 128)
+        else 2
+    )
+    for capacity in (4, 8, 16, 32, 64):
+        if capacity > peak_capacity:
+            break
+        for length in unique:
+            if length > 128 and len(unique) != 1:
+                continue
+            lower_rows = (capacity // 2 + 1) * length * q.shape[2]
+            upper_rows = capacity * length * q.shape[2]
+            if lower_rows <= 65536:
+                families.append((length, capacity, True))
+            if upper_rows > 65536:
+                families.append((length, capacity, False))
+    for length, capacity, small in families:
+        seq = lengths.index(length)
+        packed = (length,) * capacity
+        key = (q.device.index, stream, q.shape[2], packed, beta_logits, small)
+        if key in _GRAPHS:
+            continue
+        estimate = 2 * (
+            capacity * length * q.shape[2] * 128 * 10
+            + capacity * length * q.shape[2] * 4
+            + capacity * q.shape[2] * 128 * 128 * 8
+            + capacity * ((length + 63) // 64) * q.shape[2] * 128 * 128 * 4
+        )
+        resident = sum(e[4] for k, e in _GRAPHS.items() if k[0] == q.device.index)
+        if (
+            resident + estimate > _workspace_budget(q.device) * 0.8
+            or len(_GRAPHS) >= _MAX_GRAPHS
+        ):
+            return
+        forward = [-1] * len(lengths)
+        forward[seq] = 0
+        gpu = [
+            _device_indices(v, q.device)
+            for v in ([seq] + [-1] * (capacity - 1), forward, chunks, [seq])
+        ]
+        layout = (
+            packed,
+            tuple(v[0] for v in gpu),
+            tuple(v[1] for v in gpu),
+            capacity,
+        )
+        chunk_kda_full_reuse_graph(
+            *inputs[:6],
+            cu,
+            inputs[6],
+            inputs[7],
+            _normalization_rows=1 if small else 65537,
+            _packed_layout=layout,
+            _beta_logits=beta_logits,
+        )
+        _STATS["prepared_single_lengths"] += 1
+
+
+def _prepare_small_pair_family(inputs, cu, lengths, norm_rows, beta_logits):
+    q = inputs[0]
+    unique = tuple(sorted(set(lengths)))
+    # Prepare every admitted bucket through the observed busy peak, including
+    # normalization changes while the queue drains. Padding adds independent
+    # sequences and never changes a real partial GEMM's shape.
+    if len(unique) != 2 or unique[-1] > 128 or q.shape[2] > 32:
+        return
+    stream = torch.cuda.current_stream(q.device.index).cuda_stream
+    identity = (q.device.index, stream, q.shape[2], unique, beta_logits)
+    epoch = _STATS["evictions"]
+    peak = (
+        triton.next_power_of_2(len(lengths))
+        if len(lengths) <= 16
+        else ((len(lengths) + 7) // 8) * 8
+    )
+    prepared = _PREPARED_SMALL_PAIRS.get(identity)
+    if prepared is not None and prepared[0] == epoch and prepared[1] >= peak:
+        _PREPARED_SMALL_PAIRS.move_to_end(identity)
+        return
+    _PREPARED_SMALL_PAIRS[identity] = (epoch, peak)
+    while len(_PREPARED_SMALL_PAIRS) > _MAX_GRAPHS:
+        _PREPARED_SMALL_PAIRS.popitem(last=False)
+    groups = {n: [i for i, value in enumerate(lengths) if value == n] for n in unique}
+    chunks = (0, *accumulate(((n + 63) // 64) for n in lengths))
+    for capacity in (2, 4, 8, 16, 24, 32, 40, 48, 56, 64):
+        if capacity > peak:
+            break
+        first_count = capacity // 2 + 1 if capacity <= 16 else capacity - 7
+        flags = []
+        if first_count * unique[0] * q.shape[2] <= 65536:
+            flags.append(True)
+        if capacity * unique[-1] * q.shape[2] > 65536:
+            flags.append(False)
+        for small in flags:
+            packed = tuple(n for n in unique for _ in range(capacity))
+            key = (q.device.index, stream, q.shape[2], packed, beta_logits, small)
+            if key in _GRAPHS:
+                continue
+            # Preparation must not evict a live template or change the global cap.
+            estimate = 2 * (
+                sum(packed) * q.shape[2] * 128 * 10
+                + sum(packed) * q.shape[2] * 4
+                + len(packed) * q.shape[2] * 128 * 128 * 8
+                + sum(((n + 63) // 64) for n in packed) * q.shape[2] * 128 * 128 * 4
+            )
+            resident = sum(e[4] for k, e in _GRAPHS.items() if k[0] == q.device.index)
+            if (
+                resident + estimate > _workspace_budget(q.device) * 0.8
+                or len(_GRAPHS) >= _MAX_GRAPHS
+            ):
+                return
+            inverse, selected = [], []
+            forward = [-1] * len(lengths)
+            for n in unique:
+                sequences = groups[n][:capacity]
+                start = len(inverse)
+                inverse.extend(sequences + [-1] * (capacity - len(sequences)))
+                for slot, seq in enumerate(sequences):
+                    forward[seq] = start + slot
+                    selected.append(seq)
+            gpu = [
+                _device_indices(v, q.device)
+                for v in (inverse, forward, chunks, selected)
+            ]
+            layout = (
+                packed,
+                tuple(v[0] for v in gpu),
+                tuple(v[1] for v in gpu),
+                capacity,
+            )
+            chunk_kda_full_reuse_graph(
+                *inputs[:6],
+                cu,
+                inputs[6],
+                inputs[7],
+                _normalization_rows=1 if small else 65537,
+                _packed_layout=layout,
+                _beta_logits=beta_logits,
+            )
+            _STATS["prepared_small_pairs"] += 1
+
+
+def _length_group_reuse(inputs, cu, lengths, norm_rows, beta_logits):
     # A new heterogeneous batch must not invalidate every existing graph.
     # Capture each repeated length independently; frequency changes use the
-    # existing power-of-two capacities. All input/output storage is independent.
+    # same two-request tiles. All input/output storage is independent.
     token = _FORWARD_METADATA.set({}) if metadata_cache() is None else None
     try:
         q, k, v, g, beta, state, a, bias = inputs
@@ -336,69 +575,70 @@ def _length_group_reuse(inputs, cu, lengths, norm_rows):
                 inputs[7],
                 _normalization_rows=norm_rows,
                 _packed_layout=base,
+                _beta_logits=beta_logits,
             )
-        skip = base[3] if result is not None else 0
-        plans, real_chunks, _ = _length_group_plans(lengths, q.device, skip=skip)
-        heads, state_size = q.shape[2], q.shape[2] * 128 * 128
+        if result is not None:
+            _STATS["base_replays"] += 1
+            stream = torch.cuda.current_stream(q.device.index).cuda_stream
+            key = (
+                q.device.index,
+                stream,
+                q.shape[2],
+                base[0],
+                beta_logits,
+                norm_rows <= 65536,
+            )
+            other = (*key[:-1], not key[-1])
+            resident = sum(e[4] for k, e in _GRAPHS.items() if k[0] == q.device.index)
+            if (
+                other not in _GRAPHS
+                and resident + _GRAPHS[key][4] <= _workspace_budget(q.device) * 0.8
+                and len(_GRAPHS) < _MAX_GRAPHS
+            ):
+                # This call owns separate outputs, which are intentionally
+                # discarded. Never scatter alternate normalization into result.
+                chunk_kda_full_reuse_graph(
+                    *inputs[:6],
+                    cu,
+                    inputs[6],
+                    inputs[7],
+                    _normalization_rows=65537 if key[-1] else 1,
+                    _packed_layout=base,
+                    _beta_logits=beta_logits,
+                )
+        skip = (
+            tuple((n, base[3]) for n in sorted(set(base[0])))
+            if result is not None
+            else 0
+        )
+        plans = _length_group_plans(lengths, q.device, skip=skip)
+        heads = q.shape[2]
         if result is None:
             result = (
                 torch.empty_like(q),
                 torch.empty_like(state),
                 state.new_empty(
-                    (1, sum(triton.cdiv(n, 64) for n in lengths), heads, 128, 128)
+                    (1, sum(((n + 63) // 64) for n in lengths), heads, 128, 128)
                 ),
             )
-        for length, count, sequence_ids, group_cu, *_ in plans:
-            shape = (1, count * length, heads, 128)
-            buffers = tuple(t.new_empty(shape) for t in (q, k, v, g)) + (
-                beta.new_empty(shape[:3]),
-                state.new_empty((count, heads, 128, 128)),
-                torch.empty_like(a),
-                torch.empty_like(bias),
-            )
-            _pack_inputs[
-                (count, triton.cdiv(max(length * heads * 128, state_size), 1024))
-            ](
-                *inputs,
-                cu,
-                sequence_ids,
-                *buffers,
-                group_cu,
-                heads * 128,
-                heads,
-                state_size,
-                1024,
-            )
+        for layout in plans:
+            # Pack directly from the original requests into the graph's private
+            # inputs, then scatter once into this call's independently owned
+            # result. No intermediate group tensors or duplicate copies.
             outputs = chunk_kda_full_reuse_graph(
-                *buffers[:5],
-                buffers[5],
-                group_cu,
-                buffers[6],
-                buffers[7],
+                *inputs[:6],
+                cu,
+                inputs[6],
+                inputs[7],
                 _normalization_rows=norm_rows,
+                _packed_layout=layout,
+                _output_buffers=result,
+                _beta_logits=beta_logits,
             )
             if outputs is None:
                 return None
-            _unpack_group_outputs[
-                (
-                    count,
-                    triton.cdiv(
-                        max(length * heads * 128, triton.cdiv(length, 64) * state_size),
-                        1024,
-                    ),
-                )
-            ](
-                *outputs,
-                *result,
-                cu,
-                sequence_ids,
-                real_chunks,
-                length,
-                heads * 128,
-                state_size,
-                1024,
-            )
         _STATS["grouped_calls"] += 1
+        _prepare_single_length_families(inputs, cu, lengths, beta_logits)
         return result
     finally:
         if token is not None:
@@ -418,13 +658,24 @@ def chunk_kda_full_reuse_graph(
     *,
     _normalization_rows=None,
     _packed_layout=None,
+    _minimum_capacity=None,
+    _output_buffers=None,
+    _beta_logits=False,
 ):
     """Return fresh outputs, or None so callers retain their supported fallback."""
     tensors = (q, k, v, g, beta, initial_state, cu_seqlens, A_log, dt_bias)
+    contiguous_tensors = (q, k, v, g, initial_state, cu_seqlens, A_log, dt_bias)
     if os.environ.get("GLM53_KDA_FULL_REUSE_GRAPH", "1") == "0":
         return None
     if (
-        any(t is None or not t.is_cuda or not t.is_contiguous() for t in tensors)
+        any(
+            t is None or not t.is_cuda or not t.is_contiguous()
+            for t in contiguous_tensors
+        )
+        or beta is None
+        or not beta.is_cuda
+        or beta.stride(-1) != 1
+        or beta.stride(-2) <= 0
         or any(t.device != q.device for t in tensors)
         or q.ndim != 4
         or q.shape[0] != 1
@@ -433,7 +684,7 @@ def chunk_kda_full_reuse_graph(
         or not 1 <= initial_state.shape[0] <= 64
         or any(t.shape != q.shape or t.dtype != torch.bfloat16 for t in (q, k, v, g))
         or beta.shape != q.shape[:3]
-        or beta.dtype != torch.float32
+        or beta.dtype != (torch.bfloat16 if _beta_logits else torch.float32)
         or initial_state.shape[1:] != (q.shape[2], 128, 128)
         or initial_state.dtype != torch.float32
         or A_log.numel() != q.shape[2]
@@ -454,18 +705,30 @@ def chunk_kda_full_reuse_graph(
     )
     if _packed_layout is None and (
         len(set(lengths)) > 2
-        or (len(set(lengths)) == 2 and max(lengths) * 10 > min(lengths) * 11)
+        or (
+            len(set(lengths)) == 2
+            and (max(lengths) > 128 or max(lengths) * 10 > min(lengths) * 11)
+        )
     ):
         return _length_group_reuse(
             (q, k, v, g, beta, initial_state, A_log, dt_bias),
             cu_seqlens,
             lengths,
             norm_rows,
+            _beta_logits,
         )
     selected = None
     if _packed_layout is None:
+        if _minimum_capacity is None:
+            # Two sequences longer than 8192 cannot share this <=16384-token
+            # path. Reserving a second slot only executes an empty sequence.
+            _minimum_capacity = (
+                1
+                if _COMPACT_SINGLE_LONG and len(lengths) == 1 and lengths[0] > 8192
+                else 2
+            )
         packed_lengths, (inverse, forward, real_chunks), hosts = _layout(
-            lengths, q.device
+            lengths, q.device, _minimum_capacity
         )
     else:
         packed_lengths, (inverse, forward, real_chunks, selected), hosts, _ = (
@@ -474,7 +737,7 @@ def chunk_kda_full_reuse_graph(
     packed_tokens, heads = sum(packed_lengths), q.shape[2]
     packed_states = len(packed_lengths) * heads * 128 * 128
     packed_checkpoints = (
-        sum(triton.cdiv(n, 64) for n in packed_lengths) * heads * 128 * 128
+        sum(((n + 63) // 64) for n in packed_lengths) * heads * 128 * 128
     )
     conservative_bytes = 2 * (
         packed_tokens * heads * 128 * 10
@@ -488,10 +751,24 @@ def chunk_kda_full_reuse_graph(
         return None
     # Preserve L2Norm's sealed reduction configuration across capacity padding.
     norm_small = norm_rows <= 65536
-    stream = torch.cuda.current_stream(q.device)
-    key = (q.device.index, stream.cuda_stream, heads, packed_lengths, norm_small)
+    stream = torch.cuda.current_stream(q.device.index)
+    key = (
+        q.device.index,
+        stream.cuda_stream,
+        heads,
+        packed_lengths,
+        _beta_logits,
+        norm_small,
+    )
     entry = _GRAPHS.get(key)
     inputs = (q, k, v, g, beta, initial_state, A_log, dt_bias)
+    # Token/checkpoint tiles can exceed CUDA's 65535-block Y limit. Keep the
+    # bounded sequence count on Y and the large contiguous tile axis on X.
+    pack_grid = (
+        (max(max(packed_lengths) * heads * 128, heads * 128 * 128) + 1023) // 1024,
+        len(packed_lengths),
+        1,
+    )
     scope = (
         torch.profiler.record_function("kda.full_graph")
         if os.environ.get("GLM53_KDA_GRAPH_DIAGNOSTICS") == "1"
@@ -510,13 +787,13 @@ def chunk_kda_full_reuse_graph(
                 (0, *accumulate(packed_lengths)), dtype=torch.int32, pin_memory=True
             )
             pcu = pcu_host.to(q.device, non_blocking=True)
-            offsets = (0, *accumulate(triton.cdiv(n, 64) for n in packed_lengths))
+            offsets = (0, *accumulate(((n + 63) // 64) for n in packed_lengths))
             packed_chunks, chunk_host = _device_indices(offsets, q.device)
             indices_host = torch.tensor(
                 [
                     (i, j)
                     for i, n in enumerate(packed_lengths)
-                    for j in range(triton.cdiv(n, 64))
+                    for j in range(((n + 63) // 64))
                 ],
                 dtype=torch.int32,
                 pin_memory=True,
@@ -527,17 +804,7 @@ def chunk_kda_full_reuse_graph(
             token = _FORWARD_METADATA.set({})
             try:
                 with torch.cuda.stream(capture_stream):
-                    _pack_inputs[
-                        (
-                            len(packed_lengths),
-                            triton.cdiv(
-                                max(
-                                    max(packed_lengths) * heads * 128, heads * 128 * 128
-                                ),
-                                1024,
-                            ),
-                        )
-                    ](
+                    _pack_inputs[pack_grid](
                         *inputs,
                         cu_seqlens,
                         inverse,
@@ -545,18 +812,21 @@ def chunk_kda_full_reuse_graph(
                         pcu,
                         heads * 128,
                         heads,
+                        beta.stride(-2),
                         heads * 128 * 128,
                         1024,
                     )
                     # Warm every native/Triton operation with frozen metadata.
                     for _ in range(2):
-                        _reference(buffers, pcu, indices, norm_rows)
+                        _reference(buffers, pcu, indices, norm_rows, _beta_logits)
                 stream.wait_stream(capture_stream)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(
                     graph, stream=capture_stream, capture_error_mode="thread_local"
                 ):
-                    outputs = _reference(buffers, pcu, indices, norm_rows)
+                    outputs = _reference(
+                        buffers, pcu, indices, norm_rows, _beta_logits
+                    )
                 stream.wait_stream(capture_stream)
             finally:
                 _FORWARD_METADATA.reset(token)
@@ -584,6 +854,16 @@ def chunk_kda_full_reuse_graph(
             )
             _GRAPHS[key] = entry
             _STATS["captures"] += 1
+            if os.environ.get("GLM53_KDA_GRAPH_DIAGNOSTICS") == "1":
+                _RECENT_CAPTURES.append(
+                    {
+                        "lengths": packed_lengths,
+                        "norm_small": norm_small,
+                        "real_sequences": len(lengths),
+                        "real_tokens": q.shape[1],
+                    }
+                )
+                del _RECENT_CAPTURES[:-8]
             while (
                 len(_GRAPHS) > _MAX_GRAPHS
                 or sum(e[4] for k, e in _GRAPHS.items() if k[0] == q.device.index)
@@ -594,56 +874,70 @@ def chunk_kda_full_reuse_graph(
                 _GRAPHS.popitem(last=False)
                 _STATS["evictions"] += 1
             logging.info(
-                "[KDA full reuse graph] capture sequences=%d capacity=%d tokens=%d heads=%d groups=%d resident_bytes=%d",
+                "[KDA full reuse graph] capture sequences=%d capacity=%d tokens=%d heads=%d groups=%d resident_bytes=%d lengths=%s norm_small=%s",
                 len(lengths),
                 len(packed_lengths),
                 q.shape[1],
                 heads,
                 len(set(lengths)),
                 estimated_bytes,
+                packed_lengths,
+                norm_small,
             )
         else:
             _GRAPHS.move_to_end(key)
         buffers, graph, outputs, (pcu, packed_chunks, *_), _ = entry
-        _pack_inputs[
-            (
-                len(packed_lengths),
-                triton.cdiv(
-                    max(max(packed_lengths) * heads * 128, heads * 128 * 128), 1024
-                ),
+        pack_args = (*inputs, cu_seqlens, inverse, *buffers, pcu)
+        compiled = _COMPILED_DISPATCH and q.device.index == torch.cuda.current_device()
+        if compiled and all(t.data_ptr() % 16 == 0 for t in pack_args):
+            _pack_runner(
+                q.device.index,
+                heads,
+                beta.dtype,
+                beta.stride(-2),
+                cu_seqlens.dtype,
+                pack_grid,
+            )(
+                *pack_args,
+                heads * 128,
+                heads,
+                beta.stride(-2),
+                heads * 128 * 128,
+                1024,
             )
-        ](
-            *inputs,
-            cu_seqlens,
-            inverse,
-            *buffers,
-            pcu,
-            heads * 128,
-            heads,
-            heads * 128 * 128,
-            1024,
-        )
+        else:
+            _pack_inputs[pack_grid](
+                *pack_args,
+                heads * 128,
+                heads,
+                beta.stride(-2),
+                heads * 128 * 128,
+                1024,
+            )
         graph.replay()
         _STATS["replays"] += 1
-        result = (
-            torch.empty_like(q),
-            torch.empty_like(initial_state),
-            initial_state.new_empty(
-                (1, sum(triton.cdiv(n, 64) for n in lengths), heads, 128, 128)
-            ),
-        )
-        _unpack_outputs[
-            (
-                len(lengths) if selected is None else selected.numel(),
-                triton.cdiv(
-                    max(
-                        max(lengths) * heads * 128,
-                        triton.cdiv(max(lengths), 64) * heads * 128 * 128,
-                    ),
-                    1024,
+        result = _output_buffers
+        if result is None:
+            result = (
+                torch.empty_like(q),
+                torch.empty_like(initial_state),
+                initial_state.new_empty(
+                    (1, sum(((n + 63) // 64) for n in lengths), heads, 128, 128)
                 ),
             )
-        ](
+        unpack_grid = (
+            (
+                max(
+                    max(packed_lengths) * heads * 128,
+                    (max(lengths) + 63) // 64 * heads * 128 * 128,
+                )
+                + 1023
+            )
+            // 1024,
+            len(lengths) if selected is None else selected.numel(),
+            1,
+        )
+        unpack_args = (
             *outputs,
             *result,
             cu_seqlens,
@@ -651,12 +945,27 @@ def chunk_kda_full_reuse_graph(
             real_chunks,
             pcu,
             packed_chunks,
-            heads * 128,
-            heads * 128 * 128,
-            1024,
-            selected,
-            selected is not None,
         )
+        subset = selected is not None
+        if (
+            compiled
+            and all(t.data_ptr() % 16 == 0 for t in unpack_args)
+            and (selected is None or selected.data_ptr() % 16 == 0)
+        ):
+            _unpack_runner(
+                q.device.index, heads, cu_seqlens.dtype, unpack_grid, subset
+            )(*unpack_args, heads * 128, heads * 128 * 128, 1024, selected, subset)
+        else:
+            _unpack_outputs[unpack_grid](
+                *unpack_args, heads * 128, heads * 128 * 128, 1024, selected, subset
+            )
         if selected is not None:
-            _STATS["base_replays"] += 1
+            _STATS["subset_replays"] += 1
+        elif _packed_layout is None:
+            _prepare_single_length_families(
+                inputs, cu_seqlens, lengths, _beta_logits
+            )
+            _prepare_small_pair_family(
+                inputs, cu_seqlens, lengths, norm_rows, _beta_logits
+            )
         return result

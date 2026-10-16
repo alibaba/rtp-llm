@@ -27,9 +27,21 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3_tie_break.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
+#include <ATen/cuda/CUDAContext.h>
+
 using namespace rtp_llm;
 
 namespace torch_ext {
+
+void rmsnormCurrentStream(at::Tensor& output, at::Tensor& input, at::Tensor& weight, double eps) {
+    const auto stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    rmsnorm(output, input, weight, eps, reinterpret_cast<int64_t>(stream));
+}
+
+void fusedAddRmsnormCurrentStream(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps) {
+    const auto stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    fused_add_rmsnorm(input, residual, weight, eps, reinterpret_cast<int64_t>(stream));
+}
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("debug_kernel",
@@ -61,6 +73,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("eps"),
                   py::arg("cuda_stream") = 0);
 
+    rtp_ops_m.def("rmsnorm_current_stream",
+                  &rmsnormCurrentStream,
+                  "RMSNorm kernel on the calling thread's current CUDA stream",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("eps"));
+
     rtp_ops_m.def("fused_add_rmsnorm",
                   &fused_add_rmsnorm,
                   "Fused Add RMSNorm kernel",
@@ -69,6 +89,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("eps"),
                   py::arg("cuda_stream") = 0);
+
+    rtp_ops_m.def("fused_add_rmsnorm_current_stream",
+                  &fusedAddRmsnormCurrentStream,
+                  "Fused Add RMSNorm kernel on the calling thread's current CUDA stream",
+                  py::arg("input"),
+                  py::arg("residual"),
+                  py::arg("weight"),
+                  py::arg("eps"));
 
     rtp_ops_m.def("silu_and_mul",
                   &silu_and_mul,

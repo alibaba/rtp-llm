@@ -10,6 +10,17 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "norm_gpu_test",
+    main = "norm_test.py",
+    srcs = ["norm_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
 py_test (
     name = "rmsresnorm_test",
     srcs = ["rmsresnorm_test.py"],

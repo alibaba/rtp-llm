@@ -31,3 +31,15 @@ py_test (
     tags = ["H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
+
+py_test (
+    name = "typed_storage_view_gpu_test",
+    srcs = ["typed_storage_view_test.py"],
+    main = "typed_storage_view_test.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual"],
+    exec_properties = {'gpu_count':'1'},
+)

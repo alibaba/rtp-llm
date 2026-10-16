@@ -37,8 +37,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     cached_indexer_host_lengths,
     cached_indexer_prefill,
+    indexer_varlen_bounds,
     metadata_cache,
     score_workspace_budget,
+    score_workspace_fits,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
@@ -123,10 +125,34 @@ def _topk_canonicalize_enabled() -> bool:
     )
 
 
+_FUSED_PREFILL_TOPK_CANONICALIZE = (
+    os.environ.get("GLM53_PREFILL_FUSED_TOPK_CANONICALIZE", "0") == "1"
+)
+
+
 def canonicalize_topk_output(out: torch.Tensor) -> None:
     """Sort valid token indices in-place while preserving ``-1`` padding."""
     if not _topk_canonicalize_enabled():
         return
+    if (
+        _FUSED_PREFILL_TOPK_CANONICALIZE
+        and metadata_cache() is not None
+        and out.dtype == torch.int32
+        and out.ndim == 2
+        and (
+            out.shape[0] <= 1024
+            or (out.shape[1] in (512, 1024, 2048) and out.shape[0] <= 32768)
+        )
+        and out.shape[1] <= 2048
+    ):
+        # Tuned int32 widths win through the tested 32K-row range.
+        # Retain the small-row limit for other widths and native fallback beyond it.
+        from rtp_llm.models_py.triton_kernels.common.canonicalize_topk import (
+            canonicalize_topk_,
+        )
+
+        if canonicalize_topk_(out):
+            return
     sentinel = torch.iinfo(out.dtype).max
     sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
     sorted_indices = torch.sort(sortable, dim=-1).values
@@ -334,7 +360,11 @@ def _linear_fixed_rows(
         fixed_projection_graph,
     )
 
-    result = fixed_projection_graph(flat, weight, rows)
+    result = (
+        fixed_projection_graph(flat, weight, rows)
+        if metadata_cache() is not None
+        else None
+    )
     if result is not None:
         return result.view(*x.shape[:-1], weight.shape[0])
     output = torch.empty(
@@ -540,14 +570,20 @@ class IndexerFP8(PoolBackedModule):
             if starts is None:
                 starts = torch.zeros_like(meta.ks)
                 ends = meta.ke - meta.ks
-            budget = score_workspace_budget(q.device)
             # DeepGEMM pads the logits row stride; include TopK/normalization
             # scratch in the per-row bound instead of budgeting logits alone.
             row_bytes = (((max_keys + 255) // 256 + 1) * 256 + 8 * self.index_topk) * 4
-            rows = budget // row_bytes
-            if rows < 1:
-                raise RuntimeError("Indexer score workspace cannot fit one query row")
-            rows = min(meta.M, max(1, rows // 128 * 128))
+            required_bytes = ((meta.M + 127) // 128 * 128) * row_bytes
+            if score_workspace_fits(q.device, required_bytes):
+                rows = meta.M
+            else:
+                budget = score_workspace_budget(q.device)
+                rows = budget // row_bytes
+                if rows < 1:
+                    raise RuntimeError(
+                        "Indexer score workspace cannot fit one query row"
+                    )
+                rows = min(meta.M, max(1, rows // 128 * 128))
             for begin in range(0, meta.M, rows):
                 end = min(begin + rows, meta.M)
                 with record_function_range("dsv4.fp8.indexer.prefill.score"):
@@ -1043,10 +1079,6 @@ class IndexerFP8(PoolBackedModule):
                     T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
                 M = int(position_ids.numel())  # T_total
 
-                positions_d = position_ids.to(
-                    device=device, dtype=torch.int32
-                ).contiguous()
-
             # Under varlen, ``fp8_mqa_indexer_score`` consumes a single
             # request-concatenated K axis ``k_quant_flat[0..T)`` whose
             # per-request offset is ``cu_kv_seqlens[b]``. ``ks/ke`` MUST
@@ -1059,23 +1091,14 @@ class IndexerFP8(PoolBackedModule):
             # The TopK kernel processes [ks, ke) but returns indices
             # relative to ks — already request-local [0, N_b).
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_bounds"):
-                req_id_long = req_id_per_token.to(device=device, dtype=torch.int64)
-                T_per_token = T_per_req.to(torch.int64).index_select(0, req_id_long)
-                cu_kv_per_token_i64 = cu_kv_seqlens.to(torch.int64).index_select(
-                    0, req_id_long
+                positions_d, ks, ke, cu_kv_per_token = indexer_varlen_bounds(
+                    req_id_per_token,
+                    position_ids,
+                    T_per_req,
+                    cu_kv_seqlens,
+                    ratio,
+                    device,
                 )
-                ks = cu_kv_per_token_i64.to(torch.int32).contiguous()
-                ke = (
-                    (
-                        cu_kv_per_token_i64
-                        + ((positions_d.to(torch.int64) + 1) // ratio).clamp_max(
-                            T_per_token
-                        )
-                    )
-                    .to(torch.int32)
-                    .contiguous()
-                )
-                cu_kv_per_token = cu_kv_per_token_i64.to(torch.int32).contiguous()
 
             # ``freqs_cis_slice`` per-token gather — RoPE angles for ``q``
             # in ``_compute_indexer_q``. Equivalent to ``self.freqs_cis[

@@ -104,7 +104,7 @@ class ChunkKDAFunction(torch.autograd.Function):
 
         g_input = g
 
-        (o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = (
+        o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state = (
             chunk_kda_fwd(
                 q=q,
                 k=k,

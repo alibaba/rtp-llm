@@ -277,6 +277,21 @@ def test_mqa():
                             runner, q, w, k, scale, meta
                         )
                         torch.testing.assert_close(actual, ref, rtol=0, atol=0)
+            # Sufficient allocator headroom must retain the full-M launch,
+            # with no driver query or fallback budget calculation.
+            _FORWARD_METADATA.get()[("indexer_score_budget_lower", q.device)] = (
+                8192 << 20
+            )
+            with mock.patch.object(
+                module,
+                "score_workspace_budget",
+                side_effect=AssertionError("unexpected budget query"),
+            ), mock.patch(
+                "torch.cuda.mem_get_info",
+                side_effect=AssertionError("unexpected CUDA query"),
+            ):
+                actual = IndexerFP8._prefill_score_topk(runner, q, w, k, scale, meta)
+                torch.testing.assert_close(actual, ref, rtol=0, atol=0)
         finally:
             _FORWARD_METADATA.reset(token)
         print("MQA_PASS", batch, m, n, flush=True)

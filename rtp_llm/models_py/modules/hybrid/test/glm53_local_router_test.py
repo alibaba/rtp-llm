@@ -195,6 +195,7 @@ class Glm53LocalRouterTest(unittest.TestCase):
             layer.top_k = 8
             layer.fake_balance_expert = None
             layer.correction_bias = bias
+            layer.group_topk = GroupTopK()
             layer._use_mega_moe_fused_shared = fused_shared
             layer.shared_expert_gate = None
             layer._shared_expert_stream = None

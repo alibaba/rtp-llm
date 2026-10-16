@@ -14,6 +14,9 @@
 import os
 
 import torch
+from rtp_llm.models_py.triton_kernels.kimi_kda import chunk_copies, state_update
+
+_REUSE_BIAS_OUTPUT = os.environ.get("GLM53_KDA_REUSE_BIAS_OUTPUT", "0") == "1"
 
 
 def _sequence_boundaries(cu_seqlens, token_count):
@@ -154,7 +157,24 @@ def chunk_gated_delta_rule_fwd_h_cublas(
     )
     v_new = torch.empty_like(u) if save_new_value else None
     key_head_repeat = value_heads // key_heads
+    reuse_bias_output = (
+        _REUSE_BIAS_OUTPUT
+        and k.dtype == torch.bfloat16
+        and (
+            not torch.is_grad_enabled()
+            or not any(
+                tensor is not None and tensor.requires_grad
+                for tensor in (k, w, u, gk, initial_state)
+            )
+        )
+    )
     global_chunk_index = 0
+    write_checkpoints = (
+        state_update._ENABLED
+        and state_update._WRITE_CHECKPOINTS
+        and h.dtype == torch.float32
+        and not transpose_state_layout
+    )
 
     for sequence_index, (batch_index, seq_start, seq_stop) in enumerate(
         sequence_ranges
@@ -174,17 +194,32 @@ def chunk_gated_delta_rule_fwd_h_cublas(
             state = state.contiguous()
 
         local_chunk_index = 0
+        checkpoint_written = False
+        prepared_next = None
         for start in range(seq_start, seq_stop, chunk_size):
             stop = min(start + chunk_size, seq_stop)
             length = stop - start
-            stored_state = state.to(k.dtype)
+            # Fusion preserves the original contiguous BLAS operands; unsupported
+            # shapes/layouts and differentiable calls retain the original copies.
+            prepared = prepared_next
+            prepared_next = None
+            if prepared is None:
+                prepared = (
+                    chunk_copies.prepare_chunk_copies(
+                        state, u[batch_index, start:stop], k[batch_index, start:stop]
+                    )
+                    if reuse_bias_output and chunk_copies._ENABLED
+                    else None
+                )
+            stored_state = prepared[0] if prepared is not None else state.to(k.dtype)
             target_chunk = (
                 global_chunk_index if cu_seqlens is not None else local_chunk_index
             )
-            if transpose_state_layout:
-                h[batch_index, target_chunk] = state.transpose(-1, -2)
-            else:
-                h[batch_index, target_chunk] = state
+            if not checkpoint_written:
+                if transpose_state_layout:
+                    h[batch_index, target_chunk] = state.transpose(-1, -2)
+                else:
+                    h[batch_index, target_chunk] = state
 
             # baddbmm accepts the head-interleaved strided views directly.
             # Materializing both chunks here adds two D2D copies per Python
@@ -192,35 +227,105 @@ def chunk_gated_delta_rule_fwd_h_cublas(
             # changing the CUDA BLAS result.
             w_chunk = w[batch_index, start:stop].permute(1, 0, 2)
             u_chunk = u[batch_index, start:stop].permute(1, 0, 2)
-            new_value = torch.baddbmm(
-                u_chunk.float(),
-                w_chunk,
-                stored_state,
-                beta=1,
-                alpha=-1,
-                out_dtype=torch.float32,
+            if reuse_bias_output:
+                # BF16 -> FP32 owns new storage. Match the original GEMM's
+                # contiguous output layout and use its bias as the destination,
+                # avoiding the separate bias-to-output copy. Inputs stay intact.
+                new_value = (
+                    prepared[1]
+                    if prepared is not None
+                    else u_chunk.to(
+                        dtype=torch.float32, memory_format=torch.contiguous_format
+                    )
+                )
+                torch.baddbmm(
+                    new_value,
+                    w_chunk,
+                    stored_state,
+                    beta=1,
+                    alpha=-1,
+                    out_dtype=torch.float32,
+                    out=new_value,
+                )
+            else:
+                new_value = torch.baddbmm(
+                    u_chunk.float(),
+                    w_chunk,
+                    stored_state,
+                    beta=1,
+                    alpha=-1,
+                    out_dtype=torch.float32,
+                )
+            new_value_bf16 = (
+                chunk_copies.finish_chunk_copies(
+                    new_value, v_new[batch_index, start:stop]
+                )
+                if prepared is not None and v_new is not None
+                else None
             )
-            new_value_bf16 = new_value.to(k.dtype)
-            if v_new is not None:
-                v_new[batch_index, start:stop] = new_value_bf16.permute(1, 0, 2)
+            if new_value_bf16 is None:
+                new_value_bf16 = new_value.to(k.dtype)
+                if v_new is not None:
+                    v_new[batch_index, start:stop] = new_value_bf16.permute(1, 0, 2)
 
-            decay = torch.exp2(gk[batch_index, stop - 1].float()).unsqueeze(-1)
-            decayed_state = state * decay
-            k_chunk = k[batch_index, start:stop]
-            if key_head_repeat != 1:
-                k_chunk = k_chunk.repeat_interleave(key_head_repeat, dim=1)
-            k_chunk = k_chunk.permute(1, 2, 0).contiguous()
-            state = decayed_state + torch.bmm(
+            log_decay = gk[batch_index, stop - 1]
+            if not state_update._ENABLED:
+                decay = torch.exp2(log_decay.float()).unsqueeze(-1)
+                decayed_state = state * decay
+            if prepared is not None:
+                k_chunk = prepared[2]
+            else:
+                k_chunk = k[batch_index, start:stop]
+                if key_head_repeat != 1:
+                    k_chunk = k_chunk.repeat_interleave(key_head_repeat, dim=1)
+                k_chunk = k_chunk.permute(1, 2, 0).contiguous()
+            delta = torch.bmm(
                 k_chunk,
                 new_value_bf16,
                 out_dtype=torch.float32,
             )
+            if state_update._ENABLED:
+                state_output = None
+                if write_checkpoints:
+                    if stop < seq_stop:
+                        state_output = h[batch_index, target_chunk + 1]
+                    elif final_state is not None:
+                        state_output = final_state[sequence_index]
+                prefetched = None
+                if (
+                    prepared is not None
+                    and chunk_copies._PREFETCH_STATE
+                    and stop < seq_stop
+                ):
+                    next_stop = min(stop + chunk_size, seq_stop)
+                    prefetched = chunk_copies.update_prepare_chunk(
+                        state,
+                        delta,
+                        log_decay,
+                        u[batch_index, stop:next_stop],
+                        k[batch_index, stop:next_stop],
+                        state_output,
+                    )
+                if prefetched is not None:
+                    updated, prepared_next = prefetched
+                else:
+                    updated = state_update.kda_state_update(
+                        state, delta, log_decay, output=state_output
+                    )
+                checkpoint_written = updated is not None and state_output is not None
+                state = (
+                    updated
+                    if updated is not None
+                    else state * torch.exp2(log_decay.float()).unsqueeze(-1) + delta
+                )
+            else:
+                state = decayed_state + delta
 
             local_chunk_index += 1
             if cu_seqlens is not None:
                 global_chunk_index += 1
 
-        if final_state is not None:
+        if final_state is not None and not checkpoint_written:
             if transpose_state_layout:
                 final_state[sequence_index] = state.transpose(-1, -2)
             else:

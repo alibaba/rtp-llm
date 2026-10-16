@@ -13,6 +13,8 @@ class MHCPost(torch.autograd.Function):
         comb_res_mix: torch.Tensor,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
+        # Backward retains its original batched-only shape contract.
+        assert residual.ndim == 4, "mHC post backward requires batched residual"
         out = mhc_post_fwd(x, residual, post_layer_mix, comb_res_mix, out)
         ctx.save_for_backward(x, residual, post_layer_mix, comb_res_mix)
         return out
@@ -32,4 +34,7 @@ def mhc_post(
     comb_res_mix: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # Inference needs neither an autograd context nor saved backward tensors.
+    if not torch.is_grad_enabled():
+        return mhc_post_fwd(x, residual, post_layer_mix, comb_res_mix, out)
     return MHCPost.apply(x, residual, post_layer_mix, comb_res_mix, out)

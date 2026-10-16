@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import nn
 
@@ -24,6 +26,11 @@ class GroupTopK(nn.Module):
     def __init__(self):
         super().__init__()
         self.group_topk_op = compute_ops.GroupTopKOp()
+        self._fused_router = None
+        if os.environ.get("GLM53_FUSED_ROUTER_TOPK", "0") == "1":
+            from rtp_llm.models_py.modules.glm53_router_topk import fused_router_topk
+
+            self._fused_router = fused_router_topk
 
     def forward(
         self,
@@ -37,6 +44,18 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
+        if self._fused_router is not None and self._fused_router(
+            topk_weights,
+            topk_ids,
+            scores,
+            correction_bias,
+            n_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+        ):
+            return
         scores = scores.sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
         self.group_topk_op.forward(

@@ -1,8 +1,11 @@
 import itertools
-from unittest import SkipTest, TestCase, main
+import statistics
+import time
+from unittest import SkipTest, TestCase, main, mock
 
 import torch
 from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 from torch import dtype as _dtype
 
 
@@ -36,6 +39,128 @@ class NormTest(TestCase):
                 num_tokens=params[0], hidden_size=params[1], dtype=params[2]
             ):
                 self._run_rms_norm_test(*params)
+
+    def test_current_stream_is_resolved_inside_binding(self):
+        width = 4096
+        x = torch.randn((97, width), dtype=torch.bfloat16)
+        weight = torch.randn(width, dtype=torch.bfloat16)
+        norm = RMSNorm(weight)
+        output = torch.empty_like(x)
+        stream = torch.cuda.Stream()
+
+        with torch.cuda.stream(stream):
+            with mock.patch.object(
+                torch.cuda,
+                "current_stream",
+                side_effect=AssertionError("Python current_stream must not be called"),
+            ):
+                self.assertIs(norm(x, output), output)
+            done = stream.record_event()
+
+        torch.cuda.current_stream().wait_event(done)
+        torch.testing.assert_close(
+            output.float(), RMSNormTorch(weight)(x).float(), atol=1e-2, rtol=1e-2
+        )
+
+    def test_current_stream_binding_cpu_overhead(self):
+        width = 4096
+        x = torch.randn((419, width), dtype=torch.bfloat16)
+        weight = torch.randn(width, dtype=torch.bfloat16)
+        output = torch.empty_like(x)
+
+        def baseline():
+            rtp_llm_ops.rmsnorm(
+                output, x, weight, 1e-6, torch.cuda.current_stream().cuda_stream
+            )
+
+        def candidate():
+            rtp_llm_ops.rmsnorm_current_stream(output, x, weight, 1e-6)
+
+        for _ in range(30):
+            baseline()
+            candidate()
+        torch.cuda.synchronize()
+
+        samples = {"baseline": [], "candidate": []}
+        for _ in range(60):
+            for name, fn in (("baseline", baseline), ("candidate", candidate)):
+                torch.cuda.synchronize()
+                begin = time.thread_time_ns()
+                for _ in range(100):
+                    fn()
+                samples[name].append((time.thread_time_ns() - begin) / 100_000.0)
+        torch.cuda.synchronize()
+
+        baseline_us = statistics.median(samples["baseline"])
+        candidate_us = statistics.median(samples["candidate"])
+        print(
+            "rmsnorm current-stream CPU us/call: "
+            f"baseline={baseline_us:.3f}, candidate={candidate_us:.3f}"
+        )
+        self.assertLess(candidate_us, baseline_us)
+
+    def test_inplace_output_exact_graph_and_cpu_overhead(self):
+        width = 4096
+        weight = torch.randn(width, dtype=torch.bfloat16)
+        norm = RMSNorm(weight)
+        for tokens in (1, 81, 419, 5103):
+            with self.subTest(tokens=tokens):
+                source = torch.randn((tokens, width), dtype=torch.bfloat16)
+                expected = norm(source)
+                inplace = source.clone()
+                self.assertIs(norm(inplace, inplace), inplace)
+                self.assertTrue(torch.equal(inplace, expected))
+
+        stream = torch.cuda.Stream()
+        source = torch.randn((5103, width), dtype=torch.bfloat16)
+        expected = norm(source)
+        inplace = source.clone()
+        with torch.cuda.stream(stream):
+            self.assertIs(norm(inplace, inplace), inplace)
+            done = stream.record_event()
+        torch.cuda.current_stream().wait_event(done)
+        self.assertTrue(torch.equal(inplace, expected))
+
+        static_input = torch.randn((419, width), dtype=torch.bfloat16)
+        original = static_input.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = norm(static_input, static_input)
+        expected = norm(original)
+        static_input.copy_(original)
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertIs(graph_output, static_input)
+        self.assertTrue(torch.equal(graph_output, expected))
+
+        source = torch.randn((419, width), dtype=torch.bfloat16)
+        inplace = source.clone()
+
+        def baseline():
+            norm(source)
+
+        def candidate():
+            norm(inplace, inplace)
+
+        for _ in range(30):
+            baseline()
+            candidate()
+        torch.cuda.synchronize()
+        samples = {"baseline": [], "candidate": []}
+        for _ in range(60):
+            for name, fn in (("baseline", baseline), ("candidate", candidate)):
+                torch.cuda.synchronize()
+                begin = time.thread_time_ns()
+                for _ in range(100):
+                    fn()
+                samples[name].append((time.thread_time_ns() - begin) / 100_000.0)
+        baseline_us = statistics.median(samples["baseline"])
+        candidate_us = statistics.median(samples["candidate"])
+        print(
+            "rmsnorm inplace CPU us/call: "
+            f"baseline={baseline_us:.3f}, candidate={candidate_us:.3f}"
+        )
+        self.assertLess(candidate_us, baseline_us)
 
     def test_rms_norm_large_row_offsets(self):
         # Exercise the actual >2**32 element address boundary, without

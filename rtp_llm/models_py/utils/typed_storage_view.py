@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 TORCH_DTYPE_SIZE_BYTES = {
@@ -20,6 +22,7 @@ class LinearCacheConverter:
         linear_conv_kernel_dim: int,
         qkv_size: int,
         conv_state_dtype: torch.dtype,
+        cache_views: bool | None = None,
     ) -> None:
         self.local_num_v_heads = local_num_v_heads
         self.head_v_dim = head_v_dim
@@ -28,6 +31,11 @@ class LinearCacheConverter:
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
         self.qkv_size = qkv_size
         self.conv_state_dtype = conv_state_dtype
+        self.cache_views = (
+            os.environ.get("RTP_LLM_LINEAR_CACHE_VIEW_REUSE", "0") == "1"
+            if cache_views is None
+            else cache_views
+        )
 
         self.ssm_state_item_size = self.dtype_size_bytes(self.ssm_state_dtype)
         self.conv_state_item_size = self.dtype_size_bytes(self.conv_state_dtype)
@@ -36,6 +44,9 @@ class LinearCacheConverter:
         self.ssm_state_size_bytes = self.ssm_state_size * self.ssm_state_item_size
         self.conv_state_size_bytes = self.conv_state_size * self.conv_state_item_size
         self.block_size_bytes = self.ssm_state_size_bytes + self.conv_state_size_bytes
+        self._view_cache_key = None
+        self._cached_conv_state = None
+        self._cached_ssm_state = None
 
     def cache_store_segment_sizes(self) -> tuple[int, ...]:
         """Return contiguous [SSM, history*(Q, K, V)] source segments."""
@@ -115,7 +126,34 @@ class LinearCacheConverter:
     def get_block_size_bytes(self, kv_cache_tensor: torch.Tensor) -> int:
         return kv_cache_tensor.stride(0) * self.dtype_size_bytes(kv_cache_tensor.dtype)
 
-    def get_conv_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _base_view_key(base_tensor: torch.Tensor) -> tuple:
+        storage = base_tensor.untyped_storage()
+        return (
+            storage.data_ptr(),
+            storage.nbytes(),
+            base_tensor.device,
+            base_tensor.dtype,
+            base_tensor.storage_offset(),
+            tuple(base_tensor.shape),
+            tuple(base_tensor.stride()),
+        )
+
+    def _cached_views(
+        self, kv_cache_tensor: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = self._base_view_key(kv_cache_tensor)
+        if key != self._view_cache_key:
+            conv_state = self._build_conv_state_tensor(kv_cache_tensor)
+            ssm_state = self._build_ssm_state_tensor(kv_cache_tensor)
+            self._cached_conv_state = conv_state
+            self._cached_ssm_state = ssm_state
+            self._view_cache_key = key
+        assert self._cached_conv_state is not None
+        assert self._cached_ssm_state is not None
+        return self._cached_conv_state, self._cached_ssm_state
+
+    def _build_conv_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
         block_size_bytes = self.get_block_size_bytes(kv_cache_tensor)
         assert (
             block_size_bytes >= self.block_size_bytes
@@ -136,7 +174,7 @@ class LinearCacheConverter:
             storage_offset_bytes=self.ssm_state_size_bytes,
         )
 
-    def get_ssm_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
+    def _build_ssm_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
         block_size_bytes = self.get_block_size_bytes(kv_cache_tensor)
         assert (
             block_size_bytes >= self.block_size_bytes
@@ -157,3 +195,13 @@ class LinearCacheConverter:
                 self.ssm_state_item_size,
             ),
         )
+
+    def get_conv_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
+        if self.cache_views:
+            return self._cached_views(kv_cache_tensor)[0]
+        return self._build_conv_state_tensor(kv_cache_tensor)
+
+    def get_ssm_state_tensor(self, kv_cache_tensor: torch.Tensor) -> torch.Tensor:
+        if self.cache_views:
+            return self._cached_views(kv_cache_tensor)[1]
+        return self._build_ssm_state_tensor(kv_cache_tensor)

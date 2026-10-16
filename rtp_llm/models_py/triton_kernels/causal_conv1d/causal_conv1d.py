@@ -7,16 +7,21 @@
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common.host_math import ceil_div, next_power_of_2
 
 PAD_SLOT_ID = -1
 BLOCK_M = 8
 BLOCK_N = 256
+_COMPILED_PREFILL_DISPATCH = (
+    os.environ.get("GLM53_CAUSAL_CONV_COMPILED_DISPATCH", "0") == "1"
+)
 
 from rtp_llm.models_py.triton_kernels.causal_conv1d.op import cal_block_idx
 
@@ -75,6 +80,7 @@ class CausalConv1dMetadata:
 def prepare_causal_conv1d_metadata(
     query_start_loc: torch.Tensor,
     device: torch.device,
+    query_start_loc_cpu: Optional[torch.Tensor] = None,
 ) -> CausalConv1dMetadata:
     """Prepare metadata for causal_conv1d_fn.
 
@@ -87,7 +93,8 @@ def prepare_causal_conv1d_metadata(
             For example, if sequences have lengths [5, 1, 1, 1], then
             query_start_loc = [0, 5, 6, 7, 8].
         device: The device to place the output tensors on.
-        block_m: Block size for BLOCK_M parameter (default: 8).
+        query_start_loc_cpu: Optional CPU mirror of query_start_loc. The caller
+            must supply the same boundaries when this mirror is available.
 
     Returns:
         CausalConv1dMetadata containing precomputed batch_ptr, token_chunk_offset_ptr,
@@ -98,7 +105,15 @@ def prepare_causal_conv1d_metadata(
         >>> metadata = prepare_causal_conv1d_metadata(query_start_loc, device='cuda')
         >>> output = causal_conv1d_fn(x, weight, bias, ..., metadata=metadata)
     """
-    boundaries = query_start_loc.cpu().numpy()
+    if query_start_loc_cpu is not None:
+        if (
+            query_start_loc_cpu.device.type != "cpu"
+            or query_start_loc_cpu.shape != query_start_loc.shape
+        ):
+            raise ValueError("query_start_loc_cpu must be a matching CPU mirror")
+        boundaries = query_start_loc_cpu.numpy()
+    else:
+        boundaries = query_start_loc.cpu().numpy()
     seqlens = np.diff(boundaries)
     # Calculate number of chunks per sequence
     nums = -(-seqlens // BLOCK_M)  # Ceiling division
@@ -112,15 +127,24 @@ def prepare_causal_conv1d_metadata(
     for num in nums:
         offsetlist.extend(range(num))
 
-    # Create tensors
-    batch_ptr = torch.full((total + 1,), PAD_SLOT_ID, dtype=torch.int32, device=device)
-    token_chunk_offset_ptr = torch.full(
-        (total + 1,), PAD_SLOT_ID, dtype=torch.int32, device=device
+    # One owned pinned buffer, one asynchronous H2D. Building device tensors
+    # and copying each row with blocking copy_ drained previously queued work.
+    # Keep both row starts 16-byte aligned. Compiled Triton launchers can then
+    # reuse their aligned pointer specialization without copying either row.
+    capacity = ceil_div(total + 1, 4) * 4
+    host = torch.empty(
+        (2, capacity),
+        dtype=torch.int32,
+        pin_memory=torch.device(device).type == "cuda",
     )
-
-    batch_ptr[: len(mlist)].copy_(torch.from_numpy(mlist.astype(np.int32)))
-    token_chunk_offset_ptr[: len(offsetlist)].copy_(
-        torch.from_numpy(np.array(offsetlist, dtype=np.int32))
+    values = host.numpy()
+    values[0, :total] = mlist
+    values[1, :total] = offsetlist
+    values[:, total] = PAD_SLOT_ID
+    packed = host.to(device=device, non_blocking=True)
+    batch_ptr, token_chunk_offset_ptr = (
+        packed[0, : total + 1],
+        packed[1, : total + 1],
     )
 
     return CausalConv1dMetadata(
@@ -522,6 +546,16 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 )
 
 
+@lru_cache(maxsize=128)
+def _compiled_prefill_runner(device, dtypes, launch_values, grid):
+    # Retain compiled code only. The returned launcher resolves the current
+    # CUDA stream on every call, preserving the model's asynchronous ordering.
+    kernel = _causal_conv1d_fwd_kernel.warmup(
+        *dtypes, *launch_values, grid=grid
+    )
+    return kernel[grid]
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -620,7 +654,7 @@ def causal_conv1d_fn(
     dim, cu_seqlen = x.shape
     _, width = weight.shape
     state_len = width - 1
-    np2_statelen = triton.next_power_of_2(state_len)
+    np2_statelen = next_power_of_2(state_len)
 
     padded_batch = query_start_loc.size(0) - 1
     stride_x_seq = 0
@@ -692,32 +726,32 @@ def causal_conv1d_fn(
             seq_size_per_block,
         )
 
-    grid = (grid_x, triton.cdiv(dim, BLOCK_N))
-    _causal_conv1d_fwd_kernel[grid](
-        # Pointers to matrices
+    initial_states = (
+        torch.empty([0], device=x.device, dtype=x.dtype)
+        if conv_states is None
+        else conv_states
+    )
+    state_block_map = (
+        torch.empty([0], device=x.device, dtype=torch.int32)
+        if block_map is None
+        else block_map
+    )
+    pointers = (
         x,
         weight,
         bias,
-        (
-            torch.empty([0], device=x.device, dtype=x.dtype)
-            if conv_states is None
-            else conv_states
-        ),
-        (
-            torch.empty([0], device=x.device, dtype=torch.int32)
-            if block_map is None
-            else block_map
-        ),
+        initial_states,
+        state_block_map,
         prefix_lengths,
         query_start_loc,
         batch_ptr,
         token_chunk_offset_ptr,
         out,
-        # Matrix dimensions
+    )
+    launch_values = (
         padded_batch,
         dim,
         max_block_size,
-        # stride
         stride_x_seq,
         stride_x_dim,
         stride_x_token,
@@ -729,21 +763,36 @@ def causal_conv1d_fn(
         stride_o_seq,
         stride_o_dim,
         stride_o_token,
-        # others
         pad_slot_id,
-        # META
-        HAS_BIAS=bias is not None,
-        KERNEL_WIDTH=width,
-        SILU_ACTIVATION=activation in ["silu", "swish"],
-        HAS_CACHE=block_map is not None and conv_states is not None,
-        SEQ_SIZE_PER_BLOCK=seq_size_per_block,
-        IS_CONTINUOUS_BATCHING=True,
-        USE_PAD_SLOT=pad_slot_id is not None,
-        NP2_STATELEN=np2_statelen,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        OUTPUT_GROUP_WIDTH=dim // output_groups if output_groups > 1 else 0,
+        bias is not None,
+        width,
+        activation in ["silu", "swish"],
+        block_map is not None and conv_states is not None,
+        True,
+        pad_slot_id is not None,
+        np2_statelen,
+        BLOCK_M,
+        BLOCK_N,
+        seq_size_per_block,
+        dim // output_groups if output_groups > 1 else 0,
     )
+    grid = (grid_x, ceil_div(dim, BLOCK_N))
+    present = tuple(t for t in pointers if t is not None)
+    if (
+        _COMPILED_PREFILL_DISPATCH
+        and torch.version.hip is None
+        and all(t.device == x.device and t.data_ptr() % 16 == 0 for t in present)
+        and x.device.index == torch.cuda.current_device()
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        _compiled_prefill_runner(
+            x.device.index,
+            tuple(None if t is None else t.dtype for t in pointers),
+            launch_values,
+            (*grid, 1),
+        )(*pointers, *launch_values)
+    else:
+        _causal_conv1d_fwd_kernel[grid](*pointers, *launch_values)
     return out.to(original_x_dtype)
 
 
@@ -1162,16 +1211,16 @@ def causal_conv1d_update(
 
     stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
     state_len = width - 1
-    np2_statelen = triton.next_power_of_2(state_len)
+    np2_statelen = next_power_of_2(state_len)
     # when speculative, we load (width - 2) token from conv_state and (seqlen) token from x, then store them in different block
-    np2_statelen_total = triton.next_power_of_2(state_len - 1 + seqlen)
+    np2_statelen_total = next_power_of_2(state_len - 1 + seqlen)
 
     stride_block_map = block_map.size(1) if block_map is not None else 0
 
     def grid(META):
         return (
             batch,
-            triton.cdiv(dim, META["BLOCK_N"]),
+            ceil_div(dim, META["BLOCK_N"]),
         )
 
     _causal_conv1d_update_kernel[grid](

@@ -1,8 +1,18 @@
+import functools
 import math
+import os
 
 import tilelang
 import torch
 from tilelang import language as T
+
+_COMPILED_DISPATCH = os.environ.get("GLM53_MHC_COMPILED_DISPATCH", "0") == "1"
+
+
+@functools.lru_cache(maxsize=128)
+def _post_runner(device, mhc, hidden):
+    # Retain only the original adapter, including validation and stream lookup.
+    return _mhc_post_fwd(mhc, hidden).torch_function
 
 
 @tilelang.jit(
@@ -163,25 +173,17 @@ def mhc_post_fwd(
     comb_res_mix: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    num_seqs, num_tokens, mhc, hidden = residual.shape
+    assert residual.ndim in (3, 4), f"{residual.shape=}"
+    leading = residual.shape[:-2]
+    mhc, hidden = residual.shape[-2:]
 
     assert x.dtype == torch.bfloat16, f"{x.dtype=}"
     assert residual.dtype == torch.bfloat16, f"{residual.dtype=}"
     assert post_layer_mix.dtype == torch.float32, f"{post_layer_mix.dtype=}"
     assert comb_res_mix.dtype == torch.float32, f"{comb_res_mix.dtype=}"
-    assert x.shape == (num_seqs, num_tokens, hidden), f"{x.shape=}"
-    assert post_layer_mix.shape == (
-        num_seqs,
-        num_tokens,
-        mhc,
-        1,
-    ), f"{post_layer_mix.shape=}"
-    assert comb_res_mix.shape == (
-        num_seqs,
-        num_tokens,
-        mhc,
-        mhc,
-    ), f"{comb_res_mix.shape=}"
+    assert x.shape == (*leading, hidden), f"{x.shape=}"
+    assert post_layer_mix.shape == (*leading, mhc, 1), f"{post_layer_mix.shape=}"
+    assert comb_res_mix.shape == (*leading, mhc, mhc), f"{comb_res_mix.shape=}"
 
     residual = residual.contiguous()
     assert x.is_contiguous()
@@ -190,7 +192,14 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    kernel = _mhc_post_fwd(mhc, hidden)
+    kernel = (
+        _post_runner(residual.device.index, mhc, hidden)
+        if _COMPILED_DISPATCH
+        else _mhc_post_fwd(mhc, hidden)
+    )
+    if residual.ndim == 3:
+        kernel(comb_res_mix, residual, post_layer_mix.squeeze(-1), x, out)
+        return out
     kernel(
         comb_res_mix.flatten(0, 1),
         residual.flatten(0, 1),

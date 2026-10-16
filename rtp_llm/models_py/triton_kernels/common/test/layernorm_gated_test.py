@@ -56,6 +56,5 @@ class TestLayerNormGated(unittest.TestCase):
     def test_sigmoid_gate(self):
         self._test_rms_norm_gated("sigmoid")
 
-
 if __name__ == "__main__":
     unittest.main()

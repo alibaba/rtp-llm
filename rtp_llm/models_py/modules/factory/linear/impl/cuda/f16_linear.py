@@ -80,7 +80,12 @@ class CudaF16Linear(LinearBase):
             and input.dtype == torch.bfloat16
             and input.device == self.weight.device
         ):
-            flat = input.reshape(-1, input.shape[-1]).contiguous()
+            # Prefill projections already receive a contiguous [tokens, hidden]
+            # matrix. Avoid creating two redundant tensor views per projection.
+            matrix_input = input.ndim == 2
+            flat = input if matrix_input else input.reshape(-1, input.shape[-1])
+            if not flat.is_contiguous():
+                flat = flat.contiguous()
             output = torch.empty(
                 (flat.shape[0], self.weight.shape[0]),
                 dtype=input.dtype,
@@ -88,5 +93,9 @@ class CudaF16Linear(LinearBase):
             )
             if flat.shape[0]:
                 self._bf16_gemm(flat, self._bf16_weight, output)
-            return output.view(*input.shape[:-1], self.weight.shape[0])
+            return (
+                output
+                if matrix_input
+                else output.view(*input.shape[:-1], self.weight.shape[0])
+            )
         return F.linear(input, self.weight, self.bias)

@@ -65,3 +65,15 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM"},
 )
+
+py_test(
+    name = "bf16_deepgemm_linear_gpu_test",
+    srcs = ["bf16_deepgemm_linear_test.py"],
+    main = "bf16_deepgemm_linear_test.py",
+    deps = py_test_deps,
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "4"},
+    env = {"GPU_COUNT": "4"},
+)
+
+# Manual diagnostic: separate first-use JIT work from repeated CPU dispatch.

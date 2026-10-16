@@ -21,7 +21,6 @@ class RMSNorm(BaseNorm):
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
         # The linked FlashInfer kernel multiplies row and stride in uint32.
@@ -32,22 +31,20 @@ class RMSNorm(BaseNorm):
         num_tokens, hidden_size = hidden_states.shape
         rows_per_launch = (1 << 32) // hidden_size
         if num_tokens <= rows_per_launch:
-            rtp_llm_ops.rmsnorm(
+            rtp_llm_ops.rmsnorm_current_stream(
                 output,
                 hidden_states,
                 self.weight.data,
                 self.variance_epsilon,
-                stream_id,
             )
         else:
             for start in range(0, num_tokens, rows_per_launch):
                 end = min(start + rows_per_launch, num_tokens)
-                rtp_llm_ops.rmsnorm(
+                rtp_llm_ops.rmsnorm_current_stream(
                     output[start:end],
                     hidden_states[start:end],
                     self.weight.data,
                     self.variance_epsilon,
-                    stream_id,
                 )
         return output
 
@@ -57,9 +54,8 @@ class RMSResNorm(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
-        stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.fused_add_rmsnorm(
-            hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id
+        rtp_llm_ops.fused_add_rmsnorm_current_stream(
+            hidden_states, residual, self.weight.data, self.variance_epsilon
         )
         return hidden_states, residual
 

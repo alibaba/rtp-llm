@@ -1,6 +1,7 @@
 """Forward cache lifetime, workspace budgeting and geometry isolation."""
 
 import importlib.util
+import random
 import sys
 import unittest
 from pathlib import Path
@@ -31,8 +32,9 @@ class ForwardMetadataTest(unittest.TestCase):
         self.query = self.start_patch(
             mock.patch("torch.cuda.mem_get_info", return_value=(1 << 30, 2 << 30))
         )
-        self.start_patch(mock.patch("torch.cuda.memory_reserved", return_value=0))
-        self.start_patch(mock.patch("torch.cuda.memory_allocated", return_value=0))
+        self.allocator = self.start_patch(
+            mock.patch("torch.cuda.memory_stats_as_nested_dict", return_value={})
+        )
         self.start_patch(mock.patch("torch.cuda.current_device", return_value=0))
 
     def start_patch(self, patch):
@@ -85,6 +87,56 @@ class ForwardMetadataTest(unittest.TestCase):
             self.assertEqual(a[3], 8611)
         finally:
             meta._FORWARD_METADATA.reset(token)
+
+    def test_indexer_bounds_exact_reuse_and_scope_refresh(self):
+        req = torch.tensor([0, 0, 1, 1, 1, 2], dtype=torch.int32)
+        positions = torch.tensor([8192, 8193, 128, 129, 130, 0], dtype=torch.int32)
+        counts = torch.tensor([2048, 32, 0], dtype=torch.int32)
+        cu = torch.tensor([0, 2048, 2080, 2080], dtype=torch.int32)
+        with mock.patch.dict("os.environ", {"GLM53_INDEXER_SHARED_BOUNDS": "1"}):
+            for _ in range(2):
+                expected_ks = cu.long()[req.long()].int()
+                expected_ke = (
+                    expected_ks.long()
+                    + torch.minimum(
+                        (positions.long() + 1) // 4, counts.long()[req.long()]
+                    )
+                ).int()
+                token = meta._FORWARD_METADATA.set({})
+                try:
+                    a = meta.indexer_varlen_bounds(req, positions, counts, cu, 4, "cpu")
+                    for _ in range(11):
+                        self.assertIs(
+                            a,
+                            meta.indexer_varlen_bounds(
+                                req, positions, counts, cu, 4, "cpu"
+                            ),
+                        )
+                    self.assertTrue(torch.equal(a[1], expected_ks))
+                    self.assertTrue(torch.equal(a[2], expected_ke))
+                    self.assertTrue(torch.equal(a[3], expected_ks))
+                    different_ratio = meta.indexer_varlen_bounds(
+                        req, positions, counts, cu, 8, "cpu"
+                    )
+                    self.assertIsNot(a, different_ratio)
+                    changed = positions.clone() + 16
+                    b = meta.indexer_varlen_bounds(req, changed, counts, cu, 4, "cpu")
+                    self.assertIsNot(a, b)
+                    # The cache owns the source to prevent pointer recycling.
+                    self.assertTrue(
+                        any(
+                            value[0][1] is positions
+                            for value in meta.metadata_cache().values()
+                        )
+                    )
+                finally:
+                    meta._FORWARD_METADATA.reset(token)
+                counts.add_(8)
+                cu[1:] += torch.tensor([8, 16, 24], dtype=torch.int32)
+                positions.add_(4)
+            a = meta.indexer_varlen_bounds(req, positions, counts, cu, 4, "cpu")
+            b = meta.indexer_varlen_bounds(req, positions, counts, cu, 4, "cpu")
+            self.assertIsNot(a, b)
 
     def test_workspace_reused_once_per_forward(self):
 
@@ -217,10 +269,102 @@ class ForwardMetadataTest(unittest.TestCase):
 
     def test_budget_caps_at_available_and_reusable_memory(self):
         self.query.return_value = (16 << 20, 1 << 30)
-        with mock.patch(
-            "torch.cuda.memory_reserved", return_value=24 << 20
-        ), mock.patch("torch.cuda.memory_allocated", return_value=8 << 20):
-            self.assertEqual(meta.score_workspace_budget("cuda:0"), 16 << 20)
+        self.allocator.return_value = {
+            "reserved_bytes": {"all": {"current": 24 << 20}},
+            "allocated_bytes": {"all": {"current": 8 << 20}},
+        }
+        self.assertEqual(meta.score_workspace_budget("cuda:0"), 16 << 20)
+        self.allocator.assert_called_once_with("cuda:0")
+
+    def test_saturated_budget_needs_no_cuda_query(self):
+        self.allocator.return_value = {
+            "reserved_bytes": {"all": {"current": 80 << 20}},
+            "allocated_bytes": {"all": {"current": 16 << 20}},
+        }
+        self.assertEqual(meta.score_workspace_budget("cuda:0"), 32 << 20)
+        self.query.assert_not_called()
+        # Falling below the saturation point must still query current free
+        # memory; no previous forward's budget or free-byte estimate is reused.
+        self.query.return_value = (0, 1 << 30)
+        self.allocator.return_value = {
+            "reserved_bytes": {"all": {"current": 63 << 20}},
+        }
+        self.assertEqual(meta.score_workspace_budget("cuda:0"), (63 << 20) // 2)
+        self.query.assert_called_once()
+
+    def test_demand_budget_expires_and_falls_back_to_current_memory(self):
+        self.patch_object(meta, "_SCORE_WORKSPACE_DEMAND", True)
+        self.allocator.return_value = {
+            "reserved_bytes": {"all": {"current": 24 << 20}},
+        }
+
+        @meta.scoped_forward_metadata
+        def forward(_, inputs):
+            if self.allocator.return_value:
+                self.assertTrue(meta.score_workspace_fits("cuda:0", 12 << 20))
+                self.assertFalse(meta.score_workspace_fits("cuda:0", (12 << 20) + 1))
+                self.query.assert_not_called()
+            else:
+                self.assertFalse(meta.score_workspace_fits("cuda:0", 1))
+                self.assertEqual(meta.score_workspace_budget("cuda:0"), 8 << 20)
+                self.assertTrue(meta.score_workspace_fits("cuda:0", 8 << 20))
+                self.query.assert_called_once()
+
+        forward(self.model, self.inputs)
+        self.assertFalse(meta.score_workspace_fits("cuda:0", 1))
+        self.allocator.return_value = {}
+        self.query.return_value = (16 << 20, 1 << 30)
+        forward(self.model, self.inputs)
+
+    def test_allocator_snapshot_matches_scalar_statistics(self):
+        # Keep the real public scalar functions, replacing only their native
+        # statistics source. Include missing keys and over-allocation, whose
+        # reusable contribution must be clamped to zero.
+        for reserved, allocated in ((0, 0), (11, 7), (7, 11), (1 << 40, 123)):
+            self.allocator.return_value = {
+                "reserved_bytes": {"all": {"current": reserved}},
+                "allocated_bytes": {"all": {"current": allocated}},
+                "irrelevant": {"small_pool": {"peak": 999}},
+            }
+            # cuda re-exports the function; the scalar wrappers resolve it
+            # through the defining memory module's globals.
+            with mock.patch.object(
+                torch.cuda.memory, "memory_stats_as_nested_dict", self.allocator
+            ):
+                expected = max(
+                    0,
+                    torch.cuda.memory_reserved("cuda:0")
+                    - torch.cuda.memory_allocated("cuda:0"),
+                )
+            self.allocator.reset_mock()
+            self.assertEqual(meta._reusable_allocator_bytes("cuda:0"), expected)
+            self.allocator.assert_called_once_with("cuda:0")
+        self.allocator.return_value = {}
+        self.assertEqual(meta._reusable_allocator_bytes("cuda:0"), 0)
+        self.query.assert_not_called()
+
+    def test_demand_bound_preserves_unchunked_row_geometry(self):
+        rng = random.Random(193905)
+        for _ in range(10000):
+            rows = rng.choice((1, 81, 127, 128, 129, 255, 256, 257, 9889, 32768))
+            row_bytes = rng.randrange(1, 200000)
+            required = ((rows + 127) // 128 * 128) * row_bytes
+            cap = 32 << 20
+            bound = min(cap, required + rng.choice((-1, 0, 1, 128 * row_bytes)))
+            token = meta._FORWARD_METADATA.set(
+                {("indexer_score_budget_lower", torch.device("cuda:0")): bound}
+            )
+            try:
+                if meta.score_workspace_fits("cuda:0", required):
+                    free = rng.randrange(0, 1 << 32)
+                    original_budget = min(cap, (free + 2 * bound) // 2)
+                    original_rows = min(
+                        rows, max(1, (original_budget // row_bytes) // 128 * 128)
+                    )
+                    self.assertEqual(original_rows, rows)
+            finally:
+                meta._FORWARD_METADATA.reset(token)
+        self.query.assert_not_called()
 
     def test_cp_geometry_is_part_of_cache_identity(self):
         padding = torch.ones(32, dtype=torch.int32)

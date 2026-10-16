@@ -64,6 +64,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     validate_block_table_lookup,
     validate_slot_mapping,
 )
+from rtp_llm.models_py.triton_kernels.common.host_math import next_power_of_2
 
 
 @triton.jit
@@ -1059,7 +1060,7 @@ def run_save_partial_states(
         block_size,
         num_state_blocks=int(state_cache.shape[0]),
         HEAD_SIZE=head_size,
-        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
+        TRITON_BLOCK_SIZE=next_power_of_2(head_size),
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
@@ -1227,7 +1228,7 @@ def run_fused_kpool_decode_update(
         HEAD_DIM=head_dim,
         ROUND_SCALE=round_scale,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
-        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_D=next_power_of_2(head_dim),
         num_warps=1,
     )
 
@@ -1377,7 +1378,7 @@ def run_fused_compress_kv_write(
         kv_slot_mapping,
         kv_block_size,
         HEAD_SIZE=head_dim,
-        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+        TRITON_BLOCK_SIZE=next_power_of_2(head_dim),
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         OVERLAP=overlap,

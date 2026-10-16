@@ -1,12 +1,11 @@
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common.host_math import ceil_div
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 
 # Global address arithmetic is int64. make_block_ptr requires int32 tile
 # coordinates; these bounded coordinates are widened by Triton before strides.
-
-
 @triton.jit(do_not_specialize=["max_block_size"])
 def load_initial_state_from_block_map_kernel(
     prefix_lengths: tl.tensor,
@@ -78,9 +77,8 @@ def load_initial_state_from_block_map(
     assert prefix_lengths.shape[0] == batch
 
     # 增加V维度的并行度
-    grid = (batch, head_num, triton.cdiv(v, block_v))
+    grid = (batch, head_num, ceil_div(v, block_v))
     token_stride_conv = conv_states.stride(0)
-
     load_initial_state_from_block_map_kernel[grid](
         prefix_lengths,
         block_map,
@@ -202,7 +200,7 @@ def store_ssm_state_to_block_map(
     _, head_num, v, k = ssm_states.shape
     chunk_num = chunk_indices.shape[0]
     max_block_size = block_map.shape[1]
-    grid = (chunk_num, head_num, triton.cdiv(v, block_v))
+    grid = (chunk_num, head_num, ceil_div(v, block_v))
     token_stride_ssm_state = ssm_states.stride(0)
     store_ssm_state_to_block_map_kernel[grid](
         chunk_indices,

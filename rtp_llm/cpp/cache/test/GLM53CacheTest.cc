@@ -722,7 +722,7 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesWithAverageLeng
     EXPECT_EQ(config.group_block_nums[1], 13u);
 }
 
-TEST(GLM53CacheConfigTest, ReplayDefaultsToSupportedTargetAndHonorsOptOut) {
+TEST(GLM53CacheConfigTest, ReplayRequiresExplicitOptInAndValidGeometry) {
     ScopedEnvVar replay("GLM53_KDA_REPLAY", nullptr);
     ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0");
     auto model = makeGlm53Config();
@@ -737,6 +737,8 @@ TEST(GLM53CacheConfigTest, ReplayDefaultsToSupportedTargetAndHonorsOptOut) {
     const auto create = [&](int drafts = 3, bool mtp = false) {
         return HybridPoolConfigCreator::createConfig(model, pc, options, mtp, drafts);
     };
+    EXPECT_FALSE(create().linear_replay);
+    ScopedEnvVar enabled("GLM53_KDA_REPLAY", "1");
     EXPECT_TRUE(create().linear_replay);
     EXPECT_FALSE(create(0).linear_replay);
     EXPECT_FALSE(create(8).linear_replay);
@@ -762,8 +764,6 @@ TEST(GLM53CacheConfigTest, ReplayDefaultsToSupportedTargetAndHonorsOptOut) {
     model.model_type = "kimi_linear";
     EXPECT_FALSE(create().linear_replay);
     model.model_type = "glm5_3_flash";
-    ScopedEnvVar disabled("GLM53_KDA_REPLAY", "0");
-    EXPECT_FALSE(create().linear_replay);
 }
 
 TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting) {

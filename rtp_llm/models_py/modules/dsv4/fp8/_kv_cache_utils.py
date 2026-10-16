@@ -110,6 +110,19 @@ def require_pool_tokens_per_block(
     )
 
 
+_EMPTY_POOL_CONTEXT = {
+    "_kv_pool_view": None,
+    "_kv_block_table": None,
+    "_kv_eb": 0,
+    "_kv_tokens_per_block": 0,
+    "_kv_owner_tokens_per_block": 0,
+    "_state_pool_3d": None,
+    "_state_block_table": None,
+    "_state_eb": 0,
+    "_state_tokens_per_block": 0,
+}
+
+
 class PoolBackedModule(nn.Module):
     """Base class for modules backed by framework-managed paged pools.
 
@@ -163,18 +176,53 @@ class PoolBackedModule(nn.Module):
         ``pos // state_tokens_per_block`` while the in-block offset uses
         ``pos % state_eb``.
         """
+        # Ordinary per-forward fields need no Module registration bookkeeping.
+        # Keep setattr for registered fields, custom setters and tensor/scalar
+        # subclasses so their registration and dispatch semantics are preserved.
+        assign = setattr
+        if (
+            type(self).__setattr__ is nn.Module.__setattr__
+            and _EMPTY_POOL_CONTEXT.keys() <= self.__dict__.keys()
+            and all(
+                type(t) in (torch.Tensor, type(None))
+                and not isinstance(t, (nn.Parameter, nn.Buffer))
+                for t in (
+                    kv_pool_view,
+                    kv_block_table,
+                    state_pool_view,
+                    state_block_table,
+                )
+            )
+            and all(
+                type(n) is int
+                for n in (
+                    kv_eb,
+                    state_eb,
+                    state_tokens_per_block,
+                    kv_tokens_per_block,
+                    kv_owner_tokens_per_block,
+                )
+            )
+        ):
+            assign = object.__setattr__
         if kv_pool_view is not None:
             assert kv_eb > 0 and kv_tokens_per_block > 0, (
                 f"KV pool bound but kv_eb={kv_eb} / "
                 f"kv_tokens_per_block={kv_tokens_per_block} non-positive; "
                 "CacheConfig propagation broken (writer would index with zero stride)"
             )
-        self._kv_pool_view = kv_pool_view
-        self._kv_block_table = kv_block_table
-        self._kv_eb = kv_eb
-        self._kv_tokens_per_block = kv_tokens_per_block
-        self._kv_owner_tokens_per_block = (
-            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
+        assign(self, "_kv_pool_view", kv_pool_view)
+        assign(self, "_kv_block_table", kv_block_table)
+        assign(self, "_kv_eb", kv_eb)
+        assign(self, "_kv_tokens_per_block", kv_tokens_per_block)
+        assign(
+            self,
+            "_kv_owner_tokens_per_block",
+            (
+                kv_owner_tokens_per_block
+                if kv_owner_tokens_per_block > 0
+                else kv_tokens_per_block
+            ),
         )
 
         if state_pool_view is not None:
@@ -190,24 +238,38 @@ class PoolBackedModule(nn.Module):
                     f"state_eb={state_eb}"
                 )
                 num_blocks = total_slots // state_eb
-                self._state_pool_3d = state_pool_view.view(num_blocks, state_eb, hidden)
+                assign(
+                    self,
+                    "_state_pool_3d",
+                    state_pool_view.view(num_blocks, state_eb, hidden),
+                )
             elif state_pool_view.dim() == 3:
                 assert int(state_pool_view.shape[1]) == state_eb, (
                     f"state pool block entries={state_pool_view.shape[1]} "
                     f"does not match state_eb={state_eb}"
                 )
-                self._state_pool_3d = state_pool_view
+                assign(self, "_state_pool_3d", state_pool_view)
             else:
                 raise AssertionError(
                     f"expected 2D or 3D state pool view, got {state_pool_view.shape}"
                 )
         else:
-            self._state_pool_3d = None
-        self._state_block_table = state_block_table
-        self._state_eb = state_eb
-        self._state_tokens_per_block = state_tokens_per_block
+            assign(self, "_state_pool_3d", None)
+        assign(self, "_state_block_table", state_block_table)
+        assign(self, "_state_eb", state_eb)
+        assign(self, "_state_tokens_per_block", state_tokens_per_block)
 
     def clear_pool_context(self) -> None:
+        # These per-forward references normally live in the instance dictionary,
+        # outside Module's parameter/buffer registries. Clear them together to
+        # avoid nine visits to Module.__setattr__ for every attention layer.
+        # Registered fields or custom setters retain the ordinary Module path.
+        if (
+            type(self).__setattr__ is nn.Module.__setattr__
+            and _EMPTY_POOL_CONTEXT.keys() <= self.__dict__.keys()
+        ):
+            self.__dict__.update(_EMPTY_POOL_CONTEXT)
+            return
         self._kv_pool_view = None
         self._kv_block_table = None
         self._kv_eb = 0

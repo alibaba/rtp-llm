@@ -10,10 +10,8 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common.host_math import next_power_of_2
 
-
-@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
-@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
 @triton.jit
 def _layer_norm_fwd_1pass_kernel(
     X,  # pointer to the input
@@ -35,6 +33,7 @@ def _layer_norm_fwd_1pass_kernel(
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     SIGMOID_GATE: tl.constexpr,
+    STORE_STATS: tl.constexpr = True,
 ):
     # Map the program id to the row of X and Y it should compute.
     # Widen before row * stride; the element offset can exceed INT32_MAX.
@@ -44,9 +43,10 @@ def _layer_norm_fwd_1pass_kernel(
     Y += row * stride_y_row + group * N
     if HAS_Z:
         Z += row * stride_z_row + group * N
-    if not IS_RMS_NORM:
-        Mean += group * M
-    Rstd += group * M
+    if STORE_STATS:
+        if not IS_RMS_NORM:
+            Mean += group * M
+        Rstd += group * M
     W += group * N
     if HAS_BIAS:
         B += group * N
@@ -61,14 +61,16 @@ def _layer_norm_fwd_1pass_kernel(
             x *= z * tl.sigmoid(z)
     if not IS_RMS_NORM:
         mean = tl.sum(x, axis=0) / N
-        tl.store(Mean + row, mean)
+        if STORE_STATS:
+            tl.store(Mean + row, mean)
         xbar = tl.where(cols < N, x - mean, 0.0)
         var = tl.sum(xbar * xbar, axis=0) / N
     else:
         xbar = tl.where(cols < N, x, 0.0)
         var = tl.sum(xbar * xbar, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Rstd + row, rstd)
+    if STORE_STATS:
+        tl.store(Rstd + row, rstd)
     # Normalize and apply linear transformation
     mask = cols < N
     w = tl.load(W + cols, mask=mask).to(tl.float32)
@@ -97,6 +99,7 @@ def layer_norm_fwd(
     norm_before_gate=True,
     is_rms_norm=False,
     activation="silu",
+    return_stats=True,
 ):
     if activation not in ("silu", "sigmoid"):
         raise ValueError(f"Unsupported gate activation: {activation}")
@@ -122,13 +125,17 @@ def layer_norm_fwd(
     assert out.stride(-1) == 1
     mean = (
         torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-        if not is_rms_norm
+        if return_stats and not is_rms_norm
         else None
     )
-    rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+    rstd = (
+        torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+        if return_stats
+        else None
+    )
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+    BLOCK_N = min(MAX_FUSED_SIZE, next_power_of_2(group_size))
     if group_size > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
@@ -150,9 +157,12 @@ def layer_norm_fwd(
             group_size,
             eps,
             BLOCK_N=BLOCK_N,
+            HAS_BIAS=bias is not None,
+            HAS_Z=z is not None,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
             SIGMOID_GATE=activation == "sigmoid",
+            STORE_STATS=return_stats,
             num_warps=num_warps,
         )
     return out, mean, rstd
@@ -208,4 +218,5 @@ class RmsNormGated(torch.nn.Module):
             norm_before_gate=True,
             is_rms_norm=True,
             activation=self.activation,
+            return_stats=False,
         )[0]
