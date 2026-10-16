@@ -215,8 +215,15 @@ public:
             if (dp_rank_ != 0) {
                 (*it)->setGenTimeline(false);
             }
-            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
-                (*it)->setIsContextStream(false);
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)
+                && !(*it)->isContextStream()) {
+                // Only advance streams whose context phase is done: a fresh
+                // context stream has not run its prefill yet, so an early
+                // state advance here grows the KV block table before the
+                // context is computed and desynchronizes the write/read views
+                // (deterministic garbage on every request). The context flag
+                // flip itself belongs to GenerateStream::update() after the
+                // context completes, exactly like the FIFO path.
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
             }
