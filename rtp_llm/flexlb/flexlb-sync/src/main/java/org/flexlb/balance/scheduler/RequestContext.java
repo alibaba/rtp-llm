@@ -325,6 +325,11 @@ public final class RequestContext {
             engine = new EngineFacts(pObserved, pCompleted, decodeAccepted, visibility, false, engine.predictionSequence());
         }
         if (evidence.kind() != EngineKind.RETIRED) { lastWorkerAtMs = Math.max(lastWorkerAtMs, evidence.nowMs()); }
+        if (preemption != null && !preemption.finished() && !preemption.restorationObserved()
+                && (isDecode ? evidence.kind() == EngineKind.ALLOCATED : evidence.kind() == EngineKind.ACTIVE)) {
+            preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
+                    false, preemption.pendingTerminal(), preemption.confirmationPending(), true, preemption.reconciliation());
+        }
         if (terminal && delivery != null) {
             var old = delivery;
             delivery = new DeliveryFacts(old.identity(), old.send(), old.acknowledged(), old.abandonment(),
@@ -367,8 +372,8 @@ public final class RequestContext {
         if (request.expectedBatchId() != 0L && request.expectedBatchId() != batchId) { return new Stale<>(before); }
         if (phase != Phase.OPEN) { return new Rejected<>(before, before, Rejection.CLOSED); }
         CancelKind currentKind = placement != null ? CancelKind.WAIT_PLACEMENT
-                : preemption != null && !preemption.finished() ? CancelKind.WAIT_PREEMPTION
                 : delivery != null && delivery.transferred() ? CancelKind.REMOTE
+                : preemption != null && !preemption.finished() ? CancelKind.WAIT_PREEMPTION
                 : route == null ? CancelKind.GLOBAL_QUEUE : CancelKind.WORKER_QUEUE;
         if (cancellation != null && (cancellation.reason() != request.reason()
                 || cancellation.operation() != null && cancellation.operation().kind() == currentKind)) {
@@ -486,7 +491,7 @@ public final class RequestContext {
             return new Rejected<>(before, before, Rejection.INVALID_STATE);
         }
         var registration = new PreemptionRegistration(this, attempt, exact, target);
-        preemption = new PreemptionFacts(registration, PreemptionCancelPhase.CLAIMED, false, false, null, false, null);
+        preemption = new PreemptionFacts(registration, PreemptionCancelPhase.CLAIMED, false, false, null, false, false, null);
         return new Granted<>(before, refresh(before.updatedAtMs()), registration);
     }
 
@@ -501,17 +506,17 @@ public final class RequestContext {
                         || !terminal.success() || engine.decodeAccepted());
         boolean priorityProof = terminal != null && terminal.kind() == EndKind.PRIORITY
                 && preemption.phase().acceptsPriorityTerminal();
-        boolean observed = engine.prefillObserved() || engine.decodeAccepted();
+        boolean observed = preemption.restorationObserved();
         boolean eligible = authoritative || priorityProof
                 || preemption.phase() == PreemptionCancelPhase.NOT_FOUND_STALE
-                        && (terminal == null ? preemption.confirmationPending() || observed : engine.decodeAccepted()
+                        && (terminal == null ? preemption.confirmationPending() || observed : observed
                         || delivery != null && delivery.decodeProof());
         if (!eligible) {
             return new Blocked<>(before, before, Blocker.RELEASE_PROOF);
         }
         var permit = new ReconciliationPermit(this, exact, route, terminal, preemption.confirmationPending());
         preemption = new PreemptionFacts(exact, preemption.phase(), preemption.cancelAcknowledged(), false,
-                terminal, preemption.confirmationPending(), permit);
+                terminal, preemption.confirmationPending(), preemption.restorationObserved(), permit);
         return new Granted<>(before, refresh(before.updatedAtMs()), permit);
     }
 
@@ -534,7 +539,7 @@ public final class RequestContext {
         var terminal = report.terminal() == null ? previous.pendingTerminal() : report.terminal();
         boolean finished = previous.finished() || report.ledgerCommitted() && terminal != null;
         preemption = new PreemptionFacts(exact, next, acknowledged, finished, terminal,
-                previous.confirmationPending(), null);
+                previous.confirmationPending(), previous.restorationObserved(), null);
         if (report.ledgerCommitted()) {
             if (delivery != null && terminal != null) {
                 var old = delivery;
@@ -577,7 +582,7 @@ public final class RequestContext {
             }
             if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
                 preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
-                        false, preemption.pendingTerminal(), true, preemption.reconciliation());
+                        false, preemption.pendingTerminal(), true, preemption.restorationObserved(), preemption.reconciliation());
                 return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
             }
             long activity = Math.max(lastWorkerAtMs, delivery.startedAtMs());
@@ -617,7 +622,8 @@ public final class RequestContext {
             return new Blocked<>(before, refresh(nowMs), Blocker.PLACEMENT);
         }
         if (preemption != null && !preemption.finished() && !deliveryFailure
-                && (pendingEnd == null || pendingEnd.kind() != EndKind.INACTIVITY && pendingEnd.kind() != EndKind.RETIREMENT)) {
+                && (pendingEnd == null || pendingEnd.kind() != EndKind.FRONTEND
+                        && pendingEnd.kind() != EndKind.INACTIVITY && pendingEnd.kind() != EndKind.RETIREMENT)) {
             return new Blocked<>(before, refresh(nowMs), Blocker.PREEMPTION);
         }
         if (outcome == null && pendingEnd == null) { return new Rejected<>(before, before, Rejection.NO_OUTCOME); }
@@ -644,7 +650,7 @@ public final class RequestContext {
             if (preemption != null && (close.expired() || pendingEnd.kind() == EndKind.RETIREMENT
                     && pendingEnd.decodeSettled())) {
                 preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
-                        true, preemption.pendingTerminal(), preemption.confirmationPending(), preemption.reconciliation());
+                        true, preemption.pendingTerminal(), preemption.confirmationPending(), preemption.restorationObserved(), preemption.reconciliation());
             }
             pendingEnd = null;
         }
@@ -699,7 +705,7 @@ public final class RequestContext {
         if (preemption != null && close.decodeSettled() && (close.expired()
                 || delivery != null && delivery.abandonment() != null && delivery.prefillProof() && delivery.decodeProof())) {
             preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
-                    true, preemption.pendingTerminal(), preemption.confirmationPending(), preemption.reconciliation());
+                    true, preemption.pendingTerminal(), preemption.confirmationPending(), preemption.restorationObserved(), preemption.reconciliation());
         }
         if (close.prefillSettled() && close.decodeSettled() && close.notificationsDone() && close.timersDone()
                 && canRelease() && placement == null && close.releaseOperation() == null && close.endOperation() == null
@@ -734,11 +740,11 @@ public final class RequestContext {
             return;
         }
         if (preemption != null && !preemption.finished() && !deliveryFailure
-                && evidence.kind() != EndKind.INACTIVITY && evidence.kind() != EndKind.RETIREMENT) {
+                && evidence.kind() != EndKind.FRONTEND && evidence.kind() != EndKind.INACTIVITY && evidence.kind() != EndKind.RETIREMENT) {
             var previous = preemption.pendingTerminal();
             boolean better = previous == null || evidence.kind() == EndKind.WORKER && previous.kind() != EndKind.WORKER;
             preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
-                    false, better ? evidence : previous, preemption.confirmationPending(), preemption.reconciliation());
+                    false, better ? evidence : previous, preemption.confirmationPending(), preemption.restorationObserved(), preemption.reconciliation());
             return;
         }
         if (pendingEnd == null || evidence.kind() == EndKind.WORKER && pendingEnd.kind() != EndKind.WORKER) {

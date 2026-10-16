@@ -37,6 +37,7 @@ public final class RequestRepository {
                     }
                     long timeout = data.getConfig().getRequestLifecycle().getRequest().getTimeoutMs();
                     if (timeout <= 0L) { throw new IllegalArgumentException("positive request inactivity timeout required"); }
+                    if (!data.getConfig().getDispatcher().requiresGenerateInput()) { data.discardGenerateInput(); }
                     data.register(scheduler, response);
                     context.register(id, System.currentTimeMillis(), data.getRequestExpiresAtMs(), timeout);
                     activeRequests.put(id, context);
@@ -78,6 +79,7 @@ public final class RequestRepository {
             if (activeRequests.get(exact.data().getRequestId()) != exact) { return; }
             terminalRecords.put(exact.data().getRequestId(), new TerminalRecord(terminal, exact.data().getScheduler()));
             activeRequests.remove(exact.data().getRequestId(), exact);
+            exact.data().discardGenerateInput();
         }
     }
     boolean removeExactTerminal(TerminalRecord exact, long before) {

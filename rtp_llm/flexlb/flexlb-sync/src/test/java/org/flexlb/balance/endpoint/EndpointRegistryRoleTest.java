@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
+
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
@@ -28,6 +30,28 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EndpointRegistryRoleTest {
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION", "DECODE"})
+    void routingDirectoriesStayOrderedAcrossInsertionRetirementAndReplacement(RoleType role) {
+        var statuses = new java.util.HashMap<Integer, WorkerStatus>();
+        for (int port : new int[]{8003, 8001, 8002}) {
+            var worker = status(role, port);
+            statuses.put(port, worker);
+            EndpointTestSupport.publishEndpoint(registry, role, worker.getIpPort(), worker);
+        }
+        java.util.function.Supplier<List<String>> addresses = () -> role == RoleType.DECODE
+                ? decodeRoutingSnapshot(registry, null).stream().map(DecodeResources.DecodeRoutingView::address).toList()
+                : registry.prefillRoutingSnapshot(role).stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList();
+        var original = addresses.get();
+        assertEquals(List.of("127.0.0.1:8001", "127.0.0.1:8002", "127.0.0.1:8003"), original);
+        retire(role, "127.0.0.1:8002", statuses.get(8002));
+        assertEquals(List.of("127.0.0.1:8001", "127.0.0.1:8003"), addresses.get());
+        var replacement = status(role, 8002);
+        EndpointTestSupport.publishEndpoint(registry, role, replacement.getIpPort(), replacement);
+        assertEquals(original, addresses.get());
+        assertEquals(3, original.size(), "an earlier directory remains an immutable snapshot");
+    }
 
     private EndpointRegistry registry;
     private PlacementAvailability availability;
@@ -145,7 +169,7 @@ class EndpointRegistryRoleTest {
                 registry, RoleType.DECODE, address, status);
 
         DecodeResources.DecodeRoutingView before =
-                registry.decodeRoutingSnapshot(null).getFirst();
+                decodeRoutingSnapshot(registry, null).getFirst();
         assertEquals(address, before.address());
         assertEquals("group-a", before.topology().group());
         assertEquals("site-a", before.topology().site());
@@ -158,7 +182,7 @@ class EndpointRegistryRoleTest {
         }
 
         DecodeResources.DecodeRoutingView after =
-                registry.decodeRoutingSnapshot(null).getFirst();
+                decodeRoutingSnapshot(registry, null).getFirst();
         assertNotSame(before, after,
                 "topology is an independent routing-cache generation");
         assertSame(before.workerStatus(), after.workerStatus());
@@ -175,7 +199,7 @@ class EndpointRegistryRoleTest {
         EndpointTestSupport.publishEndpoint(
                 registry, RoleType.DECODE, address, oldStatus);
         DecodeResources.DecodeRoutingView oldView =
-                registry.decodeRoutingSnapshot(null).getFirst();
+                decodeRoutingSnapshot(registry, null).getFirst();
 
         retire(RoleType.DECODE, address, oldStatus);
         WorkerStatus replacementStatus = status(RoleType.DECODE, 8020);
@@ -189,7 +213,7 @@ class EndpointRegistryRoleTest {
         assertNull(registry.captureDecodeGeneration(oldView),
                 "an old view must not pin a same-address replacement");
         DecodeResources.DecodeRoutingView replacementView =
-                registry.decodeRoutingSnapshot(null).getFirst();
+                decodeRoutingSnapshot(registry, null).getFirst();
         assertEquals(address, replacementView.address());
         assertTrue(oldView.generationId() != replacementView.generationId());
         try (WorkerEndpoint.GenerationPin pin =
@@ -237,10 +261,10 @@ class EndpointRegistryRoleTest {
         assertNotSame(first, replacement);
         List<EndpointRegistry.PrefillRoutingEntry> replacementDirectory =
                 registry.prefillRoutingSnapshot(RoleType.PREFILL);
-        assertEquals(List.of(secondAddress, thirdAddress, firstAddress),
+        assertEquals(List.of(firstAddress, secondAddress, thirdAddress),
                 replacementDirectory.stream()
                         .map(EndpointRegistry.PrefillRoutingEntry::address).toList(),
-                "retirement removes the old position; the new generation joins at the end");
+                "the replacement generation retains address ordering");
         assertSame(first, originalDirectory.getFirst().endpoint(),
                 "an in-flight traversal keeps its advisory old generation");
         assertSame(replacement, replacementDirectory.stream()

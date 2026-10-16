@@ -12,6 +12,59 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class EndpointRoundRobinTest {
     @Test
+    void dynamicCapturesFollowAddressSuccessorWithoutRepeatingCallbacks() {
+        var rotation = new EndpointRoundRobin();
+        var last = new java.util.HashMap<String, String>();
+        var random = new java.util.Random(187237);
+        for (int iteration = 0; iteration < 2000; iteration++) {
+            int size = random.nextInt(80);
+            String group = "g" + random.nextInt(4);
+            var role = random.nextBoolean() ? RoleType.PREFILL : RoleType.DECODE;
+            String scope = role + group;
+            String[] addresses = new String[size];
+            boolean[] eligible = new boolean[size];
+            int[] predicates = new int[size], captures = new int[size];
+            var ring = new java.util.TreeSet<String>();
+            for (int i = 0; i < size; i++) {
+                addresses[i] = "worker-" + random.nextInt(100);
+                eligible[i] = random.nextBoolean();
+                if (eligible[i]) { ring.add(addresses[i]); }
+            }
+            String expected = ring.isEmpty() ? null : last.containsKey(scope) ? ring.higher(last.get(scope)) : ring.first();
+            if (expected == null && !ring.isEmpty()) { expected = ring.first(); }
+            int selected = rotation.next(role, group, size,
+                    i -> { predicates[i]++; return eligible[i]; }, i -> { captures[i]++; return addresses[i]; });
+            if (expected == null) { assertEquals(-1, selected); }
+            else {
+                assertEquals(expected, addresses[selected]);
+                assertTrue(eligible[selected]);
+                last.put(scope, expected);
+            }
+            for (int i = 0; i < size; i++) {
+                assertEquals(1, predicates[i]);
+                assertEquals(eligible[i] ? 1 : 0, captures[i]);
+            }
+            assertScratchReleased();
+        }
+    }
+
+    @Test
+    void contendedLargeRingPreservesExactFairness() throws Exception {
+        var rotation = new EndpointRoundRobin();
+        String[] addresses = java.util.stream.IntStream.range(0, 750).mapToObj(i -> "worker-" + i).toArray(String[]::new);
+        try (var executor = Executors.newFixedThreadPool(16)) {
+            var calls = new ArrayList<Future<Integer>>();
+            for (int i = 0; i < 6000; i++) {
+                calls.add(executor.submit(() -> rotation.next(RoleType.DECODE, "fleet", addresses.length,
+                        j -> true, j -> addresses[j])));
+            }
+            int[] counts = new int[addresses.length];
+            for (var call : calls) { counts[call.get(10, java.util.concurrent.TimeUnit.SECONDS)]++; }
+            for (int count : counts) { assertEquals(8, count); }
+        }
+    }
+
+    @Test
     void changingEligibleSetDoesNotSkipAContinuouslyEligibleWorker() {
         var rotation = new EndpointRoundRobin();
         assertEquals("a", pick(rotation, "g", List.of("a", "b", "c")));

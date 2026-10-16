@@ -165,7 +165,7 @@ class DeliveryDispatcherTest {
                 .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
                 .filter(input -> input.getRequestId() == 502L)
                 .findFirst().orElseThrow();
-        assertEquals(first.ctx().data().getGenerateInput().getUnknownFields(), firstSent.getUnknownFields());
+        assertEquals(first.ctx().data().getGenerateInput().toWireBuilder().getUnknownFields(), firstSent.getUnknownFields());
         boolean replaced = enabled && validScheduleContext;
         assertEquals("00-11111111111111111111111111111111-"
                         + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111") + "-01",
@@ -176,7 +176,7 @@ class DeliveryDispatcherTest {
                         + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222") + "-01",
                 secondSent.getRequestInfo().getTraceContext().getTraceparent());
         assertEquals(replaced ? "" : "vendor=two", secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals("vendor=one", first.ctx().data().getGenerateInput()
+        assertEquals("vendor=one", first.ctx().data().getGenerateInput().toWireBuilder()
                 .getRequestInfo().getTraceContext().getTracestate(), "dispatch must not mutate the queued payload");
     }
 

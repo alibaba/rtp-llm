@@ -40,15 +40,19 @@ final class EndpointRoundRobin {
             String[] eligibleAddresses = scratch.eligibleAddresses;
             String[] orderedAddresses = scratch.orderedAddresses;
             int count = 0;
+            boolean ordered = true;
             for (int i = 0; i < size; i++) {
                 if (eligible.test(i)) {
                     String candidate = address.apply(i);
                     eligibleAddresses[i] = candidate;
+                    if (ordered && count > 0 && (candidate == null || orderedAddresses[count - 1] == null
+                            || orderedAddresses[count - 1].compareTo(candidate) > 0)) { ordered = false; }
                     orderedAddresses[count++] = candidate;
                 }
             }
             if (count == 0) { return -1; }
-            Arrays.sort(orderedAddresses, 0, count);
+            // Published directories are ordered; filtering preserves that order.
+            if (!ordered) { Arrays.sort(orderedAddresses, 0, count); }
             String selected;
             synchronized (cursor) {
                 int index = cursor.lastSelectedAddress == null ? 0

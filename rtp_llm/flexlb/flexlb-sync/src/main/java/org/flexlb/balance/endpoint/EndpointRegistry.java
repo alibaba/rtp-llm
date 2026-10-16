@@ -227,26 +227,19 @@ public class EndpointRegistry {
     }
 
     /**
-     * Return immutable routing values for the Decode generations observed
-     * during this traversal.
+     * Append immutable Decode routing values to caller-owned storage, which
+     * the registry never retains. Values reflect generations seen during this traversal.
      *
      * <p>The registry is intentionally not locked while an endpoint takes its
      * admission lock.  This avoids introducing a map-bin/admission-lock order;
      * publication races are resolved when the selected generation is pinned
      * by {@link #captureDecodeGeneration(DecodeResources.DecodeRoutingView)}.</p>
      */
-    public List<DecodeResources.DecodeRoutingView> decodeRoutingSnapshot(String group) {
-        List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeResources.DecodeRoutingView> snapshot =
-                new ArrayList<>(directory.size());
-        for (Map.Entry<String, DecodeEndpoint> entry : directory) {
+    public void decodeRoutingSnapshot(String group, List<DecodeResources.DecodeRoutingView> target) {
+        for (Map.Entry<String, DecodeEndpoint> entry : decodeDirectory) {
             var view = Objects.requireNonNull(entry.getValue().routingView(entry.getKey()));
-            if (group == null || group.equals(view.topology().group())) {
-                snapshot.add(view);
-            }
+            if (group == null || group.equals(view.topology().group())) { target.add(view); }
         }
-        if (snapshot.isEmpty()) { return List.of(); }
-        return snapshot.size() == directory.size() ? Collections.unmodifiableList(snapshot) : List.copyOf(snapshot);
     }
 
     /**
@@ -440,19 +433,25 @@ public class EndpointRegistry {
         }
     }
 
-    /** Build the immutable directory before the map write; replacement first detaches the old generation. */
+    /** Keep the immutable directory in address order; request routing then needs no full sort. */
     private <T> List<T> directoryAfterMutation(List<T> previous, String address,
                                               Function<T, String> addressOf, T next) {
         if (closeCompletion != null) {
             return List.of();
         }
         List<T> updated = new ArrayList<>(previous.size() + (next == null ? 0 : 1));
+        boolean inserted = next == null;
         for (T entry : previous) {
-            if (!address.equals(addressOf.apply(entry))) {
+            String currentAddress = addressOf.apply(entry);
+            if (!inserted && address.compareTo(currentAddress) <= 0) {
+                updated.add(next);
+                inserted = true;
+            }
+            if (!address.equals(currentAddress)) {
                 updated.add(entry);
             }
         }
-        if (next != null) {
+        if (!inserted) {
             updated.add(next);
         }
         return List.copyOf(updated);

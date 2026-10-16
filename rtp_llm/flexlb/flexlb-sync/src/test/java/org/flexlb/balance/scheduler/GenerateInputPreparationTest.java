@@ -47,14 +47,43 @@ class GenerateInputPreparationTest {
         context.data().setGenerateInputPb(valid.toByteString());
         context.data().prepareGenerateInput();
         var parsed = context.data().getGenerateInput();
-        assertEquals(valid, parsed);
+        assertEquals(valid, GenerateInputPB.parseFrom(parsed.toWireBuilder().build().toByteString()));
         assertSame(parsed, context.data().getGenerateInput());
-        assertEquals(71, context.data().getGenerateInput().getRequestId());
-        parsed.toBuilder().setRequestId(72).build();
-        assertEquals(71, context.data().getGenerateInput().getRequestId());
+        assertEquals(71, context.data().getGenerateInput().toWireBuilder().getRequestId());
+        parsed.toWireBuilder().setRequestId(72).build();
+        assertEquals(71, context.data().getGenerateInput().toWireBuilder().getRequestId());
         context.data().setGenerateInputPb(ByteString.EMPTY);
         assertFalse(context.data().hasGenerateInput());
         assertNull(context.data().getGenerateInput());
+    }
+
+    @Test
+    void nonBatchDoesNotRetainOrParseInput() throws Exception {
+        var config = SchedulingTestConfig.newConfig();
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var data = new RequestContext(config).data();
+        data.setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+        assertFalse(data.hasGenerateInput());
+        assertEquals(0, data.getGenerateInputSize());
+        assertNull(data.getGenerateInput());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void archiveDropsCachedInputWithoutInvalidatingAnExistingReader(boolean prepared) throws Exception {
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 71L);
+        var wire = GenerateInputPB.newBuilder().setRequestId(71L).addTokenIds(42).build();
+        context.data().setGenerateInputPb(wire.toByteString());
+        var reader = prepared ? context.data().getGenerateInput() : null;
+        var repository = new RequestRepository();
+        assertEquals(RequestRepository.RegistrationResult.REGISTERED, repository.register(context,
+                mock(AbstractRequestScheduler.class), new RequestFuture((kind, value, failure) -> true)));
+        assertThrows(IllegalStateException.class, () -> context.data().setGenerateInputPb(ByteString.EMPTY));
+        repository.archive(context, RequestState.from(context.snapshot()));
+        assertNull(repository.findActive(71L));
+        assertFalse(context.data().hasGenerateInput());
+        assertNull(context.data().getGenerateInput());
+        if (reader != null) { assertEquals(wire, GenerateInputPB.parseFrom(reader.toWireBuilder().build().toByteString())); }
     }
 
     @ParameterizedTest

@@ -268,7 +268,8 @@ public final class RouteProjection {
                     return PrefillPredictionBoundary.committedDecisionGroupMs(cached.getAsDouble());
                 }
             }
-            return predictions.batchDurationMs(items.subList(0, memberIndex + 1));
+            return predictions.batchDurationMs(memberIndex + 1 == items.size()
+                    ? items : items.subList(0, memberIndex + 1));
         }
 
         /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */

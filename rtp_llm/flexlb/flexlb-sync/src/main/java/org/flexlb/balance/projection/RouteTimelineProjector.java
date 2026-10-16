@@ -91,7 +91,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             return unavailable("INCOMING_EXPIRED");
         }
 
-        predictions.reset(evaluator);
+        predictions.evaluator = evaluator;
         try {
             return projectWithPredictions(
                     queue, committed, deliveryProjection,
@@ -99,7 +99,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         } finally {
-            predictions.reset(null);
+            predictions.evaluator = null;
         }
     }
 
@@ -115,7 +115,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
 
         final long incomingPrefillMs;
         try {
-            incomingPrefillMs = predictions.singleMs(
+            incomingPrefillMs = predictions.itemDurationMs(
                     seqLen, hitCache);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(
@@ -501,36 +501,31 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             implements RouteProjection.Predictions {
 
         private PrefillTimePredictor.Evaluator evaluator;
-        private Object cachedSingleSnapshot;
+        // Equal immutable models and request shapes share both singleton predictions across calls.
+        private Object cachedSnapshot;
         private long cachedSeqLen = -1L;
         private long cachedHitCache = -1L;
-        private long cachedSingleMs;
-        private Object cachedBatchSnapshot;
-        private long cachedBatchSeqLen = -1L;
-        private long cachedBatchHitCache = -1L;
-        private long cachedBatchMs;
+        private long cachedSingleMs = -1L;
+        private long cachedBatchMs = -1L;
 
-        private void reset(PrefillTimePredictor.Evaluator evaluator) {
-            this.evaluator = evaluator;
-            // Prediction caches are keyed by immutable model snapshot and
-            // request shape, so they remain valid across equal-model endpoint
-            // probes in one full-fleet selection (and across later calls).
-        }
-
-        private long singleMs(long seqLen, long hitCache) {
+        private long singletonMs(long seqLen, long hitCache, boolean batch) {
             Object snapshot = evaluator.snapshotIdentity();
-            if (cachedSingleSnapshot == snapshot
-                    && cachedSeqLen == seqLen
-                    && cachedHitCache == hitCache) {
-                return cachedSingleMs;
-            }
+            boolean sameInput = cachedSnapshot == snapshot && cachedSeqLen == seqLen && cachedHitCache == hitCache;
+            long cached = batch ? cachedBatchMs : cachedSingleMs;
+            if (sameInput && cached >= 0L) { return cached; }
             try {
-                long predicted = PrefillPredictionBoundary.predictSingleRequestMs(
-                        evaluator, seqLen, hitCache);
-                cachedSingleSnapshot = snapshot;
-                cachedSeqLen = seqLen;
-                cachedHitCache = hitCache;
-                cachedSingleMs = predicted;
+                long predicted = batch
+                        ? PrefillPredictionBoundary.predictCommittedBatchMs(evaluator,
+                                new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(seqLen, hitCache))))
+                        : PrefillPredictionBoundary.predictSingleRequestMs(evaluator, seqLen, hitCache);
+                if (!sameInput) {
+                    cachedSnapshot = snapshot;
+                    cachedSeqLen = seqLen;
+                    cachedHitCache = hitCache;
+                    cachedSingleMs = cachedBatchMs = -1L;
+                }
+                if (batch) { cachedBatchMs = predicted; }
+                else { cachedSingleMs = predicted; }
                 return predicted;
             } catch (RuntimeException predictionFailure) {
                 throw new PredictionFailure(predictionFailure);
@@ -539,21 +534,29 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
 
         @Override
         public long itemDurationMs(GroupPlanner.Item item) {
-            return singleMs(item.seqLen(), item.hitCache());
+            return singletonMs(item.seqLen(), item.hitCache(), false);
         }
 
         @Override
         public long itemDurationMs(long seqLen, long hitCache) {
-            return singleMs(seqLen, hitCache);
+            return singletonMs(seqLen, hitCache, false);
         }
 
         @Override
         public long batchDurationMs(List<GroupPlanner.Item> items) {
+            if (items.size() == 1) {
+                var item = items.getFirst();
+                return singletonMs(item.seqLen(), item.hitCache(), true);
+            }
             try {
+                if (items.size() == 2) {
+                    return PrefillPredictionBoundary.predictCommittedBatchMs(evaluator,
+                            new PrefillBatchFeatures(List.of(items.get(0).features(), items.get(1).features())));
+                }
+                var features = new PrefillBatchFeatures.Item[items.size()];
+                for (int i = 0; i < features.length; i++) { features[i] = items.get(i).features(); }
                 return PrefillPredictionBoundary.predictCommittedBatchMs(
-                        evaluator, new PrefillBatchFeatures(
-                                List.of(items.stream().map(GroupPlanner.Item::features)
-                                        .toArray(PrefillBatchFeatures.Item[]::new))));
+                        evaluator, new PrefillBatchFeatures(List.of(features)));
             } catch (RuntimeException predictionFailure) {
                 throw new PredictionFailure(predictionFailure);
             }
@@ -573,25 +576,9 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
 
         @Override
         public long singletonBatchDurationMs(long seqLen, long hitCache) {
-            Object snapshot = evaluator.snapshotIdentity();
-            if (cachedBatchSnapshot == snapshot
-                    && cachedBatchSeqLen == seqLen
-                    && cachedBatchHitCache == hitCache) {
-                return cachedBatchMs;
-            }
-            try {
-                long predicted = PrefillPredictionBoundary.predictCommittedBatchMs(
-                        evaluator, new PrefillBatchFeatures(List.of(
-                                new PrefillBatchFeatures.Item(seqLen, hitCache))));
-                cachedBatchSnapshot = snapshot;
-                cachedBatchSeqLen = seqLen;
-                cachedBatchHitCache = hitCache;
-                cachedBatchMs = predicted;
-                return predicted;
-            } catch (RuntimeException predictionFailure) {
-                throw new PredictionFailure(predictionFailure);
-            }
+            return singletonMs(seqLen, hitCache, true);
         }
+
     }
 
     /** Predictor failures preserve the distinction between execution and invalid values. */
