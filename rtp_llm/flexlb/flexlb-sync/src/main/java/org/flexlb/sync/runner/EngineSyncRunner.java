@@ -178,7 +178,6 @@ public class EngineSyncRunner implements Runnable {
                     continue;
                 }
 
-                workerStatus.configureStatusFreshness(statusStaleAfterUs);
                 WorkerStatus.PollLease statusPollLease =
                         workerStatus.tryBeginStatusPoll(syncCycleId);
                 if (statusPollLease != null) {
@@ -402,7 +401,7 @@ public class EngineSyncRunner implements Runnable {
                 ip,
                 port,
                 CommonUtils.toGrpcPort(port),
-                site);
+                site, statusStaleAfterUs);
         logger.info("Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(), workerIpPort);
         return discovered;

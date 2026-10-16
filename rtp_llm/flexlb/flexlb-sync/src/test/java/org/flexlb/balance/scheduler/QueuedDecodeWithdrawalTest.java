@@ -42,8 +42,8 @@ class QueuedDecodeWithdrawalTest {
         queue = mock(GlobalQueueCoordinator.class);
         when(queue.requeue(any())).thenReturn(true);
         registry.attachGlobalQueue(queue);
-        decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8000, 8001, null), mock(EndpointEventProjector.class));
+        decode = new DecodeEndpoint(org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, null,
+                "127.0.0.1", 8000, 8001, null)), mock(EndpointEventProjector.class));
     }
 
     @AfterEach

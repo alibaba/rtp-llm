@@ -40,8 +40,7 @@ class GrpcWorkerStatusRunnerTest {
         when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         var registry = RunnerTestSupport.endpointRegistry(config);
         try {
-            var status = RunnerTestSupport.discovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test");
-            status.configureStatusFreshness(20_000L);
+            var status = WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test", 20_000L);
             var directory = directory(registry, status);
             var grpc = mock(EngineGrpcService.class);
             var version = new java.util.concurrent.atomic.AtomicLong();
@@ -54,17 +53,16 @@ class GrpcWorkerStatusRunnerTest {
                             status, status.tryBeginStatusPoll(version.get()), directory, mock(EngineHealthReporter.class),
                             grpc, 1000L, mock(CacheAwareService.class), executor).run();
             poll.accept(Runnable::run);
-            status.configureStatusFreshness(20_000L);
             var endpoint = directory.exactEndpoint(RoleType.DECODE, status.getIpPort(), status);
             assertNotNull(endpoint);
             poll.accept(queue::add);
-            long applied = status.lastStatusAppliedUs();
+            long applied = status.appliedSnapshotReceivedUs();
             long contact = status.pollHealth().lastSuccessfulPollUs();
             java.util.concurrent.TimeUnit.MILLISECONDS.sleep(30);
             for (int index = 0; index < 5; index++) { poll.accept(queue::add); }
             org.junit.jupiter.api.Assertions.assertEquals(1, queue.size(), "at most one retained protobuf response");
             assertTrue(status.pollHealth().lastSuccessfulPollUs() > contact);
-            org.junit.jupiter.api.Assertions.assertEquals(applied, status.lastStatusAppliedUs());
+            org.junit.jupiter.api.Assertions.assertEquals(applied, status.appliedSnapshotReceivedUs());
             assertTrue(status.isActiveGeneration());
             assertNull(endpoint.tryPinSchedulingGeneration(), "fresh RPC contact must not make old state schedulable");
             try (var cleanup = endpoint.tryPinGeneration()) {
