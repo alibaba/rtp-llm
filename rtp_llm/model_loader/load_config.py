@@ -1,12 +1,12 @@
 import enum
 import json
 import logging
-import os
 from typing import Any, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
@@ -130,6 +130,7 @@ class LoadConfig(BaseModel):
         ep_size: int,
         num_nodes: int,
         phy2log_path: Optional[str] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ):
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
@@ -148,23 +149,27 @@ class LoadConfig(BaseModel):
 
         phy2log: List[List[int]] = []
 
-        if os.environ.get("MAXPANDER_ENABLE", "0") == "1" and expert_num > 0:
-            if phy2log_path:
-                raise ValueError("MaxPander static placement cannot use phy2log_path")
+        if maxpander_config.enabled:
+            maxpander_config.validate_placement(
+                expert_num=expert_num,
+                physical_expert_num=phy_exp_num,
+                ep_size=ep_size,
+                phy2log_path=phy2log_path,
+            )
             from rtp_llm.eplb.maxpander_plan import build_circulant_plan
 
             plan, _, _ = build_circulant_plan(
                 expert_num,
                 phy_exp_num,
                 ep_size,
-                seed=int(os.environ.get("MAXPANDER_SEED", "0")),
+                seed=maxpander_config.seed,
             )
             logging.info(
                 "MaxPander startup placement: logical=%d physical=%d EP=%d seed=%s layers=%d",
                 expert_num,
                 phy_exp_num,
                 ep_size,
-                os.environ.get("MAXPANDER_SEED", "0"),
+                maxpander_config.seed,
                 layer_num,
             )
             return [plan.tolist() for _ in range(layer_num)]

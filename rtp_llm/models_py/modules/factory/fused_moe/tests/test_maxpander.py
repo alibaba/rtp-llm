@@ -100,6 +100,74 @@ class DispatchTest(unittest.TestCase):
             torch.equal(router.quota[e], torch.tensor([256, 256], device="cuda"))
         )
 
+    def test_inplace_strided_rows_and_repeated_calls(self):
+        router, phi, _ = self.make_router()
+        storage = torch.full((257, 9), -123, device="cuda", dtype=torch.int64)
+        packed = storage[:, 2:6]
+        scratch_addresses = [
+            router.counts.data_ptr(),
+            router.hot_order.data_ptr(),
+        ]
+        for value in (0, 7, 15, -1, 19):
+            logical = torch.full_like(packed, value)
+            packed.copy_(logical)
+            result = router.remap_inplace(packed)
+            self.assertIs(result, packed)
+            self.check_mapping(logical, packed, phi)
+            self.assertTrue(torch.all(storage[:, :2] == -123))
+            self.assertTrue(torch.all(storage[:, 6:] == -123))
+            self.assertEqual(
+                scratch_addresses,
+                [
+                    router.counts.data_ptr(),
+                    router.hot_order.data_ptr(),
+                ],
+            )
+
+    def test_inplace_graph_replay_reloads_logical_ids(self):
+        router, phi, _ = self.make_router()
+        source = torch.zeros((64, 4), device="cuda", dtype=torch.int64)
+        storage = torch.empty((64, 8), device="cuda", dtype=torch.int64)
+        packed = storage[:, :4]
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            packed.copy_(source)
+            router.remap_inplace(packed)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            packed.copy_(source)
+            router.remap_inplace(packed)
+        for value in (0, 5, 15, -1):
+            source.fill_(value)
+            graph.replay()
+            torch.cuda.synchronize()
+            self.check_mapping(source, packed, phi)
+
+    def test_invalid_inplace_layout_rejected(self):
+        router, _, _ = self.make_router()
+        with self.assertRaisesRegex(ValueError, "contiguous columns"):
+            router.remap_inplace(
+                torch.zeros((8, 4), device="cuda", dtype=torch.int64).t()
+            )
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            router.remap_inplace(
+                torch.zeros((1, 4), device="cuda", dtype=torch.int64).expand(8, 4)
+            )
+
+    def test_hot_order_matches_stable_sort_with_ties_and_padding(self):
+        for experts in (24, 256):
+            router, _, _ = self.make_router(e=experts, p=experts + experts // 4)
+            for logical in (
+                torch.full((257, 6), -1, device="cuda", dtype=torch.int64),
+                torch.arange(1536, device="cuda").view(-1, 6) % experts,
+                torch.randint(-1, experts + 2, (257, 6), device="cuda"),
+            ):
+                router(logical)
+                expected = torch.argsort(router.counts, descending=True, stable=True)
+                self.assertTrue(torch.equal(router.hot_order.long(), expected))
+
     def test_graph_replay_recomputes_routes(self):
         router, phi, _ = self.make_router()
         ids = torch.zeros((256, 4), device="cuda", dtype=torch.int64)

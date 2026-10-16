@@ -310,6 +310,7 @@ def _args_from_model_config(
         index_topk=attn_config.indexer_topk,
         moe_inter_dim=_resolve_dsv4_moe_inter_dim(model_config),
         n_routed_experts=model_config.expert_num,
+        maxpander_config=model_config.maxpander_config,
         n_physical_experts=int(
             model_config.eplb_config.phy_exp_num(model_config.expert_num)
         ),

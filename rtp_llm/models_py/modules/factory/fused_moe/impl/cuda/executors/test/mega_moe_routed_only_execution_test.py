@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.local_loop import (
     LocalLoopExecutor,
 )
@@ -156,6 +157,8 @@ def _make_moe(
     layer_id: int = 7,
     max_tokens_per_rank: int = _MAX_TOKENS,
     chunking_enabled: bool = True,
+    maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
+    physical_expert_num: int = _EXPERTS,
 ) -> MoE:
     return MoE(
         moe_w1_layout="gate_up",
@@ -176,6 +179,8 @@ def _make_moe(
         max_tokens_per_rank=max_tokens_per_rank,
         chunking_enabled=chunking_enabled,
         strategy=strategy,
+        maxpander_config=maxpander_config,
+        n_physical_experts=physical_expert_num,
     )
 
 

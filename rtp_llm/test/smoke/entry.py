@@ -65,6 +65,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="smoke runner")
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
     parser.add_argument("--task_info", type=str, required=True, help="task_info")
+    parser.add_argument(
+        "--model_path_override",
+        type=str,
+        default=None,
+        help="Use a local checkpoint directory without modifying the task fixture",
+    )
     parser.add_argument("--envs", type=str, required=False, default="", help="envs")
     parser.add_argument(
         "--smoke_args", type=str, required=False, default="", help="smoke_args"
@@ -96,6 +102,15 @@ if __name__ == "__main__":
             x = json5.load(f)
         except ImportError:
             x = json.load(f)
+        if args.model_path_override is not None:
+            if not os.path.isdir(args.model_path_override):
+                raise ValueError(
+                    f"Local checkpoint directory does not exist: {args.model_path_override}"
+                )
+            original_model_path = x["model_path"]
+            x["model_path"] = args.model_path_override
+            if x.get("tokenizer_path") == original_model_path:
+                x["tokenizer_path"] = args.model_path_override
         if "query_result" in x:
             x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
         task_info = TaskInfo(

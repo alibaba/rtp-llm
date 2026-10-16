@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
@@ -79,6 +80,7 @@ class V4Args:
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
     n_physical_experts: Optional[int] = None
+    maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig()
     n_shared_experts: int = 1
     moe_strategy: str = "auto"
     n_activated_experts: int = 6
@@ -162,6 +164,7 @@ def _block_kwargs(
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
         n_physical_experts=args.n_physical_experts,
+        maxpander_config=args.maxpander_config,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         moe_strategy=args.moe_strategy,

@@ -317,6 +317,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             num_sms,
             self._shared_recipe,
             tuple(token_counts),
+            cfg.maxpander_config,
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
             (
                 float(getattr(self, "_gate_pack_route_scale", 1.0))
@@ -414,8 +415,15 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             torch.cuda.synchronize(device)
 
     def can_use_gate_pack_static(self, gate) -> bool:
-        # SE must not provide a gate-pack bypass around physical replica mapping.
-        return False
+        return (
+            os.environ.get("DSV4_GATE_FUSED", "1") != "0"
+            and os.environ.get("DSV4_GATE_FP32", "0") != "1"
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            and self.cfg.dim % 128 == 0
+            and _gate_pack_input_packer_env_allows()
+            and _get_mega_se_gate_pack_kernels() is not None
+        )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
@@ -445,22 +453,18 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
     def forward_with_gate_pack(self, x, gate, input_ids):
         if not self.can_use_gate_pack_static(gate):
             raise RuntimeError(
-                "DSV4.1 MegaMoE SE fused gate-pack is disabled for MaxPander "
-                "adaptation; use explicit gate/Top-K and forward"
+                "DSV4.1 MegaMoE SE fused gate-pack is unavailable for this gate or packer"
             )
         kernels = _get_mega_se_gate_pack_kernels()
         pack_nonhash, pack_hash, _ = kernels
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         buf = self._mega_buf
-        y = self._mega_y[:tokens]
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_se_gate_pack"):
@@ -493,8 +497,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
 
 __all__ = ["MegaMoEStrategySE"]

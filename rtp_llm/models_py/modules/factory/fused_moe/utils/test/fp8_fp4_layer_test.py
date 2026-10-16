@@ -92,27 +92,20 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
         layer = Fp8Fp4MoeLayer.__new__(Fp8Fp4MoeLayer)
         torch.nn.Module.__init__(layer)
         layer.dim = 4
-        layer.physical_router = None
         layer.gate = _FakeGate(events, gate_pack_enabled)
         layer.fused_moe = _FakeFusedMoe(events)
         layer.shared_experts = object() if with_shared else None
         layer._shared_executor = _FakeSharedExecutor(events) if with_shared else None
         return layer
 
-    def test_physical_mapping_is_after_gate_and_before_executor(self):
+    def test_logical_gate_outputs_are_left_for_executor_mapping(self):
         for with_shared in (True, False):
             for with_observer in (True, False):
                 events = []
                 observed = {}
                 layer = self._layer(
-                    events, gate_pack_enabled=True, with_shared=with_shared
+                    events, gate_pack_enabled=False, with_shared=with_shared
                 )
-
-                def remap(logical):
-                    events.append("physical.remap")
-                    return logical + 10
-
-                layer.physical_router = remap
                 x = torch.ones((2, 4), dtype=torch.bfloat16)
                 with patch.object(
                     layer_module,
@@ -129,22 +122,17 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
                         ),
                     )
                 self.assertLess(
-                    events.index("gate.forward"), events.index("physical.remap")
-                )
-                self.assertLess(
-                    events.index("physical.remap"), events.index("fused_moe.forward")
+                    events.index("gate.forward"), events.index("fused_moe.forward")
                 )
                 self.assertNotIn("gate.prepare", events)
                 self.assertNotIn("fused_moe.forward_gate_pack", events)
-                self.assertTrue(torch.all(layer.fused_moe.last_topk_ids == 10).item())
+                self.assertTrue(torch.all(layer.fused_moe.last_topk_ids == 0).item())
                 self.assertTrue(
                     torch.all(layer.fused_moe.last_topk_weights == 1).item()
                 )
                 if with_observer:
                     self.assertTrue(torch.all(observed["topk_indices"] == 0).item())
-                    self.assertTrue(
-                        torch.all(observed["physical_topk_indices"] == 10).item()
-                    )
+                    self.assertNotIn("physical_topk_indices", observed)
 
     @staticmethod
     def _combine(events):

@@ -9,6 +9,14 @@ py_test(
 )
 
 py_test(
+    name = "test_maxpander_perf",
+    srcs = ["test_maxpander_perf.py"],
+    deps = ["//rtp_llm/models_py:maxpander"],
+    tags = ["manual", "L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+py_test(
     name = "test_config_resolver",
     srcs = ["test_config_resolver.py"],
     deps = [

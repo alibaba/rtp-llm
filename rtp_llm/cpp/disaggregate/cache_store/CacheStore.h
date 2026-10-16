@@ -17,6 +17,8 @@ public:
     CacheStore() {};
     virtual ~CacheStore() {};
 
+    virtual void stop() {}
+
     virtual void store(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
                        CacheStoreStoreDoneCallback                callback) = 0;
 
