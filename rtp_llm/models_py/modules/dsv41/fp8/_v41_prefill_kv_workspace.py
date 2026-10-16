@@ -121,7 +121,7 @@ class PreparedGlobalWorkspace:
     on the same forward stream before reading the complete interleaved output.
     """
 
-    def __init__(self, swa, global_sizes, refresh):
+    def __init__(self, swa, global_sizes, refresh, *, output_stream=None):
         self.global_sizes = global_sizes
         self.swa_capacity = swa.sizes
         self.geometry = _row_geometry(swa)
@@ -135,9 +135,25 @@ class PreparedGlobalWorkspace:
             layout.extend((start, offset, size, tiles))
             offset += size
         self.global_starts = tuple(starts)
-        self.output = torch.empty(
-            (offset, swa.flat.shape[1]), dtype=swa.flat.dtype, device=swa.flat.device
-        )
+        if output_stream is None:
+            self.output = torch.empty(
+                (offset, swa.flat.shape[1]),
+                dtype=swa.flat.dtype,
+                device=swa.flat.device,
+            )
+        else:
+            producer_stream = torch.cuda.current_stream(swa.flat.device)
+            # The caller already ordered the producer after this stream's old
+            # work. Only allocation changes stream; layout copies stay on the
+            # producer, so there is no new event or cross-stream upload.
+            with torch.cuda.stream(output_stream):
+                self.output = torch.empty(
+                    (offset, swa.flat.shape[1]),
+                    dtype=swa.flat.dtype,
+                    device=swa.flat.device,
+                )
+            # Protect even a failure during the remaining metadata preparation.
+            self.output.record_stream(producer_stream)
         # One small asynchronous upload supplies both the producer mapping and
         # SWA refresh. Keep its pinned source alive with the global aliases.
         self.pinned_holder = torch.tensor(
@@ -207,12 +223,15 @@ class PreparedGlobalWorkspace:
         return PreparedGlobalRows(values, self)
 
 
-def prepare_global_workspace(swa, global_sizes):
+def prepare_global_workspace(swa, global_sizes, *, output_stream=None):
     """Reserve exact request ranges for direct producer output when supported.
 
     This is independent of batch size or equal request lengths. The caller must
     use the original producer path if this returns None, and must publish the
     returned plan only when the direct producer actually ran successfully.
+    When output_stream is supplied, the caller must already have ordered the
+    current producer stream after its prior work. Only the final allocation
+    uses output_stream; layout uploads stay on the producer, without a new event.
     """
     if not isinstance(swa, SwaRows) or not swa.flat.is_cuda:
         return None
@@ -226,7 +245,9 @@ def prepare_global_workspace(swa, global_sizes):
     refresh = _refresh_backend()
     if not refresh.is_supported(swa.flat):
         return None
-    return PreparedGlobalWorkspace(swa, global_sizes, refresh)
+    return PreparedGlobalWorkspace(
+        swa, global_sizes, refresh, output_stream=output_stream
+    )
 
 
 def _combine_swa_rows(shared, globals_by_req, swa):

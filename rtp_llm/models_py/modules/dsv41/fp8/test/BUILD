@@ -34,6 +34,8 @@ _TESTS = [
     "test_v41_merged_qb",
     "test_v41_mega_wiring",
     "test_v41_joint_pool",
+    "test_v41_owned_pool",
+    "test_v41_cp_async",
     "test_v41_norm_quant",
     "test_v41_prefill_candidates",
     "test_v41_prefill_deepselect",
@@ -60,6 +62,9 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_owned_pool",
+    "test_v41_cp_async",
+    "test_v41_prefill_kv_workspace",
     "test_v41_host_swa_metadata",
     "test_v41_sparse_decode",
     "test_v41_decode_topk",

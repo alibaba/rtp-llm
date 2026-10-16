@@ -1,4 +1,4 @@
-"""Startup-warmed CP4 pool readback; the FP4 codec remains the only format owner.
+"""Startup-warmed pool readback; the FP4 codec remains the only format owner.
 
 Unsupported common geometry returns None before allocation or transport.
 Qualified but cold/invalid local state raises, never selecting a different
@@ -374,10 +374,13 @@ def warmup(main_layout, index_layout, *, cp_size, cp_rank, device):
             direct_kernels, direct_args, (triton.cdiv(rows, 128), rows)
         ):
             kernel[(grid, 1, 1)](*a)
+        from . import _v41_owned_pool
+
+        owned_kernels = _v41_owned_pool.warmup(layout, device, _gather)
         torch.cuda.current_stream().synchronize()
         # Preserve legacy indices 0..2; direct output uses metadata/dequant 3/4
         # with the same gather handle at index 1. Both paths are startup-warmed.
-        _READY[key] = (*kernels, *direct_kernels)
+        _READY[key] = (*kernels, *direct_kernels, owned_kernels)
     return True
 
 
@@ -432,22 +435,37 @@ def _split_rows(tensor, partitions):
     return tuple(views[index] for index in selected)
 
 
-def try_gather(attn, main, index, ends, seq_ends, *, groups, workspace=None, swa=None):
+def try_gather(
+    attn,
+    main,
+    index,
+    ends,
+    seq_ends,
+    *,
+    groups,
+    workspace=None,
+    swa=None,
+    output_stream=None,
+):
     """Choose the schedule from common host geometry and prepared pool layouts."""
-    if not _MIN_BATCH <= len(ends) <= 128:
+    if not 1 <= len(ends) <= 128:
         return None
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
     tables = getattr(attn, "_block_tables_by_type", None)
     if (
         cp is None
         or cp.cp_size < 1
-        or not cp.kv_cache_sharded
+        or (cp.cp_size > 1 and not cp.kv_cache_sharded)
         or attn.compress_ratio not in (1, 2)
         or cache is None
     ):
         return None
+    if tables is None:
+        raise ValueError("Joint pool requires bound native block tables")
     region = attn._global_region()
     mt, it = tables.get(region), tables.get(INDEXER_KV)
+    if not isinstance(mt, torch.Tensor) or not isinstance(it, torch.Tensor):
+        raise ValueError("Joint pool requires both main and index block tables")
     mtpb = require_pool_tokens_per_block(cache, region=region)
     itpb = require_pool_tokens_per_block(cache, region=INDEXER_KV)
     ratio, owner, rank = (
@@ -475,7 +493,32 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups, workspace=None, swa
         index_entries,
         cp.cp_size,
     )
-    kernels = _READY[(seq_ends.device.index, *layout)]
+    if not isinstance(seq_ends, torch.Tensor):
+        raise ValueError("Joint pool requires the prepared sequence-end tensor")
+    kernels = _READY.get((seq_ends.device.index, *layout))
+    if kernels is None:
+        raise RuntimeError("Joint pool kernels were not prepared by startup warmup")
+    from . import _v41_owned_pool
+
+    owned = _v41_owned_pool.try_gather(
+        main,
+        index,
+        ends,
+        seq_ends,
+        mt,
+        it,
+        layout,
+        kernels[5],
+        workspace=workspace,
+        swa=swa,
+        output_stream=output_stream,
+    )
+    if owned is not None:
+        return owned
+    # Unsupported common geometry preserves the previous collective schedule.
+    # Once the owned path is selected, local errors propagate from that path.
+    if len(ends) < _MIN_BATCH:
+        return None
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,
     )
@@ -484,7 +527,7 @@ def try_gather(attn, main, index, ends, seq_ends, *, groups, workspace=None, swa
     if workspace is None and swa is not None:
         from ._v41_prefill_kv_workspace import prepare_global_workspace
 
-        workspace = prepare_global_workspace(swa, counts)
+        workspace = prepare_global_workspace(swa, counts, output_stream=output_stream)
     if workspace is not None:
         _validate_workspace(workspace, counts, seq_ends.device)
         globals_by_request = _split_rows(

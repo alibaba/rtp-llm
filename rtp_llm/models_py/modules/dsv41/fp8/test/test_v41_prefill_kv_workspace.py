@@ -3,7 +3,9 @@
 import importlib.util
 import unittest
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -45,6 +47,92 @@ def inputs(batch=3, device="cuda"):
 
 
 class CPUFallbackTest(unittest.TestCase):
+    def _prepare_with_fake_streams(self, events, requested, *, fail_metadata=False):
+        current = ["producer"]
+        rows = workspace.SwaRows(torch.empty((4, 512)), (0, 1, 3))
+
+        @contextmanager
+        def use_stream(stream):
+            old, current[0] = current[0], stream
+            try:
+                yield
+            finally:
+                current[0] = old
+
+        class DeviceMetadata:
+            def __getitem__(self, key):
+                return self
+
+            def view(self, *shape):
+                return self
+
+        class PinnedMetadata:
+            def to(self, **kwargs):
+                self.non_blocking = kwargs["non_blocking"]
+                events.append(("upload", current[0], self.non_blocking))
+                return DeviceMetadata()
+
+        output = SimpleNamespace(
+            record_stream=lambda stream: events.append(("record", stream))
+        )
+
+        def allocate(*args, **kwargs):
+            events.append(("allocate", current[0]))
+            return output
+
+        def pinned(*args, **kwargs):
+            events.append(("pinned", current[0]))
+            if fail_metadata:
+                raise RuntimeError("metadata preparation failed")
+            return PinnedMetadata()
+
+        def current_stream(device):
+            events.append(("current", current[0]))
+            return current[0]
+
+        with patch.object(workspace.torch, "empty", side_effect=allocate), patch.object(
+            workspace.torch, "tensor", side_effect=pinned
+        ), patch.object(
+            workspace.torch.cuda, "current_stream", side_effect=current_stream
+        ), patch.object(
+            workspace.torch.cuda, "stream", side_effect=use_stream
+        ):
+            return workspace.PreparedGlobalWorkspace(
+                rows, (5, 7, 0), SimpleNamespace(_BLOCK=256), output_stream=requested
+            )
+
+    def test_output_stream_changes_allocation_only_and_preserves_default_path(self):
+        for requested in (None, "consumer"):
+            events = []
+            self._prepare_with_fake_streams(events, requested)
+            self.assertEqual(
+                events,
+                (
+                    [("allocate", "producer")]
+                    if requested is None
+                    else [
+                        ("current", "producer"),
+                        ("allocate", "consumer"),
+                        ("record", "producer"),
+                    ]
+                )
+                + [("pinned", "producer"), ("upload", "producer", True)],
+            )
+
+    def test_output_is_recorded_before_metadata_preparation_can_raise(self):
+        events = []
+        with self.assertRaisesRegex(RuntimeError, "metadata preparation failed"):
+            self._prepare_with_fake_streams(events, "consumer", fail_metadata=True)
+        self.assertEqual(
+            events,
+            [
+                ("current", "producer"),
+                ("allocate", "consumer"),
+                ("record", "producer"),
+                ("pinned", "producer"),
+            ],
+        )
+
     def test_ragged_descriptor_is_lazy_and_supports_padded_row_starts(self):
         flat = torch.arange(70).view(14, 5)
         rows = workspace.SwaRows(flat, (0, 3, 2), row_starts=(0, 4, 10))
@@ -117,6 +205,66 @@ class CUDAWorkspaceTest(unittest.TestCase):
         for g, _ in gs:
             g.view(torch.int16).random_(-32768, 32767)
         return plan, plan.publish(gs)
+
+    def test_consumer_allocation_survives_aborted_side_stream_producer(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        consumer, producer = torch.cuda.current_stream(device), torch.cuda.Stream(
+            device=device
+        )
+        rows = workspace.SwaRows(
+            torch.zeros((4, 512), device=device, dtype=torch.bfloat16), (0, 1, 3)
+        )
+        counts = (4096, 2048, 1024)
+        shape = (sum(counts) + 4, 512)
+        # Prime enough consumer-stream blocks so allocator growth cannot turn
+        # this pending-work check into a cudaMalloc synchronization test.
+        warm = [
+            torch.empty(shape, device=device, dtype=torch.bfloat16) for _ in range(8)
+        ]
+        del warm
+        producer.wait_stream(consumer)
+        completed = torch.cuda.Event()
+        allocations, records = [], []
+        original_empty, original_record = torch.empty, torch.Tensor.record_stream
+
+        def allocate(*args, **kwargs):
+            allocations.append(torch.cuda.current_stream(device))
+            return original_empty(*args, **kwargs)
+
+        def record(tensor, stream):
+            records.append((tensor.untyped_storage().data_ptr(), stream))
+            return original_record(tensor, stream)
+
+        with self.assertRaisesRegex(RuntimeError, "producer aborted"):
+            with torch.cuda.stream(producer), patch.object(
+                torch, "empty", side_effect=allocate
+            ), patch.object(torch.Tensor, "record_stream", record):
+                plan = workspace.prepare_global_workspace(
+                    rows, counts, output_stream=consumer
+                )
+                pointer = plan.output.untyped_storage().data_ptr()
+                reference = weakref.ref(plan.output)
+                torch.cuda._sleep(100_000_000)
+                plan.output.fill_(7)
+                completed.record(producer)
+                del plan
+                raise RuntimeError("producer aborted")
+        self.assertEqual(allocations, [consumer])
+        self.assertEqual(records, [(pointer, producer)])
+        self.assertIsNone(reference())
+        self.assertFalse(completed.query())
+        replacements = [
+            torch.full(shape, -3, device=device, dtype=torch.bfloat16) for _ in range(4)
+        ]
+        self.assertTrue(
+            all(value.untyped_storage().data_ptr() != pointer for value in replacements)
+        )
+        producer.synchronize()
+        self.assertTrue(
+            all(
+                torch.equal(value, torch.full_like(value, -3)) for value in replacements
+            )
+        )
 
     def test_direct_producer_ragged_bits_no_cat_or_request_views(self):
         for counts, sizes, starts in (
