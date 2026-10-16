@@ -22,7 +22,9 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
+    NormalEngine(const EngineInitParams&                       params,
+                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                 bool                                          start_loop = true);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;

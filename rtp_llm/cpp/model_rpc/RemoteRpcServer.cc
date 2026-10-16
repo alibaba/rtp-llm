@@ -1,5 +1,6 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
+#include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 
 using namespace std;
 
@@ -9,13 +10,19 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
     rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
-    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = initWithEngineLoop(maga_init_params, std::move(propose_params), mm_process_engine, false);
     if (!ret.ok()) {
         return ret;
     }
     initLocalHostInfo();
     initLocalPeerInfo();
     initCacheStore(maga_init_params, propose_params_ptr);
+    // A TP worker can receive a batch before its own RPC listener is ready.
+    // Bind its cache store before the engine can snapshot it for a forward.
+    {
+        py::gil_scoped_release release;
+        THROW_IF_STATUS_ERROR(std::static_pointer_cast<NormalEngine>(engine_)->startLoop());
+    }
     return grpc::Status::OK;
 }
 
