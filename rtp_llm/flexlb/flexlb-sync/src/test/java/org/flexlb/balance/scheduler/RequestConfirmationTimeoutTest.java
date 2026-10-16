@@ -174,7 +174,7 @@ class RequestConfirmationTimeoutTest {
     }
 
     private static WorkerStatus worker(RoleType role, String ip) {
-        return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
+        return org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test"));
     }
 
     private static WorkerStatusResponse status(RoleType role) {

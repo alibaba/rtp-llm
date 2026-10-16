@@ -50,8 +50,8 @@ class PrefillCompletionProjectionTest {
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
         try {
-            WorkerStatus worker = WorkerStatus.createDiscovered(
-                    RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");
+            WorkerStatus worker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+                    RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test"));
             PrefillEndpoint prefill;
             worker.lock.lock();
             try {
@@ -61,8 +61,8 @@ class PrefillCompletionProjectionTest {
             } finally {
                 worker.lock.unlock();
             }
-            WorkerStatus decodeWorker = WorkerStatus.createDiscovered(
-                    RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
+            WorkerStatus decodeWorker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+                    RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test"));
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
