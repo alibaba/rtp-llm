@@ -14,20 +14,28 @@ from monitoring.contracts import MetricContractError
 class PrometheusClient:
     """Query a bound TSDB using an explicitly shared target-kind inventory."""
 
-    def __init__(self, url, *, query_plan, target_kinds, max_gap_s):
+    def __init__(self, url, *, query_plan, target_kinds, max_gap_s,
+                 max_response_bytes=16 * 1024 * 1024):
         self.url = url
         self.query_plan = query_plan
         self.target_kinds = target_kinds
         self.max_gap = max_gap_s
+        if type(max_response_bytes) is not int or max_response_bytes < 1:
+            raise ValueError("Prometheus response byte budget must be positive")
+        self.max_response_bytes = max_response_bytes
 
     def api(self, endpoint, timeout=5, *, deadline=None, **params):
         if self.url is None:
             raise RuntimeError("Prometheus client has no bound TSDB URL")
         url = self.url + "/api/v1/" + endpoint + "?" + urllib.parse.urlencode(params)
         if deadline is not None:
+            deadline.check()
             timeout = min(timeout, deadline.remaining())
         with urllib.request.urlopen(url, timeout=timeout) as response:
-            data = json.load(response)
+            payload = response.read(self.max_response_bytes + 1)
+        if len(payload) > self.max_response_bytes:
+            raise ValueError("Prometheus response byte budget exceeded")
+        data = json.loads(payload)
         if deadline is not None:
             deadline.check()
         if data.get("status") != "success" or data.get("warnings"):
@@ -57,20 +65,28 @@ class PrometheusClient:
             matchers.append(key + "=" + json.dumps(value))
         return "{" + ",".join(matchers) + "}"
 
-    def instant(self, name, timeout=5, *, metric_names=None, labels=None):
+    def scrape_time(self, name, timeout=5, *, deadline=None):
+        """Health checks read only up; they never acquire the target's metrics."""
         selector = self.selector(name)
-        selected = self.selector(name, metric_names=metric_names, labels=labels)
         now = time.time()
         window = f"[{round(self.max_gap * 1000)}ms]"
         # Health and values must come from the same actual scrape. An instant
         # vector can look back across a gap and turn stale data into a sample.
-        health = self.query("up" + selector + window, now, timeout)
+        health = self.query("up" + selector + window, now, timeout,
+                            **({"deadline": deadline} if deadline is not None else {}))
         if len(health) != 1 or not health[0].get("values"):
             raise RuntimeError("Prometheus target stale: " + name)
         latest_scrape, up = health[0]["values"][-1]
         if up != "1":
             raise RuntimeError("Prometheus target unavailable: " + name)
-        rows = self.query(selected + window, latest_scrape, timeout)
+        return latest_scrape
+
+    def instant(self, name, timeout=5, *, metric_names=None, labels=None, deadline=None):
+        selected = self.selector(name, metric_names=metric_names, labels=labels)
+        latest_scrape = self.scrape_time(name, timeout, deadline=deadline)
+        window = f"[{round(self.max_gap * 1000)}ms]"
+        rows = self.query(selected + window, latest_scrape, timeout,
+                          **({"deadline": deadline} if deadline is not None else {}))
         return [
             dict(metric=r["metric"], value=r["values"][-1])
             for r in rows

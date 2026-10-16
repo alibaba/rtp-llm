@@ -55,24 +55,34 @@ class ObservationClock:
                     epoch_policy="anchored_monotonic")
 
 
+class SampleSchedule:
+    """Absolute ticks shared by foreground and cancellable background readers."""
+
+    def __init__(self, started, interval_s, *, immediate=False):
+        if type(interval_s) not in (int, float) or not math.isfinite(interval_s) or interval_s <= 0:
+            raise ValueError("poll interval must be finite and positive")
+        self.interval = interval_s
+        self.next = started + (0 if immediate else interval_s)
+
+    def advance(self, now):
+        self.next += self.interval
+        if self.next < now:
+            self.next += math.ceil((now - self.next) / self.interval) * self.interval
+
+
 def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False):
     """Preserve the last sample at a boundary; all waiting uses the stage clock."""
-    if type(interval_s) not in (int, float) or not math.isfinite(interval_s) or interval_s <= 0:
-        raise ValueError("poll interval must be finite and positive")
-    next_sample = deadline.clock() + (0 if immediate else interval_s)
+    schedule = SampleSchedule(deadline.clock(), interval_s, immediate=immediate)
     first = True
     while first or until is None or deadline.clock() < until:
         deadline.check()
-        target = next_sample if until is None else min(next_sample, until)
+        target = schedule.next if until is None else min(schedule.next, until)
         deadline.sleep(max(0, target - deadline.clock()))
         first = False
         yield sample()
-        next_sample += interval_s
         # Skip elapsed ticks instead of issuing catch-up bursts. Consumer work
         # also counts toward the period; the last boundary sample is retained.
-        now = deadline.clock()
-        if next_sample < now:
-            next_sample += math.ceil((now - next_sample) / interval_s) * interval_s
+        schedule.advance(deadline.clock())
 
 
 @dataclass(frozen=True)

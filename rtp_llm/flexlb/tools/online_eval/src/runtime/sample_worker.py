@@ -1,6 +1,6 @@
 """Bounded background sampling with cancellation and joined shutdown."""
 import threading
-from runtime.observation import SampleBudget
+from runtime.observation import SampleBudget, SampleSchedule
 
 
 class SamplingError(RuntimeError):
@@ -23,6 +23,7 @@ class SampleWorker:
     def __init__(self, capture, clock, params):
         self.capture, self.clock, self.params = capture, clock, params
         self.started = clock()
+        self.schedule = SampleSchedule(self.started, params["interval_s"])
         self.end = self.started + params["duration_s"]
         self.stop_event = threading.Event()
         self.done_event = threading.Event()
@@ -54,9 +55,7 @@ class SampleWorker:
 
     def _run(self):
         try:
-            while not self.stop_event.wait(
-                min(self.params["interval_s"], max(0, self.end - self.clock()))
-            ):
+            while not self.stop_event.wait(max(0, min(self.schedule.next, self.end) - self.clock())):
                 if self.clock() >= self.end:
                     break
                 self.append(
@@ -64,6 +63,7 @@ class SampleWorker:
                         CaptureDeadline(self.clock, self.end, self.stop_event)
                     )
                 )
+                self.schedule.advance(self.clock())
         except TimeoutError as error:
             if not self.stop_event.is_set() and self.clock() < self.end:
                 self.error = f"incomplete sampling: {type(error).__name__}: {error}"

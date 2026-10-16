@@ -154,7 +154,7 @@ class PrometheusSession:
         def ready():
             try:
                 for name in targets:
-                    self.client.instant(name, timeout=min(5, deadline.remaining()))
+                    self.client.scrape_time(name, deadline=deadline)
                 return True
             except TimeoutError:
                 raise
