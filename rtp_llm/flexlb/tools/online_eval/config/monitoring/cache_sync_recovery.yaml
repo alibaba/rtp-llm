@@ -1,0 +1,106 @@
+metric_plan_schema_version: 5
+include:
+- master_cpu.yaml
+sources:
+  master:
+    cache_global_keys:
+      promql: sum(flexlb_app_cache_global_total_count${selector})
+      unit: keys
+      value_kind: gauge
+      labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_cache_global_total_count
+    heap_bytes:
+      promql: sum by (area) (jvm_memory_used_bytes${selector})
+      unit: bytes
+      value_kind: gauge
+      labels:
+      - area
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - jvm_memory_used_bytes
+    direct_bytes:
+      promql: sum by (id) (jvm_buffer_memory_used_bytes${selector})
+      unit: bytes
+      value_kind: gauge
+      labels:
+      - id
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - jvm_buffer_memory_used_bytes
+    cache_diff_scanned_keys:
+      promql: sum by (role) (flexlb_app_cache_diff_scanned_keys_total${selector})
+      unit: keys
+      value_kind: counter
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_cache_diff_scanned_keys_total
+    worker_status_commits:
+      promql: sum(flexlb_app_engine_health_check_visitor_success_qps_total${selector})
+      unit: responses
+      value_kind: counter
+      labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_engine_health_check_visitor_success_qps_total
+    cache_sync_commits:
+      promql: sum by (role) (flexlb_app_cache_status_check_visitor_success_qps_total${selector})
+      unit: responses
+      value_kind: counter
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_cache_status_check_visitor_success_qps_total
+produced:
+  cache_stability/full_gc_pause_ms:
+    producer: cache_stability
+    source_type: process_log
+    unit: ms
+    value_kind: gauge
+    labels: []
+  cache_stability/allocation_gib_s:
+    producer: cache_stability
+    source_type: debug_api
+    unit: GiB/s
+    value_kind: gauge
+    labels: []
+  cache_stability/healthy_age_s:
+    producer: cache_stability
+    source_type: debug_api
+    unit: s
+    value_kind: gauge
+    labels: []
+  cache_stability/visible_workers:
+    producer: cache_stability
+    source_type: debug_api
+    unit: workers
+    value_kind: gauge
+    labels: []

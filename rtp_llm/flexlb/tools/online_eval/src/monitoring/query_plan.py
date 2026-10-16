@@ -122,7 +122,7 @@ def _validate_produced(spec, metric, path):
             or not isinstance(spec, dict)
             or not {"producer", "source_type", "unit", "value_kind", "labels"} <= set(spec)
             or set(spec) - {"producer", "source_type", "unit", "value_kind", "labels", "calculation"}
-            or spec["source_type"] not in ("prometheus", "debug_api", "client_journal")
+            or spec["source_type"] not in ("prometheus", "debug_api", "client_journal", "process_log")
             or type(spec["producer"]) is not str or not NAME.fullmatch(spec["producer"])):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)

@@ -2,21 +2,17 @@
 
 import copy
 import json
-import math
-import urllib.request
 from pathlib import Path
 
 import grpc
 
 from adapters.master_control import master_url
 from adapters.mock_control import control_json
-from analysis.checks import CheckResult, evaluate
+from analysis.checks import CheckResult
+from cases.cache_sync_recovery.analysis import CHECK_IDS
+from cases.cache_sync_recovery.health import healthy, collateral
 from scenario.contracts import StageHandler, StageOutput
-from runtime.observation import poll_samples
-from adapters.background_source import BackgroundSource
-
-CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged",
-    "cache_consistency", "actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"})
+from runtime.observation import poll_samples, SampleBudget
 
 
 def validate(params, plan):
@@ -27,54 +23,6 @@ def validate(params, plan):
     from adapters.java_flow_spec import JavaFlowSpec
     JavaFlowSpec.read(params["traffic"])
     return copy.deepcopy(params)
-
-
-def master_rows(ctx, deadline):
-    url = master_url("127.0.0.1", ctx.ops.master_http_port, "inflight")
-    with urllib.request.urlopen(url, timeout=min(2, deadline.remaining())) as response:
-        raw = response.read(2_000_001)
-    if len(raw) > 2_000_000:
-        raise ValueError("Master health snapshot exceeds byte budget")
-    payload = json.loads(raw)
-    rows = {}
-    for role in ("prefill", "decode"):
-        for row in payload[role + "_endpoints"]:
-            address = row["ip_port"]
-            if address in rows:
-                raise ValueError("duplicate Worker in Master snapshot")
-            for field in ("generation", "status_age_ms", "reported_alive"):
-                if field not in row:
-                    raise ValueError("Master lacks Worker poll-health evidence: " + field)
-            if (type(row["generation"]) is not int or row["generation"] <= 0
-                    or type(row["reported_alive"]) is not bool
-                    or type(row["status_age_ms"]) not in (int, float)
-                    or not math.isfinite(row["status_age_ms"])):
-                raise ValueError("invalid Worker poll-health evidence")
-            rows[address] = dict(row, role=role)
-    return rows
-
-
-def healthy(row, maximum):
-    return (row["reported_alive"] and 0 <= row["status_age_ms"] <= maximum
-            and 0 <= row.get("applied_status_age_ms", row["status_age_ms"]) <= maximum
-            and row.get("scheduling_status_fresh", True))
-
-
-def collateral(rows, baseline, victims, maximum):
-    """Absence, generation replacement and stale status all affect healthy survivors."""
-    return sorted(address for address, old in baseline.items() if address not in victims
-                  and (address not in rows or rows[address]["generation"] != old["generation"]
-                       or not healthy(rows[address], maximum)))
-
-
-def converged(rows, names, keys, versions, maximum):
-    if set(rows) != set(names):
-        return False
-    return all(healthy(row, maximum) and (row["role"] != "prefill" or (
-        row.get("cache_indexed") is True and row.get("cache_key_size") == keys
-        and row.get("cache_version") == versions[address]
-        and row.get("cache_indexed_version") == versions[address]))
-               for address, row in rows.items())
 
 
 def atomic_write(path, text):
@@ -102,7 +50,7 @@ def execute(ctx, params, deadline):
     from adapters.resource_evidence import flow_evidence
     from traffic.traffic_source import materialize
     from cases.cache_sync_recovery.telemetry import (
-        fetch, diagnostic_metrics, DIAGNOSTIC_METRICS, resource, fingerprint_matches, interval_rates,
+        fetch, resource, fingerprint_matches, interval_rates,
     )
     p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
     intervention = params["intervention"]
@@ -111,6 +59,7 @@ def execute(ctx, params, deadline):
     evidence = dict(intervention=intervention, parameters=copy.deepcopy(params),
         environment=ctx.instance["environment"], events=[], intensity={}, frames=[], errors=[],
         healthy_violations=[], convergence_samples=0, consistency=None,
+        provenance=dict(env_epoch=ctx.env_epoch),
         expiry_scope="discovery withdrawal while RPC remains alive; not a health-timeout injection")
     engines = control_json(ctx.ops, "snapshot?view=topology", deadline)["engines"]
     prefill = sorted((e for e in engines if e["role"] == "prefill"), key=lambda e: int(e["name"].rsplit("-", 1)[1]))
@@ -119,6 +68,7 @@ def execute(ctx, params, deadline):
     chosen = [prefill[i*len(prefill)//p["expired_workers"]] for i in range(p["expired_workers"])]
     victims = {e["http_addr"] for e in chosen} if intervention else set()
     names = {e["http_addr"] for e in engines}
+    evidence["worker_addresses"] = sorted(names)
     path = Path(ctx.env.discovery_file)
     original = path.read_text()
     ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(path, original))
@@ -128,23 +78,7 @@ def execute(ctx, params, deadline):
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0
     url = master_url("127.0.0.1", ctx.ops.master_http_port, "inflight")
-    metrics_url = f"http://127.0.0.1:{ctx.env.master_management_port}/prometheus"
-    diagnostic = None
-    owned_environment = ctx.env
-
-    def read_diagnostics(d):
-        if ctx.env is not owned_environment:
-            raise ValueError('diagnostic source environment changed')
-        return dict(metrics=diagnostic_metrics(fetch(metrics_url, min(5, d.remaining()))),
-                    master=resource(owned_environment.master), mock=resource(owned_environment.mock))
-
-    def start_diagnostics():
-        nonlocal diagnostic
-        diagnostic = BackgroundSource('cache_resources', read_diagnostics,
-            directory/'diagnostics.jsonl', identity=dict(env_epoch=ctx.env_epoch),
-            clock=ctx.clock, wall_clock=ctx.wall_clock,
-            params=dict(duration_s=deadline.remaining(), interval_s=o['sample_s'], **o['capture']))
-        diagnostic.attach(ctx, deadline)
+    sample_budget = SampleBudget(o["capture"])
 
     def fixture(e, operation, **options):
         result = control_json(ctx.ops, "cache_fixture", deadline,
@@ -208,11 +142,9 @@ def execute(ctx, params, deadline):
                 and (w["role"] != "prefill" or w.get("cache_key_size") == keys)
                 for w in rows.values()) and rebuilt == victims
             evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if ready else 0
-        observed = diagnostic.latest() if diagnostic is not None else None
-        diagnostics = observed['data'] if observed else {}
-        measurements = diagnostics.get('metrics', {})
         frame = dict(epoch_s=ctx.wall_clock(), phase=phase, snapshot_read_s=ctx.clock()-before,
-            workers=rows, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
+            workers={a: {k: w[k] for k in ("generation", "reported_alive", "status_age_ms",
+                     "applied_status_age_ms", "scheduling_status_fresh") if k in w} for a,w in rows.items()}, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
             max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
             missing_workers=len((baseline or {}).keys()-rows.keys()-victims),
             healthy_max_status_age_ms=max((max(w["status_age_ms"], w.get("applied_status_age_ms", w["status_age_ms"]))
@@ -229,14 +161,11 @@ def execute(ctx, params, deadline):
             replaced_workers=sum(a in baseline and w["generation"] != baseline[a]["generation"] for a, w in rows.items()) if baseline else 0,
             affected_workers=len(affected), reported_dead=sum(not w["reported_alive"] for w in rows.values()),
             process_allocated_bytes=raw.get("process_allocated_bytes"), scheduler_inflight=raw["scheduler_inflight"],
-            master=diagnostics.get('master', {}), mock=diagnostics.get('mock', {}),
-            diagnostic_source=dict(selection='latest_completed', sample={k: v for k, v in observed.items() if k != 'data'} if observed else None,
-                                   status='ok' if observed else 'pending'))
-        frame.update({field: measurements.get(field) for field in DIAGNOSTIC_METRICS})
-        frame['diff_scanned_keys'] = raw.get('diagnostic_diff_scanned_keys', frame['diff_scanned_keys'])
+            master=resource(ctx.env.master), mock=resource(ctx.env.mock))
+        encoded = sample_budget.append(frame)
         evidence["frames"].append(frame)
         with (directory/"observations.jsonl").open("a") as f:
-            f.write(json.dumps(frame)+"\n")
+            f.write(encoded+"\n")
         return rows
 
     def hold(phase, seconds):
@@ -252,7 +181,6 @@ def execute(ctx, params, deadline):
         return after
 
     try:
-        start_diagnostics()
         t = params["traffic"]
         trace = materialize(directory/"traffic.jsonl", t["source"], "cache-sync-shared-background",
                             Path(ctx.instance["source_path"]).parent,
@@ -328,8 +256,7 @@ def execute(ctx, params, deadline):
             evidence["victim_alive_before"] = alive(chosen)
             atomic_write(path, withdraw(original, victims))
             event("partial_workers_withdrawn")
-        hold("intervention", p["withdraw_s"])
-        if intervention:
+            hold("intervention", p["withdraw_s"])
             evidence["victim_alive_withdrawn"] = alive(chosen)
             atomic_write(path, original)
             event("partial_workers_restored")
@@ -341,8 +268,6 @@ def execute(ctx, params, deadline):
         flow.drain(deadline)
         event("drain_finished")
         evidence["client"] = flow.evidence_snapshot()
-        diagnostic.stop_sampling(deadline)
-        diagnostic.latest()
         event("performance_observation_finished")
         for e in prefill:
             fixture(e, "churn", delta=0, every=0)
@@ -360,54 +285,27 @@ def execute(ctx, params, deadline):
         evidence["consistency"] = dict(consistent=consistent, expected=expected, observed=verified,
             scope="frozen fingerprints and exhaustive status/global membership; counts guard extra mappings")
         event("consistency_finished")
-        last = evidence["frames"][-1]["workers"]
-        healthy_end = (set(last) == names and all(healthy(w, limits["max_status_age_ms"]) for w in last.values())
-                       and evidence["convergence_samples"] >= o["converged_samples"])
         evidence.update(affected_workers=sorted(affected), expired_workers=sorted(absent), rebuilt_workers=sorted(rebuilt),
                         max_sample_gap_s=maximum_gap)
-        measured = evidence["intensity"]["measurement"]
-        checks = [evaluate("healthy_survivors", len(affected), "eq", 0),
-            evaluate("cache_converged", healthy_end, "eq", True),
-            evaluate("cache_consistency", consistent, "eq", True),
-            evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
-            evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["responses"]*keys
-                     and measured["totals"]["full_responses"] == measured["totals"]["responses"], "eq", True),
-            evaluate("clock_input_intensity", limits["min_added_keys_per_s"] <= measured["added_keys"] <= limits["max_added_keys_per_s"], "eq", True),
-            evaluate("sampling_complete", maximum_gap, "le", o["max_gap_s"]),
-            evaluate("client_complete", evidence["client"]["complete"], "eq", True)]
-        if intervention:
-            checks.extend([evaluate("victims_withdrawn", len(absent), "eq", len(victims)),
-                           evaluate("victims_rebuilt", len(rebuilt), "eq", len(victims))])
-        else:
-            checks.extend(CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
-                          for k in ("victims_withdrawn", "victims_rebuilt"))
-        evidence["checks"] = [dict(id=c.id, status=c.status, actual=c.actual) for c in checks]
         event("observation_finished")
-        return StageOutput({}, checks, [str(directory/"evidence.json")])
     except Exception as error:
         evidence["errors"].append(repr(error))
-        # A later collection error cannot erase an already observed collateral failure.
-        # Remaining checks stay unevaluated; reports retain the incomplete runtime boundary.
-        if affected:
-            evidence["affected_workers"] = sorted(affected)
-            evidence["runtime_incomplete"] = True
-            checks = [evaluate("healthy_survivors", len(affected), "eq", 0)]
-            checks.extend(CheckResult(id=k, status="SKIP", actual=None, expected=None,
-                detail="observation interrupted") for k in sorted(CHECK_IDS-{"healthy_survivors"}))
-            evidence["checks"] = [dict(id=c.id, status=c.status, actual=c.actual) for c in checks]
-            return StageOutput({}, checks, [str(directory/"evidence.json")])
-        raise
+        evidence.update(affected_workers=sorted(affected), runtime_incomplete=True)
+        # Freeze partial evidence so an interrupted observation cannot hide collateral failure.
+        if not affected:
+            raise
     finally:
         try:
             atomic_write(path, original)
         finally:
-            if diagnostic is not None:
-                diagnostic.stop_event.set()
-                try:
-                    diagnostic.stop_sampling(deadline)
-                except Exception as error:
-                    evidence['diagnostic_shutdown_error'] = repr(error)
             (directory/"evidence.json").write_text(json.dumps(evidence))
+    from cases.cache_sync_recovery.telemetry import gc_events
+    logs = list(ctx.artifact_dir.glob("environment/*/master_gc.log"))
+    evidence["gc"] = gc_events(logs[0]) if len(logs) == 1 else []
+    evidence["gc_available"] = len(logs) == 1
+    committed = ctx.services.gate("cache_stability").commit(ctx.artifact_dir, evidence)
+    return StageOutput({}, [CheckResult(**c) for c in committed.result["checks"]],
+                       [str(committed.path), str(directory/"evidence.json")])
 
 
 HANDLERS = [StageHandler("cache_recovery_cycle", validate, execute, {}, checks=CHECK_IDS)]

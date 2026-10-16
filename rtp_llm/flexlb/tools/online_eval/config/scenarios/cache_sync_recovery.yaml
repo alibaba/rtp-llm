@@ -3,7 +3,7 @@ case: cache_sync_recovery
 program: default
 default_variant: steady
 metadata:
-  kind: functional
+  kind: workload
   description: 同一大缓存与业务背景下，验证稳态同步及部分 Worker 撤出恢复的健康隔离。
   category: status
   tags: [cache, lifecycle, allocation]
@@ -38,6 +38,10 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 180
   collection: aggregate
+  monitoring:
+    query_plan: cache_sync_recovery.yaml
+    sample_interval_s: 2
+    max_sample_gap_s: 10
 parameters:
   traffic:
     group_id: cache_background
@@ -96,3 +100,4 @@ parameters:
 variants:
 - id: recovery
   program: recovery
+reports: [cache_sync_recovery.yaml]

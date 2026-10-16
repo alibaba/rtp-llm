@@ -97,10 +97,9 @@ class WorkloadRuntimeTests(unittest.TestCase):
             },
             {
                 "request_completion::default",
-                "cache_sync_recovery::steady",
-                "cache_sync_recovery::recovery",
             },
         )
+        self.assertTrue({"cache_sync_recovery::steady::batch-window", "cache_sync_recovery::recovery::batch-window"} <= w)
         self.assertEqual(len(plans), 22)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 

@@ -1,17 +1,18 @@
 """Bounded observation; key fingerprints are read only outside performance windows."""
 
 import math
+import datetime
 import re
 import urllib.request
 from diagnostics.process_resources import process_resources
 
 DIAGNOSTIC_METRICS = {
-    'global_keys': ('cache_global_total_count', {}),
-    'heap_bytes': ('jvm_memory_used_bytes', {'area': 'heap'}),
-    'direct_bytes': ('jvm_buffer_memory_used_bytes', {'id': 'direct'}),
-    'diff_scanned_keys': ('cache_diff_scanned_keys_total', {'role': 'PREFILL'}),
-    'worker_status_commits': ('engine_health_check_visitor_success_qps_total', {}),
-    'cache_sync_commits': ('cache_status_check_visitor_success_qps_total', {'role': 'PREFILL'}),
+    'global_keys': ('master/cache_global_keys', {}),
+    'heap_bytes': ('master/heap_bytes', {'area': 'heap'}),
+    'direct_bytes': ('master/direct_bytes', {'id': 'direct'}),
+    'diff_scanned_keys': ('master/cache_diff_scanned_keys', {'role': 'PREFILL'}),
+    'worker_status_commits': ('master/worker_status_commits', {}),
+    'cache_sync_commits': ('master/cache_sync_commits', {'role': 'PREFILL'}),
 }
 
 
@@ -23,31 +24,24 @@ def fetch(url, timeout):
     return raw
 
 
-def metric_values(raw):
-    result = []
-    for line in raw.decode().splitlines():
-        match = re.match(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+([-+0-9.eE]+)', line)
-        if not match:
-            continue
-        name, labels, value = match.groups()
-        if not any(fragment in name for fragment, _ in DIAGNOSTIC_METRICS.values()):
-            continue
-        number = float(value)
-        if math.isfinite(number):
-            result.append(dict(name=name, labels=dict(re.findall(r'(\w+)="([^"]*)"', labels or "")), value=number))
+def archived_metrics(store, frames, *, epoch, maximum_gap_s):
+    """Join only past, same-epoch archived samples; never fill a gap with future data."""
+    from bisect import bisect_right
+    result = [dict(row) for row in frames]
+    for field, (identity, labels) in DIAGNOSTIC_METRICS.items():
+        sources = [r for r in store.document["metrics"].get(identity, []) if r["epoch"] == str(epoch)
+                   and all(r["labels"].get(k) == v for k,v in labels.items())]
+        indexed = [(r["points"], [p[0] for p in r["points"]]) for r in sources]
+        for frame in result:
+            values = []
+            for points, stamps in indexed:
+                i = bisect_right(stamps, frame["epoch_s"])-1
+                if i >= 0 and frame["epoch_s"]-stamps[i] <= maximum_gap_s:
+                    value = points[i][1]
+                    if value is not None and math.isfinite(value):
+                        values.append(value)
+            frame[field] = sum(values) if values else None
     return result
-
-
-def metric_sum(meters, fragment, labels=None):
-    values = [m["value"] for m in meters if fragment in m["name"]
-              and all(m["labels"].get(k) == v for k, v in (labels or {}).items())]
-    return sum(values) if values else None
-
-
-def diagnostic_metrics(raw):
-    meters = metric_values(raw)
-    return {field: metric_sum(meters, fragment, labels)
-            for field, (fragment, labels) in DIAGNOSTIC_METRICS.items()}
 
 
 def resource(proc):
@@ -73,3 +67,16 @@ def interval_rates(before, after, seconds):
     if seconds <= 0 or any(v < 0 for v in totals.values()):
         raise ValueError("invalid fixture accounting interval")
     return dict(duration_s=seconds, totals=totals, **{k: v/seconds for k, v in totals.items()})
+
+
+def gc_events(path):
+    pattern = re.compile(r'^\[([^]]+)\].*?\[gc\s*\]\s+GC\((\d+)\) (Pause .+?)\s+\S+->\S+\([^)]*\) ([\d.]+)ms$')
+    result = []
+    for line in path.read_text().splitlines():
+        match = pattern.match(line)
+        if match:
+            stamp, identity, name, duration = match.groups()
+            end = datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
+            result.append(dict(epoch_s=end, duration_ms=float(duration), full='Pause Full' in name,
+                               gc_id=int(identity), name=name))
+    return result

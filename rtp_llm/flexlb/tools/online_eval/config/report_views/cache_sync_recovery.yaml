@@ -1,0 +1,101 @@
+report_view_schema_version: 1
+kind: selected
+report:
+  subtitle: 缓存同步稳态与部分Worker恢复
+  id: cache-stability
+  producer: cache-stability
+metrics:
+  query_plan: cache_sync_recovery.yaml
+  diagnostic_only:
+  - master/cache_global_keys
+  - master/heap_bytes
+  - master/direct_bytes
+  - master/cache_diff_scanned_keys
+  - master/worker_status_commits
+  - master/cache_sync_commits
+  - master/cpu_usage_percent
+  - master/system_cpu_usage_percent
+  - master/cpu_available_processors
+charts:
+  curves:
+    cache_stability/full_gc_pause_ms:
+      metric_id: cache_stability/full_gc_pause_ms
+      labels: {}
+      name: Full GC 暂停
+      group: steady
+      unit: ms
+      axis: value
+      color: '#1677ff'
+      hidden: false
+    cache_stability/allocation_gib_s:
+      metric_id: cache_stability/allocation_gib_s
+      labels: {}
+      name: Master 堆内存分配速率
+      group: steady
+      unit: GiB/s
+      axis: value
+      color: '#1677ff'
+      hidden: false
+    cache_stability/healthy_age_s:
+      metric_id: cache_stability/healthy_age_s
+      labels: {}
+      name: 未参与撤出的 Worker 最长未更新时长
+      group: recovery
+      unit: s
+      axis: value
+      color: '#1677ff'
+      hidden: false
+    cache_stability/visible_workers:
+      metric_id: cache_stability/visible_workers
+      labels: {}
+      name: 未参与撤出的 Worker 数量（Master 可见）
+      group: recovery
+      unit: workers
+      axis: value
+      color: '#1677ff'
+      hidden: false
+  panels:
+  - id: steady-full_gc_pause_ms
+    title: steady · Full GC 暂停
+    caption: 冻结证据；缺失保留为空。
+    empty_caption: 未采集到有效数据。
+    curve_ids:
+    - cache_stability/full_gc_pause_ms
+    axes:
+      value:
+        title: ms
+        position: left
+  - id: steady-allocation_gib_s
+    title: steady · Master 堆内存分配速率
+    caption: 冻结证据；缺失保留为空。
+    empty_caption: 未采集到有效数据。
+    curve_ids:
+    - cache_stability/allocation_gib_s
+    axes:
+      value:
+        title: GiB/s
+        position: left
+  - id: recovery-healthy_age_s
+    title: recovery · 未参与撤出的 Worker 最长未更新时长
+    caption: 冻结证据；缺失保留为空。
+    empty_caption: 未采集到有效数据。
+    curve_ids:
+    - cache_stability/healthy_age_s
+    axes:
+      value:
+        title: s
+        position: left
+  - id: recovery-visible_workers
+    title: recovery · 未参与撤出的 Worker 数量（Master 可见）
+    caption: 冻结证据；缺失保留为空。
+    empty_caption: 未采集到有效数据。
+    curve_ids:
+    - cache_stability/visible_workers
+    axes:
+      value:
+        title: workers
+        position: left
+sections:
+  sources:
+    title: 证据来源与边界
+    opened: false

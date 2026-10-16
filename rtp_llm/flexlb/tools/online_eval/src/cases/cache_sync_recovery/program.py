@@ -5,6 +5,12 @@ from case_api.numeric_parameters import COUNT, POSITIVE_COUNT, NONNEGATIVE
 from case_api.registry import CaseDefinition
 from adapters.java_flow_spec import JavaFlowSpec
 from cases.cache_sync_recovery.actions import HANDLERS
+from cases.cache_sync_recovery.analysis import analyze
+from cases.cache_sync_recovery.report import write_report, validate_view
+from cases.cache_sync_recovery.metrics import produce, metric_contract
+from case_api.gate_plugin import GatePlugin
+from case_api.execution_contract import ExecutionRequirements
+from case_api.registry import ReportView, MetricProducer, ProducerPhase
 
 INPUTS = InputContract.from_fields({
     "procedure": dict.fromkeys(("setup_timeout_s", "warmup_timeout_s", "cache_only_s",
@@ -36,7 +42,7 @@ def build(case, intervention):
     if not c["min_added_keys_per_s"] <= expected <= c["max_added_keys_per_s"]:
         raise ValueError("mutation envelope excludes the configured input")
     flow = JavaFlowSpec.read(data.traffic)
-    seconds = p["traffic_warmup_s"] + p["measurement_s"] + p["withdraw_s"] + p["post_s"]
+    seconds = p["traffic_warmup_s"] + p["measurement_s"] + (p["withdraw_s"] if intervention else 0) + p["post_s"]
     if flow.configuration.playback.duration_s < seconds:
         raise ValueError("traffic must cover intervention and the full post window")
     case.step("setup", "setup", timeout_s=p["setup_timeout_s"])
@@ -55,5 +61,12 @@ def recovery(case):
     build(case, True)
 
 
-CASE = CaseDefinition(builders={"default": default, "recovery": recovery},
+GATE = GatePlugin("cache_stability", analyze, produce, write_report)
+REPORT_VIEWS = {"cache_sync_recovery.yaml": ReportView(validate_view, GATE.render,
+                deadline_renderer=GATE.render_with_deadline)}
+
+CASE = CaseDefinition(execution_requirements=ExecutionRequirements(monitoring=True),
+                      gates={"cache_stability": GATE}, report_views=REPORT_VIEWS,
+                      producers={"cache_stability": MetricProducer(metric_contract, GATE.project, ProducerPhase.GATE)},
+                      builders={"default": default, "recovery": recovery},
                       input_contract=INPUTS, actions=tuple(HANDLERS))

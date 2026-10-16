@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from cases.cache_sync_recovery.actions import atomic_write, collateral, converged, withdraw
+from cases.cache_sync_recovery.actions import atomic_write, withdraw
+from cases.cache_sync_recovery.health import collateral, converged
 from document_io import load_document
 from flexlb_cfg import ConfigOverride, render_env
 from scenario.program_compiler import configure_program
@@ -23,15 +24,17 @@ def row(generation=1, age=20):
                 cache_indexed=True, cache_key_size=306000, cache_version=2, cache_indexed_version=2)
 
 
-def test_registered_functional_case_compiles_with_owned_fixture_and_request_gates():
+def test_registered_workload_compiles_with_shared_monitoring_and_automatic_reports():
     plan = configure_program(config(), "cache_sync_recovery.yaml")
     assert [v["id"] for v in plan["variants"]] == ["steady", "recovery"]
     a, b = plan["variants"]
+    assert all(v["metadata"]["kind"] == "workload" and v["reports"] == ["cache_sync_recovery.yaml"] for v in (a,b))
     assert [s["action"] for s in a["stages"]] == ["setup", "cache_recovery_cycle", "teardown"]
     assert a["environment"] == b["environment"] if "environment" in a else True
     left, right = copy.deepcopy(a["stages"][1]), copy.deepcopy(b["stages"][1])
     assert left["params"].pop("intervention") is False
     assert right["params"].pop("intervention") is True
+    assert right.pop("timeout_s")-left.pop("timeout_s") == 20
     assert left == right
 
 
@@ -163,6 +166,11 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
         frames=[dict(epoch_s=e,phase='measurement', master={},mock={},healthy_max_status_age_ms=age)
                 for e,age in ((epoch-120,7),(epoch+1,None))])
     (cache/'evidence.json').write_text(json.dumps(raw))
+    from cases.cache_sync_recovery.telemetry import gc_events
+    from artifacts.gate import freeze_gate
+    raw.update(gc=gc_events(logs/'master_gc.log'), intervention=False)
+    freeze_gate(instance, 'cache_stability', raw, dict(verdict='PASS', validity='VALID',
+                checks=raw['checks'], validity_checks=[]))
     output = tmp_path/'report'
     report(instance,output,'example')
     specs = list(output.rglob('report-spec.json'))
@@ -230,11 +238,14 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     monkeypatch.setattr(telemetry,'resource',lambda proc:{})
     monkeypatch.setattr(traffic,'materialize',lambda *a,**kw:tmp_path/'traffic.jsonl')
     monkeypatch.setattr(actions.grpc,'insecure_channel',lambda address:contextlib.nullcontext(address))
+    from cases.cache_sync_recovery.program import GATE
+    ctx.monitor = SimpleNamespace(client=SimpleNamespace(metric_snapshot=lambda *a, **kw: []))
+    ctx.services = SimpleNamespace(gate=lambda name: GATE)
     result = actions.execute(ctx,params,deadline)
     from scenario.stage_execution import _validate_output
     _validate_output(ctx,result,{},actions.CHECK_IDS)
     assert next(c.status for c in result.checks if c.id=='healthy_survivors') == 'FAIL'
-    assert all(c.status=='SKIP' for c in result.checks if c.id!='healthy_survivors')
+    assert next(c.status for c in result.checks if c.id=='sampling_complete') == 'ERROR'
     evidence = json.loads((tmp_path/'cache-stability/evidence.json').read_text())
     assert evidence['affected_workers'] == ['h1']
     assert evidence['healthy_violations'][0]['direct_alive'][0]['alive'] is True
@@ -270,13 +281,102 @@ def test_ring_fixture_requires_at_least_three_prefill_workers_before_launch():
         configure_program(data,'case.yaml')
 
 
-def test_diagnostic_source_reduces_high_cardinality_before_retaining_samples(monkeypatch):
-    from cases.cache_sync_recovery.telemetry import diagnostic_metrics, DIAGNOSTIC_METRICS
-    raw = '\n'.join(f'engine_health_check_visitor_success_qps_total{{worker="w{i}"}} 2' for i in range(1000)).encode()
-    projected = diagnostic_metrics(raw)
-    assert projected['worker_status_commits'] == 2000
-    assert len(json.dumps(projected)) < 500
-    # One projection declaration extends parsing and capture without another field list.
-    monkeypatch.setitem(DIAGNOSTIC_METRICS, 'new_counter', ('custom_counter_total', {'role': 'PREFILL'}))
-    projected = diagnostic_metrics(raw+b'\ncustom_counter_total{role="PREFILL"} 7\n')
-    assert projected['new_counter'] == 7
+def test_archived_metrics_respect_epoch_labels_age_and_missing_values():
+    from cases.cache_sync_recovery.telemetry import archived_metrics
+    from types import SimpleNamespace
+    store = SimpleNamespace(document={'metrics': {
+        'master/worker_status_commits': [
+            dict(epoch='1',labels={},points=[[100,2],[105,7]]),
+            dict(epoch='2',labels={},points=[[100,999]])],
+        'master/heap_bytes': [dict(epoch='1',labels={'area':'nonheap'},points=[[100,123]])]}})
+    rows = archived_metrics(store,[dict(epoch_s=t) for t in (90,100,110,116)],epoch=1,maximum_gap_s=10)
+    assert [r['worker_status_commits'] for r in rows] == [None,2,7,None]
+    assert all(r['heap_bytes'] is None and r['diff_scanned_keys'] is None for r in rows)
+    # Aggregation is declared at collection, before high-cardinality results are archived.
+    plan = load_document(ROOT/'config/monitoring/cache_sync_recovery.yaml')
+    assert all(s['promql'].startswith('sum') for s in plan['sources']['master'].values())
+
+
+def pressure_evidence(intervention=False):
+    params = copy.deepcopy(config()['parameters'])
+    params['intervention'] = intervention
+    params['procedure']['expired_workers'] = 1
+    workers = {f'w{i}': row() for i in range(4)}
+    workers['w3']['role'] = 'decode'
+    frames = [dict(epoch_s=t, phase='measurement' if t < 14 else 'post', workers=copy.deepcopy(workers),
+                   master={}, mock={}, healthy_max_status_age_ms=20, missing_workers=0,
+                   process_allocated_bytes=int((t-10)*2**30)) for t in (10, 12, 14, 16)]
+    return dict(parameters=params, intervention=intervention, environment=dict(n_prefill=3,n_decode=1),
+        provenance=dict(env_epoch=1), frames=frames, worker_addresses=list(workers), affected_workers=[],
+        victims=['w0'] if intervention else [], expired_workers=['w0'] if intervention else [],
+        rebuilt_workers=['w0'] if intervention else [], convergence_samples=5, max_sample_gap_s=2,
+        consistency=dict(consistent=True), client=dict(complete=True), errors=[],
+        expiry_scope='discovery withdrawal', healthy_violations=[],
+        gc_available=True, gc=[dict(epoch_s=15,full=True,duration_ms=180)],
+        events=[dict(id=k,epoch_s=t) for k,t in [('cache_baseline_ready',9),('cache_only_started',10),
+            ('measurement_started',10),('performance_observation_finished',17),('observation_finished',18)]],
+        intensity={'measurement':dict(responses=50,entries=50*306000,key_payload_bytes=200000000,
+            added_keys=2340,totals=dict(responses=15000,full_responses=15000,entries=15000*306000))})
+
+
+@pytest.mark.parametrize('recovery', [False, True])
+def test_core_checks_and_validity_are_separate_without_weakening_recovery(recovery):
+    from cases.cache_sync_recovery.analysis import analyze
+    evidence = pressure_evidence(recovery)
+    result = analyze(evidence)
+    assert result['verdict'] == 'PASS' and result['validity'] == 'VALID'
+    assert {c['id'] for c in result['checks']} == __import__('cases.cache_sync_recovery.analysis',fromlist=['CHECK_IDS']).CHECK_IDS
+    evidence['consistency']['consistent'] = False
+    assert analyze(evidence)['verdict'] == 'FAIL'
+    if recovery:
+        evidence['consistency']['consistent'] = True
+        evidence['rebuilt_workers'] = []
+        assert analyze(evidence)['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('failure', ['pressure','shape','mutations','gap','client'])
+def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
+    from cases.cache_sync_recovery.analysis import analyze
+    evidence = pressure_evidence()
+    if failure == 'pressure': evidence['intensity']['measurement']['responses'] = 34
+    if failure == 'shape': evidence['intensity']['measurement']['totals']['entries'] -= 1
+    if failure == 'mutations': evidence['intensity']['measurement']['added_keys'] = 1999
+    if failure == 'gap': evidence['max_sample_gap_s'] = 11
+    if failure == 'client': evidence['client']['complete'] = False
+    result = analyze(evidence)
+    assert result['verdict'] == result['validity'] == 'INVALID'
+    assert all(c['status'] == 'PASS' for c in result['functional_checks'] if c['status'] != 'SKIP')
+
+
+@pytest.mark.parametrize('recovery', [False, True])
+def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monkeypatch, recovery):
+    from cases.cache_sync_recovery.program import GATE
+    from monitoring.query_plan import load_plan, definitions
+    from monitoring.metric_store import MetricStore
+    from reporting.workload import write_views
+    from reporting.core import read_bundle, load_analysis
+    from test_workload_report_views import payload
+    evidence = pressure_evidence(recovery)
+    committed = GATE.commit(tmp_path, evidence)
+    MetricStore(dict(metrics_schema_version=1, definitions=definitions(load_plan('cache_sync_recovery.yaml')),
+                     metrics={},collection_gaps={},errors=[])).save(tmp_path)
+    GATE.project(tmp_path)
+    stored = MetricStore.read(tmp_path)
+    assert stored.document['metrics']['cache_stability/full_gc_pause_ms'][0]['points'] == [[15,180]]
+    # Delivery must not analyze, acquire telemetry, or parse mutable live logs.
+    monkeypatch.setattr(type(GATE), 'evaluate', lambda *a: pytest.fail('report re-adjudicated gate'))
+    run = payload()
+    paths = write_views(tmp_path, run, ['cache_sync_recovery.yaml'])
+    bundle = read_bundle(paths['cache_sync_recovery.yaml'].parent)
+    spec = json.loads((bundle/'report-spec.json').read_text())
+    assert len(spec['panels']) == 2
+    assert all(p['title'].startswith(('recovery' if recovery else 'steady')+' · ') for p in spec['panels'])
+    assert spec['timeOriginEpochS'] == 10
+    assert load_analysis(bundle)['outcome'] == dict(gate=committed.result['verdict'],validity='VALID')
+
+
+def test_cache_suite_stays_out_of_default_ci():
+    suites = load_document(ROOT/'config/suites.yaml')
+    assert suites['suites']['cache_sync'] == ['cache_sync_recovery::steady','cache_sync_recovery::recovery']
+    assert all(not x.startswith('cache_sync_recovery::') for x in suites['suites']['workload'])
+    assert all(j['suite'] != 'cache_sync' for j in suites['ci_jobs'].values())

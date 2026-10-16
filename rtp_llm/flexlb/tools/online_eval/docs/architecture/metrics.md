@@ -74,7 +74,7 @@ sources:
 
 `include` 合并集合，`exclude` 按完整指标 ID 显式删除。重复定义、循环引用和删除不存在的指标均失败；本契约不支持同 ID 覆盖，要调整口径时修改所属集合，或新增不同 ID 并排除旧指标。展开后的定义及 SHA 写入编译产物与运行归档。
 
-难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal` 或 `debug_api`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
+难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal`、`debug_api` 或 `process_log`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
 
 `measurement` 将来源与统计语义分开：
 

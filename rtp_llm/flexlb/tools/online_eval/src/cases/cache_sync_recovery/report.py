@@ -1,29 +1,13 @@
 """将冻结的缓存同步证据交给公共报告层，不重新判定功能断言。"""
 from __future__ import annotations
 
-import argparse
 import copy
-import datetime
 import hashlib
 import json
 from pathlib import Path
-import re
 
 from reporting.components import details, run_meta, table
 from reporting.core import write_bundle
-
-
-def gc_events(path):
-    pattern = re.compile(r'^\[([^]]+)\].*?\[gc\s*\]\s+GC\((\d+)\) (Pause .+?)\s+\S+->\S+\([^)]*\) ([\d.]+)ms$')
-    result = []
-    for line in path.read_text().splitlines():
-        match = pattern.match(line)
-        if match:
-            stamp, identity, name, duration = match.groups()
-            end = datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
-            result.append(dict(epoch_s=end, duration_ms=float(duration), full='Pause Full' in name,
-                               gc_id=int(identity), name=name))
-    return result
 
 
 def derivative(rows, key):
@@ -105,43 +89,30 @@ def compact_report_spec(data, original):
     return spec
 
 
-def report(instance, output, identity):
-    source = instance/'cache-stability/evidence.json'
-    raw = json.loads(source.read_text())
+def write_report(directory, raw, result, *, run=None, presentation=None):
+    """Render a committed gate; the workload runner owns invocation and delivery."""
+    directory = Path(directory)
+    identity = run["id"]+"-cache-stability" if run else directory.name+"-cache-stability"
     frames = [{k: v for k, v in r.items() if k != 'workers'} for r in raw['frames']]
+    if presentation is not None:
+        from monitoring.metric_store import MetricStore
+        from cases.cache_sync_recovery.telemetry import archived_metrics
+        frames = archived_metrics(MetricStore.read(directory), frames, epoch=raw["provenance"]["env_epoch"],
+                                 maximum_gap_s=raw["parameters"]["observation"]["max_gap_s"])
     zero = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'cache_only_started'), frames[0]['epoch_s'])
-    performance_end = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'performance_observation_finished'),
-                           frames[-1]['epoch_s'])
+    performance_end = next((e['epoch_s'] for e in raw['events'] if e.get('name', e['id']) == 'performance_observation_finished'), frames[-1]['epoch_s'])
     rows = [r for r in frames if zero <= r['epoch_s'] <= performance_end]
-    labels = dict(cache_only_started="纯缓存观察开始", traffic_warmup_started="业务预热开始",
-        measurement_started="测量开始", measurement_finished="测量结束",
-        partial_workers_withdrawn="撤出部分Worker", partial_workers_restored="恢复Worker发现",
-        intervention_started="对照事件窗口开始", post_started="恢复后观察开始", post_finished="恢复后观察结束",
-        sending_stopped="停止发送", drain_finished="请求排空", performance_observation_finished="性能观察结束")
-    events = [dict(id=e.get('name', e['id']), name=labels.get(e['id'],e['id']), t=e['epoch_s']-zero)
+    gc = [g for g in raw.get('gc', []) if zero <= g['epoch_s'] <= performance_end]
+    checks = result['functional_checks'] if 'functional_checks' in result else result['checks']
+    launched = raw.get('launched_artifacts', {})
+    events = [dict(id=e.get('name', e['id']), name=e.get('name', e['id']), t=e['epoch_s']-zero)
               for e in raw['events'] if zero <= e['epoch_s'] <= performance_end]
-    gc_path = next(instance.glob('environment/*/master_gc.log'))
-    gc = [g for g in gc_events(gc_path) if zero <= g['epoch_s'] <= performance_end]
-    checks = raw.get('checks', [])
-    validity = not raw['errors'] and not raw.get('runtime_incomplete') and any(e.get('name', e['id'])=='observation_finished' for e in raw['events'])
-    result = json.loads((instance/'result.json').read_text()) if (instance/'result.json').exists() else {}
-    acceptance = {c['id']: c['status'] for c in checks if c['id'] in {
-        'actual_sync_intensity','clock_input_intensity','response_shape','sampling_complete','client_complete'}}
-    validity = validity and acceptance and all(v=='PASS' for v in acceptance.values())
-    launched = {}
-    for ancestor in instance.parents:
-        receipt = ancestor/'master-launched-artifact.json'
-        if receipt.exists():
-            launched = {kind: json.loads((ancestor/(kind+'-launched-artifact.json')).read_text())
-                        for kind in ('master','mock')}
-            break
     data = {k: v for k, v in raw.items() if k != 'frames'}
-    data.update(frames=frames, gc=gc, raw_root=str(instance),
-        outcome=dict(gate='FAIL' if any(c['status']=='FAIL' for c in checks) else 'PASS' if checks else 'INVALID',
-                     validity='VALID' if validity else 'INVALID'),
-        source_evidence_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), execution_result=result,
+    data.update(frames=frames, gc=gc, raw_root=str(directory),
+        outcome=dict(gate=result['verdict'], validity=result['validity']),
+        source_evidence_sha256=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(), execution_result=result,
         presentation_renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        workload_acceptance=acceptance, launched_artifacts=launched)
+        workload_acceptance={c['id']: c['status'] for c in result['validity_checks']}, launched_artifacts=launched)
     data.update(verdict=data['outcome']['gate'], runtime_validity=data['outcome']['validity'])
     baseline_ready = any(e['id']=='cache_baseline_ready' for e in raw['events'])
     summaries = {}
@@ -162,8 +133,9 @@ def report(instance, output, identity):
         cpu_rates = derivative(cpu,'cpu_usec')
         cpu_values = [r for r in cpu if r.get('cpu_usec') is not None]
         summaries[phase] = dict(samples=len(group), sample_window_s=duration, actual_rpc=actual,
-            full_gc_count=sum(g['full'] for g in pauses), full_gc_per_min=sum(g['full'] for g in pauses)*60/duration,
-            gc_pause_fraction=sum(overlap(g) for g in gc)/duration,
+            full_gc_count=sum(g['full'] for g in pauses) if raw.get('gc_available', True) else None,
+            full_gc_per_min=sum(g['full'] for g in pauses)*60/duration if raw.get('gc_available', True) else None,
+            gc_pause_fraction=sum(overlap(g) for g in gc)/duration if raw.get('gc_available', True) else None,
             allocation_gib_s=rate('process_allocated_bytes',1/2**30), diff_million_keys_s=rate('diff_scanned_keys',1e-6),
             cache_success_s=rate('cache_sync_commits'), worker_status_success_s=rate('worker_status_commits'),
             cpu_cores=((cpu_values[-1]['cpu_usec']-cpu_values[0]['cpu_usec'])
@@ -179,10 +151,10 @@ def report(instance, output, identity):
         timeAxis=dict(min=0,max=performance_end-zero+1), events=events, panels=[],
         run_meta=run_meta(dict(id=identity,kind='run',case='cache_sync_recovery'),
             implementation=dict(master=launched.get('master'), mock=launched.get('mock')),
-            configuration=result.get('implementation'), workload=raw['parameters'],
-            environment=raw['environment'], evidence=dict(source=str(source))),
+            configuration=(run or {}).get('implementation'), workload=raw['parameters'],
+            environment=raw['environment'], evidence=dict(source=str(directory/'cache_stability-gate-evidence.json'))),
         kpis=[dict(label='功能判定',value=data['outcome']['gate']),dict(label='实验有效性（含同步强度）',value=data['outcome']['validity']),
-              dict(label='Full GC次数',value=sum(g['full'] for g in gc)),
+              dict(label='Full GC次数',value=sum(g['full'] for g in gc) if raw.get('gc_available', True) else None),
               dict(label='未参与撤出的 Worker 受影响数',value=len(set(raw.get('affected_workers',[]))-set(raw.get('victims',[]))))],
         sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态应用成功/s','条目/s','MiB/s','分配GiB/s','diff百万key/s','FullGC次/分','GC暂停占比','CPU核','未参与撤出的 Worker 最长未更新ms'],
             [[phase, round(v['actual_rpc']['responses'],3), v['cache_success_s'], v['worker_status_success_s'], round(v['actual_rpc']['entries']),
@@ -192,18 +164,41 @@ def report(instance, output, identity):
                   details('实际同步强度',raw['intensity']),details('一致性',raw.get('consistency')),
                   details('健康Worker异常证据',raw.get('healthy_violations',[])),
                   details('证据边界',dict(scope=raw['expiry_scope'],errors=raw['errors']))])
+    if run is not None and run.get('workload', {}).get('runtime_validity') == 'INVALID':
+        data['outcome']['validity'] = data['runtime_validity'] = 'INVALID'
     spec = compact_report_spec(data, spec)
-    return write_bundle(output,'run',identity,data,spec,producer='cache_sync_recovery',role='diagnostic')
+    if presentation is not None:
+        from monitoring.metric_store import MetricStore
+        from reporting.curves import materialize, project_panels
+        store = MetricStore.read(directory)
+        curves = [materialize(key, style, row["points"], origin=zero,
+                              labels=row["labels"], provenance=row["provenance"])
+                  for key, style in presentation.charts.curves.items()
+                  for row in store.document["metrics"].get(style.metric_id, [])]
+        variant = "recovery" if raw["intervention"] else "steady"
+        panels = [p for p in project_panels(curves, presentation) if p["id"].startswith(variant+"-")]
+        for panel in panels:
+            panel["events"] = spec["panels"][0]["events"]
+        spec["panels"] = panels
+    spec['sections'].insert(0, table('实验有效性', ['检查','状态','实际值'],
+        [[c['id'],c['status'],str(c['actual'])] for c in result['validity_checks']]))
+    # Keep execution/telemetry provenance from the common runner; preserve the case's own origin.
+    if run is not None:
+        from reporting.run_context import canonical_spec
+        payload = dict(run)
+        spec = canonical_spec(spec, payload)
+        data['run'] = run
+    return write_bundle(directory, 'run', identity, data, spec,
+                        producer='cache_stability', role='gate')
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('instance',type=Path)
-    parser.add_argument('output',type=Path)
-    parser.add_argument('--id',required=True)
-    args = parser.parse_args()
-    report(args.instance,args.output,args.id)
+def validate_view(path, definition, fail):
+    from reporting.view_schema import validate_section_contract
+    validate_section_contract(path, definition, {"sources": None}, fail)
 
 
-if __name__ == '__main__':
-    main()
+def report(instance, output, identity):
+    """Explicit offline rendering of an existing committed gate; never re-adjudicate."""
+    from artifacts.gate import load_gate
+    evidence, result = load_gate(instance, "cache_stability")
+    return write_report(output, evidence, result)

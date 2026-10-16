@@ -159,8 +159,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
                     self.assertNotIn("reports", variant)
                     continue
                 names = variant["reports"]
-                self.assertEqual(len(names), 2)
-                self.assertIn(DEFAULT_VIEW, names)
+                self.assertTrue(names)
+                self.assertEqual(len(names), len(set(names)))
+                self.assertTrue(any(name != DEFAULT_VIEW for name in names))
                 self.assertTrue(all((ROOT / "config/report_views" / name).is_file()
                                     for name in names))
         cache = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")

@@ -73,8 +73,7 @@ def test_workload_suite_excludes_controls_but_kind_keeps_them():
     suite = classify(plans, 'workload')
     assert len(suite) == 3
     assert all(p['variant_id'] == 'default' for p in suite)
-    assert {p['variant_id'] for p in classify(plans, kind='workload')} == {
-        'default', 'affinity_disabled', 'glm', 'glm__affinity_disabled', 'non_rolling'}
+    assert {p['variant_id'] for p in classify(plans, kind='workload')} == {'default', 'affinity_disabled', 'glm', 'glm__affinity_disabled', 'non_rolling', 'steady', 'recovery'}
     with pytest.raises(ScenarioError, match='mutually exclusive'):
         preselect_documents(docs, 'quick', kind='functional')
 
