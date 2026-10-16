@@ -49,11 +49,11 @@ bool P2PConnectorDecode::init() {
             RTP_LLM_LOG_ERROR("decode connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PSchedulerDecodeRead>(
+        read_scheduler_ = std::make_unique<P2PSchedulerDecodeRead>(
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
         std::string process_id = autil::NetUtil::getBindIp() + "_pid_" + std::to_string(getpid()) + "_timestamp_"
                                  + std::to_string(currentTimeUs());
-        if (!scheduler_->init(process_id)) {
+        if (!read_scheduler_->init(process_id)) {
             RTP_LLM_LOG_ERROR("decode connector init failed: scheduler init failed");
             return false;
         }
@@ -65,9 +65,9 @@ bool P2PConnectorDecode::init() {
         RTP_LLM_LOG_ERROR("decode connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_unique<P2PWorkerDecodeRead>(
+    read_worker_ = std::make_unique<P2PWorkerDecodeRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, receiver);
-    if (!worker_->initialized()) {
+    if (!read_worker_->initialized()) {
         RTP_LLM_LOG_ERROR("decode connector init failed: worker init failed");
         return false;
     }
@@ -108,12 +108,12 @@ std::shared_ptr<AsyncContext> P2PConnectorDecode::read(const KVCacheResourcePtr&
         failed_context->markStartFailed(error_info);
         return failed_context;
     };
-    if (scheduler_ == nullptr) {
+    if (read_scheduler_ == nullptr) {
         ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "P2P scheduler is not ready");
         RTP_LLM_LOG_WARNING("asyncRead failed: %s", error_info.ToString().c_str());
         return make_failed_context(error_info);
     }
-    auto result = scheduler_->asyncRead(resource, meta, block_range, no_transfer);
+    auto result = read_scheduler_->asyncRead(resource, meta, block_range, no_transfer);
     if (!result.ok()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                             meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
@@ -124,10 +124,10 @@ std::shared_ptr<AsyncContext> P2PConnectorDecode::read(const KVCacheResourcePtr&
 }
 
 void P2PConnectorDecode::cancelRead(const std::shared_ptr<AsyncContext>& context) {
-    if (!scheduler_) {
+    if (!read_scheduler_) {
         return;
     }
-    scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
+    read_scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
 }
 
 namespace {
@@ -241,7 +241,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         }
         worker_plan.routes.push_back(std::move(worker_route));
     }
-    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, worker_plan);
+    ErrorInfo error_info = read_worker_->read(request_id, unique_key, deadline_ms, worker_plan);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -255,7 +255,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
 bool P2PConnectorDecode::cancelReadPerRank(const std::string& unique_key,
                                            int64_t            request_deadline_ms,
                                            FunctionResponsePB& response) {
-    bool ret = worker_->cancelRead(unique_key, request_deadline_ms);
+    bool ret = read_worker_->cancelRead(unique_key, request_deadline_ms);
     setP2PResponseOk(response);
     return ret;
 }
@@ -266,7 +266,7 @@ bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string& unique_key, 
     int  finished_ops = 0;
     bool stopped      = true;
 
-    worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+    read_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
 
     auto* p2p_response = response.mutable_p2p_response();
     p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);

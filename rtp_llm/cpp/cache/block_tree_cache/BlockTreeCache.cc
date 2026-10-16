@@ -180,22 +180,17 @@ ErrorInfo BlockTreeCache::validateDevicePrefixLocked(const CacheKeysType& cache_
                          "external insert requires a device cache and a valid key range");
     }
 
-    // TODO(rym): need support all group types for external insert, currently only FULL group is supported.
-    for (const auto& group : tree_->groupSets()) {
-        // Check that every group uses the FULL layout supported by writeback.
-        if (!group || group->groupType() != CacheGroupType::FULL) {
-            return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "external insert currently requires FULL groups");
-        }
-    }
     const auto path = tree_->findNode(cache_keys);
     // Check that the complete required prefix still exists in the tree.
     if (path.size() < required_prefix_blocks) {
         return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
     }
 
-    // Check that every prefix block of every group set is still resident on DEVICE and has a complete value.
-    for (size_t i = 0; i < required_prefix_blocks; ++i) {
-        for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
+    // Use each group's normal reuse range: FULL prefix, SWA window, or LINEAR endpoint state.
+    for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
+        const auto reuse_blocks =
+            std::min(tree_->groupSets()[gid]->computeReuseBlockCount(required_prefix_blocks), required_prefix_blocks);
+        for (size_t i = required_prefix_blocks - reuse_blocks; i < required_prefix_blocks; ++i) {
             const auto& resource = path[i]->group_set_resources[gid];
             if (!resource.isValidSteadyState() || resource.transfer_detached || !resource.hasCompleteDeviceValue()
                 || resource.device_blocks.size() != tree_->groupSets()[gid]->devicePools().size()) {

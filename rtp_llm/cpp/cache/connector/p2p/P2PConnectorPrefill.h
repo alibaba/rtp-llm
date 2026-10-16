@@ -113,8 +113,8 @@ private:
     std::shared_ptr<LayerBlockConverter>           layer_block_converter_;
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>            tp_broadcast_client_;
-    std::unique_ptr<P2PSchedulerPrefillRead> scheduler_;
-    std::shared_ptr<P2PWorkerPrefillRead>    worker_;
+    std::unique_ptr<P2PSchedulerPrefillRead>       read_scheduler_;
+    std::shared_ptr<P2PWorkerPrefillRead>          read_worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
     std::shared_ptr<P2PBroadcastClient>            write_registration_client_;
     std::unique_ptr<P2PWorkerPrefillWrite>         write_worker_;

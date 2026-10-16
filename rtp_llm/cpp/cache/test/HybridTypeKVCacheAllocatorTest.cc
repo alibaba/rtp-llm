@@ -2220,6 +2220,197 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshReusePeakCoversThreeBoundaryDecodeAt
     EXPECT_EQ(allocator->freeBlocksNum(), 1);
 }
 
+class WritebackMultiGroupAllocatorTest: public ::testing::Test {
+protected:
+    std::shared_ptr<TestHybridTypeKVCacheAllocator> allocator_;
+    CacheKeysType                                   keys_{11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 122, 133};
+
+    void SetUp() override {
+        rtp_llm::initLogger();
+        createDevice();
+        auto config        = makeFullSwaLinearCacheConfig();
+        config.linear_step = 4;
+        allocator_         = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        KVCacheConfig tiered_config;
+        tiered_config.enable_memory_cache  = true;
+        tiered_config.memory_cache_size_mb = 1;
+        allocator_->setBlockTreeCacheConfigForTest(tiered_config);
+        ASSERT_TRUE(allocator_->init());
+    }
+
+    void seedSparsePrefix(std::optional<CacheGroupType> missing_group = std::nullopt) {
+        const auto                                 cache = allocator_->blockTreeCacheOwner();
+        const CacheKeysType                        prefix(keys_.begin(), keys_.begin() + 4);
+        std::vector<std::vector<GroupSetResource>> slots(4, std::vector<GroupSetResource>(cache->groupSets().size()));
+        std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> holds;
+        for (const auto& group : cache->groupSets()) {
+            const size_t count = group->computeReuseBlockCount(4);
+            ASSERT_EQ(group->devicePools().size(), 1u);
+            const auto pool   = group->devicePools().front();
+            auto       blocks = pool->malloc(count);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            for (size_t i = 0; i < count; ++i) {
+                if (missing_group == group->groupType() && i == 0) {
+                    continue;
+                }
+                slots[4 - count + i][group->groupSetId()].device_blocks = {(*blocks)[i]};
+            }
+            holds.emplace_back(pool, *blocks);
+        }
+        cache->insert(prefix, slots, Tier::DEVICE);
+        for (const auto& [pool, blocks] : holds) {
+            pool->decRef(blocks);
+        }
+    }
+};
+
+TEST_F(WritebackMultiGroupAllocatorTest, SparsePrefixUsesGroupReuseRangesAndPublishesOnlyFilledSuffixBlocks) {
+    seedSparsePrefix();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    const auto                        error = allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load);
+    ASSERT_TRUE(error.ok()) << error.ToString();
+    ASSERT_NE(resource, nullptr);
+    EXPECT_EQ(start, 4u);
+    EXPECT_EQ(load, nullptr);
+    EXPECT_TRUE(isNullBlockIdx(resource->blocks(1)[7]));
+    EXPECT_TRUE(isNullBlockIdx(resource->blocks(2)[7]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[10]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[11]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(2)[11]));
+
+    const auto pool   = allocator_->cacheGroups().front()->blockPool();
+    const auto prefix = resource->blocks(0)[0];
+    const auto suffix = resource->blocks(0)[11];
+    EXPECT_EQ(pool->refCount(prefix), 2u);
+    EXPECT_EQ(pool->refCount(suffix), 1u);
+    const auto committed = allocator_->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000);
+    ASSERT_TRUE(committed.ok()) << committed.ToString();
+    EXPECT_EQ(pool->refCount(suffix), 2u);
+    resource.reset();
+    EXPECT_EQ(pool->refCount(prefix), 1u);
+    EXPECT_EQ(pool->refCount(suffix), 1u);
+
+    const auto cache = allocator_->blockTreeCacheOwner();
+    const auto path  = cache->tree()->findNode(keys_);
+    ASSERT_EQ(path.size(), keys_.size());
+    for (const auto& group : cache->groupSets()) {
+        if (group->groupType() != CacheGroupType::FULL) {
+            EXPECT_TRUE(path[7]->group_set_resources[group->groupSetId()].is_empty());
+        }
+    }
+    auto match = cache->match(keys_);
+    EXPECT_EQ(match.matched_device_blocks, keys_.size());
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+}
+
+TEST_F(WritebackMultiGroupAllocatorTest, SwaWindowDoesNotExpandAllocatedActiveTail) {
+    auto config                          = makeFullSwaLinearCacheConfig();
+    auto groups                          = config.topology().groups();
+    groups[1].policy.sliding_window_size = 16;
+    config.setTopology(std::move(groups), config.topology().layers());
+    allocator_ = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    seedSparsePrefix();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    ASSERT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).ok());
+    ASSERT_EQ(start, 4u);
+    EXPECT_EQ(load, nullptr);
+    for (size_t i = start; i < keys_.size() - 2; ++i) {
+        EXPECT_TRUE(isNullBlockIdx(resource->blocks(1)[i])) << "position " << i;
+    }
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[10]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[11]));
+    ASSERT_TRUE(allocator_->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 1000).ok());
+    auto cache = allocator_->blockTreeCacheOwner();
+    auto match = cache->match(keys_);
+    EXPECT_EQ(match.matched_device_blocks, start);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+}
+
+class WritebackMissingGroupAllocatorTest:
+    public WritebackMultiGroupAllocatorTest,
+    public ::testing::WithParamInterface<CacheGroupType> {};
+
+TEST_P(WritebackMissingGroupAllocatorTest, RejectsAdmissionWithoutTakingReferences) {
+    seedSparsePrefix(GetParam());
+    const auto                        pool = allocator_->cacheGroups().front()->blockPool();
+    const auto                        free = pool->freeBlocksNum();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).hasError());
+    EXPECT_EQ(resource, nullptr);
+    EXPECT_EQ(load, nullptr);
+    EXPECT_EQ(pool->freeBlocksNum(), free);
+}
+
+INSTANTIATE_TEST_SUITE_P(FullSwaLinear,
+                         WritebackMissingGroupAllocatorTest,
+                         ::testing::Values(CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR));
+
+TEST_F(WritebackMultiGroupAllocatorTest, SparseLocalLoadTargetsOutsideTransferTailAreMaterialized) {
+    seedSparsePrefix();
+    const auto                                 cache = allocator_->blockTreeCacheOwner();
+    const CacheKeysType                        local(keys_.begin(), keys_.begin() + 8);
+    std::vector<std::vector<GroupSetResource>> slots(8, std::vector<GroupSetResource>(cache->groupSets().size()));
+    for (const auto& group : cache->groupSets()) {
+        const size_t first = std::max<size_t>(4, 8 - group->computeReuseBlockCount(8));
+        for (size_t i = first; i < 8; ++i) {
+            const auto block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_FALSE(isNullBlockIdx(block));
+            slots[i][group->groupSetId()].host_block = block;
+        }
+    }
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, local, slots));
+    const auto                        pool = allocator_->cacheGroups().front()->blockPool();
+    const auto                        free = pool->freeBlocksNum();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    const auto                        error = allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load);
+    ASSERT_TRUE(error.ok()) << error.ToString();
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(start, 8u);
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[6]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(1)[7]));
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(2)[7]));
+    for (const auto& desc : load->loadDescs()) {
+        EXPECT_EQ(desc.target_blocks.size(), cache->groupSets()[desc.group_set_id]->groupIds().size());
+        for (const auto block : desc.target_blocks) {
+            EXPECT_FALSE(isNullBlockIdx(block));
+        }
+    }
+    EXPECT_TRUE(cache->abortPendingLoad(load));
+    load.reset();
+    resource.reset();
+    EXPECT_EQ(pool->freeBlocksNum(), free);
+}
+
+TEST_F(WritebackMultiGroupAllocatorTest, BusySwaWindowRejectsAdmissionWithoutTakingReferences) {
+    seedSparsePrefix();
+    const auto  cache    = allocator_->blockTreeCacheOwner();
+    const auto  path     = cache->tree()->findNode(keys_);
+    const auto& group    = *std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [](const auto& group) {
+        return group->groupType() == CacheGroupType::SWA;
+    });
+    auto&       value    = path[2]->group_set_resources[group->groupSetId()];
+    value.transfer_state = GroupSetTransferState::DEMOTING;
+    const auto                        pool = allocator_->cacheGroups().front()->blockPool();
+    const auto                        free = pool->freeBlocksNum();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    EXPECT_TRUE(allocator_->admitWriteBackDecodeCache(keys_, 4, resource, start, load).hasError());
+    EXPECT_EQ(resource, nullptr);
+    EXPECT_EQ(pool->freeBlocksNum(), free);
+    value.transfer_state = GroupSetTransferState::IDLE;
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

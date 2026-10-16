@@ -860,7 +860,7 @@ message P2PConnectorStartWriteRequestPB {
     int64 timeout_ms = 3;
     repeated int64 cache_keys = 4;
     int32 decode_tp_size = 5;
-    uint64 layout_digest = 6;
+    reserved 6;
     repeated int32 token_ids = 9;
     int32 input_length = 10;
     reserved 11;

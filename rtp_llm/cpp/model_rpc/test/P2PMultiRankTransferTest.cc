@@ -390,7 +390,7 @@ public:
         }
     }
     bool inCopy() {
-        auto receiver = std::dynamic_pointer_cast<transfer::tcp::TcpKVCacheReceiver>(connector->decode_->worker_->receiver_);
+        auto receiver = std::dynamic_pointer_cast<transfer::tcp::TcpKVCacheReceiver>(connector->decode_->read_worker_->receiver_);
         const auto store = receiver->getTransferTaskStore();
         std::shared_lock<std::shared_mutex> lock(store->mutex_);
         for (const auto& [name, task] : store->task_map_) {
@@ -400,7 +400,7 @@ public:
         return false;
     }
     void gateCopy(CopyGate& gate) {
-        auto receiver = std::dynamic_pointer_cast<transfer::tcp::TcpKVCacheReceiver>(connector->decode_->worker_->receiver_);
+        auto receiver = std::dynamic_pointer_cast<transfer::tcp::TcpKVCacheReceiver>(connector->decode_->read_worker_->receiver_);
         auto promise = std::make_shared<std::promise<cudaError_t>>();
         auto future = promise->get_future();
         check(receiver->transfer_service_->worker_thread_pool_->pushTask([promise, event = gate.event()] {
@@ -410,7 +410,7 @@ public:
         checkCuda(future.get());
     }
     bool hasCompletedTask(const std::string& request_key) {
-        auto* worker = connector->decode_->worker_.get();
+        auto* worker = connector->decode_->read_worker_.get();
         std::shared_ptr<P2PWorkerDecodeRead::ReadTaskGroup> group;
         {
             std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
@@ -424,12 +424,12 @@ public:
         return false;
     }
     bool readsDrained() {
-        auto* worker = connector->decode_->worker_.get();
+        auto* worker = connector->decode_->read_worker_.get();
         std::scoped_lock lock(worker->read_tasks_mutex_, worker->lease_map_mutex_);
         return worker->read_tasks_.empty() && worker->lease_map_.empty();
     }
     size_t pendingCancels(bool expired_only = false) {
-        auto* worker = connector->decode_->worker_.get();
+        auto* worker = connector->decode_->read_worker_.get();
         std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
         if (!expired_only) return worker->pending_cancel_keys_.size();
         return std::count_if(worker->pending_cancel_keys_.begin(), worker->pending_cancel_keys_.end(),
@@ -451,7 +451,7 @@ public:
             state->release = true;
             state->cv.notify_all();
         });
-        auto& worker = connector->prefill_->worker_;
+        auto& worker = connector->prefill_->read_worker_;
         const int threads = worker->config_.p2p_prefill_sender_thread_count;
         for (int i = 0; i < threads; ++i) {
             check(worker->async_sender_pool_->pushTask([state] {
@@ -533,7 +533,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                 }
             }
             for (const auto& rank : ranks) {
-                const auto buffers = rank->connector->prefill_->worker_->getComputedBuffersStore();
+                const auto buffers = rank->connector->prefill_->read_worker_->getComputedBuffersStore();
                 std::lock_guard<std::mutex> lock(buffers->computed_buffers_mutex_);
                 out.computed_buffers += buffers->computed_buffers_.size();
                 out.source_markers += buffers->removed_requests_.size();
@@ -740,7 +740,7 @@ protected:
         for (const auto& rank : ranks_) held.push_back(rank->resource);
         auto* root = held[0].get();
         KVCacheResourcePtr collective(root, [held = std::move(held)](KVCacheResource*) mutable { held.clear(); });
-        auto result = ranks_[0]->connector->decode_->scheduler_->asyncRead(collective, meta, {0, 2});
+        auto result = ranks_[0]->connector->decode_->read_scheduler_->asyncRead(collective, meta, {0, 2});
         check(result.ok() && result.context, "Decode kickoff failed");
         context_ = result.context;
     }
@@ -839,7 +839,7 @@ protected:
     void prepareConcurrent(int load_ms = 5000, int kickoff_capacity = 0) {
         ranks_ = makeRanks(RoleType::DECODE, host_, load_ms);
         if (kickoff_capacity > 0) {
-            auto& scheduler = ranks_[0]->connector->decode_->scheduler_;
+            auto& scheduler = ranks_[0]->connector->decode_->read_scheduler_;
             scheduler->checker_->stop();
             scheduler->async_read_pool_->stop();
             scheduler->async_read_pool_->join();
@@ -871,7 +871,7 @@ protected:
             ASSERT_EQ(request.resources[0]->blocks(0), request.resources[1]->blocks(0));
             batch_.push_back(std::move(request));
         }
-        auto& scheduler = ranks_[0]->connector->decode_->scheduler_;
+        auto& scheduler = ranks_[0]->connector->decode_->read_scheduler_;
         if (overload) {
             queue_gate_ = std::make_shared<KickoffGate>();
             ASSERT_EQ(scheduler->async_read_pool_->pushTask([gate = queue_gate_] { gate->wait(); }, false),

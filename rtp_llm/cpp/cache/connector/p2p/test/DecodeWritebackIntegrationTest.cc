@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
@@ -109,9 +110,10 @@ private:
     bool                    released_{false};
 };
 
-class DecodeWritebackIntegrationTest: public DeviceTestBase {
+template<typename AllocatorType>
+class DecodeWritebackIntegrationTestBase: public DeviceTestBase {
 protected:
-    using Allocator = test::BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
+    using Allocator = test::BlockTreeCacheTestAllocator<AllocatorType>;
     autil::EnvGuard                                    perf_{"PERF_TEST", "1"};
     CacheConfig                                        config_;
     std::shared_ptr<Allocator>                         source_, target_;
@@ -163,9 +165,13 @@ protected:
         return manager;
     }
 
+    virtual CacheConfig cacheConfig() const {
+        return test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
+    }
+
     void SetUp() override {
         DeviceTestBase::SetUp();
-        config_ = test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
+        config_ = cacheConfig();
         source_ = std::make_shared<Allocator>(config_);
         target_ = std::make_shared<Allocator>(config_);
         ASSERT_TRUE(source_->init());
@@ -287,11 +293,17 @@ protected:
         ASSERT_FALSE(stream_->hasError());
         ASSERT_TRUE(stream_->incrKVBlock().ok());
         source_blocks_ = stream_->streamCacheResource().kvCache().blocks(0, 0);
-        for (int layer = 0; layer < 2; ++layer) {
-            for (size_t i = 0; i < source_blocks_.size(); ++i) {
-                for (const auto& block : source_->convertIndexToBufferByTag(
-                         layer, config_.topology().groups().front().tag, source_blocks_[i], 1, 0)) {
-                    ASSERT_EQ(cudaMemset(block.addr, 10 * layer + i + 1, block.size_bytes), cudaSuccess);
+        for (const auto& group : config_.topology().groups()) {
+            const auto  gid    = config_.topology().groupIdForTag(group.tag);
+            const auto& blocks = stream_->streamCacheResource().kvCache().blocks(0, gid);
+            for (int layer : group.layer_ids) {
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    if (isNullBlockIdx(blocks[i])) {
+                        continue;
+                    }
+                    for (const auto& block : source_->convertIndexToBufferByTag(layer, group.tag, blocks[i], 1, 0)) {
+                        ASSERT_EQ(cudaMemset(block.addr, 10 * layer + i + 1, block.size_bytes), cudaSuccess);
+                    }
                 }
             }
         }
@@ -353,6 +365,112 @@ protected:
         return source_->blockTreeCache()->groupSets().front()->devicePools().front()->refCount(source_blocks_[index]);
     }
 };
+
+class DecodeWritebackIntegrationTest: public DecodeWritebackIntegrationTestBase<SingleTypeKVCacheAllocator> {};
+
+class DecodeWritebackHybridIntegrationTest:
+    public DecodeWritebackIntegrationTestBase<HybridPoolKVCacheAllocator>,
+    public ::testing::WithParamInterface<int> {
+protected:
+    CacheConfig cacheConfig() const override {
+        auto config        = test::makeFullSwaLinearCacheConfig(GetParam() != 1);
+        config.linear_step = 1;
+        if (GetParam() == 2) {
+            auto groups                          = config.topology().groups();
+            groups[1].policy.sliding_window_size = 16;
+            groups[1].policy.active_tail_blocks  = 4;
+            config.setTopology(std::move(groups), config.topology().layers());
+        } else if (GetParam() == 3 || GetParam() == 4) {
+            const bool linear = GetParam() == 3;
+            auto       group  = config.topology().groups()[linear ? 2 : 1];
+            group.layer_ids   = {0};
+            KVCacheSpecPtr spec;
+            if (linear) {
+                spec = test::makeLinearSpec(group.tag, 4, DataType::TYPE_FP16, 1, 2);
+            } else {
+                spec = test::makeMhaSpec(group.tag, 4, DataType::TYPE_FP16, 1, 2);
+            }
+            config.fromGroupedSpecs({spec}, {{0, 1, 2}}, {group.policy.group_type}, {group.tag}, {group.policy});
+        }
+        config.use_independent_block_pools = true;
+        std::vector<uint32_t> blocks(config.groupNums(), 128);
+        std::vector<size_t>   strides, scales;
+        for (const auto& group : config.topology().groups()) {
+            strides.push_back(group.kv_block_stride_bytes);
+            scales.push_back(group.kv_scale_stride_bytes);
+        }
+        config.setGroupBlockLayout(blocks, strides, scales);
+        return config;
+    }
+};
+
+TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreservesSparseHoles) {
+    tokens_ = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+    keys_   = calculateCacheKeys(tokens_.data(), 20, 4);
+    prepare(21, 20);
+    // Keep only the configured active tail among complete source blocks.
+    for (const auto& group : source_->cacheGroups()) {
+        if (group->policy().group_type == CacheGroupType::FULL) {
+            continue;
+        }
+        const size_t keep = group->activeTailBlocks() == 0 ? keys_.size() : group->activeTailBlocks();
+        auto&        ids = stream_->streamCacheResource().kvCache().cacheResource(0).mutableBlockIds(group->group_id());
+        for (size_t i = 0; i + keep < keys_.size(); ++i) {
+            const auto block = ids.blocks()[i];
+            if (!isNullBlockIdx(block)) {
+                group->unreference({block});
+                ids.setAt(i, NULL_BLOCK_IDX);
+            }
+        }
+    }
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    ASSERT_NE(writeSource(), nullptr);
+    EXPECT_EQ(writeSource()->cacheKeys(), keys_);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+
+    const auto cache = target_->blockTreeCacheOwner();
+    const auto path  = cache->tree()->findNode(keys_);
+    ASSERT_EQ(path.size(), keys_.size());
+    for (const auto& group_set : cache->groupSets()) {
+        const auto&  base  = group_set->groupAt(0);
+        const size_t count = base.policy.active_tail_blocks == 0 ? keys_.size() : base.policy.active_tail_blocks;
+        const size_t first = std::max<size_t>(1, keys_.size() - std::min(count, keys_.size()));
+        const auto   gid   = group_set->groupSetId();
+        for (size_t i = 1; i < first; ++i) {
+            EXPECT_TRUE(path[i]->group_set_resources[gid].is_empty());
+        }
+        for (size_t i = first; i < keys_.size(); ++i) {
+            const auto& blocks = path[i]->group_set_resources[gid].device_blocks;
+            ASSERT_EQ(blocks.size(), group_set->groupIds().size());
+            for (size_t member = 0; member < blocks.size(); ++member) {
+                const auto& group = group_set->groupAt(member);
+                for (int layer : group.layer_ids) {
+                    for (const auto& block :
+                         target_->convertIndexToBufferByTag(layer, group.tag, blocks[member], 1, 0)) {
+                        std::vector<uint8_t> bytes(block.size_bytes);
+                        ASSERT_EQ(cudaMemcpy(bytes.data(), block.addr, bytes.size(), cudaMemcpyDeviceToHost),
+                                  cudaSuccess);
+                        EXPECT_TRUE(std::all_of(
+                            bytes.begin(), bytes.end(), [&](uint8_t b) { return b == 10 * layer + i + 1; }));
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(cache->groupSets().size(), GetParam() >= 3 ? 1u : (GetParam() == 1 ? 2u : 3u));
+    auto match = cache->match(keys_);
+    EXPECT_EQ(match.matched_device_blocks, keys_.size());
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+}
+
+INSTANTIATE_TEST_SUITE_P(FullSwaLinear, DecodeWritebackHybridIntegrationTest, ::testing::Values(0, 1, 2, 3, 4));
 
 TEST_F(DecodeWritebackIntegrationTest, FinishedStreamReleasesBeforeTcpCopyAndNextRequestReusesSuffix) {
     prepare();

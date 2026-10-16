@@ -364,7 +364,6 @@ protected:
         request.set_deadline_ms(currentTimeMs() + 4000);
         request.set_decode_tp_size(2);
         request.set_input_length(4);
-        request.set_layout_digest(ShardLayoutFactory::writebackLayoutDigest(*config_.topologyPtr(), 2));
         for (const auto token : token_ids_) {
             request.add_token_ids(token);
         }
@@ -942,7 +941,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentWritesJoinLocalLoadAndPublishId
 TEST_F(P2PConnectorWriteSchedulerTest, InvalidPrefillAdmissionDoesNotAllocateOrRegister) {
     const auto                                                               free      = allocator_->freeBlocksNum();
     const std::vector<std::function<void(P2PConnectorStartWriteRequestPB&)>> mutations = {
-        [](auto& r) { r.set_layout_digest(r.layout_digest() + 1); },
+        [](auto& r) { r.set_plan_digest(r.plan_digest() + 1); },
         [](auto& r) { r.set_decode_tp_size(1); },
         [](auto& r) { r.set_cache_keys(2, 999); },
         [](auto& r) { r.add_cache_keys(999); },
@@ -1015,18 +1014,62 @@ TEST_F(P2PConnectorWriteSchedulerTest, LostFinalResponseStillConfirmsPeerStop) {
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 3u);
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, UnsupportedGroupsAndCpAreRejectedBeforeHandshake) {
-    auto groups                         = config_.topologyPtr()->groups();
-    groups[0].policy.group_type         = CacheGroupType::SWA;
-    groups[0].policy.active_tail_blocks = 2;
-    const auto unsupported              = CacheTopology::create(groups, config_.topologyPtr()->layers());
-    EXPECT_TRUE(ShardLayoutFactory::validateWritebackLayout(*unsupported, decode_config_.parallelism_config, 2)
-                    .hasError());
+TEST_F(P2PConnectorWriteSchedulerTest, WritebackPlanPreservesConfiguredActiveTail) {
+    for (const auto& [window, tail] :
+         std::vector<std::pair<int, uint32_t>>{{0, 2}, {4, 2}, {8, 2}, {16, 2}, {16, 4}, {16, 0}}) {
+        SCOPED_TRACE("window=" + std::to_string(window) + " tail=" + std::to_string(tail));
+        auto config                          = test::makeFullSwaLinearCacheConfig();
+        auto groups                          = config.topology().groups();
+        groups[1].policy.sliding_window_size = window;
+        groups[1].policy.active_tail_blocks  = tail;
+        const auto topology                  = CacheTopology::create(groups, config.topology().layers());
+        auto       decode_config             = decode_config_;
+        decode_config.topology               = topology;
+        auto prefill_config                  = prefill_config_;
+        prefill_config.topology              = topology;
+        P2PSchedulerDecodeWrite  decode_scheduler(decode_config, decode_client_, *decode_source_worker_);
+        P2PSchedulerPrefillWrite prefill_scheduler(prefill_config, allocator_, nullptr, prefill_client_);
+        const auto               decode  = decode_scheduler.planFor(2);
+        const auto               prefill = prefill_scheduler.planFor(2);
+        ASSERT_TRUE(decode->ok()) << decode->error.ToString();
+        ASSERT_TRUE(prefill->ok()) << prefill->error.ToString();
+        EXPECT_EQ(decode->plan.digest(), prefill->plan.digest());
+        for (const auto& route : decode->plan.routes) {
+            const auto positions = KVCacheTransferPlanner::resolveKeys(route.src_keys, 8);
+            if (route.cache_tag == "swa") {
+                const size_t        count = tail == 0 ? 8u : std::min<size_t>(tail, 8);
+                std::vector<size_t> expected;
+                for (size_t i = 8 - count; i < 8; ++i) {
+                    expected.push_back(i);
+                }
+                EXPECT_EQ(positions, expected);
+            } else if (route.cache_tag == "linear") {
+                EXPECT_EQ(positions, std::vector<size_t>({7}));
+            }
+        }
+    }
+    const auto config        = test::makeFullSwaLinearCacheConfig(false);
+    auto       decode_config = decode_config_;
+    decode_config.topology   = config.topologyPtr();
+    P2PSchedulerDecodeWrite scheduler(decode_config, decode_client_, *decode_source_worker_);
+    const auto              plan = scheduler.planFor(2);
+    ASSERT_TRUE(plan->ok());
+    for (const auto& route : plan->plan.routes) {
+        EXPECT_NE(route.cache_tag, "swa");
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, UnsupportedCpAndAsymmetricTpAreRejectedBeforeHandshake) {
     auto cp                               = decode_config_.parallelism_config;
     cp.prefill_cp_config.kv_cache_sharded = true;
-    EXPECT_TRUE(ShardLayoutFactory::validateWritebackLayout(*config_.topologyPtr(), cp, 2).hasError());
+    EXPECT_FALSE(decode_->planFor(1)->ok());
+    EXPECT_FALSE(prefill_->planFor(1)->ok());
+    auto cp_config               = prefill_config_;
+    cp_config.parallelism_config = cp;
+    P2PSchedulerPrefillWrite cp_scheduler(cp_config, allocator_, nullptr, prefill_client_);
+    EXPECT_FALSE(cp_scheduler.planFor(2)->ok());
     decode_.reset();
-    decode_config_.topology = unsupported;
+    decode_config_.parallelism_config = cp;
     createDecode();
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&]() { return context->done(); }));

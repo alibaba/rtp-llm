@@ -604,4 +604,21 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     return config;
 }
 
+inline CacheConfig makeFullSwaLinearCacheConfig(bool reuse_swa = true) {
+    auto       config              = makeSimpleHybridMhaCacheConfig(3, 128, 4, DataType::TYPE_FP16, 1, 1, 2);
+    const auto full                = makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 2);
+    const auto swa                 = makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 2);
+    const auto linear              = makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 2);
+    auto       swa_policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse = reuse_swa;
+    swa_policy.sliding_window_size = 8;
+    config.fromGroupedSpecs(
+        {full, swa, linear},
+        {{0}, {1}, {2}},
+        {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR},
+        {"full", "swa", "linear"},
+        {defaultCacheGroupPolicy(CacheGroupType::FULL), swa_policy, defaultCacheGroupPolicy(CacheGroupType::LINEAR)});
+    return config;
+}
+
 }  // namespace rtp_llm::test

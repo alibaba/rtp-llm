@@ -824,7 +824,7 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
     ASSERT_TRUE(worker->init());
     auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
     connector->prefill_ = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
-    connector->prefill_->worker_ = worker;
+    connector->prefill_->read_worker_ = worker;
     manager->p2p_connector_ = connector;
 
     const auto free_before = manager->freeBlocksNum();

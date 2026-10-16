@@ -115,23 +115,21 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_t
             return it->second;
         }
     }
-    PlanResult plan{
-        {}, ShardLayoutFactory::validateWritebackLayout(*config_.topology, config_.parallelism_config, decode_tp_size)};
-    if (plan.ok()) {
-        const auto dst_layout =
-            ShardLayoutFactory::fromTopology(*config_.topology, config_.parallelism_config, RoleType::PREFILL);
-        const auto src_layout = ShardLayoutFactory::peerOf(dst_layout, decode_tp_size, false, RoleType::DECODE);
-        const auto tags       = ShardLayoutFactory::tagsOf(*config_.topology);
-        plan                  = KVCacheTransferPlanner::plan(src_layout, dst_layout, tags);
-        for (const auto& route : plan.plan.routes) {
-            if (route.src_partition.count != 1 || route.dst_partition.count != 1
-                || route.src_slice.mode != CpBlockSliceMode::NONE || route.dst_slice.mode != CpBlockSliceMode::NONE) {
-                plan = PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires whole-block routes")};
-                break;
-            }
+    const auto& pc = config_.parallelism_config;
+    if (pc.tp_size <= 0 || decode_tp_size != pc.tp_size || pc.prefill_cp_config.is_enabled()
+        || pc.prefill_cp_config.kv_cache_sharded) {
+        return std::make_shared<const PlanResult>(
+            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires symmetric TP and disabled CP")});
+    }
+    const auto               dst_layout = ShardLayoutFactory::fromTopology(*config_.topology, pc, RoleType::PREFILL);
+    std::vector<std::string> tags;
+    for (const auto& group : config_.topology->groups()) {
+        if (group.policy.enable_prefix_reuse) {
+            tags.push_back(group.tag);
         }
     }
-    auto                        result = std::make_shared<const PlanResult>(std::move(plan));
+    const auto src_layout = ShardLayoutFactory::peerOf(dst_layout, decode_tp_size, false, RoleType::DECODE);
+    auto       result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
     auto [it, inserted] = plan_cache_.emplace(decode_tp_size, result);
     (void)inserted;
@@ -352,10 +350,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     const auto planned = planFor(request.decode_tp_size());
     if (!planned->ok()) {
         return reject(planned->error);
-    }
-    if (request.layout_digest()
-        != ShardLayoutFactory::writebackLayoutDigest(*config_.topology, config_.parallelism_config.tp_size)) {
-        return invalid("writeback layout mismatch");
     }
     if (request.plan_digest() != planned->plan.digest() || request.decode_workers_size() != request.decode_tp_size()) {
         return invalid("writeback source workers or plan mismatch");

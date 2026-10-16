@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
@@ -1351,10 +1350,9 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
 }
 
 bool KVCacheManager::writebackEnabled() const {
-    return cache_store_config_.p2p_writeback_enable
-           && pd_sep_config_.role_type == RoleType::DECODE && p2p_connector_
-           && ShardLayoutFactory::validateWritebackLayout(
-                  config_.topology(), parallelism_config_, parallelism_config_.tp_size).ok();
+    return cache_store_config_.p2p_writeback_enable && pd_sep_config_.role_type == RoleType::DECODE && p2p_connector_
+           && !parallelism_config_.prefill_cp_config.is_enabled()
+           && !parallelism_config_.prefill_cp_config.kv_cache_sharded;
 }
 
 std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheResourcePtr& resource,
@@ -1391,10 +1389,20 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             return skip("no_complete_suffix");
         }
         CacheKeysType keys(source.cacheKeys().begin(), source.cacheKeys().begin() + blocks);
-        // incrKVCacheRef constructs independent block tables and owns the additional references before stream free().
-        auto hold = allocator_->incrKVCacheRef(source, keys, true);
-        if (!hold || hold->cacheKeys() != keys) {
-            return skip("source_blocks_missing");
+        // Preserve logical positions, including sparse holes, while holding only physical blocks.
+        const auto         groups = allocator_->cacheGroups();
+        KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {
+            for (int gid = 0; gid < resource->groupNums(); ++gid) {
+                groups[gid]->unreference(resource->blocks(gid));
+            }
+            delete resource;
+        });
+        hold->initGroups(config_.topologyPtr());
+        hold->setCacheKeys(keys);
+        for (const auto& group : groups) {
+            auto block_ids = source.blocks(group->group_id());
+            block_ids.resize(blocks, NULL_BLOCK_IDX);
+            group->reference(hold->mutableBlockIds(group->group_id()), block_ids);
         }
         hold->setLastBlockAligned(true);
         std::vector<int> token_ids(tokens->data(0), tokens->data(0) + tokens->seqLength());
