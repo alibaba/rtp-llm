@@ -164,6 +164,46 @@ def concat_and_cast_mha_k_triton(
     )
 
 
+
+@triton.jit
+def _scatter_block_table_kernel(
+    flat_ptr,
+    indptr_ptr,
+    padded_ptr,
+    total_pages,
+    table_width,
+    bs,
+    LOG2_ITERS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Scatter flat page ids into the padded [bs, table_width] block table.
+
+    One launch replaces the aten chain (searchsorted + clamp + where +
+    index_put + zeros, ~40us/layer): each program maps its flat page ids to
+    the owning request with an in-kernel binary search over the cum indptr
+    and writes the live entries only. Stale values in the unused region are
+    tolerated (the attention kernel bounds reads by seq_lens).
+    """
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < total_pages
+    k = offs.to(tl.int32)
+    lo = tl.zeros((BLOCK,), dtype=tl.int32)
+    hi = tl.full((BLOCK,), bs, dtype=tl.int32)
+    for _ in tl.static_range(LOG2_ITERS):
+        mid = (lo + hi + 1) // 2
+        v = tl.load(indptr_ptr + mid, mask=mask, other=2147483647)
+        take = v <= k
+        lo = tl.where(take, mid, lo)
+        hi = tl.where(take, hi, mid - 1)
+    row = lo
+    base = tl.load(indptr_ptr + row, mask=mask, other=0)
+    col = k - base
+    valid = mask & (row < bs) & (col < table_width)
+    val = tl.load(flat_ptr + offs, mask=valid, other=0)
+    tl.store(padded_ptr + row.to(tl.int64) * table_width + col, val, mask=valid)
+
+
 def _use_trtllm_gen_prefill() -> bool:
     """Env gate for the trtllm-gen ragged prefill (default off, A/B form)."""
     return os.environ.get("XING4_MLA_TRTLLM_GEN_PREFILL", "0") == "1"
@@ -685,7 +725,7 @@ class MlaFlashInferDecodeOp(object):
             # Large-batch regime only: the kernel halves the attention time
             # (3.69 vs 6.94 ms/step at bs64) but the aten scatter machinery
             # costs ~1.6ms of extra launches, which loses below ~bs32.
-            and q_nope.shape[0] >= 32
+            and q_nope.shape[0] >= 1
         ):
             attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache)
         else:
@@ -733,29 +773,24 @@ class MlaFlashInferDecodeOp(object):
         table_width = (
             self.max_context_len + self.token_per_block - 1
         ) // self.token_per_block
-        padded = torch.zeros(
+        # One Triton launch instead of the aten chain (searchsorted+clamp+
+        # where+index_put+zeros ~40us/layer): binary-search row mapping in
+        # kernel, live entries only, fixed shapes (graph-capture-safe),
+        # stale unused-region values tolerated (reads bound by seq_lens).
+        padded = torch.empty(
             (bs, table_width), dtype=torch.int32, device=flat_pages.device
         )
-        # Graph-safe scatter: searchsorted (fixed output shape, no host
-        # sync) maps each flat page to its request; repeat_interleave would
-        # sync on the device counts and abort stream capture.
-        col_flat = torch.arange(
-            total_pages, device=flat_pages.device, dtype=torch.int64
+        _scatter_block_table_kernel[(triton.cdiv(total_pages, 256),)](
+            flat_pages,
+            indptr,
+            padded,
+            total_pages,
+            table_width,
+            bs,
+            LOG2_ITERS=8,
+            BLOCK=256,
+            num_warps=4,
         )
-        row_ids = torch.searchsorted(
-            indptr[1:].to(torch.int64), col_flat, right=True
-        )
-        col_ids = col_flat - indptr.to(torch.int64)[row_ids]
-        # The flat page table's numel can lag the indptr coverage by one
-        # plan cycle (both are resized shared buffers): clamp stale tail
-        # entries into the last row's unused table region with value 0 —
-        # deterministic shapes stay graph-safe and live entries untouched.
-        row_c = row_ids.clamp(max=bs - 1)
-        col_c = col_ids.clamp(min=0, max=table_width - 1)
-        vals = torch.where(
-            row_ids < bs, flat_pages, torch.zeros_like(flat_pages)
-        )
-        padded[row_c, col_c] = vals
 
         full_kv = kv_cache.kv_cache_base.view(
             -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
