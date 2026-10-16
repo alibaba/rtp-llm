@@ -42,7 +42,7 @@ def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, 
                    (("baseline_start", "baseline_end"), ("post_start", "post_end"))]
     windows = [(origin+start, origin+end) for start, end in windows]
     frozen = capture_window(monitor.client, evidence["gate_input"]["fields"], source="mock",
-        windows=windows, epoch=evidence.get("env_epoch", 1), deadline=deadline,
+        windows=windows, epoch=evidence["provenance"]["env_epoch"], deadline=deadline,
         limits=limits, directory=directory)
     samples = {}
     for field, rows in frozen.field_rows().items():

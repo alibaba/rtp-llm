@@ -62,6 +62,21 @@ def test_dense_scrape_ledger_remains_valid_when_control_poll_is_slow():
     assert analyze(e)['verdict'] == 'PASS'
 
 
+def test_raw_window_uses_frozen_provenance_epoch_without_defaulting(tmp_path):
+    import json
+    e, _, monitor = prepare()
+    e['provenance']['env_epoch'] = 7
+    directory = tmp_path/'capture'
+    measurement_samples(monitor, e, Deadline(float('inf')),
+                        dict(max_samples=1000, max_bytes=1_000_000), directory=directory)
+    raw = json.loads((directory/'metrics.json').read_text())
+    assert raw['capture']['epoch'] == '7'
+    assert {row['epoch'] for rows in raw['metrics'].values() for row in rows} == {'7'}
+    del e['provenance']['env_epoch']
+    with pytest.raises(KeyError, match='env_epoch'):
+        acquire(e, monitor)
+
+
 def test_dense_scrapes_preserve_real_collapse_failure():
     e, _, monitor = prepare(hit=.3)
     acquire(e, monitor)
