@@ -513,7 +513,7 @@ class PPSkipWeightTest(unittest.TestCase):
         self.assertEqual(self.skipped_names(pp_size=1, pp_rank=0), set())
 
     def test_ffn_service_keeps_global_weights_after_rank_normalization(self):
-        for world_size in (2, 3):
+        for world_size in (2, 3, 4):
             with self.subTest(world_size=world_size):
                 pc = ParallelismConfig()
                 pc.world_size = world_size
@@ -531,7 +531,8 @@ class PPSkipWeightTest(unittest.TestCase):
                     (pc.pp_rank, pc.dp_rank, pc.tp_rank), (0, service_rank, 0)
                 )
                 self.assertEqual(
-                    (pc.pp_size, pc.dp_size, pc.tp_size, pc.ep_size), (1, 1, 1, 1)
+                    (pc.pp_size, pc.dp_size, pc.tp_size, pc.ep_size),
+                    (1, 1, 1, 1),
                 )
                 self.assertTrue(pc.ffn_disaggregate_config.is_ffn_service())
                 self.assertEqual(

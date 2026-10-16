@@ -8,7 +8,7 @@ from rtp_llm.ops import RoleType, SpeculativeType
 
 class StartupRealWarmupTest(unittest.TestCase):
     def test_ffn_ranks_do_not_fail_startup_warmup_gate(self):
-        for world_size in (2, 3):
+        for world_size in (2, 3, 4):
             for world_rank in range(world_size):
                 with self.subTest(world_size=world_size, world_rank=world_rank):
                     config = SimpleNamespace(
@@ -32,13 +32,16 @@ class StartupRealWarmupTest(unittest.TestCase):
                         start_server._should_run_startup_real_warmup(config)
                     )
 
-    def test_warmup_entry_rank_preserves_tp_boundaries(self):
+    def test_warmup_entry_rank_preserves_pp_and_tp_boundaries(self):
         for pp_size, world_rank, expected in (
             (1, 0, True),
             (1, 1, False),
             (1, 2, True),
-            (2, 4, True),
+            (2, 0, True),
+            (2, 2, True),
+            (2, 4, False),
             (2, 5, False),
+            (2, 6, False),
         ):
             with self.subTest(pp_size=pp_size, world_rank=world_rank):
                 config = SimpleNamespace(

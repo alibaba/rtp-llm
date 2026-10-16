@@ -16,17 +16,19 @@
 namespace rtp_llm {
 
 struct RankLayout {
-    int64_t pp_size = 1;
-    int64_t pp_rank = 0;
-    int64_t dp_size = 1;
-    int64_t tp_size = 1;
-    int64_t dp_rank = 0;
-    int64_t tp_rank = 0;
+    int64_t world_size = 1;
+    int64_t pp_size    = 1;
+    int64_t pp_rank    = 0;
+    int64_t dp_size    = 1;
+    int64_t tp_size    = 1;
+    int64_t dp_rank    = 0;
+    int64_t tp_rank    = 0;
     /** Materialized PP layer partition per stage; required when pp_size > 1. */
     std::vector<int64_t> layer_counts;
 
     static RankLayout fromParallelismConfig(const ParallelismConfig& config) {
         RankLayout layout;
+        layout.world_size   = config.world_size;
         layout.pp_size      = config.pp_size;
         layout.pp_rank      = config.pp_rank;
         layout.dp_size      = config.dp_size;
@@ -39,7 +41,7 @@ struct RankLayout {
 
     /** Rank lattice helpers shared with the Python layout implementation. */
     int64_t laneStride() const {
-        return dp_size * tp_size;
+        return world_size / pp_size;
     }
     int64_t stageRank() const {
         return dp_rank * tp_size + tp_rank;

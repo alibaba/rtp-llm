@@ -200,12 +200,6 @@ def _test_all_gather_collective(
     """Test all_gather collective operation across all groups"""
     logging.info(f"Rank {rank} testing all_gather")
     for group_type in [Group.WORLD, Group.DP, Group.TP]:
-        # Skip if group doesn't make sense for this configuration
-        if group_type == Group.DP and dp_size == 1:
-            continue
-        if group_type == Group.TP and tp_size == 1:
-            continue
-
         process_group, group_ranks = get_process_group_and_ranks(group_type)
 
         # Only test if this rank is in the group
@@ -223,6 +217,7 @@ def _test_all_gather_collective(
                 for r in group_ranks
             ]
             expected = torch.cat(expected_list, dim=0)
+            assert result.shape == expected.shape
             assert torch.allclose(
                 result, expected
             ), f"Rank {rank} all_gather {group_type}: Expected {expected.cpu()}, got {result.cpu()}"
@@ -471,6 +466,47 @@ def _test_all_collectives_worker(
         raise
 
 
+def _test_pp_singleton_groups_worker(
+    rank: int, world_size: int, tp_size: int, dp_size: int, nccl_port: int
+):
+    config = ParallelismConfig()
+    config.world_rank = config.local_rank = rank
+    config.world_size = config.local_world_size = world_size
+    config.pp_size = 2
+    config.tp_size = tp_size
+    config.dp_size = dp_size
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        config,
+        nccl_comm_config=NcclCommConfig(nccl_ip="127.0.0.1"),
+        nccl_init_port=nccl_port,
+        backend="nccl",
+    )
+    try:
+        tensor = torch.tensor(
+            [[rank, rank + 10]], dtype=torch.float32, device=f"cuda:{rank}"
+        )
+        for group in (Group.TP, Group.DP, Group.STAGE):
+            pg = _get_group(group)
+            assert torch.distributed.get_process_group_ranks(pg) == [rank]
+            gathered = all_gather(tensor, group)
+            assert gathered.shape == tensor.shape
+            torch.testing.assert_close(gathered, tensor)
+            assert gathered.data_ptr() != tensor.data_ptr()
+        assert _get_group(Group.STAGE) is _get_group(Group.TP)
+
+        pp_group = _get_group(Group.PP)
+        pp_cpu_group = _get_group(Group.PP, cpu_backend=True)
+        assert pp_group is not pp_cpu_group
+        for pg, backend in ((pp_group, "nccl"), (pp_cpu_group, "gloo")):
+            assert pg is not torch.distributed.group.WORLD
+            assert torch.distributed.get_process_group_ranks(pg) == [0, 1]
+            assert torch.distributed.get_backend(pg) == backend
+        torch.cuda.synchronize()
+    finally:
+        destroy_distributed_environment()
+
+
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
 
@@ -517,6 +553,11 @@ class TestCollectiveOperations(unittest.TestCase):
                         f"Process {p.name} exited with code {p.exitcode}"
                     )
         finally:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+            for p in processes:
+                p.join()
             # Release port locks
             for lock in locks:
                 lock.__exit__(None, None, None)
@@ -552,6 +593,15 @@ class TestCollectiveOperations(unittest.TestCase):
             tp_size=1,
             dp_size=4,
             test_name="all_collectives_tp1_dp4",
+        )
+
+    def test_pp2_tp1_dp1_singleton_groups(self):
+        self._run_test(
+            _test_pp_singleton_groups_worker,
+            world_size=2,
+            tp_size=1,
+            dp_size=1,
+            test_name="pp2_tp1_dp1_singleton_groups",
         )
 
 

@@ -203,7 +203,7 @@ class WeightConverter:
             )
 
         layout = RankLayout.from_parallelism_config(pc)
-        coord = layout.coord_of_unchecked(pc.world_rank)
+        coord = layout.coord_of(pc.world_rank)
         pc.tp_rank = _env_int("TP_RANK", coord.tp)
         pc.dp_rank = _env_int("DP_RANK", coord.dp)
         pc.ep_rank = layout.ep_rank_of(pc.world_rank, pc.ep_size)

@@ -519,6 +519,11 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
 
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
                                                  const ParallelismConfig& parallelism_config) {
+    /** Skip capacity synchronization with the FFN service, which does not use KV cache. */
+    if (parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate) {
+        return candidate_block_num;
+    }
+
     const auto layout     = RankLayout::fromParallelismConfig(parallelism_config);
     const auto group_size = static_cast<size_t>(layout.laneStride());
     if (group_size > 1) {

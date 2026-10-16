@@ -1,10 +1,11 @@
-"""Single authoritative implementation of the world-rank layout:
+"""World-rank layout with an explicit global process count:
 
-    world_rank = pp_rank * (dp_size * tp_size) + dp_rank * tp_size + tp_rank
+    world_rank = pp_rank * lane_stride + dp_rank * tp_size + tp_rank
+    lane_stride = world_size // pp_size
 
-Axis order {PP(outermost), DP, TP(innermost)}. Every rank derivation must go
-through this module; the C++ side only reads the ParallelismConfig fields
-materialized here. Pure stdlib, importable from every startup path.
+Axis order {PP(outermost), DP, TP(innermost)}. TP/DP group enumeration uses
+the declared sizes; rank validation uses the actual world size.
+Pure stdlib, importable from every startup path.
 """
 
 from dataclasses import dataclass
@@ -15,9 +16,9 @@ from typing import List
 class Group(Enum):
     """Parallel dimensions plus composite groups. Single enum shared by the
     layout model and collective communication. WORLD spans all ranks;
-    STAGE spans one pipeline stage's dp*tp ranks (WORLD narrowed per stage).
+    STAGE spans one pipeline stage (WORLD narrowed per stage).
     Both are composite groups, not single-axis slices.
-    PCP is reserved, not materialized yet."""
+    """
 
     TP = "TP"
     DP = "DP"
@@ -44,25 +45,33 @@ class RankLayout:
     position inside the group equals the coordinate along the target axis.
     """
 
-    __slots__ = ("_pp_size", "_dp_size", "_tp_size")
+    __slots__ = ("_world_size", "_pp_size", "_dp_size", "_tp_size")
 
-    def __init__(self, pp_size: int = 1, dp_size: int = 1, tp_size: int = 1):
-        if pp_size < 1 or dp_size < 1 or tp_size < 1:
+    def __init__(
+        self, world_size: int, pp_size: int = 1, dp_size: int = 1, tp_size: int = 1
+    ):
+        if world_size < 1 or pp_size < 1 or dp_size < 1 or tp_size < 1:
             raise ValueError(
                 f"RankLayout sizes must all be >= 1, got "
-                f"pp_size={pp_size}, dp_size={dp_size}, tp_size={tp_size}"
+                f"world_size={world_size}, pp_size={pp_size}, "
+                f"dp_size={dp_size}, tp_size={tp_size}"
             )
+        if world_size % pp_size != 0:
+            raise ValueError(
+                f"world_size {world_size} must be divisible by pp_size {pp_size}"
+            )
+        self._world_size = int(world_size)
         self._pp_size = int(pp_size)
         self._dp_size = int(dp_size)
         self._tp_size = int(tp_size)
 
     @staticmethod
     def from_parallelism_config(cfg) -> "RankLayout":
-        """Duck-typed on the three size fields; missing/zero sizes fall back to 1."""
         return RankLayout(
-            pp_size=max(int(getattr(cfg, "pp_size", 1)), 1),
-            dp_size=max(int(getattr(cfg, "dp_size", 1)), 1),
-            tp_size=max(int(getattr(cfg, "tp_size", 1)), 1),
+            world_size=cfg.world_size,
+            pp_size=cfg.pp_size,
+            dp_size=cfg.dp_size,
+            tp_size=cfg.tp_size,
         )
 
     @property
@@ -87,32 +96,24 @@ class RankLayout:
         }[group]
 
     def world_size(self) -> int:
-        return self._pp_size * self._dp_size * self._tp_size
+        return self._world_size
 
     def lane_stride(self) -> int:
         """World-rank stride between adjacent PP stages of the same lane."""
-        return self._dp_size * self._tp_size
+        return self._world_size // self._pp_size
 
     def coord_of(self, world_rank: int) -> Coord:
-        """Validated: raises ValueError when world_rank is outside the lattice."""
+        """Return coordinates; reject world ranks outside the layout."""
         world_rank = int(world_rank)
         if world_rank < 0 or world_rank >= self.world_size():
             raise ValueError(
                 f"world_rank {world_rank} out of range [0, {self.world_size()}) "
                 f"for layout {self}"
             )
-        return self.coord_of_unchecked(world_rank)
 
-    def coord_of_unchecked(self, world_rank: int) -> Coord:
-        """Allow coordinates outside the lattice. At pp=1, preserve mainline
-        flattened DP ranks: FFN-disaggregate replicas/service ranks can exceed
-        dp_size but still belong to stage zero."""
-        pp = 0
-        rank_in_stage = int(world_rank)
-        if self._pp_size > 1:
-            pp, rank_in_stage = divmod(rank_in_stage, self.lane_stride())
-        dp, tp = divmod(rank_in_stage, self._tp_size)
-        return Coord(tp=tp, dp=dp, pp=pp)
+        pp_rank, rank_in_stage = divmod(world_rank, self.lane_stride())
+        dp_rank, tp_rank = divmod(rank_in_stage, self._tp_size)
+        return Coord(tp=tp_rank, dp=dp_rank, pp=pp_rank)
 
     def world_rank_of(self, coord: Coord) -> int:
         if not (0 <= coord.tp < self._tp_size):
@@ -127,7 +128,7 @@ class RankLayout:
             raise ValueError(
                 f"pp coordinate {coord.pp} out of range [0, {self._pp_size})"
             )
-        return (coord.pp * self._dp_size + coord.dp) * self._tp_size + coord.tp
+        return coord.pp * self.lane_stride() + coord.dp * self._tp_size + coord.tp
 
     def groups(self, group: Group) -> List[List[int]]:
         """All groups of `group`, deterministic order (see class docstring)."""
@@ -162,14 +163,9 @@ class RankLayout:
         elif group is Group.WORLD:
             groups.append(list(range(self.world_size())))
         elif group is Group.STAGE:
+            stride = self.lane_stride()
             for pp in range(self._pp_size):
-                groups.append(
-                    [
-                        self.world_rank_of(Coord(tp=t, dp=d, pp=pp))
-                        for d in range(self._dp_size)
-                        for t in range(self._tp_size)
-                    ]
-                )
+                groups.append(list(range(pp * stride, (pp + 1) * stride)))
         else:  # pragma: no cover - guarded by the Group enum
             raise ValueError(f"unknown group: {group}")
         return groups
@@ -180,7 +176,7 @@ class RankLayout:
         for members in self.groups(group):
             if world_rank in members:
                 return members
-        raise AssertionError(  # pragma: no cover - unreachable by construction
+        raise AssertionError(
             f"world_rank {world_rank} (coord {coord}) not found in any {group} group"
         )
 
@@ -197,9 +193,9 @@ class RankLayout:
         }[group]
 
     def ep_rank_of(self, world_rank: int, ep_size: int) -> int:
-        """Expert-shard number: lane-local rank modulo ep_size. At pp=1 this
-        equals the legacy `world_rank % ep_size` (lane_rank == world_rank).
+        """Expert-shard number within a stage, for a world rank in this layout.
         ep_size must divide the per-stage rank count; ep_size <= 1 means no EP."""
+        coord = self.coord_of(world_rank)
         ep_size = int(ep_size)
         if ep_size <= 1:
             return 0
@@ -209,25 +205,21 @@ class RankLayout:
                 f"ep_size {ep_size} must divide the per-stage rank count "
                 f"{stride} for layout {self}"
             )
-        return int(world_rank) % stride % ep_size
-
-    def ep_groups(self) -> List[List[int]]:
-        """EP communication rosters: one group per PP stage holding all its
-        dp*tp ranks (WORLD narrowed per stage; equals [WORLD] at pp=1).
-        Identical to groups(Group.STAGE); kept as the EP-view alias."""
-        return self.groups(Group.STAGE)
+        stage_rank = coord.dp * self._tp_size + coord.tp
+        return stage_rank % ep_size
 
     def __repr__(self) -> str:
         return (
-            f"RankLayout(pp_size={self._pp_size}, dp_size={self._dp_size}, "
-            f"tp_size={self._tp_size})"
+            f"RankLayout(world_size={self._world_size}, pp_size={self._pp_size}, "
+            f"dp_size={self._dp_size}, tp_size={self._tp_size})"
         )
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, RankLayout):
             return NotImplemented
         return (
-            self._pp_size == other._pp_size
+            self._world_size == other._world_size
+            and self._pp_size == other._pp_size
             and self._dp_size == other._dp_size
             and self._tp_size == other._tp_size
         )

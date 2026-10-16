@@ -41,6 +41,13 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         ct._create_process_groups(cfg, "gloo", None, disable_custom_all_reduce=True)
         if pp_size == 1:
             assert ct._get_group(ct.Group.STAGE) is torch.distributed.group.WORLD
+            for cpu_backend in (False, True):
+                try:
+                    ct._get_group(ct.Group.PP, cpu_backend=cpu_backend)
+                except ValueError as exc:
+                    assert "PP process groups require pp_size > 1" in str(exc)
+                else:
+                    raise AssertionError("PP group lookup must fail when pp_size=1")
 
         callbacks = {}
         cpp_ops = SimpleNamespace(
@@ -64,23 +71,38 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
                 ct._get_group(ct.Group.WORLD)
             ),
         }
-        # A stage resolves to a group except at pp>1, dp=1, tp=1, where it is a
-        # single rank with no collective to run.
-        if not (pp_size > 1 and dp_size == 1 and tp_size == 1):
-            looked_up["STAGE"] = torch.distributed.get_process_group_ranks(
-                ct._get_group(ct.Group.STAGE)
-            )
-        if tp_size > 1 and world_size != tp_size:
-            looked_up["TP"] = torch.distributed.get_process_group_ranks(
-                ct._get_group(ct.Group.TP)
-            )
-        if dp_size > 1 and world_size != dp_size:
-            looked_up["DP"] = torch.distributed.get_process_group_ranks(
-                ct._get_group(ct.Group.DP)
-            )
+        for group, size in (
+            (ct.Group.TP, tp_size),
+            (ct.Group.DP, dp_size),
+            (ct.Group.STAGE, tp_size * dp_size),
+        ):
+            pg = ct._get_group(group)
+            looked_up[group.name] = torch.distributed.get_process_group_ranks(pg)
+            assert pg.size() == size
+            if size == world_size:
+                assert pg is torch.distributed.group.WORLD
+            if size == 1:
+                assert looked_up[group.name] == [rank]
+                tensor = torch.tensor([[rank, rank + 10]], dtype=torch.int32)
+                gathered = ct.all_gather(tensor, group)
+                assert gathered.shape == tensor.shape
+                assert torch.equal(gathered, tensor)
+                assert gathered.data_ptr() != tensor.data_ptr()
+        if pp_size > 1 and dp_size == 1:
+            assert ct._get_group(ct.Group.STAGE) is ct._get_group(ct.Group.TP)
+        elif pp_size > 1 and tp_size == 1:
+            assert ct._get_group(ct.Group.STAGE) is ct._get_group(ct.Group.DP)
         if max(pp_size, 1) > 1:
-            looked_up["PP"] = torch.distributed.get_process_group_ranks(
-                ct._get_group(ct.Group.PP)
+            pp_group = ct._get_group(ct.Group.PP)
+            pp_cpu_group = ct._get_group(ct.Group.PP, cpu_backend=True)
+            # Both transports use Gloo in this CPU test, but remain distinct groups.
+            assert pp_group is not torch.distributed.group.WORLD
+            assert pp_cpu_group is not torch.distributed.group.WORLD
+            assert pp_group is not pp_cpu_group
+            looked_up["PP"] = torch.distributed.get_process_group_ranks(pp_group)
+            assert (
+                torch.distributed.get_process_group_ranks(pp_cpu_group)
+                == looked_up["PP"]
             )
         # Each entry is a scalar-capacity case; minima fall on different TP/DP/PP ranks.
         local_blocks = [
@@ -100,11 +122,36 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
                 return tensor.clone()
             return tensor_to(tensor, *args, **kwargs)
 
-        # Exercise the actual C++ all-gather callback and mode mapping with real gloo collectives.
-        # Only CUDA staging is replaced so this topology test stays CPU-only.
+        # Test Python callbacks with real Gloo collectives, not the C++ bridge.
+        # Replace CUDA staging only to keep tensors on CPU.
         with patch.object(torch.cuda, "current_device", return_value=0), patch.object(
             torch.Tensor, "to", cpu_staging
         ):
+            stage_begin = rank // stage_size * stage_size
+            tp_begin = rank // tp_size * tp_size
+            for mode, ranks in (
+                (ct._CPP_PARALLEL_MODE_TP, range(tp_begin, tp_begin + tp_size)),
+                (
+                    ct._CPP_PARALLEL_MODE_DP,
+                    range(
+                        stage_begin + rank % tp_size,
+                        stage_begin + stage_size,
+                        tp_size,
+                    ),
+                ),
+                (
+                    ct._CPP_PARALLEL_MODE_STAGE,
+                    range(stage_begin, stage_begin + stage_size),
+                ),
+            ):
+                send = torch.tensor([rank, rank + 10], dtype=torch.int32)
+                recv = torch.full((len(ranks), 2), -1, dtype=torch.int32)
+                callbacks["allgather"]([recv], mode, [send], False)
+                expected = torch.tensor(
+                    [[r, r + 10] for r in ranks], dtype=torch.int32
+                )
+                assert torch.equal(recv, expected), (rank, mode, recv, expected)
+
             for local_block_num in local_blocks:
                 block_nums = torch.full((stage_size,), -1, dtype=torch.int32)
                 block_nums[local_rank] = local_block_num
@@ -177,11 +224,19 @@ def _run_topology(test, pp_size, dp_size, tp_size):
                 capacities,
             )
     finally:
+        timed_out = []
         for p in procs:
             p.join(timeout=30)
             if p.is_alive():
+                timed_out.append(p.pid)
+        for p in procs:
+            if p.is_alive():
                 p.terminate()
-                test.fail("worker deadlocked (group creation/barrier mismatch)")
+        for p in procs:
+            p.join()
+    test.assertFalse(timed_out, f"workers deadlocked: {timed_out}")
+    for rank, p in enumerate(procs):
+        test.assertEqual(p.exitcode, 0, f"rank {rank} exited with code {p.exitcode}")
     return results
 
 
@@ -237,6 +292,11 @@ class PPGroupTopologyTest(unittest.TestCase):
                 merged[key] = ranks
         return merged
 
+    def test_single_rank_and_pure_tp_dp_world_aliases(self):
+        for tp_size, dp_size in ((1, 1), (2, 1), (1, 2)):
+            with self.subTest(tp_size=tp_size, dp_size=dp_size):
+                _run_topology(self, pp_size=1, dp_size=dp_size, tp_size=tp_size)
+
     def test_pp1_dp2_tp2_matches_historical_groups(self):
         results = _run_topology(self, pp_size=1, dp_size=2, tp_size=2)
         membership = self._merge(results)
@@ -263,9 +323,10 @@ class PPGroupTopologyTest(unittest.TestCase):
         # PP groups span the stages of each tp lane.
         self.assertEqual(membership["PP0"], [0, 2])
         self.assertEqual(membership["PP1"], [1, 3])
-        self.assertFalse(any(k.startswith("DP") for k in membership))
-        # dp=1: a stage coincides with its TP group, so no distinct STAGE group.
-        self.assertFalse(any(k.startswith("STAGE") for k in membership))
+        for rank in range(4):
+            self.assertEqual(membership[f"DP{rank}"], [rank])
+        self.assertEqual(membership["STAGE0"], [0, 1])
+        self.assertEqual(membership["STAGE1"], [2, 3])
         self.assertEqual(results[0][0], 0)
         self.assertEqual(results[3][0], 1)
         self.assertEqual(results[0][4]["TP"], [0, 1])
@@ -322,9 +383,11 @@ class PPGroupTopologyTest(unittest.TestCase):
                 [min(column) for column in zip(*stage_snapshots)], [80, 96, 112, 128]
             )
 
-    def test_pp2_dp2_tp1_stage_group(self):
+    def test_pp2_dp2_tp1_stage_reuses_dp(self):
         results = _run_topology(self, pp_size=2, dp_size=2, tp_size=1)
         membership = self._merge(results)
+        self.assertEqual(membership["DP0"], [0, 1])
+        self.assertEqual(membership["DP1"], [2, 3])
         self.assertEqual(membership["STAGE0"], [0, 1])
         self.assertEqual(membership["STAGE1"], [2, 3])
         for result in results.values():
@@ -333,12 +396,17 @@ class PPGroupTopologyTest(unittest.TestCase):
                 [min(column) for column in zip(*stage_snapshots)], [80, 96, 112, 128]
             )
 
-    def test_pp2_dp1_tp1_pp_group_only(self):
+    def test_pp2_dp1_tp1_singleton_tp_dp_groups(self):
         results = _run_topology(self, pp_size=2, dp_size=1, tp_size=1)
         membership = self._merge(results)
         self.assertEqual(membership["PP0"], [0, 1])
-        # dp=1, tp=1: each stage is a single rank, so no STAGE/TP/DP group exists.
-        self.assertFalse(any(k.startswith(("TP", "DP", "STAGE")) for k in membership))
+        self.assertEqual(membership["PP0_gloo"], [0, 1])
+        for rank in range(2):
+            self.assertEqual(membership[f"TP{rank}"], [rank])
+            self.assertEqual(membership[f"DP{rank}"], [rank])
+            self.assertEqual(membership[f"STAGE{rank}"], [rank])
+            for group in ("TP", "DP", "STAGE"):
+                self.assertEqual(results[rank][4][group], [rank])
         self.assertEqual(results[0][4]["PP"], [0, 1])
         for result in results.values():
             local_blocks, stage_blocks, stage_snapshots, _ = result[5]

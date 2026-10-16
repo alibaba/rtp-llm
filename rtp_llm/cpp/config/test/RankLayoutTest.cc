@@ -12,9 +12,8 @@ namespace rtp_llm {
 namespace {
 
 /**
- * Independent oracle: the canonical world-rank formula the Python authority
- * (rank_layout.py) defines, written in a different algebraic form so the C++
- * compose slice is checked against the source of truth, not against itself.
+ * Independent reference for complete PP/DP/TP grids. Explicit-WORLD cases
+ * below also cover layouts whose declared axes do not span WORLD.
  */
 int64_t oracleLaneStride(int64_t dp_size, int64_t tp_size) {
     return dp_size * tp_size;
@@ -28,25 +27,29 @@ int64_t oracleWorldRank(int64_t pp_stage, int64_t dp_rank, int64_t tp_rank, int6
     return (pp_stage * dp_size + dp_rank) * tp_size + tp_rank;
 }
 
-RankLayout makeLattice(int64_t dp_size, int64_t tp_size, int64_t dp_rank, int64_t tp_rank) {
+RankLayout makeLattice(int64_t pp_size, int64_t dp_size, int64_t tp_size, int64_t dp_rank, int64_t tp_rank) {
     RankLayout layout;
-    layout.dp_size = dp_size;
-    layout.tp_size = tp_size;
-    layout.dp_rank = dp_rank;
-    layout.tp_rank = tp_rank;
+    layout.world_size = pp_size * dp_size * tp_size;
+    layout.pp_size    = pp_size;
+    layout.dp_size    = dp_size;
+    layout.tp_size    = tp_size;
+    layout.dp_rank    = dp_rank;
+    layout.tp_rank    = tp_rank;
     return layout;
 }
 
 RankLayout makePp(int64_t pp_size, int64_t pp_rank) {
     RankLayout layout;
-    layout.pp_size = pp_size;
-    layout.pp_rank = pp_rank;
+    layout.world_size = pp_size;
+    layout.pp_size    = pp_size;
+    layout.pp_rank    = pp_rank;
     return layout;
 }
 
 RankLayout makeMaterialized(std::vector<int64_t> counts, int64_t pp_rank) {
     RankLayout layout;
     layout.pp_size      = static_cast<int64_t>(counts.size());
+    layout.world_size   = layout.pp_size;
     layout.pp_rank      = pp_rank;
     layout.layer_counts = std::move(counts);
     return layout;
@@ -60,7 +63,7 @@ TEST(RankLayoutTest, ComposeSliceMatchesOracleExhaustive) {
             for (int64_t tp_size = 1; tp_size <= 3; ++tp_size) {
                 for (int64_t dp_rank = 0; dp_rank < dp_size; ++dp_rank) {
                     for (int64_t tp_rank = 0; tp_rank < tp_size; ++tp_rank) {
-                        const auto layout = makeLattice(dp_size, tp_size, dp_rank, tp_rank);
+                        const auto layout = makeLattice(pp_size, dp_size, tp_size, dp_rank, tp_rank);
                         EXPECT_EQ(layout.laneStride(), oracleLaneStride(dp_size, tp_size));
                         EXPECT_EQ(layout.stageRank(), oracleStageRank(dp_rank, tp_rank, tp_size));
                         for (int64_t pp_stage = 0; pp_stage < pp_size; ++pp_stage) {
@@ -75,7 +78,7 @@ TEST(RankLayoutTest, ComposeSliceMatchesOracleExhaustive) {
 }
 
 TEST(RankLayoutTest, WorldRankOfStageZeroIsStageRank) {
-    const auto layout = makeLattice(/*dp_size=*/2, /*tp_size=*/4, /*dp_rank=*/1, /*tp_rank=*/3);
+    const auto layout = makeLattice(/*pp_size=*/1, /*dp_size=*/2, /*tp_size=*/4, /*dp_rank=*/1, /*tp_rank=*/3);
     EXPECT_EQ(layout.worldRankOf(0), layout.stageRank());
     EXPECT_EQ(layout.stageRank(), 1 * 4 + 3);
 }
@@ -99,10 +102,11 @@ TEST(RankLayoutTest, RingNeighborRanks) {
     /** pp=3, dp=1, tp=2: stage0 = ranks {0,1}, stage1 = {2,3}, stage2 = {4,5}. */
     auto make = [](int64_t pp_rank, int64_t tp_rank) {
         RankLayout layout;
-        layout.pp_size = 3;
-        layout.pp_rank = pp_rank;
-        layout.tp_size = 2;
-        layout.tp_rank = tp_rank;
+        layout.world_size = 6;
+        layout.pp_size    = 3;
+        layout.pp_rank    = pp_rank;
+        layout.tp_size    = 2;
+        layout.tp_rank    = tp_rank;
         return layout;
     };
     EXPECT_EQ(make(0, 0).laneStride(), 2);
@@ -117,12 +121,13 @@ TEST(RankLayoutTest, RingNeighborRanks) {
 
     /** dp>1: lane offset dp_rank*tp_size must be included; lane of rank 3 is {3, 7}, not {3, 5}. */
     RankLayout dp_lane;
-    dp_lane.pp_size = 2;
-    dp_lane.pp_rank = 0;
-    dp_lane.dp_size = 2;
-    dp_lane.tp_size = 2;
-    dp_lane.dp_rank = 1;
-    dp_lane.tp_rank = 1;
+    dp_lane.world_size = 8;
+    dp_lane.pp_size    = 2;
+    dp_lane.pp_rank    = 0;
+    dp_lane.dp_size    = 2;
+    dp_lane.tp_size    = 2;
+    dp_lane.dp_rank    = 1;
+    dp_lane.tp_rank    = 1;
     EXPECT_EQ(dp_lane.laneStride(), 4);
     EXPECT_EQ(dp_lane.worldRankOf(0), 3);
     EXPECT_EQ(dp_lane.worldRankOf(1), 7);
@@ -169,6 +174,7 @@ TEST(RankLayoutTest, MaterializedRejectsInconsistentCounts) {
 
 TEST(RankLayoutTest, FromParallelismConfig) {
     ParallelismConfig pc;
+    pc.world_size            = 24;
     pc.pp_size               = 3;
     pc.pp_rank               = 2;
     pc.dp_size               = 2;
@@ -177,6 +183,7 @@ TEST(RankLayoutTest, FromParallelismConfig) {
     pc.tp_rank               = 3;
     pc.pp_stage_layer_counts = {5, 4, 4};
     const auto layout        = RankLayout::fromParallelismConfig(pc);
+    EXPECT_EQ(layout.world_size, 24);
     EXPECT_EQ(layout.pp_size, 3);
     EXPECT_EQ(layout.pp_rank, 2);
     EXPECT_EQ(layout.dp_size, 2);
@@ -190,10 +197,45 @@ TEST(RankLayoutTest, FromParallelismConfig) {
 
     /** Multi-stage layouts must consume the partition materialized by Python. */
     ParallelismConfig bare;
+    bare.world_size        = 4;
     bare.pp_size           = 4;
     bare.pp_rank           = 0;
     const auto bare_layout = RankLayout::fromParallelismConfig(bare);
     EXPECT_THROW(bare_layout.layerRangeOf(0, /*total_layers=*/65), std::exception);
+}
+
+TEST(RankLayoutTest, ExplicitWorldSizeDefinesStageStride) {
+    ParallelismConfig pc;
+    pc.world_size    = 8;
+    pc.pp_size       = 2;
+    const auto first = RankLayout::fromParallelismConfig(pc);
+    EXPECT_EQ(first.laneStride(), 4);
+    EXPECT_EQ(first.worldRankOf(1), 4);
+    EXPECT_EQ(first.prevRank(), 4);
+    EXPECT_EQ(first.nextRank(), 4);
+
+    pc.pp_rank      = 1;
+    pc.world_rank   = 4;
+    const auto last = RankLayout::fromParallelismConfig(pc);
+    EXPECT_EQ(last.worldRankOf(0), 0);
+    EXPECT_EQ(last.prevRank(), 0);
+    EXPECT_EQ(last.nextRank(), 0);
+}
+
+TEST(RankLayoutTest, SingleStageUsesExplicitWorldSize) {
+    ParallelismConfig pc;
+    pc.world_size = 4;
+    for (int64_t rank = 0; rank < pc.world_size; ++rank) {
+        /** Python materializes dp_rank = world_rank for single-stage TP=1. */
+        pc.world_rank     = rank;
+        pc.dp_rank        = rank;
+        const auto layout = RankLayout::fromParallelismConfig(pc);
+        EXPECT_EQ(layout.laneStride(), 4);
+        EXPECT_EQ(layout.stageRank(), rank);
+        EXPECT_EQ(layout.worldRankOf(0), rank);
+        EXPECT_EQ(layout.prevRank(), rank);
+        EXPECT_EQ(layout.nextRank(), rank);
+    }
 }
 
 }  // namespace rtp_llm

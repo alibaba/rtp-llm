@@ -14,6 +14,7 @@ class EplbStageRootTest(unittest.TestCase):
     def config(self, pp_size):
         return SimpleNamespace(
             parallelism_config=SimpleNamespace(
+                world_size=pp_size * 4,
                 pp_size=pp_size, dp_size=2, tp_size=2, local_world_size=8
             ),
             server_config=SimpleNamespace(start_port=8000),

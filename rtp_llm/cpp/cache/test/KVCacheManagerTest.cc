@@ -595,6 +595,31 @@ TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
     EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0, false));
 }
 
+TEST_F(KVCacheManagerTest, FfnDisaggregatePreservesLocalCapacityThroughPoolInit) {
+    const uint32_t candidates[] = {11, 7, 9, 3};
+    for (int64_t rank = 0; rank < 4; ++rank) {
+        SCOPED_TRACE(rank);
+        ParallelismConfig parallelism;
+        parallelism.world_size = 4;
+        parallelism.world_rank = rank;
+        parallelism.pp_size    = parallelism.dp_size = parallelism.tp_size = 1;
+        parallelism.dp_rank    = rank;
+        auto& ffn = parallelism.ffn_disaggregate_config;
+        ffn.enable_ffn_disaggregate = true;
+        ffn.attention_dp_size       = 3;
+        ffn.is_ffn_rank             = rank == 3;
+
+        const auto confirmed = CacheConfigCreator::synchronizeBlockNum(candidates[rank], parallelism);
+        ASSERT_EQ(confirmed, candidates[rank]);
+        auto config = makeSimpleMhaCacheConfig(1, 1, 4, DataType::TYPE_FP16);
+        config.finalizeBlockNums(confirmed, RuntimeConfig{});
+        KVCacheManager manager(config, /*warmup=*/false, nullptr, {}, parallelism);
+        ASSERT_TRUE(manager.init());
+        EXPECT_EQ(manager.cacheConfig().group("default").block_num, candidates[rank]);
+        EXPECT_EQ(manager.totalBlocksNum(), candidates[rank] - 1);
+    }
+}
+
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
     auto config  = makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                            /*block_num=*/1,

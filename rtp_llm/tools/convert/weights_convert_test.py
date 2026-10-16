@@ -1,14 +1,62 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.cpp.cache.test.libcache_config_creator_py_test import validate_basic_config
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
 from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.tools.convert.weights_convert import WeightConverter
 from rtp_llm.tools.convert.weights_convert_utils import (
     ModelConfigPostBuilder,
     apply_layer_override_and_post_build,
 )
+
+
+class WeightsConvertParallelismTest(unittest.TestCase):
+    def test_explicit_world_size_covers_all_conversion_ranks(self):
+        converter = WeightConverter.__new__(WeightConverter)
+        for rank in range(4):
+            with self.subTest(rank=rank), patch.dict(
+                os.environ,
+                {
+                    "TP_SIZE": "2",
+                    "DP_SIZE": "2",
+                    "WORLD_SIZE": "4",
+                    "WORLD_RANK": str(rank),
+                    "LOCAL_WORLD_SIZE": "4",
+                },
+                clear=True,
+            ):
+                config = converter._build_parallelism_config()
+                self.assertEqual(config.world_size, 4)
+                self.assertEqual(
+                    (
+                        config.tp_rank,
+                        config.dp_rank,
+                        config.ep_rank,
+                        config.local_rank,
+                    ),
+                    (rank % 2, rank // 2, rank, rank),
+                )
+
+    def test_missing_world_size_rejects_out_of_range_rank(self):
+        converter = WeightConverter.__new__(WeightConverter)
+        with patch.dict(
+            os.environ,
+            {
+                "TP_SIZE": "2",
+                "DP_SIZE": "2",
+                "WORLD_RANK": "3",
+                "LOCAL_WORLD_SIZE": "4",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, r"world_rank 3 out of range \[0, 1\)"
+            ):
+                converter._build_parallelism_config()
 
 
 class WeightsConvertLayerOverrideTest(unittest.TestCase):

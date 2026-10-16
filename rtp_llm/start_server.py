@@ -214,7 +214,7 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     # Keep DashSc serving ranks aligned with frontend serving ranks.
     layout = RankLayout.from_parallelism_config(pc)
     for rank in range(local_world_size):
-        if rank == 0 or layout.coord_of_unchecked(pc.world_rank + rank).tp == 0:
+        if rank == 0 or layout.coord_of(pc.world_rank + rank).tp == 0:
             yield rank
         else:
             logging.info(
@@ -504,7 +504,7 @@ def start_frontend_server_impl(
     layout = RankLayout.from_parallelism_config(pc)
     for rank in range(local_world_size):
         for i in range(frontend_server_count):
-            if rank == 0 or layout.coord_of_unchecked(pc.world_rank + rank).tp == 0:
+            if rank == 0 or layout.coord_of(pc.world_rank + rank).tp == 0:
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
                 )
