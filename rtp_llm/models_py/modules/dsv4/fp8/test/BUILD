@@ -83,8 +83,6 @@ _CONTRACT_TESTS = [
 [
     dsv4_py_test(
         name = name,
-        # This contract test constructs the PPU provider on CUDA workers too.
-        data = ["//rtp_llm/platforms:ppu_sources"] if name == "test_indexer_fp8_score" else [],
         # Do not let the local integer-arithmetic assertion hide a skipped
         # large-stride CUDA regression when the worker lacks memory.
         args = [
@@ -210,23 +208,6 @@ py_test(
 )
 
 py_test(
-    name = "test_indexer_topk_routing_ppu_cpu",
-    srcs = ["test_indexer_topk_v3_routing.py"],
-    data = ["//rtp_llm/models_py:dsv4_indexer_source"],
-    deps = ["@pip_ppu_torch//torch"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "DSV4_INDEXER_TOPK_SOURCE_ONLY": "1",
-    },
-    main = "test_indexer_topk_v3_routing.py",
-    tags = ["ppu"],
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-)
-
-py_test(
     name = "test_model1_layout_contract",
     srcs = ["test_model1_layout_contract.py"],
     data = ["testdata/dsv4_model1_golden_v1.json"],
@@ -240,18 +221,6 @@ cuda13_sm100_py_test(
     deps = _DSV4_FP8_TEST_DEPS,
 )
 
-
-[
-    py_test(
-        name = name + "_ppu",
-        srcs = [name + ".py"],
-        main = name + ".py",
-        deps = _DSV4_FP8_TEST_DEPS,
-        tags = ["ppu"],
-        target_compatible_with = select({"@//:using_ppu": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    )
-    for name in ["test_compressor_cp_merged_gather", "test_compressor_prepare_metadata_varlen"]
-]
 
 dsv4_sm100_py_test(
     name = "test_mega_csa_rtp_eager",

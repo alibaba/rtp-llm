@@ -722,15 +722,26 @@ class CudaImpl(GpuImpl):
 
 
 class PpuImpl(CudaImpl):
-    def prepare_model_runtime(self, model_config, engine_config) -> None:
-        from rtp_llm.platforms.ppu.runtime import prepare_model_runtime
+    def _ppu_runtime(self):
+        """Resolve the PPU runtime module (in-tree or deferred extension).
 
-        prepare_model_runtime(model_config, engine_config)
+        PPU adapters ship in the platform's own distribution; the open-source
+        tree only carries this device hook.
+        """
+        from rtp_llm.utils.import_util import load_optional_internal_source_module
+
+        runtime = load_optional_internal_source_module("platforms.ppu.runtime")
+        if runtime is None:
+            raise RuntimeError(
+                "PPU runtime module is not available in this distribution"
+            )
+        return runtime
+
+    def prepare_model_runtime(self, model_config, engine_config) -> None:
+        self._ppu_runtime().prepare_model_runtime(model_config, engine_config)
 
     def configure_model_weight_loader(self, model_config, loader) -> None:
-        from rtp_llm.platforms.ppu.runtime import configure_model_weight_loader
-
-        configure_model_weight_loader(model_config, loader)
+        self._ppu_runtime().configure_model_weight_loader(model_config, loader)
 
     @property
     def support_dio_load(self) -> bool:

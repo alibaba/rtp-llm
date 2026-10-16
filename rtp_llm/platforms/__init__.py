@@ -6,7 +6,7 @@ model descriptors to ModuleRegistry; execution uses the selected real modules.
 
 from importlib import import_module
 
-_BUILTIN_PLATFORMS = ("rtp_llm.platforms.ppu",)
+_BUILTIN_PLATFORMS = ()
 
 
 def register_backend_hooks():

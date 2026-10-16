@@ -60,7 +60,7 @@ INDEXER_ENTRY_BYTES = 132
 _FP8_MAX = 448.0
 
 
-@pytest.mark.parametrize("provider_name", ["implicit_cuda", "cuda", "ppu"])
+@pytest.mark.parametrize("provider_name", ["implicit_cuda", "cuda"])
 @pytest.mark.parametrize("next_n", [1, 3, 4])
 def test_indexer_consumer_provider_chunking(provider_name, next_n):
     """Real construction and decode dispatch, with mocked numerical operators."""
@@ -68,13 +68,11 @@ def test_indexer_consumer_provider_chunking(provider_name, next_n):
     from rtp_llm.models_py.modules.dsv4.platform_provider import (
         DefaultDsv4PlatformProvider,
     )
-    from rtp_llm.platforms.ppu.models.dsv4.ppu_provider import M890PDsv4Provider
     from rtp_llm.utils.model_weight import W
 
     provider = {
         "implicit_cuda": None,
         "cuda": DefaultDsv4PlatformProvider(),
-        "ppu": M890PDsv4Provider({"DSV4_INDEXER_TOPK_BACKEND": "torch"}),
     }[provider_name]
     batch, heads, dim = 2, 2, 4
     layer_weights = {
@@ -146,8 +144,6 @@ def test_indexer_consumer_provider_chunking(provider_name, next_n):
         )
     assert result is output
     expected_chunks = [lengths]
-    if provider_name == "ppu" and next_n > 2:
-        expected_chunks = [lengths[:, offset:offset + 2] for offset in range(0, next_n, 2)]
     assert len(calls) == len(expected_chunks)
     for actual, expected in zip(calls, expected_chunks):
         torch.testing.assert_close(actual, expected)

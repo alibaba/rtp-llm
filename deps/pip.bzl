@@ -1,5 +1,4 @@
 load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
-load(":ppu_requirements.bzl", "ppu_requirements")
 
 PIP_EXTRA_ARGS = [
     "--cache-dir=~/.cache/pip",
@@ -24,7 +23,6 @@ FLASHINFER_069_ANNOTATIONS = {
 }
 
 def pip_deps():
-    ppu_requirements(name = "ppu_requirements")
     pip_parse(
         name = "pip_cpu_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_cpu.txt",
@@ -36,14 +34,6 @@ def pip_deps():
     pip_parse(
         name = "pip_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_arm.txt",
-        python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
-        timeout = 3600,
-    )
-
-    pip_parse(
-        name = "pip_ppu_torch",
-        requirements_lock = "@rtp_deps//:requirements_lock_torch_ppu.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,

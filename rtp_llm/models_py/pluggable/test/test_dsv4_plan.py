@@ -1,4 +1,5 @@
-import dataclasses
+"""Framework-level DSV4 plan tests over the public baseline implementations."""
+
 import json
 import subprocess
 import sys
@@ -10,18 +11,14 @@ from rtp_llm.device.device_type import DeviceType
 from rtp_llm.device.runtime import DeviceRuntimeContext
 from rtp_llm.models.dsv4.adapter import execution_options_snapshot
 from rtp_llm.models.dsv4.adapter import get_registry as get_module_registry
-from rtp_llm.models.dsv4.specs import CONTRACTS, request_for
+from rtp_llm.models.dsv4.specs import CONTRACTS, STATE_FORMAT, request_for
 from rtp_llm.models_py.pluggable.factory import (
     ModuleBuildContext,
     ModuleSelectionContext,
 )
-from rtp_llm.platforms.ppu.models.dsv4.manifest import (
-    DECODE_EXECUTION_OPTIONS,
-    PREFILL_EXECUTION_OPTIONS,
-)
 
 
-def selection(rank=0, *, device_name="ZW-M890P", **changed):
+def selection(rank=0, *, device_name="L20", **changed):
     metadata = dict(
         model_type="deepseek_v4",
         num_layers=43,
@@ -38,13 +35,12 @@ def selection(rank=0, *, device_name="ZW-M890P", **changed):
         reuse_cache=False,
         lora=False,
         eplb=False,
-        indexer_cache_mode="fp4",
-        execution_options=dict(PREFILL_EXECUTION_OPTIONS),
+        indexer_cache_mode="fp8",
         fp8_kv_cache=True,
     )
     metadata.update(changed)
     return ModuleSelectionContext(
-        DeviceRuntimeContext(DeviceType.Ppu, device_name, rank), json.dumps(metadata)
+        DeviceRuntimeContext(DeviceType.Cuda, device_name, rank), json.dumps(metadata)
     )
 
 
@@ -52,9 +48,9 @@ def explicit_config():
     return ModuleDispatchConfig.from_dict(
         {
             "mode": "auto",
-            "platform": "ppu",
+            "platform": "cuda",
             "impl_overrides": {
-                "rtp.dsv4." + kind: f"ppu.dsv4.{kind}.fp4_indexer.v1"
+                "rtp.dsv4." + kind: f"baseline.dsv4.{kind}.v1"
                 for kind in CONTRACTS
             },
         }
@@ -62,565 +58,6 @@ def explicit_config():
 
 
 class Dsv4PlanTest(unittest.TestCase):
-    def decode_context(self, rank=0, **changed):
-        values = dict(
-            tp_size=1,
-            dp_size=8,
-            ep_size=8,
-            world_size=8,
-            role="DECODE",
-            cache_geometry={"kernel_tokens_per_block": 256},
-            cuda_graph=True,
-            indexer_cache_mode="fp4",
-            execution_options=dict(DECODE_EXECUTION_OPTIONS),
-            moe_communication={
-                "enabled": True,
-                "low_latency": True,
-                "all_gather": False,
-                "ffn_disaggregate": False,
-                "max_generate_batch_size": 128,
-            },
-        )
-        values.update(changed)
-        config = ModuleDispatchConfig(
-            mode="auto",
-            platform="ppu",
-            impl_overrides=tuple(
-                ("rtp.dsv4." + kind, f"ppu.dsv4.{kind}.fp4_decode.v1")
-                for kind in CONTRACTS
-            ),
-        )
-        return ModuleBuildContext(
-            get_module_registry(), selection(rank, **values), config,
-            world_size=values["world_size"],
-        )
-
-    def test_decode_four_and_eight_rank_mtp_plans(self):
-        from rtp_llm.models.dsv4.adapter import validate_parallelism
-
-        topology_digests = {}
-        for world in (4, 8):
-            validate_parallelism(SimpleNamespace(
-                tp_size=1, dp_size=world, ep_size=world, pp_size=1,
-                world_size=world, role_type=SimpleNamespace(name="DECODE"),
-            ))
-            for model_type, layers in (("deepseek_v4", 43), ("deepseek_v4_mtp", 1)):
-                digests = set()
-                for rank in range(world):
-                    ctx = self.decode_context(
-                        rank, dp_size=world, ep_size=world, world_size=world,
-                        model_type=model_type, num_layers=layers,
-                        layer_compress_ratios=[0] if layers == 1 else [4] * 43,
-                        speculative=True, speculative_type="MTP", gen_num_per_cycle=3,
-                    )
-                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-                    self.assertEqual(len(ctx.bindings), 1 + 3 * layers)
-                self.assertEqual(len(digests), 1)
-                topology_digests[world, model_type] = digests.pop()
-        for model_type in ("deepseek_v4", "deepseek_v4_mtp"):
-            self.assertNotEqual(
-                topology_digests[4, model_type], topology_digests[8, model_type]
-            )
-
-    def test_prefix_reuse_requires_explicit_experimental_opt_in(self):
-        for decode in (False, True):
-            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
-            for value in (None, "0", "true", "1"):
-                options = dict(base)
-                if value is not None:
-                    options["DSV4_PPU_PREFIX_REUSE"] = value
-                changed = dict(reuse_cache=True, execution_options=options)
-                ctx = (
-                    self.decode_context(**changed)
-                    if decode
-                    else self.context(selection(**changed))
-                )
-                with self.subTest(decode=decode, value=value):
-                    if value == "1":
-                        ctx.prepare([request_for("model", ctx.selection)])
-                        self.assertEqual(len(ctx.bindings), 130)
-                    else:
-                        with self.assertRaisesRegex(ValueError, "DSV4_PPU_PREFIX_REUSE"):
-                            ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_prefix_reuse_target_draft_rank_contracts(self):
-        for decode, world in ((False, 4), (True, 4), (True, 8)):
-            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
-            for gamma in (0, 1, 2, 3):
-                models = [("deepseek_v4", 43)]
-                if gamma:
-                    models.append(("deepseek_v4_mtp", 1))
-                for model_type, layers in models:
-                    digests = set()
-                    for rank in range(world):
-                        changed = dict(
-                            role="DECODE" if decode else "PREFILL",
-                            model_type=model_type,
-                            num_layers=layers,
-                            layer_compress_ratios=[0] if layers == 1 else [4] * 43,
-                            speculative=bool(gamma),
-                            speculative_type="MTP" if gamma else "NONE",
-                            gen_num_per_cycle=gamma,
-                            reuse_cache=True,
-                            execution_options={**base, "DSV4_PPU_PREFIX_REUSE": "1"},
-                        )
-                        ctx = (
-                            self.decode_context(
-                                rank, dp_size=world, ep_size=world,
-                                world_size=world, **changed,
-                            )
-                            if decode else self.context(selection(rank, **changed))
-                        )
-                        digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-                        self.assertEqual(len(ctx.bindings), 1 + 3 * layers)
-                    self.assertEqual(len(digests), 1)
-
-    def test_prefix_reuse_opt_in_preserves_other_rejections(self):
-        for decode in (False, True):
-            base = DECODE_EXECUTION_OPTIONS if decode else PREFILL_EXECUTION_OPTIONS
-            for unsupported in (
-                {"indexer_cache_mode": "fp8"}, {"fp8_kv_cache": False},
-                {"hidden_size": 8192}, {"speculative": True},
-            ):
-                changed = dict(
-                    reuse_cache=True,
-                    execution_options={**base, "DSV4_PPU_PREFIX_REUSE": "1"},
-                    **unsupported,
-                )
-                ctx = (
-                    self.decode_context(**changed)
-                    if decode else self.context(selection(**changed))
-                )
-                with self.subTest(decode=decode, unsupported=unsupported):
-                    with self.assertRaisesRegex(ValueError, "No compatible"):
-                        ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_decode_plan_covers_ep_world_before_runtime_imports(self):
-        from rtp_llm.models.dsv4.adapter import validate_parallelism
-
-        pc = SimpleNamespace(
-            tp_size=1,
-            dp_size=8,
-            ep_size=8,
-            pp_size=1,
-            world_size=8,
-            role_type=SimpleNamespace(name="DECODE"),
-        )
-        validate_parallelism(pc)
-        digests = set()
-        for rank in range(8):
-            ctx = self.decode_context(rank)
-            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-            self.assertEqual(len(ctx.bindings), 130)
-            self.assertTrue(
-                all(
-                    b.request.required_capabilities == frozenset({"decode"})
-                    for b in ctx.bindings
-                )
-            )
-            self.assertTrue(
-                all(not b.implementation.auto_selectable for b in ctx.bindings)
-            )
-        self.assertEqual(len(digests), 1)
-        pc.ep_size = 4
-        with self.assertRaises(ValueError):
-            validate_parallelism(pc)
-
-    def test_parallel_groups_are_not_restricted_to_fixed_sizes(self):
-        from rtp_llm.models.dsv4.adapter import validate_parallelism
-
-        for decode, tp, dp, ep in (
-            (False, 2, 1, 1),
-            (False, 8, 1, 1),
-            (False, 4, 1, 4),
-            (False, 8, 1, 8),
-            (True, 1, 2, 2),
-            (True, 2, 2, 4),
-            (True, 8, 1, 8),
-            (True, 1, 16, 16),
-        ):
-            world = tp * dp
-            topology = dict(
-                tp_size=tp, dp_size=dp, ep_size=ep, pp_size=1, world_size=world
-            )
-            with self.subTest(decode=decode, **topology):
-                validate_parallelism(SimpleNamespace(**topology))
-                digests = set()
-                for rank in range(world):
-                    if decode:
-                        ctx = self.decode_context(rank, **topology)
-                    elif ep > 1:
-                        ctx = self.prefill_deepep_context(rank, **topology)
-                    else:
-                        ctx = ModuleBuildContext(
-                            get_module_registry(),
-                            selection(rank, role="PREFILL", **topology),
-                            explicit_config(),
-                            world_size=world,
-                        )
-                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-                    self.assertEqual(len(ctx.bindings), 130)
-                self.assertEqual(len(digests), 1)
-
-    def prefill_deepep_context(self, rank=0, **changed):
-        comm = dict(
-            enabled=True,
-            low_latency=False,
-            all_gather=False,
-            ffn_disaggregate=False,
-            internode=False,
-        )
-        values = dict(
-            role="PREFILL",
-            tp_size=8,
-            dp_size=1,
-            ep_size=8,
-            world_size=8,
-            moe_communication=comm,
-        )
-        values.update(changed)
-        config = ModuleDispatchConfig(
-            mode="auto",
-            platform="ppu",
-            impl_overrides=tuple(
-                (
-                    "rtp.dsv4." + kind,
-                    "ppu.dsv4.moe.fp4_prefill_deepep.v1"
-                    if kind == "moe"
-                    else f"ppu.dsv4.{kind}.fp4_indexer.v1",
-                )
-                for kind in CONTRACTS
-            ),
-        )
-        return ModuleBuildContext(
-            get_module_registry(),
-            selection(rank, **values),
-            config,
-            world_size=values["world_size"],
-        )
-
-    def test_prefill_ep_world_plan_binds_the_deepep_normal_moe(self):
-        for tp, ep in ((8, 8), (4, 4), (2, 2)):
-            with self.subTest(tp=tp, ep=ep):
-                digests = set()
-                for rank in range(ep):
-                    ctx = self.prefill_deepep_context(
-                        rank, tp_size=ep, dp_size=1, ep_size=ep, world_size=ep
-                    )
-                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-                    self.assertEqual(len(ctx.bindings), 130)
-                    self.assertEqual(
-                        {
-                            b.implementation.impl_id
-                            for b in ctx.bindings
-                            if b.request.module_id == "rtp.dsv4.moe"
-                        },
-                        {"ppu.dsv4.moe.fp4_prefill_deepep.v1"},
-                    )
-                self.assertEqual(len(digests), 1)
-
-    def test_prefill_ep_rejects_the_all_experts_tp_moe_and_ep1_deepep(self):
-        comm = dict(
-            enabled=True,
-            low_latency=False,
-            all_gather=False,
-            ffn_disaggregate=False,
-            internode=False,
-        )
-        tp_moe = self.context(
-            selection(
-                role="PREFILL",
-                tp_size=8,
-                dp_size=1,
-                ep_size=8,
-                world_size=8,
-                moe_communication=comm,
-            ),
-            explicit_config(),
-        )
-        with self.assertRaisesRegex(ValueError, "requires EP1"):
-            tp_moe.prepare([request_for("model", tp_moe.selection)])
-
-        deepep_ep1 = self.prefill_deepep_context(
-            0, tp_size=4, dp_size=1, ep_size=1, world_size=4
-        )
-        with self.assertRaisesRegex(ValueError, "requires EP>1"):
-            deepep_ep1.prepare([request_for("model", deepep_ep1.selection)])
-
-        low_latency = self.prefill_deepep_context(
-            0, moe_communication=dict(comm, low_latency=True)
-        )
-        with self.assertRaisesRegex(ValueError, "DeepEP normal dispatch"):
-            low_latency.prepare([request_for("model", low_latency.selection)])
-
-    def test_decode_tp8_dp1_plan_binds_the_low_latency_moe(self):
-        digests = set()
-        for rank in range(8):
-            ctx = self.decode_context(
-                rank, tp_size=8, dp_size=1, ep_size=8, world_size=8
-            )
-            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-            self.assertEqual(len(ctx.bindings), 130)
-            self.assertEqual(
-                {
-                    b.implementation.impl_id
-                    for b in ctx.bindings
-                    if b.request.module_id == "rtp.dsv4.moe"
-                },
-                {"ppu.dsv4.moe.fp4_decode.v1"},
-            )
-        self.assertEqual(len(digests), 1)
-
-    def test_collective_protocol_names_track_supported_topology(self):
-        registry = get_module_registry()
-        decode = registry.implementation(
-            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_decode.v1"
-        )
-        self.assertEqual(
-            decode.collective_protocol_id, "ppu.dsv4.decode.dpep-mxfp4-ll.v2"
-        )
-        prefill_ep = registry.implementation(
-            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_prefill_deepep.v1"
-        )
-        self.assertEqual(
-            prefill_ep.collective_protocol_id, "ppu.dsv4.moe.dpep-normal-mxfp4.v1"
-        )
-        prefill_tp = registry.implementation(
-            "rtp.dsv4.moe", "ppu.dsv4.moe.fp4_indexer.v1"
-        )
-        self.assertEqual(
-            prefill_tp.collective_protocol_id,
-            "ppu.dsv4.moe.tp4-shared-sharded-bf16-reduce.v2",
-        )
-
-    def test_parallel_groups_still_require_consistent_engine_geometry(self):
-        from rtp_llm.models.dsv4.adapter import validate_parallelism
-
-        for changed in (
-            {"tp_size": 0},
-            {"dp_size": 0},
-            {"ep_size": 0},
-            {"pp_size": 2},
-            {"world_size": 8},
-            {"ep_size": 3},
-            {"ep_size": 1},
-        ):
-            values = dict(tp_size=2, dp_size=2, ep_size=4, pp_size=1, world_size=4)
-            values.update(changed)
-            with self.subTest(changed=changed), self.assertRaises(ValueError):
-                validate_parallelism(SimpleNamespace(**values))
-
-    def test_only_measured_execution_combinations_are_published(self):
-        for make_context, expected in (
-            (self.decode_context, DECODE_EXECUTION_OPTIONS),
-            (lambda **kw: self.context(selection(**kw)), PREFILL_EXECUTION_OPTIONS),
-        ):
-            for key in expected:
-                for value in (None, "unsupported"):
-                    options = dict(expected)
-                    if value is None:
-                        options.pop(key)
-                    else:
-                        options[key] = value
-                    with self.subTest(option=key, value=value):
-                        ctx = make_context(execution_options=options)
-                        with self.assertRaisesRegex(ValueError, "No compatible"):
-                            ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_selected_plan_controls_actual_forward_phase(self):
-        from rtp_llm.models.dsv4.specs import (
-            forward_capabilities,
-            validate_forward_phase,
-        )
-
-        for ctx, allowed in (
-            (self.context(), {"prefill"}),
-            (self.decode_context(), {"decode", "target_verify"}),
-        ):
-            ctx.prepare([request_for("model", ctx.selection)])
-            capabilities = forward_capabilities(ctx.bindings)
-            self.assertEqual(capabilities, frozenset(allowed))
-            for is_prefill, graph, verify, phase in (
-                (True, False, False, "prefill"),
-                (False, False, False, "decode"),
-                (False, True, False, "decode"),
-                (True, True, True, "target_verify"),
-            ):
-                args = dict(
-                    is_prefill=is_prefill,
-                    has_decode_fmha=graph,
-                    is_target_verify=verify,
-                )
-                if phase in allowed:
-                    validate_forward_phase(capabilities, **args)
-                else:
-                    with self.assertRaisesRegex(
-                        RuntimeError, f"does not support {phase}"
-                    ):
-                        validate_forward_phase(capabilities, **args)
-
-    def test_decode_rejects_mismatched_runtime_and_communication(self):
-        from rtp_llm.models.dsv4.specs import validate_runtime_role
-
-        ctx = self.decode_context()
-        validate_runtime_role(
-            ctx.selection.model_metadata, is_decode_role=True, is_speculative=False
-        )
-        with self.assertRaisesRegex(ValueError, "Runtime Decode role"):
-            validate_runtime_role(
-                ctx.selection.model_metadata, is_decode_role=False, is_speculative=False
-            )
-        with self.assertRaisesRegex(ValueError, "Runtime speculation"):
-            validate_runtime_role(
-                ctx.selection.model_metadata, is_decode_role=True, is_speculative=True
-            )
-        for changed in (
-            {"role": "PDFUSION"},
-            {"cache_geometry": {}},
-            {"cache_geometry": {"kernel_tokens_per_block": 1024}},
-            {"speculative": True},
-            {"moe_communication": {}},
-            {"indexer_cache_mode": "fp8"},
-            {
-                "execution_options": {
-                    "DSV4_PPU_SGLANG_MOE": "1",
-                    "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm",
-                }
-            },
-        ):
-            with self.subTest(changed=changed):
-                ctx = self.decode_context(**changed)
-                with self.assertRaisesRegex(ValueError, "No compatible"):
-                    ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_mtp3_target_and_draft_use_separate_complete_plans(self):
-        self._check_mtp_target_and_draft_plans(3)
-
-    def test_mtp2_target_and_draft_use_separate_complete_plans(self):
-        self._check_mtp_target_and_draft_plans(2)
-
-    def test_mtp1_target_and_draft_use_separate_complete_plans(self):
-        self._check_mtp_target_and_draft_plans(1)
-
-    def _check_mtp_target_and_draft_plans(self, gamma):
-        from rtp_llm.models.dsv4.specs import validate_runtime_role
-
-        for decode in (False, True):
-            model_digests = []
-            for model_type, layers in (("deepseek_v4", 43), ("deepseek_v4_mtp", 1)):
-                digests = set()
-                for rank in range(8 if decode else 4):
-                    changed = dict(
-                        role="DECODE" if decode else "PREFILL",
-                        model_type=model_type,
-                        num_layers=layers,
-                        layer_compress_ratios=[0] if layers == 1 else [4] * 43,
-                        speculative=True,
-                        speculative_type="MTP",
-                        gen_num_per_cycle=gamma,
-                    )
-                    ctx = (
-                        self.decode_context(rank, **changed)
-                        if decode
-                        else self.context(selection(rank, **changed))
-                    )
-                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-                    self.assertEqual(len(ctx.bindings), 1 + 3 * layers)
-                    verify = decode and model_type == "deepseek_v4"
-                    self.assertEqual(
-                        "target_verify"
-                        in ctx.bindings[0].request.required_capabilities,
-                        verify,
-                    )
-                    validate_runtime_role(
-                        ctx.selection.model_metadata,
-                        is_decode_role=decode,
-                        is_speculative=True,
-                    )
-                    with self.assertRaisesRegex(ValueError, "Runtime speculation"):
-                        validate_runtime_role(
-                            ctx.selection.model_metadata,
-                            is_decode_role=decode,
-                            is_speculative=False,
-                        )
-                self.assertEqual(len(digests), 1)
-                model_digests.extend(digests)
-            self.assertNotEqual(*model_digests)
-
-    def test_mtp_contract_rejects_other_proposals_and_draft_geometry(self):
-        valid = dict(
-            model_type="deepseek_v4_mtp",
-            num_layers=1,
-            layer_compress_ratios=[0],
-            speculative=True,
-            speculative_type="MTP",
-            gen_num_per_cycle=3,
-        )
-        for changed in (
-            {"gen_num_per_cycle": 0},
-            {"gen_num_per_cycle": 4},
-            {"speculative_type": "EAGLE3"},
-            {"speculative": False},
-            {"model_type": "deepseek_v4_dspark"},
-            {"num_layers": 43},
-            {"layer_compress_ratios": [4]},
-            {"hidden_size": 2048},
-        ):
-            with self.subTest(changed=changed):
-                ctx = self.decode_context(**{**valid, **changed})
-                with self.assertRaisesRegex(ValueError, "No compatible"):
-                    ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_fp4_requires_consistent_explicit_state_contracts(self):
-        from rtp_llm.models.dsv4.specs import STATE_FORMAT_FP4
-
-        config = json.loads(explicit_config().to_string())
-        config["impl_overrides"] = {
-            "rtp.dsv4." + kind: f"ppu.dsv4.{kind}.fp4_indexer.v1" for kind in CONTRACTS
-        }
-        digests = set()
-        for rank in range(4):
-            ctx = self.context(
-                selection(
-                    rank,
-                    indexer_cache_mode="fp4",
-                    execution_options=dict(PREFILL_EXECUTION_OPTIONS),
-                ),
-                ModuleDispatchConfig.from_dict(config),
-            )
-            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
-            self.assertEqual(len(ctx.bindings), 130)
-            self.assertEqual(
-                {b.implementation.state_format_id for b in ctx.bindings},
-                {STATE_FORMAT_FP4},
-            )
-        self.assertEqual(len(digests), 1)
-        config["impl_overrides"]["rtp.dsv4.attention"] = "ppu.dsv4.attention.retired.v1"
-        ctx = self.context(
-            selection(
-                indexer_cache_mode="fp4",
-                execution_options=dict(PREFILL_EXECUTION_OPTIONS),
-            ),
-            ModuleDispatchConfig.from_dict(config),
-        )
-        with self.assertRaisesRegex(ValueError, "Unknown implementation"):
-            ctx.prepare([request_for("model", ctx.selection)])
-
-    def test_root_descriptor_declares_allocator_without_device_probe(self):
-        from rtp_llm.models.dsv4.specs import declared_indexer_cache_mode
-
-        self.assertEqual(declared_indexer_cache_mode(explicit_config()).value, "fp4")
-        config = ModuleDispatchConfig(
-            mode="auto", path_overrides=(("v4", "ppu.dsv4.model.fp4_indexer.v1"),)
-        )
-        self.assertEqual(declared_indexer_cache_mode(config).value, "fp4")
-        with self.assertRaisesRegex(ValueError, "Unknown implementation"):
-            declared_indexer_cache_mode(
-                ModuleDispatchConfig(
-                    mode="auto", impl_overrides=(("rtp.dsv4.model", "missing"),)
-                )
-            )
-
     def context(self, selected=None, config=None):
         return ModuleBuildContext(
             get_module_registry(),
@@ -683,14 +120,124 @@ class Dsv4PlanTest(unittest.TestCase):
                 )
         self.assertEqual(len(digests), 1)
 
+    def test_parallel_groups_are_not_restricted_to_fixed_sizes(self):
+        from rtp_llm.models.dsv4.adapter import validate_parallelism
+
+        for tp, dp, ep in ((2, 1, 1), (8, 1, 1), (4, 1, 4), (8, 1, 8)):
+            world = tp * dp
+            topology = dict(
+                tp_size=tp, dp_size=dp, ep_size=ep, pp_size=1, world_size=world
+            )
+            with self.subTest(**topology):
+                validate_parallelism(SimpleNamespace(**topology))
+                digests = set()
+                for rank in range(world):
+                    ctx = ModuleBuildContext(
+                        get_module_registry(),
+                        selection(rank, role="PREFILL", **topology),
+                        explicit_config(),
+                        world_size=world,
+                    )
+                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                    self.assertEqual(len(ctx.bindings), 130)
+                self.assertEqual(len(digests), 1)
+
+    def test_parallel_groups_still_require_consistent_engine_geometry(self):
+        from rtp_llm.models.dsv4.adapter import validate_parallelism
+
+        for changed in (
+            {"tp_size": 0},
+            {"dp_size": 0},
+            {"ep_size": 0},
+            {"pp_size": 2},
+            {"world_size": 8},
+            {"ep_size": 3},
+            {"ep_size": 1},
+        ):
+            values = dict(tp_size=2, dp_size=2, ep_size=4, pp_size=1, world_size=4)
+            values.update(changed)
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                validate_parallelism(SimpleNamespace(**values))
+
+    def test_declared_protocols_match_the_registered_contracts(self):
+        registry = get_module_registry()
+        for kind in CONTRACTS:
+            impl = registry.implementation(
+                "rtp.dsv4." + kind, f"baseline.dsv4.{kind}.v1"
+            )
+            self.assertEqual(impl.module_id, "rtp.dsv4." + kind)
+            self.assertEqual(impl.collective_protocol_id, "rtp.dsv4.tp-reduced.v1")
+            self.assertFalse(impl.auto_selectable)
+
+    def test_explicit_state_contracts_are_consistent(self):
+        config = json.loads(explicit_config().to_string())
+        config["impl_overrides"] = {
+            "rtp.dsv4." + kind: f"baseline.dsv4.{kind}.v1" for kind in CONTRACTS
+        }
+        digests = set()
+        for rank in range(4):
+            ctx = self.context(selection(rank), ModuleDispatchConfig.from_dict(config))
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+            self.assertEqual(
+                {b.implementation.state_format_id for b in ctx.bindings},
+                {STATE_FORMAT},
+            )
+        self.assertEqual(len(digests), 1)
+        config["impl_overrides"]["rtp.dsv4.attention"] = (
+            "baseline.dsv4.attention.retired.v1"
+        )
+        ctx = self.context(selection(), ModuleDispatchConfig.from_dict(config))
+        with self.assertRaisesRegex(ValueError, "Unknown implementation"):
+            ctx.prepare([request_for("model", ctx.selection)])
+
+    def test_root_descriptor_declares_allocator_without_device_probe(self):
+        from rtp_llm.models.dsv4.specs import declared_indexer_cache_mode
+
+        self.assertEqual(declared_indexer_cache_mode(explicit_config()).value, "fp8")
+        config = ModuleDispatchConfig(
+            mode="auto", path_overrides=(("v4", "baseline.dsv4.model.v1"),)
+        )
+        self.assertEqual(declared_indexer_cache_mode(config).value, "fp8")
+        with self.assertRaisesRegex(ValueError, "Unknown implementation"):
+            declared_indexer_cache_mode(
+                ModuleDispatchConfig(
+                    mode="auto", impl_overrides=(("rtp.dsv4.model", "missing"),)
+                )
+            )
+
+    def test_selected_plan_controls_actual_forward_phase(self):
+        from rtp_llm.models.dsv4.specs import (
+            forward_capabilities,
+            validate_forward_phase,
+        )
+
+        ctx = self.context()
+        ctx.prepare([request_for("model", ctx.selection)])
+        capabilities = forward_capabilities(ctx.bindings)
+        self.assertEqual(capabilities, frozenset({"prefill"}))
+        validate_forward_phase(
+            capabilities, is_prefill=True, has_decode_fmha=False, is_target_verify=False
+        )
+        for graph, verify, phase in (
+            (False, False, "decode"),
+            (True, False, "decode"),
+            (True, True, "target_verify"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, f"does not support {phase}"):
+                validate_forward_phase(
+                    capabilities,
+                    is_prefill=False,
+                    has_decode_fmha=graph,
+                    is_target_verify=verify,
+                )
+
     def test_unqualified_modes_rejected_by_real_predicate(self):
-        for change in [
-            {"cp_enabled": True},
+        for change in (
+            {"model_type": "deepseek_v4_mtp"},
+            {"indexer_cache_mode": "fp4"},
             {"role": "DECODE"},
-            {"speculative": True},
-            {"indexer_cache_mode": "fp8"},
-            {"fp8_kv_cache": False},
-        ]:
+        ):
             with self.subTest(change=change):
                 ctx = self.context(selection(**change))
                 with self.assertRaisesRegex(ValueError, "No compatible"):
@@ -702,36 +249,22 @@ class Dsv4PlanTest(unittest.TestCase):
             {"lora": True},
             {"eplb": True},
         ):
-            with self.subTest(role="PREFILL", flagged=flagged):
+            with self.subTest(flagged=flagged):
                 ctx = self.context(selection(**flagged))
-                ctx.prepare([request_for("model", ctx.selection)])
-                self.assertEqual(len(ctx.bindings), 130)
-        for flagged in (
-            {"cuda_graph": False},
-            {"lora": True},
-            {"eplb": True},
-        ):
-            with self.subTest(role="DECODE", flagged=flagged):
-                ctx = self.decode_context(**flagged)
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
 
     def test_device_name_no_longer_disqualifies(self):
-        for device_name in ("ZW-M890P", "PPU-ZW810E"):
-            with self.subTest(role="PREFILL", device_name=device_name):
+        for device_name in ("L20", "H20"):
+            with self.subTest(device_name=device_name):
                 ctx = self.context(selection(device_name=device_name))
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
-            with self.subTest(role="DECODE", device_name=device_name):
-                ctx = self.decode_context(device_name=device_name)
-                ctx.prepare([request_for("model", ctx.selection)])
-                self.assertEqual(len(ctx.bindings), 130)
 
-    def test_execution_digest_ignores_run_paths_but_detects_numeric_options(self):
+    def test_execution_digest_ignores_run_paths_but_detects_option_values(self):
         digests = []
         for rank in range(4):
             env = {
-                **PREFILL_EXECUTION_OPTIONS,
                 "DSV4_TASK_RUN": f"/tmp/run/rank{rank}",
                 "MOEDBG_DIR": f"/tmp/dumps/rank{rank}",
                 "WORLD_RANK": str(rank),
@@ -749,7 +282,7 @@ class Dsv4PlanTest(unittest.TestCase):
             digests[0], ctx.prepare([request_for("model", ctx.selection)])
         )
         env["DSV4_INDEXER_TOPK_BACKEND"] = "sglang"
-        env["DSV4_PPU_PREFIX_TAIL_ALIGN"] = "1"
+        env["DSV4_EXTRA_OPTION"] = "1"
         ctx = self.context(selection(execution_options=execution_options_snapshot(env)))
         self.assertNotEqual(
             digests[0], ctx.prepare([request_for("model", ctx.selection)])

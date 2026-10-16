@@ -42,7 +42,6 @@ py_test(
     data = [
         "//rtp_llm/libs:librtp_compute_ops_so",
         "//rtp_llm/libs:libth_transformer_config_so",
-        "//rtp_llm/platforms:ppu_sources",
     ],
     srcs = ["test_dsv4_resources.py"],
     deps = ["//rtp_llm/models_py:pluggable", "//rtp_llm:models", "//rtp_llm:torch"],

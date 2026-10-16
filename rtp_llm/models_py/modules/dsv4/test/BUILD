@@ -175,32 +175,6 @@ py_test(
 )
 
 py_test(
-    name = "test_ppu_deep_gemm_layout_compat",
-    srcs = ["test_ppu_deep_gemm_layout_compat.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-)
-
-py_test(
-    name = "test_deepep_graph_dispatch",
-    srcs = ["test_deepep_graph_dispatch.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-)
-
-py_test(
     name = "test_t24_dp_contract",
     srcs = ["test_t24_dp_contract.py"],
     deps = [
@@ -214,17 +188,6 @@ py_test(
     name = "test_t23_cp_contract_round",
     srcs = ["test_t23_cp_contract_round.py"],
     deps = _DSV4_TEST_DEPS,
-)
-
-py_test(
-    name = "test_strategy_select",
-    srcs = ["test_strategy_select.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-
-    data = ["//rtp_llm/platforms:ppu_sources"],
 )
 
 py_test(
@@ -254,16 +217,6 @@ py_test(
     ],
 )
 
-py_test(
-    name = "test_v4_tp_reduce_contract",
-    srcs = ["test_v4_tp_reduce_contract.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    data = ["//rtp_llm/platforms:ppu_sources"],
-)
-
 dsv4_sm100_py_test(
     name = "test_hc_cuda_splitk",
     extra_srcs = ["hc_cuda_upstream_reference.py"],
@@ -272,12 +225,6 @@ dsv4_sm100_py_test(
         "//rtp_llm/models_py:tile_kernels_mhc",
         "//rtp_llm:testlib",
     ],
-)
-
-py_test(
-    name = "test_prefill_communication",
-    srcs = ["test_prefill_communication.py"],
-    data = ["//rtp_llm/platforms:platform_sources", "//rtp_llm/platforms:ppu_sources", "//rtp_llm/server:backend_manager.py"],
 )
 
 dsv4_sm100_py_test(
