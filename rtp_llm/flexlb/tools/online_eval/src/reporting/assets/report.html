@@ -22,6 +22,7 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .multi-presets{position:relative;width:220px;max-width:100%;min-width:0}.multi-presets-button{display:flex;align-items:center;gap:7px;width:100%;height:31px}.multi-preset-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;text-align:left}.multi-preset-dot[hidden]{display:none}.multi-preset-dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none}.multi-preset-list{display:flex;flex-direction:column;gap:3px;margin-top:7px}.multi-toolbar .multi-preset-choice{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border-color:transparent;white-space:normal;overflow-wrap:anywhere}.multi-preset-choice.is-active{background:__REPORT_HOVER_BACKGROUND__}.multi-preset-choice[hidden]{display:none}.multi-presets[hidden]{display:none}
 .multi-events{margin-top:10px;color:var(--sub);font-size:12px}.multi-events summary{cursor:pointer}.multi-event-list{max-height:180px;overflow:auto;margin-top:6px}.multi-event-row{padding:5px 8px;border-bottom:1px solid var(--border)}.multi-event-row div{padding-left:12px}
 .multi-toolbar button:hover{border-color:__REPORT_PRIMARY__;color:__REPORT_PRIMARY__}.multi-range{margin-left:auto;color:var(--sub);white-space:nowrap}
+.multi-event-toggle{display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer}.multi-event-toggle input{margin:0}
 .multi-range input{margin:0 5px;border:1px solid __REPORT_BORDER__;border-radius:5px;padding:4px}
 .multi-picker{position:relative}.multi-picker-button{font-weight:600;color:__REPORT_PRIMARY__}
 .multi-dropdown{position:absolute;top:calc(100% + 8px);left:0;width:min(520px,calc(100vw - 56px));max-height:min(68vh,560px);overflow:auto;padding:10px;background:__REPORT_CARD__;border:1px solid __REPORT_BORDER__;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
@@ -75,7 +76,7 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .panel h3{margin:0 0 4px;font-size:15px;overflow-wrap:anywhere}
 .panel .cap{color:var(--sub);font-size:12px;margin-bottom:8px}
 .panel .box{height:280px;position:relative}
-@media(max-width:700px){.multi-presets .multi-dropdown{left:auto;right:0}.multi-toolbar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.multi-picker,.multi-presets{grid-column:span 2;width:100%}.multi-picker-button{width:100%}.multi-range{grid-column:1/-1;grid-row:2;font-size:12px}.multi-range input{width:65px!important;margin:0 2px}.multi-toolbar>button:last-child{grid-column:span 2}body{padding:12px}.context-grid{grid-template-columns:1fr}.multi-range{margin-left:0}.multi-plot{height:380px!important}}
+@media(max-width:700px){.multi-presets .multi-dropdown{left:auto;right:0}.multi-toolbar{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}.multi-picker,.multi-presets{grid-column:span 3;width:100%}.multi-picker-button{width:100%}.multi-range{grid-column:1/-1;grid-row:2;font-size:12px}.multi-range input{width:65px!important;margin:0 2px}.multi-toolbar>button{padding:5px 4px;white-space:nowrap}.multi-toolbar>.multi-reset,.multi-event-toggle{grid-column:span 2}body{padding:12px}.context-grid{grid-template-columns:1fr}.multi-range{margin-left:0}.multi-plot{height:380px!important}}
 </style></head><body>
 <header>
   <h1 id="title"></h1><div class="sub" id="subtitle"></div>

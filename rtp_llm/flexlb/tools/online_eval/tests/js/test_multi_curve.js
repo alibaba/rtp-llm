@@ -19,7 +19,7 @@ global.document = {createElement:tag=>new Element(tag),createElementNS:(_,tag)=>
   addEventListener:(name,handler)=>{if(name==='click')documentClicks.add(handler);},
   removeEventListener:(name,handler)=>{if(name==='click')documentClicks.delete(handler);}};
 global.Chart = class {
-  constructor(canvas,spec) {this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);
+  constructor(canvas,spec) {this.plugins=spec.plugins;this.canvas=canvas;this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);
     this.width=1000;this.height=600;this.chartArea={left:100,right:900,top:20,bottom:550};
     this.scales={x:{getValueForPixel:p=>this.options.scales.x.min+(p-100)/800*(this.options.scales.x.max-this.options.scales.x.min)}};}
   setDatasetVisibility(i,v) {this.visible[i]=v;}
@@ -161,7 +161,7 @@ const dense=FlexMultiCurve.mount(denseRoot,{title:'dense',caption:'',axes:{y:{ti
   series:[{name:'one',points:[{x:0,y:1}],color:'#123456'},{name:'two',points:[{x:0,y:2}],color:'#654321'}],presets:manyPresets},
   {timeAxis:{min:0,max:10},events:[{id:'start',name:'开始 ×2',t:.15,members:[{name:'A · 开始',t:.1},{name:'B · 开始',t:.2}]}]});
 const denseToolbar=denseRoot.children[0].children.find(e=>e.className==='multi-toolbar');
-assert.equal(denseToolbar.children.length,6);
+assert.equal(denseToolbar.children.length,7);
 const densePresets=denseToolbar.children.find(e=>e.className==='multi-presets');
 assert.equal(densePresets.children[1].children[1].children.length,200);
 densePresets.children[1].children[1].children[199].onclick();
@@ -257,3 +257,30 @@ assert.deepEqual(FlexMultiCurve.eventLabels(sparseEvents,t=>t,measure,0,0),[]);
 
 const unordered=checkEventLayout([{t:100,name:'one'},{t:300,name:'two'},{t:100,name:'three'}]);
 assert.equal(unordered[0].label,'E1 +1'); // Do not imply intervening event E2 belongs to this label.
+
+// The per-panel event toggle hides both strokes and labels, retaining data and brush drawing.
+function eventPanel(events){
+ const parent=new Element('root');
+ const c=FlexMultiCurve.mount(parent,{title:'events',caption:'',axes:{y:{title:'QPS'}},series:[{name:'qps',points:[{x:0,y:1}],color:'#123456'}]}, {timeAxis:{min:0,max:10},events});
+ const toolbar=parent.children[0].children.find(e=>e.className==='multi-toolbar');
+ return {parent,c,toggle:toolbar.children.find(e=>e.className==='multi-event-toggle')?.children[0]};
+}
+const ev=[{t:2,name:'run A start'},{t:2.1,name:'run B start'}];
+const one=eventPanel(ev),two=eventPanel(ev);
+assert.equal(one.toggle.checked,true);assert.equal(two.toggle.checked,true);
+assert.equal(eventPanel([]).toggle,undefined);
+let strokes=0,texts=0,fills=0;
+const ctx={save(){},restore(){},setLineDash(){},beginPath(){},moveTo(){},lineTo(){},stroke(){strokes++;},measureText:t=>({width:t.length*5}),fillRect(){fills++;},fillText(){texts++;}};
+function paint(c){strokes=0;texts=0;fills=0;c.plugins[0].afterDraw({...c,ctx,scales:{x:{getPixelForValue:t=>100+t*80}}});return {strokes,texts,fills};}
+assert.equal(paint(one.c).strokes,2);assert.ok(texts>0);
+const originalData=JSON.stringify(one.c.data),originalScales=JSON.stringify(one.c.options.scales);
+one.c.canvas.title='stale tooltip';one.toggle.checked=false;one.toggle.onchange();
+assert.deepEqual(paint(one.c),{strokes:0,texts:0,fills:0});assert.equal(one.c.canvas.title,'');
+assert.equal(paint(two.c).strokes,2); // Another run/chart keeps its own visibility state.
+assert.equal(JSON.stringify(one.c.data),originalData);assert.equal(JSON.stringify(one.c.options.scales),originalScales);
+assert.ok(one.parent.children[0].children.some(e=>e.className==='multi-events'));
+// Drag selection remains visible while event annotations are hidden.
+one.c.canvas.events.pointerdown({button:0,clientX:200,clientY:100,pointerId:1});
+assert.deepEqual(paint(one.c),{strokes:0,texts:0,fills:1});
+one.c.canvas.events.pointercancel();
+one.toggle.checked=true;one.toggle.onchange();assert.equal(paint(one.c).strokes,2);assert.ok(texts>0);

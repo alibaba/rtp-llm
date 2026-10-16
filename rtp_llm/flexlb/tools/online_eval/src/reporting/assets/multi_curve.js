@@ -103,13 +103,14 @@
     datasets.forEach((dataset,i)=>dataset.statistics=statistics(dataset.data,panel.series[i].statistics_samples));
     const scales = {x:{type:'linear',min:context.timeAxis.min,max:context.timeAxis.max,title:{display:true,text:'时间 / 秒'}}};
     Object.assign(scales, FlexReport.axisOptions(panel.axes, key=>key==='ratio'||key==='queue'));
-    let brush=null,lastHover=null,labels=[];
+    let brush=null,lastHover=null,labels=[],showEvents=true;
     const events = {id:'multiCurveEvents',afterDraw(chart) {
       const {ctx,chartArea:a,scales:{x}} = chart; ctx.save(); ctx.font='11px sans-serif';
-      (context.events||[]).forEach(event => {const px=x.getPixelForValue(event.t); if(px<a.left || px>a.right) return;
+      const visibleEvents=showEvents?(context.events||[]):[];
+      visibleEvents.forEach(event => {const px=x.getPixelForValue(event.t); if(px<a.left || px>a.right) return;
         ctx.strokeStyle='#94a3b8';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(px,a.top);ctx.lineTo(px,a.bottom);ctx.stroke();
       });
-      labels=eventLabels(context.events||[],t=>x.getPixelForValue(t),text=>ctx.measureText(text).width,a.left,a.right);
+      labels=eventLabels(visibleEvents,t=>x.getPixelForValue(t),text=>ctx.measureText(text).width,a.left,a.right);
       ctx.setLineDash([]);
       labels.forEach(label=>{
         ctx.fillStyle='rgba(255,255,255,.94)';ctx.fillRect(label.left,a.top+2,label.width,18);
@@ -207,7 +208,7 @@
       presetDot.hidden=!active||!active.color;presetDot.style.backgroundColor=active&&active.color||'';if(!active)activePreset=null;
       focus(focused);fillHover(lastHover,focused);}
 
-    function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
+    function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);return b;}
     const presets=document.createElement('div');presets.className='multi-presets';presets.hidden=!Object.keys(panel.presets||{}).length;
     const presetButton=document.createElement('button');presetButton.type='button';presetButton.className='multi-presets-button';presetButton.setAttribute('aria-expanded','false');presetButton.setAttribute('aria-label','快捷选择 run 或指标组');
     const presetDot=document.createElement('i');presetDot.className='multi-preset-dot';presetDot.setAttribute('aria-hidden','true');
@@ -239,7 +240,13 @@
     from.setAttribute('aria-label','区间开始秒');to.setAttribute('aria-label','区间结束秒');range.append('拖拽选区 / 秒 ',from,' — ',to);toolbar.appendChild(range);
     selection.listeners.push((lo,hi)=>{from.value=lo;to.value=hi;chart.options.scales.x.min=lo;chart.options.scales.x.max=hi;chart.update('none');fillHover(lastHover);});
     from.onchange=to.onchange=()=>selection.update(Number(from.value),Number(to.value));
-    button('还原区间',()=>{brush=null;selection.update(domain.min,domain.max);});
+    button('还原区间',()=>{brush=null;selection.update(domain.min,domain.max);}).className='multi-reset';
+    if((context.events||[]).length){
+      const label=document.createElement('label');label.className='multi-event-toggle';
+      const input=document.createElement('input');input.type='checkbox';input.checked=true;
+      input.onchange=()=>{showEvents=input.checked;canvas.title='';chart.draw();};
+      label.append(input,document.createTextNode('显示事件'));toolbar.appendChild(label);
+    }
     function pixel(event){const rect=canvas.getBoundingClientRect();return Math.max(chart.chartArea.left,Math.min(chart.chartArea.right,(event.clientX-rect.left)*chart.width/rect.width));}
     canvas.style.touchAction='pan-y';
     canvas.addEventListener('pointerdown',event=>{const rect=canvas.getBoundingClientRect(),y=(event.clientY-rect.top)*chart.height/rect.height,x=(event.clientX-rect.left)*chart.width/rect.width;
