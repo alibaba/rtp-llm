@@ -47,7 +47,7 @@ class WorkerDirectoryTest {
             assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
             cleaned.countDown();
             return null;
-        }).when(cache).removeEngineBlockCache(Mockito.anyString(), Mockito.any());
+        }).when(cache).removeEngineBlockCache(Mockito.any(WorkerStatus.class), Mockito.any());
         var statuses = new java.util.ArrayList<WorkerStatus>();
         try {
             for (int index = 0; index < 5; index++) {
@@ -103,7 +103,7 @@ class WorkerDirectoryTest {
         lease.close();
         var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
         Mockito.doThrow(new IllegalStateException("cache cleanup failed"))
-                .when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+                .when(cache).removeEngineBlockCache(status, status.trace());
         var logger = Mockito.mock(org.slf4j.Logger.class);
         discover(status);
         try (var logs = new TraceLogs()) {
@@ -127,7 +127,7 @@ class WorkerDirectoryTest {
             assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
             assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()),
                     "failed cleanup must prevent same-address replacement");
-            Mockito.doNothing().when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+            Mockito.doNothing().when(cache).removeEngineBlockCache(status, status.trace());
             workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status, null, cache, logger);
             assertTrue(workerDirectory.statusSnapshot(RoleType.PREFILL).isEmpty());
         } finally {
@@ -151,7 +151,7 @@ class WorkerDirectoryTest {
             if (attempts.incrementAndGet() == 1) { throw new IllegalStateException("transient index failure"); }
             retried.countDown();
             return null;
-        }).when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        }).when(cache).removeEngineBlockCache(status, status.trace());
         status.lock.lock();
         try {
             workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST", -1L);

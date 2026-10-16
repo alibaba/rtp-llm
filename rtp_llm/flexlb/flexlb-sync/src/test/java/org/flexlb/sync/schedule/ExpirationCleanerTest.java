@@ -58,7 +58,7 @@ class ExpirationCleanerTest {
         lease.statusRpcCompleted(false);
         cleaner.cleanExpiredWorkers();
         assertFalse(status.isActiveGeneration());
-        verify(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        verify(cache).removeEngineBlockCache(status, status.trace());
     }
 
     @Test
@@ -186,9 +186,9 @@ class ExpirationCleanerTest {
             }
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
             verify(cache).removeEngineBlockCache(
-                    first.getIpPort(), first.trace());
+                    first, first.trace());
             verify(cache).removeEngineBlockCache(
-                    second.getIpPort(), second.trace());
+                    second, second.trace());
         } finally {
             releaseFirstAwait.countDown();
             executor.shutdownNow();

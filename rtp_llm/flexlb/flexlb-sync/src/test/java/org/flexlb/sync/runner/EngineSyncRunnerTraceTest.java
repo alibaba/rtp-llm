@@ -55,7 +55,6 @@ class EngineSyncRunnerTraceTest {
                 .thenReturn(List.of(WorkerHost.of(healthy.getIp(), healthy.getPort())));
         var cleanupEntered = new CountDownLatch(1);
         var finishCleanup = new CountDownLatch(1);
-        String retiringAddress = retiring.getIpPort();
         var retirementTrace = retiring.trace();
         doAnswer(invocation -> {
             assertFalse(retiring.lock.isHeldByCurrentThread());
@@ -63,7 +62,7 @@ class EngineSyncRunnerTraceTest {
             cleanupEntered.countDown();
             assertTrue(finishCleanup.await(10, TimeUnit.SECONDS));
             return null;
-        }).when(cache).removeEngineBlockCache(retiringAddress, retirementTrace);
+        }).when(cache).removeEngineBlockCache(retiring, retirementTrace);
         EngineSyncRunner first = runner(directory, addresses, statusExecutor, cacheExecutor, cache, 11L);
         EngineSyncRunner second = runner(directory, addresses, statusExecutor, cacheExecutor, cache, 12L);
         ExecutorService runners = Executors.newFixedThreadPool(2);

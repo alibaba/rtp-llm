@@ -259,7 +259,7 @@ public final class WorkerDirectory {
             try {
                 if (role.requiresCacheKeys()) {
                     status.trace().record(Stage.CACHE_CLEANUP_BEGIN);
-                    cacheAwareService.removeEngineBlockCache(address, status.trace());
+                    cacheAwareService.removeEngineBlockCache(status, status.trace());
                     status.trace().record(Stage.CACHE_CLEANUP_END);
                 }
             } catch (Throwable cacheCleanupFailure) {

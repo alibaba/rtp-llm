@@ -164,6 +164,10 @@ public class EngineLocalView {
      * Get all cache block IDs of an engine
      *
      * @param engineIPort Engine IP
+     * <p>Returns a borrowed mutable set, not a snapshot. Callers iterating it
+     * must hold the owning generation's cacheMutationLock for the entire use.
+     * The global index lock does not protect writes to this local view.
+     *
      * @return Cache block ID set
      */
     public Set<Long> getEngineCacheBlocks(String engineIPort) {

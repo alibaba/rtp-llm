@@ -32,6 +32,8 @@ public interface CacheAwareService {
     /**
      * Update engine block KV cache status
      *
+     * <p>The caller must hold workerStatus.cacheMutationLock throughout the update.
+     *
      * @param workerStatus Worker status information
      * @return Update result
      */
@@ -42,8 +44,9 @@ public interface CacheAwareService {
      * Remove every cached block associated with one engine address.
      *
      * <p>Callers must fence the address against generation replacement before
-     * invoking this method. The cache index is address based and therefore
+     * invoking this method, and hold workerStatus.cacheMutationLock from reading
+     * the local key set until cleanup completes. The cache index is address based and therefore
      * cannot distinguish two worker generations by itself.
      */
-    void removeEngineBlockCache(String engineIpPort, EndpointTrace trace);
+    void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace);
 }
