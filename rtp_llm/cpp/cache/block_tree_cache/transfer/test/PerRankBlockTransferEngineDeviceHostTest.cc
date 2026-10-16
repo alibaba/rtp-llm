@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 namespace {
@@ -93,6 +94,8 @@ makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_co
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
+    // Finish layout initialization before handing the backing to a worker's copy stream.
+    RTP_LLM_CHECK(cudaDeviceSynchronize() == cudaSuccess);
     return pool;
 }
 
@@ -364,7 +367,7 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTar
     const HostBufferView  host{host_buffer.addr, host_buffer.payload_bytes, host_buffer.stride_bytes};
 
     const auto d2h_desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
-    ASSERT_EQ(executor.executeBatch({host}, {d2h_desc}, {group_set_.get()}), TransferStatus::OK);
+    ASSERT_TRUE(executor.executeBatch({host}, {d2h_desc}, {group_set_.get()}).ok());
     const auto* host_data = static_cast<const uint8_t*>(host.base);
     for (size_t i = 0; i < layer_bytes_[0]; ++i) {
         EXPECT_EQ(host_data[i], 0xA5);
@@ -372,7 +375,7 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTar
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
     const auto h2d_desc = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
-    ASSERT_EQ(executor.executeBatch({host}, {h2d_desc}, {group_set_.get()}), TransferStatus::OK);
+    ASSERT_TRUE(executor.executeBatch({host}, {h2d_desc}, {group_set_.get()}).ok());
     const auto device_data = readDeviceLayer(device_pool_, 0, device_block_);
     for (size_t i = 0; i < layer_bytes_[0]; ++i) {
         EXPECT_EQ(device_data[i], 0xA5);
@@ -397,6 +400,8 @@ TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissi
     context->waitDone();
 
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(context->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_NE(context->errorInfo().ToString().find("RESOURCE_EXHAUSTED"), std::string::npos);
     releasePoolBlock(*host_pool_, host_block);
@@ -681,7 +686,7 @@ TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsSharedAcrossDirectio
     per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
     per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
-    std::vector<std::shared_ptr<AsyncContext>> contexts;
+    std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
     for (size_t index = 0; index < kWorkerCount; ++index) {
         contexts.push_back(per_rank_transfer_engine_->execute(
             makeTransferTask({makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, /*host_block=*/1)})));
@@ -1042,7 +1047,28 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine = makeEngine({group}, {}, true);
 
-    expectStatus(engine, descriptor, TransferStatus::DISK_IO_ERROR);
+    auto& strategies          = engine->device_host_executor_->strategies_;
+    auto  original_strategies = std::move(strategies);
+    strategies.clear();
+    strategies.push_back(std::make_unique<FailingStrategy>());
+    auto device_failed = engine->execute(makeTransferTask({descriptor}));
+    device_failed->waitDone();
+    EXPECT_FALSE(device_failed->success());
+    EXPECT_EQ(device_failed->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(device_failed->errorInfo().ToString(),
+              "device-to-disk device-to-staging failed: invalid block transfer request");
+    EXPECT_EQ(device_failed->result().copy_error, CacheCopyError::INVALID_REQUEST);
+    EXPECT_EQ(device_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::INVALID_REQUEST}));
+
+    strategies       = std::move(original_strategies);
+    auto disk_failed = engine->execute(makeTransferTask({descriptor}));
+    disk_failed->waitDone();
+    EXPECT_FALSE(disk_failed->success());
+    EXPECT_EQ(disk_failed->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(disk_failed->errorInfo().ToString(), "device-to-disk staging-to-disk failed: disk block transfer failed");
+    EXPECT_EQ(disk_failed->result().copy_error, CacheCopyError::IO_FAILED);
+    EXPECT_EQ(disk_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::IO_FAILED}));
+
     status_io->setStatus(DiskBlockIOStatus::OK);
     expectStatus(engine, descriptor, TransferStatus::OK);
 }
@@ -1156,9 +1182,16 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageFailureShortCircu
     fillDeviceLayer(device_pool, 0, device_block, {0xAB, 0xCD});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
 
-    expectStatus(engine,
-                 makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
-                 TransferStatus::DISK_IO_ERROR);
+    auto failed = engine->execute(
+        makeTransferTask({makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0)}));
+    failed->waitDone();
+    EXPECT_FALSE(failed->success());
+    EXPECT_EQ(failed->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(
+        failed->errorInfo().ToString(),
+        "disk-to-device transfer failed, stage=disk-to-staging, descriptor_range=[0,1): disk block transfer failed");
+    EXPECT_EQ(failed->result().copy_error, CacheCopyError::IO_FAILED);
+    EXPECT_EQ(failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::IO_FAILED}));
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
     status_io->setStatus(DiskBlockIOStatus::OK);
     expectStatus(engine,
@@ -1185,6 +1218,13 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageTwoFailureRelease
     auto failed = engine->execute(makeTransferTask({descriptor}));
     failed->waitDone();
     EXPECT_FALSE(failed->success());
+
+    EXPECT_EQ(failed->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(failed->errorInfo().ToString(),
+              "disk-to-device transfer failed, stage=staging-to-device, descriptor_range=[0,1): invalid block transfer "
+              "request");
+    EXPECT_EQ(failed->result().copy_error, CacheCopyError::INVALID_REQUEST);
+    EXPECT_EQ(failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::INVALID_REQUEST}));
 
     strategies.clear();
     strategies.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
@@ -1301,12 +1341,12 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaiters
     auto store_cancelled            = std::make_shared<std::promise<void>>();
     auto load_cancelled_future      = load_cancelled->get_future();
     auto store_cancelled_future     = store_cancelled->get_future();
-    disk_to_device->onDone([disk_to_device_completions, load_cancelled](ErrorInfo) {
+    disk_to_device->onDone([disk_to_device_completions, load_cancelled](TransferResult) {
         if (disk_to_device_completions->fetch_add(1) == 0) {
             load_cancelled->set_value();
         }
     });
-    device_to_disk->onDone([device_to_disk_completions, store_cancelled](ErrorInfo) {
+    device_to_disk->onDone([device_to_disk_completions, store_cancelled](TransferResult) {
         if (device_to_disk_completions->fetch_add(1) == 0) {
             store_cancelled->set_value();
         }
@@ -1323,8 +1363,12 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaiters
     EXPECT_TRUE(active_transfer->success());
     EXPECT_TRUE(disk_to_device->done());
     EXPECT_FALSE(disk_to_device->success());
+    EXPECT_EQ(disk_to_device->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(disk_to_device->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_TRUE(device_to_disk->done());
     EXPECT_FALSE(device_to_disk->success());
+    EXPECT_EQ(device_to_disk->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(device_to_disk->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(disk_to_device_completions->load(), 1u);
     EXPECT_EQ(device_to_disk_completions->load(), 1u);
 }
@@ -1402,6 +1446,83 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksMayUseAva
 }
 
 // ---- Strategy chain tests ----
+
+class StagedMemoryCopyTest: public ::testing::TestWithParam<bool> {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    }
+
+    void TearDown() override {
+        releaseStagedMemoryCopyScratch(scratch_);
+    }
+
+    void expectRoundTrip(bool segmented, size_t tile_count, bool reuse_scratch) {
+        constexpr size_t            allocation_bytes = 24576;
+        const std::array<size_t, 3> tile_bytes{31, 257, 4097};
+        const std::array<size_t, 3> device_offsets{5, 4103, 16387};
+        const std::array<size_t, 3> host_offsets{16448, 64, 8256};
+        auto                        host =
+            torch::empty({allocation_bytes},
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(GetParam()));
+        auto device =
+            torch::empty({allocation_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        ASSERT_EQ(host.is_pinned(), GetParam());
+        auto*                host_data   = host.data_ptr<uint8_t>();
+        auto*                device_data = device.data_ptr<uint8_t>();
+        std::vector<uint8_t> expected_device(allocation_bytes, 0xA5);
+        ASSERT_EQ(cudaSuccess,
+                  cudaMemcpy(device_data, expected_device.data(), allocation_bytes, cudaMemcpyHostToDevice));
+        ASSERT_EQ(cudaSuccess, cudaDeviceSynchronize());
+        std::fill_n(host_data, allocation_bytes, 0xCD);
+        std::vector<uint8_t> expected_host(allocation_bytes, 0xE3);
+
+        StagedMemoryCopyParams params;
+        params.host_base = host_data + 64;
+        ASSERT_EQ(cudaSuccess, cudaGetDevice(&params.device_index));
+        for (size_t tile = 0; tile < tile_count; ++tile) {
+            const size_t staging_offset = segmented ? (params.host_bytes + 15) / 16 * 16 : params.host_bytes;
+            const size_t host_offset    = segmented ? host_offsets[tile] : 64 + staging_offset;
+            params.tiles.push_back({device_data + device_offsets[tile], staging_offset, tile_bytes[tile]});
+            if (segmented) {
+                params.host_segments.push_back({host_data + host_offset, staging_offset, tile_bytes[tile]});
+            }
+            for (size_t byte = 0; byte < tile_bytes[tile]; ++byte) {
+                const uint8_t value                          = (tile * 61 + byte * 17 + tile_count) % 251;
+                host_data[host_offset + byte]                = value;
+                expected_device[device_offsets[tile] + byte] = value;
+                expected_host[host_offset + byte]            = value;
+            }
+            params.host_bytes = staging_offset + tile_bytes[tile];
+        }
+
+        params.direction = StagedMemoryCopyDirection::H2D;
+        ASSERT_TRUE(execStagedMemoryCopy(params, reuse_scratch ? &scratch_ : nullptr));
+        std::vector<uint8_t> actual_device(allocation_bytes);
+        ASSERT_EQ(cudaSuccess, cudaMemcpy(actual_device.data(), device_data, allocation_bytes, cudaMemcpyDeviceToHost));
+        EXPECT_EQ(actual_device, expected_device);
+
+        std::fill_n(host_data, allocation_bytes, 0xE3);
+        params.direction = StagedMemoryCopyDirection::D2H;
+        ASSERT_TRUE(execStagedMemoryCopy(params, reuse_scratch ? &scratch_ : nullptr));
+        EXPECT_EQ(std::vector<uint8_t>(host_data, host_data + allocation_bytes), expected_host);
+    }
+
+    StagedMemoryCopyScratch scratch_;
+};
+
+TEST_P(StagedMemoryCopyTest, DisjointHostSegmentsPreserveGuardsAcrossScratchGrowthAndReuse) {
+    for (size_t tile_count : {1u, 3u, 2u}) {
+        SCOPED_TRACE(tile_count);
+        ASSERT_NO_FATAL_FAILURE(expectRoundTrip(true, tile_count, true));
+    }
+}
+
+TEST_P(StagedMemoryCopyTest, ContiguousHostBaseWorksWithoutReusableScratch) {
+    ASSERT_NO_FATAL_FAILURE(expectRoundTrip(false, 3, false));
+}
+
+INSTANTIATE_TEST_SUITE_P(HostMemory, StagedMemoryCopyTest, ::testing::Bool());
 
 class PerRankBlockTransferEngineStrategyTest: public ::testing::Test {
 protected:
@@ -1612,6 +1733,65 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
+}
+
+TEST_F(PerRankBlockTransferEngineStrategyTest, StagedBatchRoundTripPreservesUnselectedHostBlock) {
+    DeviceHostCopyOptions options;
+    options.cuda_batch_copy_enabled        = false;
+    options.staged_sm_copy_enabled         = true;
+    options.staged_sm_min_tile_count       = 1;
+    options.staged_sm_min_bytes            = 1;
+    auto                            engine = makePerRankBlockTransferEngine(options);
+    std::array<StrategyCounters, 3> counters;
+    installStrategyRecorders(*engine->device_host_executor_, counters);
+
+    const std::array<BlockIdxType, 2> device_blocks{device_block_, poolMalloc(*device_pool_)};
+    ASSERT_NE(device_blocks[1], NULL_BLOCK_IDX);
+    std::array<BlockIdxType, 3> host_blocks;
+    for (auto& block : host_blocks) {
+        block = poolMalloc(*host_pool_);
+        ASSERT_NE(block, NULL_BLOCK_IDX);
+        std::memset(host_pool_->blockBuffer(block).addr, 0xE7, host_block_size_);
+    }
+    std::vector<TransferDescriptor> stores;
+    std::vector<TransferDescriptor> loads;
+    for (size_t i = 0; i < device_blocks.size(); ++i) {
+        fillDeviceLayer(device_pool_, 0, device_blocks[i], {static_cast<uint8_t>(0x31 + i)});
+        fillDeviceLayer(device_pool_, 1, device_blocks[i], {static_cast<uint8_t>(0x71 + i)});
+        const auto host_block = host_blocks[2 - 2 * i];
+        stores.push_back(makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks[i]}, host_block));
+        loads.push_back(makeDescriptor(Tier::HOST, Tier::DEVICE, {device_blocks[i]}, host_block));
+    }
+    auto store = engine->execute(makeTransferTask(std::move(stores)));
+    store->waitDone();
+    ASSERT_TRUE(store->success());
+    for (size_t i = 0; i < device_blocks.size(); ++i) {
+        const auto* host = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_blocks[2 - 2 * i]).addr);
+        EXPECT_EQ(std::vector<uint8_t>(host, host + 128), std::vector<uint8_t>(128, 0x31 + i));
+        EXPECT_EQ(std::vector<uint8_t>(host + 128, host + 256), std::vector<uint8_t>(128, 0x71 + i));
+        fillDeviceLayer(device_pool_, 0, device_blocks[i], {0});
+        fillDeviceLayer(device_pool_, 1, device_blocks[i], {0});
+    }
+    auto load = engine->execute(makeTransferTask(std::move(loads)));
+    load->waitDone();
+    ASSERT_TRUE(load->success());
+    for (size_t i = 0; i < device_blocks.size(); ++i) {
+        EXPECT_EQ(readDeviceLayer(device_pool_, 0, device_blocks[i]), std::vector<uint8_t>(128, 0x31 + i));
+        auto expected = std::vector<uint8_t>(256, 0);
+        std::fill_n(expected.begin(), 128, 0x71 + i);
+        EXPECT_EQ(readDeviceLayer(device_pool_, 1, device_blocks[i]), expected);
+    }
+    const auto* untouched = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_blocks[1]).addr);
+    EXPECT_EQ(std::vector<uint8_t>(untouched, untouched + host_block_size_),
+              std::vector<uint8_t>(host_block_size_, 0xE7));
+    EXPECT_EQ(counters[0].not_applicable, 2);
+    EXPECT_EQ(counters[1].done, 2);
+    EXPECT_EQ(counters[1].failed, 0);
+    EXPECT_EQ(counters[2].attempts, 0);
+    for (auto block : host_blocks) {
+        releasePoolBlock(*host_pool_, block);
+    }
+    releasePoolBlock(*device_pool_, device_blocks[1]);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStagedFallback) {

@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <exception>
 #include <string>
+#include <limits>
+#include <numeric>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -21,22 +24,24 @@ namespace {
 
 size_t alignedStride(size_t payload_bytes) {
     const size_t alignment = HostStagingBlockPool::kAlignment;
+    if (payload_bytes > std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        throw std::overflow_error("disk staging stride overflow");
+    }
     return ((payload_bytes + alignment - 1) / alignment) * alignment;
 }
 
-ErrorInfo deviceToDiskError(TransferStatus status, const char* stage) {
-    const ErrorCode code =
-        status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS : ErrorCode::EXECUTION_EXCEPTION;
-    return ErrorInfo(code, std::string("device-to-disk ") + stage + " failed");
+TransferResult deviceToDiskError(TransferResult result, const char* stage) {
+    result.status = ErrorInfo(result.status.code(),
+                              std::string("device-to-disk ") + stage + " failed: " + result.status.ToString());
+    return result;
 }
 
-ErrorInfo transferError(TransferStatus status, size_t begin, size_t end) {
-    const ErrorCode code =
-        status == TransferStatus::RESOURCE_EXHAUSTED ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION;
-    const char* message = status == TransferStatus::RESOURCE_EXHAUSTED ? "staging slice wait timed out" :
-                                                                         "disk-to-device transfer failed";
-    return ErrorInfo(
-        code, std::string(message) + ", descriptor_range=[" + std::to_string(begin) + "," + std::to_string(end) + ")");
+TransferResult transferError(TransferResult result, size_t begin, size_t end, const char* stage) {
+    result.status =
+        ErrorInfo(result.status.code(),
+                  std::string("disk-to-device transfer failed, stage=") + stage + ", descriptor_range=["
+                      + std::to_string(begin) + "," + std::to_string(end) + "): " + result.status.ToString());
+    return result;
 }
 
 void logBatchFailure(const std::vector<TransferDescriptor>& descriptors, size_t begin, const char* stage) {
@@ -67,7 +72,7 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
     size_t full_stride = 0;
     size_t swa_stride  = 0;
     for (const auto& group_set : group_sets) {
-        const size_t stride = alignedStride(group_set->payloadBytes());
+        const size_t stride = alignedStride(group_set->storageBytes());
         max_stride          = std::max(max_stride, stride);
         if (group_set->groupType() == CacheGroupType::FULL) {
             full_stride = std::max(full_stride, stride);
@@ -82,6 +87,7 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
         swa_stride = max_stride;
     }
 
+    RTP_LLM_CHECK(max_stride > 0 && staging_block_count <= std::numeric_limits<size_t>::max() / max_stride);
     const size_t lane_bytes = staging_block_count * max_stride / 2;
     full_batch_capacity_    = lane_bytes / full_stride;
     swa_batch_capacity_     = lane_bytes / swa_stride;
@@ -96,9 +102,9 @@ void DeviceDiskTransferExecutor::cancelPendingTransfers() {
     swa_staging_pool_->cancelAllBatchWaiters();
 }
 
-std::shared_ptr<AsyncContext>
+std::shared_ptr<TransferAsyncContext>
 DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::vector<const GroupSet*>& group_sets) {
-    auto        context     = std::make_shared<TransferBatchAsyncContext>();
+    auto        context     = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
     const auto& descriptors = task.descriptors();
     if (descriptors.empty() || descriptors.size() != group_sets.size()) {
         context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid disk-to-device batch"));
@@ -118,8 +124,8 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
         return context;
     }
 
-    auto stage_state =
-        std::make_shared<TransferStageState>([context](ErrorInfo error) { context->complete(std::move(error)); });
+    auto stage_state = std::make_shared<TransferStageState>(
+        [context](TransferResult result) { context->complete(std::move(result)); }, descriptors.size());
     for (size_t begin = 0; begin < descriptors.size(); begin += capacity) {
         const size_t                    end = std::min(begin + capacity, descriptors.size());
         std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin, descriptors.begin() + end);
@@ -127,11 +133,14 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
         auto                            batch_task = task.subtask(std::move(sub_descriptors));
         const auto                      deadline   = batch_task.deadline();
         stage_state->addBatch();
+        std::vector<size_t> indices(end - begin);
+        std::iota(indices.begin(), indices.end(), begin);
         pool->requestBatch(
             end - begin,
             deadline,
             [this,
              stage_state,
+             indices        = std::move(indices),
              batch_task     = std::move(batch_task),
              sub_group_sets = std::move(sub_group_sets),
              begin,
@@ -139,30 +148,37 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
              deadline](std::optional<HostStagingBlockPool::HostStagingBlockBatch> leases) mutable {
                 if (!leases.has_value()) {
                     const bool timed_out = batch_task.expired();
-                    stage_state->completeBatch(ErrorInfo(
-                        timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
-                        std::string(timed_out ? "disk-to-device staging admission timed out, descriptor_range=[" :
-                                                "disk-to-device staging admission cancelled, descriptor_range=[")
-                            + std::to_string(begin) + "," + std::to_string(end) + ")"));
+                    stage_state->completeBatch(
+                        TransferResult(
+                            ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
+                                      std::string(timed_out ?
+                                                      "disk-to-device staging admission timed out, descriptor_range=[" :
+                                                      "disk-to-device staging admission cancelled, descriptor_range=[")
+                                          + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                            CacheCopyError::NOT_EXECUTED),
+                        indices);
                     return;
                 }
 
                 auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
                 const int64_t queue_begin = currentTimeUs();
-                auto          on_timeout  = [this, stage_state, begin, end, queue_begin]() {
+                auto          on_timeout  = [this, stage_state, indices, begin, end, queue_begin]() {
                     if (metrics_reporter_ != nullptr) {
                         metrics_reporter_->reportQueueWaitMetric(
                             false, "transfer", nullptr, Tier::DISK, Tier::DEVICE, currentTimeUs() - queue_begin);
                     }
-                    stage_state->completeBatch(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED,
-                                                         "disk-to-device expired in TE worker queue, descriptor_range=["
-                                                             + std::to_string(begin) + "," + std::to_string(end)
-                                                             + ")"));
+                    stage_state->completeBatch(
+                        TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED,
+                                                 "disk-to-device expired in TE worker queue, descriptor_range=["
+                                                     + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                                       CacheCopyError::NOT_EXECUTED),
+                        indices);
                 };
                 const bool accepted = transfer_task_pool_.submit(
                     BlockTreeTaskClass::LOAD,
                     [this,
                      stage_state,
+                     indices,
                      batch_task     = std::move(batch_task),
                      sub_group_sets = std::move(sub_group_sets),
                      batch_leases   = std::move(batch_leases),
@@ -182,34 +198,39 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
                                     (*batch_leases)[index].blockBuffer(sub_group_sets[index]->payloadBytes()));
                             }
 
-                            TransferStatus status =
-                                host_disk_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets);
-                            if (status != TransferStatus::OK) {
+                            auto result = host_disk_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets);
+                            if (!result.ok()) {
                                 logBatchFailure(sub_descriptors, begin, "disk-to-staging");
-                                stage_state->completeBatch(transferError(status, begin, end));
+                                stage_state->completeBatch(
+                                    transferError(std::move(result), begin, end, "disk-to-staging"), indices);
                                 return;
                             }
-                            status = device_host_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets);
-                            if (status != TransferStatus::OK) {
+                            result = device_host_executor_.executeBatch(hosts, sub_descriptors, sub_group_sets);
+                            if (!result.ok()) {
                                 logBatchFailure(sub_descriptors, begin, "staging-to-device");
-                                stage_state->completeBatch(transferError(status, begin, end));
+                                stage_state->completeBatch(
+                                    transferError(std::move(result), begin, end, "staging-to-device"), indices);
                                 return;
                             }
-                            stage_state->completeBatch(ErrorInfo::OkStatus());
+                            stage_state->completeBatch(std::move(result), indices);
                         } catch (const std::exception& error) {
-                            stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                            stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()),
+                                                       indices);
                         } catch (...) {
                             stage_state->completeBatch(
-                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
+                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"), indices);
                         }
                     },
                     deadline,
                     std::move(on_timeout));
                 if (!accepted) {
                     stage_state->completeBatch(
-                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                                  "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped, descriptor_range=["
-                                      + std::to_string(begin) + "," + std::to_string(end) + ")"));
+                        TransferResult(
+                            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                      "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped, descriptor_range=["
+                                          + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                            CacheCopyError::NOT_EXECUTED),
+                        indices);
                 }
             });
     }
@@ -217,9 +238,9 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
     return context;
 }
 
-std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(TransferTask    task,
-                                                                              const GroupSet& group_set) {
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(TransferTask    task,
+                                                                                      const GroupSet& group_set) {
+    auto context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
     if (task.descriptors().size() != 1) {
         context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-to-disk batch"));
         return context;
@@ -238,9 +259,11 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(Tr
             std::optional<HostStagingBlockPool::HostStagingBlockBatch> leases) {
             if (!leases.has_value()) {
                 const bool timed_out = task.expired();
-                context->complete(ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
-                                            timed_out ? "device-to-disk staging admission timed out" :
-                                                        "device-to-disk staging admission cancelled"));
+                context->complete(
+                    TransferResult(ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
+                                             timed_out ? "device-to-disk staging admission timed out" :
+                                                         "device-to-disk staging admission cancelled"),
+                                   CacheCopyError::NOT_EXECUTED));
                 return;
             }
 
@@ -251,7 +274,9 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(Tr
                     metrics_reporter_->reportQueueWaitMetric(
                         false, "transfer", nullptr, Tier::DEVICE, Tier::DISK, currentTimeUs() - queue_begin);
                 }
-                context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk expired in TE worker queue"));
+                context->complete(
+                    TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk expired in TE worker queue"),
+                                   CacheCopyError::NOT_EXECUTED));
             };
             const bool accepted = transfer_task_pool_.submit(
                 BlockTreeTaskClass::BACKGROUND,
@@ -266,17 +291,17 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(Tr
                             batch_leases->front().blockBuffer(group_set_ptr->payloadBytes())};
                         const std::vector<TransferDescriptor> descriptors{descriptor};
                         const std::vector<const GroupSet*>    group_sets{group_set_ptr};
-                        TransferStatus status = device_host_executor_.executeBatch(hosts, descriptors, group_sets);
-                        if (status != TransferStatus::OK) {
-                            context->complete(deviceToDiskError(status, "device-to-staging"));
+                        auto result = device_host_executor_.executeBatch(hosts, descriptors, group_sets);
+                        if (!result.ok()) {
+                            context->complete(deviceToDiskError(std::move(result), "device-to-staging"));
                             return;
                         }
-                        status = host_disk_executor_.executeBatch(hosts, descriptors, group_sets);
-                        if (status != TransferStatus::OK) {
-                            context->complete(deviceToDiskError(status, "staging-to-disk"));
+                        result = host_disk_executor_.executeBatch(hosts, descriptors, group_sets);
+                        if (!result.ok()) {
+                            context->complete(deviceToDiskError(std::move(result), "staging-to-disk"));
                             return;
                         }
-                        context->complete(ErrorInfo::OkStatus());
+                        context->complete(std::move(result));
                     } catch (const std::exception& error) {
                         context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
                     } catch (...) {
@@ -287,8 +312,10 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(Tr
                 deadline,
                 std::move(on_timeout));
             if (!accepted) {
-                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                                            "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"));
+                context->complete(
+                    TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                             "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"),
+                                   CacheCopyError::NOT_EXECUTED));
             }
         });
     return context;

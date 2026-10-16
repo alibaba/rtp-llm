@@ -52,9 +52,9 @@ TEST(TransferBatchAsyncContextTest, FirstCompletionWins) {
 }
 
 TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
-    auto guard = std::make_shared<int>(1);
-    std::weak_ptr<int> weak_guard = guard;
-    TransferBatchAsyncContext context(guard);
+    auto                      guard      = std::make_shared<int>(1);
+    std::weak_ptr<int>        weak_guard = guard;
+    TransferBatchAsyncContext context(0, guard);
     guard.reset();
     ASSERT_FALSE(weak_guard.expired());
 
@@ -68,8 +68,8 @@ TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) 
     std::atomic<size_t> callback_count{0};
     ErrorCode           callback_code = ErrorCode::INVALID_PARAMS;
 
-    context.onDone([&](ErrorInfo error) {
-        callback_code = error.code();
+    context.onDone([&](TransferResult error) {
+        callback_code = error.status.code();
         ++callback_count;
     });
     context.complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "first completion"));
@@ -84,7 +84,7 @@ TEST(TransferBatchAsyncContextTest, CallbackRegisteredAfterCompletionRunsImmedia
     context.complete(ErrorInfo::OkStatus());
 
     size_t callback_count = 0;
-    context.onDone([&](ErrorInfo error) {
+    context.onDone([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
         ++callback_count;
     });
@@ -94,7 +94,7 @@ TEST(TransferBatchAsyncContextTest, CallbackRegisteredAfterCompletionRunsImmedia
 
 TEST(TransferBatchAsyncContextTest, CallbackCanReadContextWithoutDeadlock) {
     TransferBatchAsyncContext context;
-    context.onDone([&](ErrorInfo error) {
+    context.onDone([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
         EXPECT_TRUE(context.done());
         EXPECT_TRUE(context.success());
@@ -107,11 +107,11 @@ TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTermina
     auto context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> callback_count{0};
 
-    context->onDone([&](ErrorInfo error) {
+    context->onDone([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
         ++callback_count;
     });
-    context->onDone([&](ErrorInfo error) {
+    context->onDone([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
         ++callback_count;
     });
@@ -123,6 +123,22 @@ TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTermina
 
     EXPECT_EQ(callback_count.load(), 2u);
     EXPECT_TRUE(context->success());
+}
+
+TEST(TransferBatchAsyncContextTest, ClassifiedResultReachesCallbacksBeforeAndAfterCompletion) {
+    TransferBatchAsyncContext context;
+    size_t                    calls    = 0;
+    const auto                callback = [&](TransferResult result) {
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.copy_error, CacheCopyError::IO_FAILED);
+        EXPECT_EQ(result.status.ToString(), "disk read failed");
+        ++calls;
+    };
+    context.onDone(callback);
+    context.complete({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk read failed"), CacheCopyError::IO_FAILED});
+    context.onDone(callback);
+    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(context.result().copy_error, CacheCopyError::IO_FAILED);
 }
 
 }  // namespace
