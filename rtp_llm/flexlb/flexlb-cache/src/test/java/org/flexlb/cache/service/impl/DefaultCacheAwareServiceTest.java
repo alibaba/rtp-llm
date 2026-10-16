@@ -35,14 +35,36 @@ class DefaultCacheAwareServiceTest {
             worker.cacheMutationLock.unlock();
         }
         var lease = worker.tryBeginCachePoll(1L);
+        worker.cacheMutationLock.lock();
         try {
             org.junit.jupiter.api.Assertions.assertTrue(service.updateEngineBlockCache(worker, lease.pollTrace()).isSuccess());
             verify(cache).updateEngineCache(worker.getIpPort(), RoleType.PREFILL.getCode(), keys, lease.pollTrace());
-            service.removeEngineBlockCache(worker.getIpPort(), worker.trace());
+            service.removeEngineBlockCache(worker, worker.trace());
             verify(cache).removeEngineCache(worker.getIpPort(), worker.trace());
         } finally {
+            worker.cacheMutationLock.unlock();
             lease.close();
         }
+    }
+
+    @Test
+    void mutationWithoutTheGenerationCacheLockFailsBeforeReadingOrChangingKeys() {
+        var cache = mock(KvCacheManager.class);
+        var metrics = mock(CacheMetricsReporter.class);
+        var service = new DefaultCacheAwareService(cache, metrics);
+        var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "group", "127.0.0.1", 8080, 8081, "site");
+
+        assertThrows(IllegalStateException.class, () -> service.updateEngineBlockCache(worker, null));
+        assertThrows(IllegalStateException.class, () -> service.removeEngineBlockCache(worker, worker.trace()));
+        // Holding the health lock must not be mistaken for cache ownership.
+        worker.lock.lock();
+        try {
+            assertThrows(IllegalStateException.class, () -> service.updateEngineBlockCache(worker, null));
+            assertThrows(IllegalStateException.class, () -> service.removeEngineBlockCache(worker, worker.trace()));
+        } finally {
+            worker.lock.unlock();
+        }
+        org.mockito.Mockito.verifyNoInteractions(cache, metrics);
     }
 
     @Test
