@@ -1,6 +1,6 @@
 """Actual layer-6 checkpoint weights, synthetic activations, isolated FI gate.
 
-Set DSV41_FLASHINFER_CHECKPOINT=/ssd/2/serina.wzq/DeepSeek-V4.1-Flash.
+Set DSV41_FLASHINFER_CHECKPOINT=/path/to/DeepSeek-V4.1-Flash.
 Only experts [0,48) are read; no model or full checkpoint is loaded. Ordinary
 N(0,1) and independently labelled 16x stress inputs retain the existing
 rtol=.02/atol=.05 BF16 mathematical gate. Neither is a captured model input.

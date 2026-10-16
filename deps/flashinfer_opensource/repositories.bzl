@@ -17,12 +17,20 @@ def _flashinfer_opensource_impl(ctx):
     if result.return_code:
         fail("FlashInfer sidecar relocation failed:\n" + result.stdout + result.stderr)
     ctx.file("BUILD.bazel", """
+load("@rules_python//python:packaging.bzl", "py_package")
+
 package(default_visibility = ["//visibility:public"])
 py_library(
     name = "pkg",
     srcs = glob(["site-packages/**/*.py"]),
     data = glob(["site-packages/**/*"], exclude = ["site-packages/**/*.py"]),
     imports = ["site-packages"],
+)
+
+py_package(
+    name = "wheel_package",
+    deps = [":pkg"],
+    packages = ["site-packages/flashinfer_opensource"],
 )
 """)
 
