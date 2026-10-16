@@ -105,6 +105,7 @@ class WorkerStatusTest {
         response.setDpSize(10L + marker);
         response.setTpSize(20L + marker);
         response.setDpRank(30L + marker);
+        response.setDpMasterAddress("master-" + marker);
         response.setMaxSeqLen(40L + marker);
         response.setMaxBatchTokensSize(50L + marker);
         response.setStatusVersion(marker);
@@ -129,6 +130,7 @@ class WorkerStatusTest {
         assertEquals(10L + marker, fields.dpSize());
         assertEquals(20L + marker, fields.tpSize());
         assertEquals(30L + marker, fields.dpRank());
+        assertEquals("master-" + marker, fields.dpMasterAddress());
         assertEquals(40L + marker, fields.maxSeqLen());
         assertEquals(50L + marker, fields.maxBatchTokensSize());
         assertEquals(Long.toString(marker),

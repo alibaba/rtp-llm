@@ -33,6 +33,7 @@ public class EngineStatusConverter {
                 workerStatusPB.getRunningTaskInfoList());
         Map<String, TaskObservation> finishedTasks = convertTasks(
                 workerStatusPB.getFinishedTaskListList());
+        String dpMasterAddress = workerStatusPB.getDpMasterAddress();
         EngineObservation engine = new EngineObservation(
                 RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
                 (long) workerStatusPB.getAvailableConcurrency(),
@@ -44,6 +45,7 @@ public class EngineStatusConverter {
                 workerStatusPB.getDpSize(),
                 workerStatusPB.getTpSize(),
                 workerStatusPB.getDpRank(),
+                dpMasterAddress.isEmpty() ? null : dpMasterAddress,
                 workerStatusPB.getBlockSize(),
                 workerStatusPB.getBlockHashLookaheadTokens(),
                 workerStatusPB.getCacheMatchRollbackBlocks(),

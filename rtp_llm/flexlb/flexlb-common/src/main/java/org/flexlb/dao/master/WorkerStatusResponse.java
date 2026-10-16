@@ -64,6 +64,9 @@ public class WorkerStatusResponse {
     @JsonProperty("dpRank")
     private long dpRank;
 
+    @JsonProperty("dp_master_address")
+    private String dpMasterAddress;
+
     @JsonProperty("block_hash_lookahead_tokens")
     private int blockHashLookaheadTokens;
 

@@ -110,6 +110,9 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
+`dp_master_address` 保存 Engine 状态上报的 DP master 地址，随同一次状态事务写入
+`WorkerStatus.committedEngineObservation()`；未上报时为 `null`。
+
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。

@@ -266,6 +266,7 @@ class EngineStatusConverterTest {
         var status = statusBuilder()
                 .setDpSize(2)
                 .setDpRank(1)
+                .setDpMasterAddress("10.44.38.122")
                 .setAvailableKvCache(2_000_000)
                 .setTotalKvCache(2_100_000)
                 .setMaxSeqLen(131_072)
@@ -281,6 +282,7 @@ class EngineStatusConverterTest {
 
         assertEquals(2, engine.dpSize());
         assertEquals(1, engine.dpRank());
+        assertEquals("10.44.38.122", engine.dpMasterAddress());
         assertEquals(2_000_000, engine.availableKvCacheTokens());
         assertEquals(2_100_000, engine.totalKvCacheTokens());
         assertEquals(131_072, engine.maxSeqLen());
@@ -289,6 +291,8 @@ class EngineStatusConverterTest {
         assertEquals(1, engine.blockHashLookaheadTokens());
         assertEquals(KvCacheGroupMode.WITH_MAMBA, engine.kvCacheGroupMode());
         assertEquals(1, engine.cacheMatchRollbackBlocks());
+        assertNull(EngineStatusConverter.convertToStatusObservation(owner, statusBuilder().build())
+                .engine().dpMasterAddress());
     }
 
     private static EngineRpcService.WorkerStatusPB.Builder statusBuilder() {
