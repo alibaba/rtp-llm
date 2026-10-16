@@ -26,27 +26,28 @@ class KVCacheResource;
 // Offloads writeCacheStore CPU-heavy work to a background thread pool so the
 // main thread can keep launching CUDA kernels without stalling. A cycle is
 // ordered as either init -> write* -> waitAllDone, or init -> write* ->
-// finishSubmissions -> waitStoreCompletions.
+// sealSubmissions -> waitStoreCompletions. Sealing never waits for GPU-ready
+// workers; finishSubmissions remains available to explicitly drain them early.
 class CacheStoreAsyncWriter: public CacheStoreWriter {
 public:
     using StoreCompletionCallback = CacheStoreCompletionCallback;
 
-    explicit CacheStoreAsyncWriter(
-        int                                      device_id              = -1,
-        std::shared_ptr<KVCacheManager>          cache_manager          = nullptr,
-        size_t                                   cache_model_id         = 0,
-        std::optional<int>                       mtp_cache_config_index = std::nullopt,
-        std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
+    explicit CacheStoreAsyncWriter(int                                      device_id                = -1,
+                                   std::shared_ptr<KVCacheManager>          cache_manager            = nullptr,
+                                   size_t                                   cache_model_id           = 0,
+                                   std::optional<int>                       mtp_cache_config_index   = std::nullopt,
+                                   std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
     ~CacheStoreAsyncWriter() override;
 
-    void init(bool track_store_completions = false);
+    void                    init(bool track_store_completions = false);
     StoreCompletionCallback registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease = nullptr);
+    void                    sealSubmissions();
     void                    finishSubmissions();
     void                    waitStoreCompletions();
     void                    cancelStoreCompletions(std::exception_ptr exception);
     void                    waitAllDone();
-    void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
-               const torch_ext::LayerKVCache&       layer_kv) override;
+    void                    write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
+                                  const torch_ext::LayerKVCache&       layer_kv) override;
 
 private:
     void submit(std::function<void()> task);
@@ -68,7 +69,8 @@ private:
 
     enum class State {
         IDLE,
-        RUNNING
+        RUNNING,
+        SEALED
     };
 
     struct StoreCompletionState {
@@ -90,27 +92,27 @@ private:
     };
 
     static void terminateStoreCompletions(const std::shared_ptr<StoreCompletionState>& completion_state,
-                                          std::exception_ptr                            exception);
+                                          std::exception_ptr                           exception);
 
     static StoreCompletionCallback
     makeStoreCompletionCallback(const std::shared_ptr<StoreCompletionState>& completion_state,
-                                std::shared_ptr<KVCacheResource>              publication_lease);
+                                std::shared_ptr<KVCacheResource>             publication_lease);
     static StoreCompletionCallback
     registerStoreCompletionOn(const std::shared_ptr<StoreCompletionState>& completion_state,
-                              std::shared_ptr<KVCacheResource>              publication_lease = nullptr);
+                              std::shared_ptr<KVCacheResource>             publication_lease = nullptr);
 
-    autil::ThreadPoolBasePtr                    thread_pool_;
-    std::atomic<int64_t>                        pending_count_{0};
-    std::mutex                                  state_mutex_;
-    std::mutex                                  wait_mutex_;
-    std::condition_variable                     wait_cv_;
-    std::mutex                                  exception_mutex_;
-    std::exception_ptr                          stored_exception_;
-    std::shared_ptr<StoreCompletionState>        active_store_completion_state_;
-    std::shared_ptr<StoreCompletionState>        finished_store_completion_state_;
-    State                                       state_{State::IDLE};
-    int                                         device_id_{-1};
-    const std::chrono::milliseconds             store_completion_timeout_;
+    autil::ThreadPoolBasePtr              thread_pool_;
+    std::atomic<int64_t>                  pending_count_{0};
+    std::mutex                            state_mutex_;
+    std::mutex                            wait_mutex_;
+    std::condition_variable               wait_cv_;
+    std::mutex                            exception_mutex_;
+    std::exception_ptr                    stored_exception_;
+    std::shared_ptr<StoreCompletionState> active_store_completion_state_;
+    std::shared_ptr<StoreCompletionState> finished_store_completion_state_;
+    State                                 state_{State::IDLE};
+    int                                   device_id_{-1};
+    const std::chrono::milliseconds       store_completion_timeout_;
 
     std::shared_ptr<KVCacheManager>    cache_manager_;
     std::shared_ptr<const CacheConfig> cache_config_;
