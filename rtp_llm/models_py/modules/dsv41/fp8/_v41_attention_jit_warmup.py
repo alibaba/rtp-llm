@@ -163,6 +163,8 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
     )
     from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as ops
 
+    _warm_host_swa_metadata(layout, device)
+
     rows = 16
     cu = torch.arange(0, rows + 1, rows, dtype=torch.int32, device=device)
     prefix = torch.full((1,), 1, dtype=torch.int32, device=device)
@@ -209,6 +211,66 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
                 M=attn.window_size + 2,
                 window_size=attn.window_size,
                 base_offset=0,
+            )
+
+
+def _warm_host_swa_metadata(layout, device):
+    """Warm packed target and rank-ordered draft planners on private pages."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from ._v41_swa_metadata import try_host_slot_metadata
+
+    host_table = torch.tensor([[1, 2], [2, 1], [1, 2]], dtype=torch.int32)
+    table = host_table.to(device)
+    for prefix_dtype, length_dtype in product((torch.int32, torch.int64), repeat=2):
+        cp = SimpleNamespace(
+            cp_size=4,
+            kv_cache_sharded=True,
+            prefix_lengths_host=(0, 1, 3),
+            input_lengths_global_host=(0, 1, 17),
+            prefix_lengths=torch.tensor((0, 1, 3), dtype=prefix_dtype, device=device),
+            input_lengths_global=torch.tensor(
+                (0, 1, 17), dtype=length_dtype, device=device
+            ),
+        )
+        for offset_dtype in (torch.int32, torch.int64):
+            cp.cu_seqlens_global = torch.tensor(
+                (0, 0, 1, 18), dtype=offset_dtype, device=device
+            )
+            for read in (False, True):
+                _require_launch(
+                    try_host_slot_metadata(
+                        table,
+                        host_table,
+                        cp,
+                        entries=layout.entries,
+                        span=layout.tokens_per_block,
+                        num_blocks=3,
+                        read=read,
+                    ),
+                    "host SWA slot metadata",
+                )
+        for request_dtype, position_dtype in product(
+            (torch.int32, torch.int64), repeat=2
+        ):
+            _require_launch(
+                try_host_slot_metadata(
+                    table,
+                    host_table,
+                    cp,
+                    entries=layout.entries,
+                    span=layout.tokens_per_block,
+                    num_blocks=3,
+                    request_ids=torch.tensor(
+                        (-1, 2, 1, 2), dtype=request_dtype, device=device
+                    ),
+                    positions=torch.tensor(
+                        (-1, 5, 1, 3), dtype=position_dtype, device=device
+                    ),
+                ),
+                "host SWA draft slot metadata",
             )
 
 

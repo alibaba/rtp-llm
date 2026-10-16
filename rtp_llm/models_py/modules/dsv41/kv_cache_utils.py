@@ -283,6 +283,25 @@ def bind_swa_table(block_tables, region):
     return {**block_tables, SWA_KV: block_tables[region]}
 
 
+def host_block_table_for_tag(kv_cache, attention_inputs, tag):
+    """Return the existing per-forward CPU physical table, without any D2H."""
+    by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
+    table = getattr(by_tag.get(tag), "kv_cache_block_id", None)
+    return (
+        table
+        if isinstance(table, torch.Tensor) and table.device.type == "cpu"
+        else None
+    )
+
+
+def device_attention_metadata(attention_inputs, name):
+    """Use the framework-uploaded mirror for tensor math, including prefill."""
+    tensor = getattr(attention_inputs, name + "_device", None)
+    if isinstance(tensor, torch.Tensor) and tensor.numel():
+        return tensor
+    return getattr(attention_inputs, name, None)
+
+
 def host_block_tables(kv_cache, attention_inputs):
     by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
     tables = [

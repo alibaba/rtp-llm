@@ -269,11 +269,13 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
 }  // namespace
 
-torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
+torch::Tensor MtpExecutor::snapshotMutableHostInput(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
     }
-    return toCudaWithHostHold(tensor.clone().pin_memory(), holder);
+    auto snapshot = tensor.clone().pin_memory();
+    holder.hold_host(snapshot);
+    return snapshot;
 }
 
 bool MtpExecutor::isTpRank0() const {
@@ -1191,8 +1193,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         global_model_input = model_input;
     }
     if (cp_enabled && isTpRank0() && !alignment_only) {
-        global_model_input.combo_tokens  = snapshotMutableHostInputToCuda(model_input.combo_tokens, buffer_holder_);
-        global_model_input.input_lengths = snapshotMutableHostInputToCuda(model_input.input_lengths, buffer_holder_);
+        global_model_input.combo_tokens  = snapshotMutableHostInput(model_input.combo_tokens, buffer_holder_);
+        global_model_input.input_lengths = snapshotMutableHostInput(model_input.input_lengths, buffer_holder_);
     }
 
     // target model prefill

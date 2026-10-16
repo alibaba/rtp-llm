@@ -232,13 +232,10 @@ private:
 
     torch::Tensor prepareMask(int32_t grammar_vocab_size) {
         const int32_t words = (grammar_vocab_size + 31) / 32;
-        if (!reusable_bitmask_cpu_.defined() || reusable_mask_words_ < words) {
-            reusable_bitmask_cpu_ = at::full({1, words}, -1, at::dtype(at::kInt)).pin_memory();
-            reusable_mask_words_  = words;
-        } else {
-            reusable_bitmask_cpu_.fill_(-1);
-        }
-        return reusable_bitmask_cpu_.narrow(1, 0, words);
+        // A state owns an immutable snapshot: the next matcher update may
+        // build another mask while this one is still being uploaded. PyTorch's
+        // pinned allocator retains the allocation until the async copy ends.
+        return torch::full({1, words}, -1, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
     }
 
     ErrorInfo applyState(const torch::Tensor& logits, const DeviceMaskState& state, int64_t eos_token_id) {
@@ -258,14 +255,10 @@ private:
             auto mask = state.packed_allow_mask_cpu;
 #if USING_CUDA
             if (logits.is_cuda()) {
-                const int64_t words = state.packed_allow_mask_cpu.size(1);
-                if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.device() != logits.device()
-                    || reusable_bitmask_gpu_.size(1) < words) {
-                    reusable_bitmask_gpu_ =
-                        torch::empty({1, words}, torch::TensorOptions().dtype(torch::kInt32).device(logits.device()));
-                }
-                mask = reusable_bitmask_gpu_.narrow(1, 0, words);
-                mask.copy_(state.packed_allow_mask_cpu);
+                // Keep both upload and mask application on the caller's
+                // stream. A fresh device allocation also makes two callers
+                // on different streams independent after releasing the mutex.
+                mask = state.packed_allow_mask_cpu.to(logits.device(), /*non_blocking=*/true);
             }
 #endif
             runtimeApplyPackedMaskLogits(logits, mask, mask_vocab_size);
@@ -291,9 +284,6 @@ private:
     }
 
     DeviceMaskState device_mask_state_{};
-    torch::Tensor   reusable_bitmask_cpu_;
-    torch::Tensor   reusable_bitmask_gpu_;
-    int32_t         reusable_mask_words_ = 0;
 };
 
 GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):

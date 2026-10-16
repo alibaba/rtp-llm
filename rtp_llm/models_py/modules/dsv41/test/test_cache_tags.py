@@ -68,6 +68,33 @@ class CacheTagsTest(unittest.TestCase):
         self.assertEqual(CACHE.swa_region_for_layer(cache, 0), "swa_kv")
         self.assertEqual(CACHE.swa_region_for_layer(cache, 1), "decoder_swa_kv")
 
+    def test_host_table_lookup_keeps_exact_group_and_never_materializes_a_copy(self):
+        cache = SimpleNamespace(group_tags=["swa_kv", "decoder_swa_kv"])
+        swa = torch.tensor([[1, 3]], dtype=torch.int32)
+        draft = torch.tensor([[7, 9]], dtype=torch.int32)
+        inputs = {
+            "swa_kv": SimpleNamespace(kv_cache_block_id=swa),
+            "decoder_swa_kv": SimpleNamespace(kv_cache_block_id=draft),
+        }
+        self.assertIs(CACHE.host_block_table_for_tag(cache, inputs, "swa_kv"), swa)
+        self.assertIs(
+            CACHE.host_block_table_for_tag(cache, inputs, "decoder_swa_kv"), draft
+        )
+        self.assertIsNone(CACHE.host_block_table_for_tag(cache, inputs, "missing"))
+        inputs["decoder_swa_kv"].kv_cache_block_id = object()
+        self.assertIsNone(
+            CACHE.host_block_table_for_tag(cache, inputs, "decoder_swa_kv")
+        )
+
+    def test_tensor_math_uses_device_mirror_without_losing_host_fallback(self):
+        host = torch.tensor([3, 7], dtype=torch.int32)
+        device = host.clone()
+        inputs = SimpleNamespace(input_lengths=host, input_lengths_device=device)
+        self.assertIs(CACHE.device_attention_metadata(inputs, "input_lengths"), device)
+        inputs.input_lengths_device = torch.empty(0, dtype=torch.int32)
+        self.assertIs(CACHE.device_attention_metadata(inputs, "input_lengths"), host)
+        self.assertIsNone(CACHE.device_attention_metadata(inputs, "prefix_lengths"))
+
     def test_bounded_swa_routing_is_layer_specific(self):
         def get(layer, tag):
             if (layer < 21) != (tag == "swa_kv"):

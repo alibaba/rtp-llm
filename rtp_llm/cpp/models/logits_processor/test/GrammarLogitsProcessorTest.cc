@@ -15,6 +15,13 @@
 #include <vector>
 
 #include <xgrammar/tokenizer_info.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <future>
+#include <thread>
+#endif
 
 namespace rtp_llm {
 
@@ -175,6 +182,51 @@ TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) 
     ASSERT_TRUE(error.has_value());
     EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
 }
+
+#if USING_CUDA
+TEST(GrammarLogitsProcessorTest, PendingMaskUploadSurvivesGrammarAdvance) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto proc    = makeProcessor(backend, "ab");
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto first   = torch::zeros({1, 128}, options);
+    auto second  = torch::zeros({1, 128}, options);
+    // CUDA lazy-loads packed_mask_logits on its first launch. Load it before
+    // blocking the stream, otherwise module initialization waits for the host
+    // callback and measures cold-start setup instead of async mask lifetime.
+    ASSERT_FALSE(proc->process(makeSamplerInputs(first), 0, 1).has_value());
+    first.zero_();
+    ASSERT_EQ(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()), cudaSuccess);
+    std::promise<void> release;
+    auto               ready = release.get_future().share();
+    ASSERT_EQ(cudaLaunchHostFunc(
+                  at::cuda::getCurrentCUDAStream().stream(),
+                  [](void* data) { static_cast<std::shared_future<void>*>(data)->wait(); },
+                  &ready),
+              cudaSuccess);
+    std::thread releaser([&release] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        release.set_value();
+    });
+    const auto  start        = std::chrono::steady_clock::now();
+    const auto  first_error  = proc->process(makeSamplerInputs(first), 0, 1);
+    const auto  update_error = proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1);
+    const auto  second_error = proc->process(makeSamplerInputs(second), 0, 1);
+    const auto  elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    releaser.join();
+    EXPECT_LT(elapsed, 250) << "grammar mask upload must not wait for preceding GPU work";
+    EXPECT_FALSE(first_error.has_value());
+    EXPECT_FALSE(update_error.has_value());
+    EXPECT_FALSE(second_error.has_value());
+    auto first_values  = logitsVec(first);
+    auto second_values = logitsVec(second);
+    expectTokenAllowed(first_values, kA);
+    expectTokenMasked(first_values, kB);
+    expectTokenMasked(second_values, kA);
+    expectTokenAllowed(second_values, kB);
+}
+#endif
 
 TEST(GrammarLogitsProcessorTest, ProcessAppliesPackedMaskOnGpuAcrossLogitDtypes) {
     auto backend = makeBackend();
@@ -369,8 +421,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto proc = makeProcessorFromKey(backend, {"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}
