@@ -104,6 +104,7 @@ test_suite(
     name = "maga_model_smoke_light",
     tests = [
         ":smoke_h20_dense",
+        ":smoke_h20_diffusion_gemma",
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
         ":smoke_sm120_basic",
