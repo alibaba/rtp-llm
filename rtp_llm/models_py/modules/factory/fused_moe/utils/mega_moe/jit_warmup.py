@@ -11,13 +11,47 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def mega_moe_jit_warmup_enabled() -> bool:
     return model_warm_up_enabled()
+
+
+def make_moe_warmup_expert_ids(config, device):
+    import torch
+
+    if config.maxpander_config.enabled:
+        local_experts = int(config.n_routed_experts) // int(config.ep_size)
+        expert_start = int(config.ep_rank) * local_experts
+    else:
+        expert_start = int(config.local_expert_start)
+        local_experts = int(config.local_expert_end) - expert_start
+    return expert_start + torch.arange(
+        int(config.n_activated_experts), dtype=torch.long, device=device
+    ) % max(local_experts, 1)
+
+
+def warmup_moe_executor(executor, device):
+    import torch
+    import torch.distributed as dist
+
+    distributed = dist.is_available() and dist.is_initialized()
+    if distributed:
+        dist.barrier()
+    config = executor.cfg
+    inputs = torch.zeros((1, int(config.dim)), dtype=torch.bfloat16, device=device)
+    weights = torch.zeros(
+        (1, int(config.n_activated_experts)), dtype=torch.float32, device=device
+    )
+    weights[:, 0] = 1.0
+    indices = make_moe_warmup_expert_ids(config, device).unsqueeze(0).contiguous()
+    executor(inputs, weights, indices)
+    torch.cuda.synchronize()
+    if distributed:
+        dist.barrier()
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -113,6 +147,7 @@ def generate_mega_moe_jit_token_counts(
     num_sms: int,
     max_tokens_per_rank: int,
     include_cap: bool = False,
+    block_m_resolver: Callable[[int], int] | None = None,
 ) -> list[int]:
     """Return one token count per reachable MegaMoE heuristic bucket.
 
@@ -129,10 +164,10 @@ def generate_mega_moe_jit_token_counts(
     if max_tokens == 0:
         return []
 
-    reps: list[int] = []
-    last_signature: tuple[int, int, int] | None = None
-    for num_tokens in range(1, max_tokens + 1):
-        signature = mega_moe_config_signature(
+    def signature_for(num_tokens):
+        if block_m_resolver is not None:
+            return (int(block_m_resolver(num_tokens)),)
+        return mega_moe_config_signature(
             num_ranks=num_ranks,
             num_experts=num_experts,
             num_experts_per_rank=num_experts_per_rank,
@@ -141,29 +176,18 @@ def generate_mega_moe_jit_token_counts(
             intermediate_hidden=intermediate_hidden,
             num_sms=num_sms,
         )
+
+    reps: list[int] = []
+    last_signature: tuple[int, ...] | None = None
+    for num_tokens in range(1, max_tokens + 1):
+        signature = signature_for(num_tokens)
         if signature != last_signature:
             reps.append(num_tokens)
             last_signature = signature
 
     if reps and include_cap:
-        cap_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=max_tokens,
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
-        last_rep_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=reps[-1],
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
+        cap_signature = signature_for(max_tokens)
+        last_rep_signature = signature_for(reps[-1])
         if cap_signature == last_rep_signature:
             reps[-1] = max_tokens
     return reps

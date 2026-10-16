@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.maxpander_config import MaxPanderConfig, MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
     _has_fp8_fp4_grouped_kernel,
 )
@@ -29,6 +30,8 @@ def _config(
     strategy="auto",
     world_size=None,
     has_shared_expert_gate=False,
+    maxpander_config=MaxPanderRuntimeConfig(),
+    physical_expert_num=16,
 ):
     return Fp8Fp4MoeRuntimeConfig(
         layer_id=0,
@@ -44,6 +47,8 @@ def _config(
         max_tokens_per_rank=128,
         moe_strategy=strategy,
         has_shared_expert_gate=has_shared_expert_gate,
+        maxpander_config=maxpander_config,
+        physical_expert_num=physical_expert_num,
     )
 
 
@@ -57,6 +62,30 @@ def _registry():
 
 
 class Fp8Fp4StrategySelectionTest(unittest.TestCase):
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+        return_value=True,
+    )
+    def test_maxpander_selection_uses_only_effective_runtime_config(self, _):
+        for requested in (False, True):
+            for role in ("PREFILL", "DECODE", "FRONTEND"):
+                with self.subTest(requested=requested, role=role):
+                    runtime = MaxPanderConfig(enable=requested).resolve(role)
+                    config = _config(
+                        ep_size=2,
+                        strategy="mega_moe",
+                        physical_expert_num=20,
+                        maxpander_config=runtime,
+                    )
+                    self.assertFalse(hasattr(config, "maxpander_enabled"))
+                    if runtime.enabled:
+                        self.assertIsInstance(
+                            _registry().get_strategy(config), CudaMegaMoeStrategy
+                        )
+                    else:
+                        with self.assertRaises(ValueError):
+                            _registry().get_strategy(config)
+
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4._has_fp8_fp4_grouped_kernel",
         return_value=True,
@@ -216,6 +245,47 @@ class Fp8Fp4StrategySelectionTest(unittest.TestCase):
         # This flag makes the layer retain FP8 shared weights and construct
         # the existing shared-expert executor plus FP32 combine epilogue.
         self.assertFalse(executor.includes_shared_expert)
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+        return_value=True,
+    )
+    def test_maxpander_preserves_explicit_mega_se_fallback(self, _):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
+        )
+
+        for enabled in (False, True):
+            for se_available in (False, True):
+                for redundant in (0, 4, 16) if enabled else (0,):
+                    with self.subTest(
+                        enabled=enabled,
+                        se_available=se_available,
+                        redundant=redundant,
+                    ), patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+                        return_value=se_available,
+                    ):
+                        config = _config(
+                            ep_size=2,
+                            n_shared_experts=2,
+                            strategy="mega_moe_se",
+                            physical_expert_num=16 + redundant,
+                            maxpander_config=MaxPanderConfig(enable=enabled).resolve(
+                                "PREFILL"
+                            ),
+                        )
+                        strategy = _registry().get_strategy(config)
+                        self.assertIsInstance(strategy, CudaMegaMoeSEStrategy)
+                        executor = strategy.get_attributes().get_executor_class()
+                        self.assertIs(
+                            executor,
+                            MegaMoeSEExecutor if se_available else MegaMoeExecutor,
+                        )
+                        self.assertEqual(executor.includes_shared_expert, se_available)
 
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",

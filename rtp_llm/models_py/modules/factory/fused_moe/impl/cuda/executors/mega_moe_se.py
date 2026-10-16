@@ -247,6 +247,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             num_sms,
             _SHARED_RECIPE,
             tuple(token_counts),
+            self.supports_gate_pack,
+            cfg.maxpander_config if cfg.maxpander_config.enabled else None,
         )
         if warmup_key in _MEGA_MOE_SE_JIT_WARMED_KEYS:
             return
@@ -331,9 +333,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._validate_capacity(tokens)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
     def forward_gate_pack(
         self,
@@ -378,8 +378,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             tokens,
             block_m,
         )
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        y = self._execute_packed_inputs(tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
 

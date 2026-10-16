@@ -19,6 +19,11 @@ from typing import Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
+    make_moe_warmup_expert_ids,
+)
+from rtp_llm.models_py.modules.maxpander import PackedMoeExecutorMixin
+
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
@@ -192,7 +197,7 @@ def _log_pre_kernel_barrier(
 
 
 @register_strategy
-class MegaMoEStrategy(RoutedExpertsStrategy):
+class MegaMoEStrategy(PackedMoeExecutorMixin, RoutedExpertsStrategy):
     name = "mega"
 
     @classmethod
@@ -229,6 +234,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     def setup_runtime(self) -> None:
         """Allocate shared dispatch/output workspaces and run optional JIT warmup."""
+        import deep_gemm
         import torch.distributed as dist
 
         cfg = self.cfg
@@ -256,6 +262,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         self._mega_y = None
         self._ensure_mega_buffers()
         self._input_packer = get_mega_moe_input_packer()
+        self.setup_mega_moe_tile_policy(deep_gemm)
         self._maybe_warmup_jit_once()
 
     def _apply_routed_weight_transform(self, layer_weights: Dict) -> None:
@@ -339,7 +346,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             return clamp_token_counts(override, max_tokens_per_rank)
         get_block_m = getattr(deep_gemm, "get_block_m_for_mega_moe", None)
         block_m_resolver = None
-        if callable(get_block_m):
+        tile_policy = getattr(self, "_maxpander_tile_policy", None)
+        if tile_policy is not None:
+            block_m_resolver = tile_policy.block_m
+        elif callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
                 cfg.physical_expert_num,
@@ -388,6 +398,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             cfg.swiglu_limit,
             num_sms,
             tuple(token_counts),
+            cfg.maxpander_config if cfg.maxpander_config.enabled else None,
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
             (
                 float(getattr(self, "_gate_pack_route_scale", 1.0))
@@ -440,9 +451,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         weights = torch.zeros(
             (max_tokens, cfg.n_activated_experts), dtype=torch.float32, device=device
         )
-        local_expert_ids = cfg.local_expert_start + torch.arange(
-            cfg.n_activated_experts, dtype=torch.long, device=device
-        ) % max(cfg.n_local_experts, 1)
+        local_expert_ids = make_moe_warmup_expert_ids(cfg, device)
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
         for token_count in token_counts:
             dist.barrier()
@@ -504,8 +513,35 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             torch.cuda.synchronize(device)
 
     def can_use_gate_pack_static(self, gate) -> bool:
-        # Keep logical routing explicit while adapting MaxPander to DSV4.1.
-        return False
+        return (
+            os.environ.get("DSV4_GATE_FUSED", "1") != "0"
+            and os.environ.get("DSV4_GATE_FP32", "0") != "1"
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            and self.cfg.dim % 128 == 0
+            and _gate_pack_input_packer_env_allows()
+            and _get_gate_pack_kernels() is not None
+        )
+
+    def _launch(self, output, tokens, device):
+        import deep_gemm
+
+        self._maybe_pre_kernel_barrier(tokens)
+        sync_cuda_graph_warmup_ranks(
+            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", device
+        )
+        self._select_mega_moe_kernel(deep_gemm, tokens)(
+            output,
+            (self._mega_l1_w, self._mega_l1_sf),
+            (self._mega_l2_w, self._mega_l2_sf),
+            self._mega_buf,
+            recipe=(1, 1, FP4_BLOCK),
+            activation="swiglu",
+            activation_clamp=(
+                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
+            ),
+            fast_math=True,
+        )
 
     def forward(
         self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
@@ -516,31 +552,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         Returns the combined routed-expert output in BF16.  The MoE epilogue
         owns the final routed+shared cast.
         """
-        import deep_gemm
-
         if self._mega_buf is None or self._mega_y is None:
             self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         self._input_packer.pack(x, weights, indices, buf, T)
-        self._maybe_pre_kernel_barrier(T)
-        sync_cuda_graph_warmup_ranks(
-            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device
-        )
-        y = self._mega_y[:T]
-        deep_gemm.fp8_fp4_mega_moe(
-            y,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
-            fast_math=True,
-        )
-        return y
+        return self._execute_packed_inputs(T, x.device)
 
     def forward_with_gate_pack(
         self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
@@ -548,8 +565,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         """Run MegaMoE with router gate + input pack fused together."""
         if not self.can_use_gate_pack_static(gate):
             raise RuntimeError(
-                "DSV4.1 MegaMoE fused gate-pack is disabled for MaxPander "
-                "adaptation; use explicit gate/Top-K and forward"
+                "DSV4.1 MegaMoE fused gate-pack is unavailable for this gate or packer"
             )
         kernels = _get_gate_pack_kernels()
         fused_mega_moe_gate_pack_nonhash, fused_mega_moe_gate_pack_hash, _ = kernels
@@ -557,9 +573,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
-        y = self._mega_y[:T]
-        import deep_gemm
-
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_gate_pack"):
@@ -588,23 +601,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._maybe_pre_kernel_barrier(T)
-        sync_cuda_graph_warmup_ranks(
-            f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device
-        )
-        deep_gemm.fp8_fp4_mega_moe(
-            y,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
-            fast_math=True,
-        )
-        return y
+        return self._execute_packed_inputs(T, x.device)
 
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
         """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel.

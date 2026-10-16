@@ -8,6 +8,19 @@ exports_files([
 ])
 
 py_library(
+    name = "prefill_bench_lib",
+    srcs = ["prefill_bench.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "test_prefill_bench",
+    srcs = ["test_prefill_bench.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":prefill_bench_lib"],
+)
+
+py_library(
     name = "perf_test_lib",
     srcs = [
         "batch_decode_test.py",

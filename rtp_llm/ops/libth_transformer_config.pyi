@@ -1319,6 +1319,7 @@ class PDSepConfig:
     decode_retry_times: int
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
+    maxpander_enabled: bool
     prefill_max_wait_timeout_ms: int
     prefill_prepare_resource_pool_size: int
     prefill_retry_timeout_ms: int

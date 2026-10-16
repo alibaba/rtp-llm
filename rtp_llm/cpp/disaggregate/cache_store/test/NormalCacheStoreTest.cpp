@@ -77,6 +77,27 @@ void NormalCacheStoreTest::verifyBlock(
     device_util_->freeCPU(buf);
 }
 
+TEST_F(NormalCacheStoreTest, testStopReleasesNetworkWhileStoreIsStillReferenced) {
+    ASSERT_TRUE(initCacheStores());
+    auto                    retained_store = cache_store1_;
+    std::weak_ptr<Messager> messager = cache_store1_->messager_;
+    ASSERT_FALSE(messager.expired());
+
+    cache_store1_->stop();
+    EXPECT_TRUE(messager.expired());
+    EXPECT_EQ(cache_store1_->thread_pool_, nullptr);
+    EXPECT_NE(cache_store1_->getMemoryUtil(), nullptr);
+    retained_store->stop();
+    retained_store->markRequestEnd("already-finished");
+
+    CacheStoreInitParams params;
+    params.listen_port = port1_;
+    params.memory_util = memory_util_;
+    auto replacement = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_NE(replacement, nullptr);
+    replacement->stop();
+}
+
 TEST_F(NormalCacheStoreTest, testStore_Success) {
     ASSERT_TRUE(initCacheStores());
 

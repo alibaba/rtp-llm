@@ -60,6 +60,21 @@ py_test(
 )
 
 py_test(
+    name = "test_maxpander_packed_moe",
+    srcs = ["test_maxpander_packed_moe.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_maxpander_tile_native",
+    srcs = ["test_maxpander_tile_native.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+    tags = ["manual"],
+)
+
+py_test(
     name = "mega_moe_static_buf_test",
     srcs = ["mega_moe_static_buf_test.py"],
     deps = ["//rtp_llm:testlib"],

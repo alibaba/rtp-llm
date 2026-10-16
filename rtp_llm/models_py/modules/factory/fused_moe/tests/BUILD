@@ -1,10 +1,42 @@
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 
+py_library(
+    name = "maxpander_reference",
+    testonly = True,
+    srcs = ["maxpander_reference.py"],
+    deps = ["//rtp_llm/models_py:maxpander"],
+)
+
 py_test(
     name = "test_maxpander",
     srcs = ["test_maxpander.py"],
-    deps = ["//rtp_llm/models_py:maxpander"],
+    deps = [
+        ":maxpander_reference",
+        "//rtp_llm/models_py:maxpander",
+    ],
     tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+py_test(
+    name = "test_maxpander_launch",
+    srcs = ["test_maxpander_launch.py"],
+    deps = [
+        ":maxpander_reference",
+        "//rtp_llm/models_py:maxpander",
+    ],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+py_test(
+    name = "test_maxpander_perf",
+    srcs = ["test_maxpander_perf.py"],
+    deps = [
+        ":maxpander_reference",
+        "//rtp_llm/models_py:maxpander",
+    ],
+    tags = ["manual", "L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
 )
 

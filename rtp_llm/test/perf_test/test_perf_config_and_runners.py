@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataclass import PerfTestConfig, TestResultMetrics
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
     auto_generate_bs_list as _auto_generate_bs_list,
@@ -123,7 +123,7 @@ class TestPrepareConfig(unittest.TestCase):
 # _run_prefill
 # ---------------------------------------------------------------------------
 class TestRunPrefill(unittest.TestCase):
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner", autospec=True)
     def test_grid_prefill(self, MockGridRunner):
         mock_runner = MagicMock()
         MockGridRunner.return_value = mock_runner
@@ -150,7 +150,7 @@ class TestRunPrefill(unittest.TestCase):
         )
         mock_runner.run.assert_called_once()
 
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner", autospec=True)
     def test_distribution_prefill_skipped(self, MockGridRunner):
         """Distribution mode: prefill is skipped (empty input_len_list)."""
         config = PerfTestConfig(
@@ -193,7 +193,7 @@ class TestRunDecode(unittest.TestCase):
         )
 
     # --- Mode 1: decode × grid ---
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner", autospec=True)
     def test_decode_grid(self, MockGridRunner):
         mock_runner = MagicMock()
         MockGridRunner.return_value = mock_runner
@@ -219,7 +219,7 @@ class TestRunDecode(unittest.TestCase):
         self.assertEqual(c2[0][2], [1, 8])
         self.assertEqual(c2[0][3], [256])
 
-    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner", autospec=True)
     def test_decode_grid_kv_skip(self, MockGridRunner):
         """All BS filtered out -> input_len is skipped entirely."""
         args = _make_args(target_tpot=0)
@@ -238,7 +238,7 @@ class TestRunDecode(unittest.TestCase):
         MockGridRunner.assert_not_called()
 
     # --- Mode 2: decode × distribution ---
-    @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner")
+    @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner", autospec=True)
     def test_decode_distribution(self, MockDistRunner):
         mock_runner = MagicMock()
         MockDistRunner.return_value = mock_runner
@@ -307,6 +307,110 @@ class TestRunDecode(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+class TestRunnerLogPath(unittest.TestCase):
+    def _assert_log_forwarding(self, invoke, runner_module, table_function):
+        for log_path in ("", "/tmp/perf_server.log"):
+            with self.subTest(log_path=log_path):
+                implementations = [
+                    MagicMock(log_flush_offset=offset) for offset in (0, 128, 256)
+                ]
+                for implementation in implementations:
+                    implementation.run.return_value = TestResultMetrics(
+                        total_requests=1, success_requests=1, fail_requests=0
+                    )
+                runner_kwargs = dict(
+                    dump_json_path="/tmp",
+                    decode_test_length=1,
+                    generate_config={"top_k": 1},
+                    num_measures=5,
+                )
+                if log_path:
+                    runner_kwargs["log_path"] = log_path
+                module_path = f"rtp_llm.test.perf_test.{runner_module}"
+                with patch(
+                    f"{module_path}.BatchPerfImpl",
+                    autospec=True,
+                    side_effect=implementations,
+                ) as mock_batch, patch(f"{module_path}.{table_function}"):
+                    invoke(runner_kwargs)
+
+                self.assertEqual(mock_batch.call_count, 3)
+                for constructor_call, offset in zip(
+                    mock_batch.call_args_list, (0, 0, 128)
+                ):
+                    self.assertEqual(constructor_call.kwargs["log_path"], log_path)
+                    self.assertEqual(
+                        constructor_call.kwargs["log_flush_offset"], offset
+                    )
+                implementations[0].run.assert_called_once_with()
+                for implementation in implementations[1:]:
+                    implementation.run.assert_called_once_with(num_measures=5)
+
+    def test_prefill_grid_log_path_and_flush_offset(self):
+        config = PerfTestConfig(
+            is_distribution=False,
+            all_seq_lens=[128, 256],
+            batch_size_list=[1],
+            input_len_list=[128, 256],
+            max_seq_len=257,
+            max_concurrency=1,
+        )
+        self._assert_log_forwarding(
+            lambda runner_kwargs: _run_prefill(
+                8000, 1, config, {128: "q128", 256: "q256"}, **runner_kwargs
+            ),
+            "grid_runner",
+            "create_metrics_table",
+        )
+
+    def test_decode_grid_log_path_and_flush_offset(self):
+        config = PerfTestConfig(
+            is_distribution=False,
+            all_seq_lens=[128],
+            batch_size_list=[1, 2],
+            input_len_list=[128],
+            max_seq_len=129,
+            max_concurrency=2,
+        )
+        self._assert_log_forwarding(
+            lambda runner_kwargs: _run_decode(
+                8000,
+                1,
+                _make_args(),
+                config,
+                {128: "q128"},
+                {},
+                **runner_kwargs,
+            ),
+            "grid_runner",
+            "create_metrics_table",
+        )
+
+    def test_distribution_log_path_and_flush_offset(self):
+        config = PerfTestConfig(
+            is_distribution=True,
+            all_seq_lens=[128, 256],
+            batch_size_list=[],
+            input_len_list=[],
+            max_seq_len=257,
+            max_concurrency=2,
+            test_config={"batch_seq_len_map": {"1": [128], "2": [128, 256]}},
+        )
+        self._assert_log_forwarding(
+            lambda runner_kwargs: _run_decode(
+                8000,
+                1,
+                _make_args(),
+                config,
+                {128: "q128", 256: "q256"},
+                {},
+                **runner_kwargs,
+            ),
+            "distribution_runner",
+            "create_distribution_metrics_table",
+        )
+
+
 class TestHelpers(unittest.TestCase):
     def test_auto_generate_bs_list(self):
         bs = _auto_generate_bs_list(128)

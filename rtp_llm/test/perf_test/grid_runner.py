@@ -29,6 +29,7 @@ class GridRunner:
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        log_path: str = "",
     ):
         self._port = port
         self._dp_size = dp_size
@@ -41,6 +42,8 @@ class GridRunner:
         self._tp_size = tp_size
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
+        self._log_path = log_path
+        self._log_flush_offset = 0
         self._title = "Decode Result" if is_decode else "Prefill Result"
 
     def warmup(self) -> None:
@@ -63,6 +66,8 @@ class GridRunner:
             warmup_runs=0,
             measure_runs=warmup_runs,
             profile_runs=0,
+            log_path=self._log_path,
+            log_flush_offset=self._log_flush_offset,
         ).run()
 
     def run(self) -> List[MetricState]:
@@ -85,7 +90,7 @@ class GridRunner:
 
                     phase = "decode" if self._is_decode else "prefill"
                     trace_name = f"bs{batch_size}_seq{input_len}_{phase}"
-                    metric = BatchPerfImpl(
+                    impl = BatchPerfImpl(
                         self._port,
                         self._dp_size,
                         batch_size * self._dp_size,
@@ -96,7 +101,11 @@ class GridRunner:
                         True,
                         self._generate_config,
                         trace_name,
-                    ).run(num_measures=self._num_measures)
+                        log_path=self._log_path,
+                        log_flush_offset=self._log_flush_offset,
+                    )
+                    metric = impl.run(num_measures=self._num_measures)
+                    self._log_flush_offset = impl.log_flush_offset
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 
                     pbar.update(1)

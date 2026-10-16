@@ -37,12 +37,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
     clamp_token_counts,
     format_token_counts,
     generate_mega_moe_jit_token_counts,
+    make_moe_warmup_expert_ids,
     mega_moe_jit_warmup_enabled,
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.models_py.modules.maxpander import PackedMoeExecutorMixin
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -157,16 +159,19 @@ def _get_validated_world_ep_group(cfg, dist):
     return group
 
 
-class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+class MegaMoeExecutor(PackedMoeExecutorMixin, Fp8Fp4ExecutorBase):
     execute_empty_inputs = True
 
     @property
     def supports_gate_pack(self) -> bool:
-        # MaxPander needs explicit logical Top-K before physical replica
-        # selection. Keep gate-pack (including its JIT warmup) disabled until
-        # that fast path implements the same remapping contract as forward().
-        # This does not disable the fused input packer or MegaMoE itself.
-        return False
+        pack_impl = (
+            os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+        )
+        return (
+            self._input_packer.name == "fused"
+            and pack_impl == "optimized"
+            and 1 <= self.cfg.n_activated_experts <= 32
+        )
 
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
@@ -274,6 +279,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             device,
         )
         self._input_packer = get_mega_moe_input_packer()
+        self.setup_mega_moe_tile_policy(deep_gemm)
         self._maybe_warmup_jit_once()
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
@@ -286,6 +292,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        tile_policy = getattr(self, "_maxpander_tile_policy", None)
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.physical_expert_num,
@@ -295,6 +302,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
+            block_m_resolver=tile_policy.block_m if tile_policy is not None else None,
         )
 
     def _maybe_warmup_jit_once(self) -> None:
@@ -328,6 +336,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_sms,
             tuple(token_counts),
             self.supports_gate_pack,
+            cfg.maxpander_config if cfg.maxpander_config.enabled else None,
         )
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
@@ -380,9 +389,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             dtype=torch.float32,
             device=device,
         )
-        local_expert_ids = cfg.local_expert_start + torch.arange(
-            cfg.n_activated_experts, dtype=torch.long, device=device
-        ) % max(cfg.n_local_experts, 1)
+        local_expert_ids = make_moe_warmup_expert_ids(cfg, device)
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
         scores = torch.zeros(
             (max_tokens, cfg.n_routed_experts),
@@ -454,7 +461,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        self._select_mega_moe_kernel(deep_gemm, tokens)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
@@ -505,9 +512,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # times, and the rank still participates as expert host.  No control
         # flow depending on a GPU-side scalar -> CUDA-graph-capture safe.
         self._input_packer.pack(x, weights, indices, buf, T)
-        y = self._mega_y[:T]
-        self._launch(y, T, x.device)
-        return y
+        return self._execute_packed_inputs(T, x.device)
 
     def forward_gate_pack(
         self,
@@ -518,8 +523,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         if not self.supports_gate_pack:
             raise RuntimeError(
-                "MegaMoE fused gate-pack is disabled for MaxPander adaptation; "
-                "use explicit gate/Top-K followed by the ordinary forward path"
+                "MegaMoE fused gate packing requires the optimized fused packer and topk<=32"
             )
         tokens = x.size(0)
         self._validate_capacity(tokens)
@@ -543,8 +547,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             input_ids=gate_payload.input_ids,
             tid2eid=gate_payload.tid2eid,
         )
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        y = self._execute_packed_inputs(tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
