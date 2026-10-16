@@ -83,6 +83,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
     @Override
     public WorkerCacheUpdateResult updateEngineBlockCache(
             WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
+        requireCacheMutationLock(workerStatus);
         long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         String engineIpPort = workerStatus.getIpPort();
         String role = workerStatus.getRole().getCode();
@@ -126,8 +127,16 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
     @Override
     public void removeEngineBlockCache(
-            String engineIpPort, EndpointTrace trace) {
-        kvCacheManager.removeEngineCache(engineIpPort, trace);
+            WorkerStatus workerStatus, EndpointTrace trace) {
+        requireCacheMutationLock(workerStatus);
+        kvCacheManager.removeEngineCache(workerStatus.getIpPort(), trace);
+    }
+
+    private static void requireCacheMutationLock(WorkerStatus workerStatus) {
+        java.util.Objects.requireNonNull(workerStatus, "workerStatus");
+        if (!workerStatus.cacheMutationLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException("Cache mutation requires the owning generation's cacheMutationLock");
+        }
     }
 
     /**
