@@ -136,6 +136,27 @@ def resolve_cp_metadata_warmup_max_batch_size(
     return max(int(max_context_batch_size), int(max_generate_batch_size), 1)
 
 
+def _warm_cp_positions_jit(lengths, prefixes, total_tokens):
+    from rtp_llm.models_py.modules.dsv41._cp_metadata_triton import (
+        try_build_cp_full_prefill_positions,
+    )
+
+    # Engine metadata is int32; Python-created metadata can be int64. Warm
+    # each pointer dtype independently for every batch bucket, including B1.
+    typed_lengths = tuple(lengths.to(dtype) for dtype in (torch.int32, torch.int64))
+    typed_prefixes = tuple(prefixes.to(dtype) for dtype in (torch.int32, torch.int64))
+    for typed_length in typed_lengths:
+        for typed_prefix in typed_prefixes:
+            if (
+                try_build_cp_full_prefill_positions(
+                    typed_length, typed_prefix, total_tokens=total_tokens
+                )
+                is None
+            ):
+                return False
+    return True
+
+
 @torch.inference_mode()
 def warmup_cp_metadata_jit(
     *,
@@ -166,7 +187,6 @@ def warmup_cp_metadata_jit(
     from rtp_llm.models_py.modules.dsv41._cp_metadata_triton import (
         cp_metadata_fusion_supported,
         try_build_cp_forward_metadata,
-        try_build_cp_full_prefill_positions,
         try_build_cp_restore_indices,
     )
     from rtp_llm.models_py.modules.dsv41.cp import cp_padded_local_kv_len
@@ -219,7 +239,7 @@ def warmup_cp_metadata_jit(
             cp_padded_local_kv_len(length, int(cp_size), 4) for length in lengths_host
         )
         restore = None if restore_enabled else ()
-        positions = () if batch_size == 1 else None
+        positions = False
         forward_metadata = None
         pool_restore = None if pool_restore_enabled else True
         pool_direct_gather = None if pool_direct_gather_enabled else True
@@ -317,10 +337,7 @@ def warmup_cp_metadata_jit(
                     total_tokens=total_tokens,
                     total_local_kv=total_local,
                 )
-            if batch_size > 1:
-                positions = try_build_cp_full_prefill_positions(
-                    lengths, prefixes, total_tokens=total_tokens
-                )
+            positions = _warm_cp_positions_jit(lengths, prefixes, total_tokens)
             forward_metadata = try_build_cp_forward_metadata(
                 forward_lengths,
                 chunks,
@@ -395,7 +412,7 @@ def warmup_cp_metadata_jit(
         missing = []
         if restore is None:
             missing.append("restore")
-        if positions is None:
+        if positions is not True:
             missing.append("positions")
         if forward_metadata is None:
             missing.append("forward_metadata")

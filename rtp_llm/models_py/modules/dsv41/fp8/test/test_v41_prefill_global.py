@@ -32,6 +32,7 @@ def _case(
     norm_dtype=torch.bfloat16,
     tile_offset=0,
     batch=1,
+    boundary_offset=0,
     seed=123,
     device="cuda",
 ):
@@ -92,7 +93,9 @@ def _case(
         starts=device_tensor(starts_cpu),
         previous=previous,
         carry=carry,
-        boundary_indices=device_tensor(boundaries),
+        boundary_indices=device_tensor([0] * boundary_offset + boundaries)[
+            boundary_offset:
+        ],
         freqs=freqs,
         norm=norm,
         index_norm=index_norm,
@@ -256,6 +259,19 @@ class PrefillGlobalCudaTest(unittest.TestCase):
             for ratio in (1, 2):
                 with self.subTest(rows=rows, ratio=ratio):
                     self._compare(rows, ratio, strided=True)
+
+    def test_ragged_unaligned_boundary_views(self):
+        for rows in (7, 29, 97):
+            for ratio in (1, 2):
+                with self.subTest(rows=rows, ratio=ratio):
+                    self._compare(
+                        rows,
+                        ratio,
+                        batch=3,
+                        strided=True,
+                        tile_offset=17,
+                        boundary_offset=1,
+                    )
 
     def test_large_projection_tiles(self):
         for rows, ratio in ((1024, 2), (32768, 2), (32768, 1)):
