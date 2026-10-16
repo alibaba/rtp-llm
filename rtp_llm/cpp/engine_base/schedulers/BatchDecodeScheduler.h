@@ -208,8 +208,15 @@ public:
     void initRunningStreams() {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            (*it)->setPerfTest(true);
             // reset start time，to get more accurate avg token time
+            // (setPerfTest(true) previously lived here: the flag gates
+            // GenerateStream::specUpdate's new_tokens.zero_(), so forcing it
+            // on every batch-scheduler stream zeroed all MTP/eagle accepted
+            // tokens — every speculative request under the batch scheduler
+            // returned token id 0 ('?') from the first step. The flag's only
+            // other gate is a beam-search restriction; the timing purpose is
+            // served by resetBeginTime above, and the intended perf-test
+            // channel is the PERF_TEST env at stream construction.)
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
             if (dp_rank_ != 0) {
