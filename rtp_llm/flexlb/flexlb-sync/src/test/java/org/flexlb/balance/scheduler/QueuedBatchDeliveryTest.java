@@ -44,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -305,21 +306,19 @@ class QueuedBatchDeliveryTest {
                 registry, requestContext, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);
         var cleanupProof =
-                new java.util.concurrent.CompletableFuture<
-                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
+                new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
         org.mockito.Mockito.when(
-                        SchedulerTestSupport.cancelChannel(registry)
-                                .cancel(
+                        SchedulerTestSupport.engineClient(registry)
+                                .cancelAsync(
                                         any(),
-                                        org.mockito.ArgumentMatchers.anyLong(),
+                                        anyInt(),
                                         any(),
                                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(cleanupProof);
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, handoff + TIMEOUT_MS);
         assertOccupancy(1, 1);
-        cleanupProof.complete(
-                org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+        cleanupProof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         if (!ack) {
             reply.complete(ack(1L));
         }
@@ -343,10 +342,9 @@ class QueuedBatchDeliveryTest {
         RequestContext context = item.ctx();
         CountDownLatch rpcEntered = new CountDownLatch(1);
         CountDownLatch releaseRpc = new CountDownLatch(1);
-        var cleanupProof =
-                new CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
-        when(SchedulerTestSupport.cancelChannel(registry)
-                        .cancel(any(), anyLong(), any(), anyLong()))
+        var cleanupProof = new CompletableFuture<EngineGrpcClient.CancelReply>();
+        when(SchedulerTestSupport.engineClient(registry)
+                        .cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenReturn(cleanupProof);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(
@@ -380,8 +378,7 @@ class QueuedBatchDeliveryTest {
                                             item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
                                 })
                         .get(2, TimeUnit.SECONDS);
-                cleanupProof.complete(
-                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                cleanupProof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
                 SchedulerTestSupport.awaitRequestWork(registry.runtime);
                 assertOccupancy(1, 1); // sender has not yet returned, even with remote proof
             } finally {
@@ -422,7 +419,7 @@ class QueuedBatchDeliveryTest {
         verify(registry)
                 .onDeliveryEvidence(
                         org.mockito.ArgumentMatchers.isNull(),
-                        org.mockito.ArgumentMatchers.argThat(
+                        argThat(
                                 e ->
                                         e instanceof ContextResult.PreparationFailure failed
                                                 && failed.route() == item
@@ -600,7 +597,7 @@ class QueuedBatchDeliveryTest {
                 .when(registry)
                 .onDeliveryEvidence(
                         any(),
-                        org.mockito.ArgumentMatchers.argThat(
+                        argThat(
                                 e ->
                                         e instanceof ContextResult.TransportResult result
                                                 && result.delivery().item() == first));

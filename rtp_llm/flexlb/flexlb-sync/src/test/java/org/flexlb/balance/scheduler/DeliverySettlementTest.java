@@ -6,13 +6,14 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
@@ -56,7 +58,7 @@ class DeliverySettlementTest {
     private DeliverySettlementTestSupport ledger;
     private PrefillEndpoint prefill;
     private final java.util.Map<
-                    Long, java.util.concurrent.CompletableFuture<EngineCancelChannel.CancelAck>>
+                    Long, java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>>
             cancellations = new java.util.concurrent.ConcurrentHashMap<>();
 
     @BeforeEach
@@ -70,14 +72,14 @@ class DeliverySettlementTest {
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                registry.runtime, "cancelChannel", channel);
-        when(channel.cancel(any(), anyLong(), any(), anyLong()))
+                registry.runtime, "engineClient", channel);
+        when(channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenAnswer(
                         call ->
                                 cancellations.computeIfAbsent(
-                                        call.getArgument(1),
+                                        call.<CancelRequestPB>getArgument(2).getRequestId(),
                                         ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
@@ -145,7 +147,7 @@ class DeliverySettlementTest {
         reject(member);
         cancellations
                 .computeIfAbsent(2L, ignored -> new java.util.concurrent.CompletableFuture<>())
-                .complete(EngineCancelChannel.CancelAck.REQUEST_FENCED);
+                .complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
         assertEquals(1, decode.routingView().engineCapacityUsed());
         assertOccupancy(1, 1);
         assertFalse(
@@ -260,7 +262,7 @@ class DeliverySettlementTest {
                                                 ignored ->
                                                         new java.util.concurrent
                                                                 .CompletableFuture<>())
-                                        .complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                                        .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
                             });
             var finished =
                     threads.submit(
@@ -344,7 +346,7 @@ class DeliverySettlementTest {
                 .computeIfAbsent(
                         member.item().requestId(),
                         ignored -> new java.util.concurrent.CompletableFuture<>())
-                .complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         await(failedAttempts);
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
         assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -429,8 +431,12 @@ class DeliverySettlementTest {
                             .toCompletableFuture()
                             .isDone());
             cleaned(member);
-            verify(SchedulerTestSupport.cancelChannel(registry))
-                    .cancel(any(), eq(131L), eq(CancelReason.CLIENT_CANCELLED), eq(500L));
+            verify(SchedulerTestSupport.engineClient(registry))
+                    .cancelAsync(
+                            any(),
+                            anyInt(),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(131L)),
+                            eq(500L));
             verify(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
             assertFalse(
                     decode.isRetired(), "actual cleanup must finish before endpoint retirement");
@@ -640,7 +646,7 @@ class DeliverySettlementTest {
                     () -> cancellations.containsKey(member.item().requestId()));
             cancellations
                     .get(member.item().requestId())
-                    .complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                    .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertTrue(cleanupEntered.await(2, TimeUnit.SECONDS));
             assertTrue(registry.requests.isCurrent(member.requestContext()));
         } finally {
@@ -848,10 +854,10 @@ class DeliverySettlementTest {
 
     @ParameterizedTest
     @EnumSource(
-            value = EngineCancelChannel.CancelAck.class,
+            value = EngineGrpcClient.CancelReply.class,
             names = {"UNSUPPORTED", "FAILED"})
     void cancelledBatchSettlesFromWorkerTerminalsWithoutRemoteCleanupAck(
-            EngineCancelChannel.CancelAck ack) throws Exception {
+            EngineGrpcClient.CancelReply ack) throws Exception {
         Member member = dispatchedMember(120L);
         try {
             registry.onDeliveryEvidence(
@@ -925,7 +931,7 @@ class DeliverySettlementTest {
             cancellations
                     .computeIfAbsent(
                             123L, ignored -> new java.util.concurrent.CompletableFuture<>())
-                    .complete(EngineCancelChannel.CancelAck.UNSUPPORTED);
+                    .complete(EngineGrpcClient.CancelReply.UNSUPPORTED);
             for (int i = 0; i < order.length(); i++) {
                 switch (order.charAt(i)) {
                     case 'P' ->
@@ -1314,7 +1320,7 @@ class DeliverySettlementTest {
                 .computeIfAbsent(
                         member.item().requestId(),
                         ignored -> new java.util.concurrent.CompletableFuture<>())
-                .complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         registry.runtime
                 .signals()
                 .delivery(member.claim())

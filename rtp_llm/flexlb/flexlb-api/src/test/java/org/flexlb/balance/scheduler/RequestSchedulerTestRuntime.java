@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
+import static org.mockito.ArgumentMatchers.anyInt;
+
 /**
  * Test-only composition root for API integration fixtures.
  *
@@ -60,19 +62,17 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** In-memory delivery fixtures own no remote resources; model their explicit cleanup response. */
-    private static org.flexlb.balance.eviction.EngineCancelChannel localDeliveryCleanup() {
-        var channel =
-                org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
+    private static EngineGrpcClient localDeliveryCleanup() {
+        var channel = org.mockito.Mockito.mock(EngineGrpcClient.class);
         org.mockito.Mockito.when(
-                        channel.cancel(
+                        channel.cancelAsync(
                                 org.mockito.ArgumentMatchers.any(),
-                                org.mockito.ArgumentMatchers.anyLong(),
+                                anyInt(),
                                 org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(
                         CompletableFuture.completedFuture(
-                                org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
-                                        .REQUEST_CLEANED));
+                                EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         return channel;
     }
 
@@ -81,13 +81,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             DeliveryDispatcher deliveryStrategy,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            org.flexlb.balance.eviction.EngineCancelChannel cancelChannel) {
+            EngineGrpcClient engineClient) {
         this(
                 configService,
                 deliveryStrategy,
                 deliveryReporter,
                 requestReporter,
-                cancelChannel,
+                engineClient,
                 null);
     }
 
@@ -96,7 +96,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             DeliveryDispatcher deliveryStrategy,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            org.flexlb.balance.eviction.EngineCancelChannel cancelChannel,
+            EngineGrpcClient engineClient,
             Runnable preparationBarrier) {
         ConfigService runtimeConfig =
                 DeliveryDispatcherTestFactory.runtimeConfigFor(deliveryStrategy, configService);
@@ -117,7 +117,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         requestReporter,
                         deliveryStrategy,
                         runtimeConfig,
-                        cancelChannel);
+                        engineClient);
         // Intercept the real batch-admission facility while all request policy remains production
         // code.
         this.runtime = assembledRuntime;
@@ -135,7 +135,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
         var eviction =
                 new DecodeCapacityAcquirer(
-                        cancelChannel, requests, runtime, requestReporter, configService, capacity);
+                        engineClient, requests, runtime, requestReporter, configService, capacity);
         this.scheduler =
                 PlacementConfiguration.create(
                         runtime,

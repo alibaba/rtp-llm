@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -17,6 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -82,7 +82,7 @@ class QueuedDecodeWithdrawalTest {
         queue = (QueuedRequestScheduler) registry;
         eviction =
                 new DecodeCapacityAcquirer(
-                        mock(EngineCancelChannel.class),
+                        mock(EngineGrpcClient.class),
                         SchedulerTestSupport.repository(registry),
                         SchedulerTestSupport.runtime(registry),
                         mock(RequestSchedulerReporter.class),
@@ -227,7 +227,7 @@ class QueuedDecodeWithdrawalTest {
                 .thenReturn(accepted);
         var manager =
                 new DecodeCapacityAcquirer(
-                        mock(EngineCancelChannel.class),
+                        mock(EngineGrpcClient.class),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry),
                         mock(RequestSchedulerReporter.class),

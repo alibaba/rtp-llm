@@ -10,7 +10,6 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -574,7 +573,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 mock(RequestSchedulerReporter.class),
                                 dispatcher,
                                 service,
-                                mock(EngineCancelChannel.class)));
+                                mock(EngineGrpcClient.class)));
         var execution = spy(runtime.deliveries());
         ReflectionTestUtils.setField(runtime, "deliveries", execution);
         doReturn(701L).when(execution).nextBatchId();

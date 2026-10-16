@@ -19,6 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -34,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -82,11 +84,8 @@ class PdfusionSchedulingTest {
                         requestReporter,
                         mock(RecentCacheKeyTraceReporter.class));
         PlacementAvailability availability = new PlacementAvailability();
-        var grpc = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
-        when(grpc.batchEnqueueAsync(
-                        org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyInt(),
-                        any()))
+        var grpc = mock(EngineGrpcClient.class);
+        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call ->
                                 java.util.concurrent.CompletableFuture.completedFuture(
@@ -161,8 +160,7 @@ class PdfusionSchedulingTest {
                         requestReporter,
                         org.mockito.Mockito.mock(DeliveryDispatcher.class),
                         service,
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.eviction.EngineCancelChannel.class));
+                        org.mockito.Mockito.mock(EngineGrpcClient.class));
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);

@@ -17,6 +17,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -79,8 +81,7 @@ class RequestConfirmationTimeoutTest {
                         requestReporter,
                         org.mockito.Mockito.mock(DeliveryDispatcher.class),
                         service,
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.eviction.EngineCancelChannel.class));
+                        org.mockito.Mockito.mock(EngineGrpcClient.class));
         DecodeEndpoint decode = null;
         try {
             WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");
@@ -201,16 +202,15 @@ class RequestConfirmationTimeoutTest {
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
                 org.mockito.Mockito.when(
-                                SchedulerTestSupport.cancelChannel(requests)
-                                        .cancel(
+                                SchedulerTestSupport.engineClient(requests)
+                                        .cancelAsync(
                                                 org.mockito.ArgumentMatchers.any(),
-                                                        org.mockito.ArgumentMatchers.anyLong(),
+                                                anyInt(),
                                                 org.mockito.ArgumentMatchers.any(),
-                                                        org.mockito.ArgumentMatchers.anyLong()))
+                                                org.mockito.ArgumentMatchers.anyLong()))
                         .thenReturn(
                                 java.util.concurrent.CompletableFuture.completedFuture(
-                                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
-                                                .REQUEST_CLEANED));
+                                        EngineGrpcClient.CancelReply.REQUEST_CLEANED));
                 assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
                 requests.onDeliveryEvidence(
                         claim,

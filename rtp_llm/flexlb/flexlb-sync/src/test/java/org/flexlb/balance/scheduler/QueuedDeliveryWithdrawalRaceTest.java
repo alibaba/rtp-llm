@@ -8,7 +8,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
@@ -213,7 +212,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             mock(RequestSchedulerReporter.class),
                             dispatcher,
                             service,
-                            mock(EngineCancelChannel.class));
+                            mock(EngineGrpcClient.class));
             owner =
                     new QueuedRequestScheduler(
                             config,

@@ -10,6 +10,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -58,8 +60,8 @@ class RequestInactivityTest {
     private DecodeEndpoint decode;
     private DeliveryClaim claim;
     private boolean deliveryCompleted;
-    private final CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>
-            cleanup = new CompletableFuture<>();
+    private final CompletableFuture<EngineGrpcClient.CancelReply> cleanup =
+            new CompletableFuture<>();
     private long registeredAtMs;
     private long handedOffAtMs;
 
@@ -76,15 +78,15 @@ class RequestInactivityTest {
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
 
-        var channel = mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-        when(channel.cancel(
+        var channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
                         org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.anyLong(),
+                        anyInt(),
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(cleanup);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                registry.runtime, "cancelChannel", channel);
+                registry.runtime, "engineClient", channel);
         RequestContext context = RequestProtocolTestSupport.context(config, REQUEST_ID);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(registry, context);
         requestContext = registry.requests.findActive(REQUEST_ID);
@@ -564,8 +566,7 @@ class RequestInactivityTest {
         if (!registry.runtime.signals().delivery(claim).toCompletableFuture().isDone()) {
             assertEquals(
                     1, registry.requests.liveRequestCount(), "expiry retains cleanup ownership");
-            cleanup.complete(
-                    org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+            cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             if (!deliveryCompleted) {
                 assertFalse(
                         registry.runtime.signals().delivery(claim).toCompletableFuture().isDone(),

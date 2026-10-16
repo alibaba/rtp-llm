@@ -6,9 +6,6 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
@@ -141,14 +138,14 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int nDecode,
             String prefillFormulaMs,
             double decodeStepMs,
-            boolean realCancelChannel) {
+            boolean preemptionSupported) {
         this(
                 basePort,
                 nPrefill,
                 nDecode,
                 prefillFormulaMs,
                 decodeStepMs,
-                realCancelChannel,
+                preemptionSupported,
                 true,
                 defaultFixedWindowDecision(),
                 false);
@@ -160,7 +157,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int nDecode,
             String prefillFormulaMs,
             double decodeStepMs,
-            boolean realCancelChannel,
+            boolean preemptionSupported,
             DecisionPolicyConfig decisionPolicy) {
         this(
                 basePort,
@@ -168,7 +165,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 nDecode,
                 prefillFormulaMs,
                 decodeStepMs,
-                realCancelChannel,
+                preemptionSupported,
                 true,
                 decisionPolicy,
                 false);
@@ -186,7 +183,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int nDecode,
             String prefillFormulaMs,
             double decodeStepMs,
-            boolean realCancelChannel,
+            boolean preemptionSupported,
             boolean autoTpm) {
         this(
                 basePort,
@@ -194,7 +191,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 nDecode,
                 prefillFormulaMs,
                 decodeStepMs,
-                realCancelChannel,
+                preemptionSupported,
                 autoTpm,
                 defaultFixedWindowDecision(),
                 false);
@@ -206,7 +203,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int nDecode,
             String prefillFormulaMs,
             double decodeStepMs,
-            boolean realCancelChannel,
+            boolean preemptionSupported,
             boolean autoTpm,
             DecisionPolicyConfig decisionPolicy,
             boolean productionRouting) {
@@ -216,7 +213,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 nDecode,
                 prefillFormulaMs,
                 decodeStepMs,
-                realCancelChannel,
+                preemptionSupported,
                 autoTpm,
                 decisionPolicy,
                 productionRouting,
@@ -229,7 +226,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int nDecode,
             String prefillFormulaMs,
             double decodeStepMs,
-            boolean realCancelChannel,
+            boolean preemptionSupported,
             boolean autoTpm,
             DecisionPolicyConfig decisionPolicy,
             boolean productionRouting,
@@ -367,13 +364,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         });
 
         dispatcher = new DeliveryDispatcher(grpcClient, configService, null, reporter, null);
-        EngineCancelChannel cancelChannel =
-                realCancelChannel
-                        ? new MockEngineCancelChannel(services)
-                        : new UnsupportedCancelStub(new MockEngineCancelChannel(services));
+        MockEngineClients.stubCancellation(grpcClient, services, preemptionSupported);
         schedulerRuntime =
                 new RequestSchedulerTestRuntime(
-                        configService, dispatcher, reporter, requestReporter, cancelChannel);
+                        configService, dispatcher, reporter, requestReporter, grpcClient);
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
         requests = schedulerRuntime.requestRegistry();
@@ -763,23 +757,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 svc.shutdown();
             }
             engineScheduler.shutdownNow();
-        }
-    }
-
-    /** Test-local fail-closed cancel transport for non-preemption scenarios. */
-    private static final class UnsupportedCancelStub implements EngineCancelChannel {
-        private final EngineCancelChannel cleanup;
-
-        private UnsupportedCancelStub(EngineCancelChannel cleanup) {
-            this.cleanup = cleanup;
-        }
-
-        @Override
-        public CompletableFuture<CancelAck> cancel(
-                CancelTarget target, long requestId, CancelReason reason, long timeoutMs) {
-            return reason == CancelReason.PRIORITY_PREEMPTED
-                    ? CompletableFuture.completedFuture(CancelAck.UNSUPPORTED)
-                    : cleanup.cancel(target, requestId, reason, timeoutMs);
         }
     }
 }
