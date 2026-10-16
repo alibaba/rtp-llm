@@ -683,13 +683,23 @@ def preprocess_video_cuda(data: GpuVideoInput, processor, device, *, video=None)
         device,
         resized_pixels=int(video.shape[0]) * data.resized_height * data.resized_width,
     ):
-        # Keep decoded frames on CUDA through resize and normalization.
-        # Preserve the processor's bicubic/antialias and uint8 conversion policy;
-        # CPU and CUDA backends can differ in arithmetic and uint8 rounding.
         if tuple(video.shape[-2:]) != (data.resized_height, data.resized_width):
-            video = resize_video_to_shape(
-                video, processor, data.resized_height, data.resized_width
-            )
+            # Match CPU uint8 bicubic/AA rounding while retaining CUDA pixels.
+            # Set QWEN35_VIDEO_TRITON_RESIZE=0 to restore Torch CUDA resize.
+            if (
+                os.environ.get("QWEN35_VIDEO_TRITON_RESIZE", "1") == "1"
+                and video.dtype == torch.uint8
+                and processor.resample == 3
+            ):
+                from .vision_video_resize import resize_bicubic_uint8
+
+                video = resize_bicubic_uint8(
+                    video, data.resized_height, data.resized_width
+                )
+            else:
+                video = resize_video_to_shape(
+                    video, processor, data.resized_height, data.resized_width
+                )
     with torch.profiler.record_function("video_processor"), _cuda_video_timer(
         GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, "processor", device
     ):
