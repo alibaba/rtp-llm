@@ -36,6 +36,47 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_joint_pool_is_scheduled_for_single_request_and_cp1(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import HCA_KV, INDEXER_KV
+
+        tree = ast.parse((_FP8 / "_v41_attention_jit_warmup.py").read_text())
+        gate = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and node.body
+            and isinstance(node.body[0], ast.ImportFrom)
+            and node.body[0].module == "rtp_llm.models_py.modules.dsv41.attn_type"
+        )
+        main = warmup.PoolLayout(HCA_KV, 128, 128 * 288, 128, 256, 1)
+        index = warmup.PoolLayout(INDEXER_KV, 128, 128 * 68, 128, 256, 1)
+        code = compile(ast.Module(body=[gate], type_ignores=[]), "warmup_gate", "exec")
+        for cp in (1, 2, 4):
+            for batch in (1, 2, 31, 32, 128):
+                with self.subTest(cp=cp, batch=batch):
+                    run = Mock()
+                    namespace = dict(warmup.__dict__)
+                    namespace.update(
+                        cp_size=cp,
+                        cp_rank=cp - 1,
+                        kv_cache_sharded=cp > 1,
+                        max_batch_size=batch,
+                        layouts={
+                            (main, "same-layer"): object(),
+                            (index, "same-layer"): object(),
+                        },
+                        device="private-device",
+                        run=run,
+                    )
+                    exec(code, namespace)
+                    joint_calls = [
+                        call
+                        for call in run.call_args_list
+                        if call.args[0][0] == "joint_pool"
+                    ]
+                    self.assertEqual(len(joint_calls), 1)
+                    self.assertEqual(joint_calls[0].args[0][-2:], (cp, cp - 1))
+
     def test_chunk_metadata_warmup_covers_mixed_types_and_independent_offsets(self):
         import torch
 

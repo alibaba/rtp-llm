@@ -273,6 +273,60 @@ class V41PrefillMetaCacheTest(unittest.TestCase):
         self.assertNotIn("candidates", shared)
         self.assertIs(shared["layers"], layers)
 
+    def test_exception_exit_joins_async_work_before_releasing_metadata(self):
+        events = []
+        global_rows = torch.ones(3, 8)
+        reference = weakref.ref(global_rows)
+        shared = {"global": {2: [(global_rows, object())]}}
+
+        def wait(kind):
+            # Pending producers still depend on the same metadata/storage
+            # when their completion is handed to the forward stream.
+            self.assertIsNotNone(reference())
+            self.assertIn("global", shared)
+            events.append(kind)
+
+        def clear():
+            self.assertEqual(set(events), {"pool.wait", "state.wait"})
+            events.append("clear")
+
+        workspace = SimpleNamespace(clear_attention_metadata=clear)
+        shared["layers"] = {
+            2: SimpleNamespace(
+                _prefill_meta_shared=SimpleNamespace(workspace=workspace)
+            )
+        }
+        shared["prefill_pool_ready"] = SimpleNamespace(wait=lambda: wait("pool.wait"))
+        shared["prefill_state_ready"] = SimpleNamespace(wait=lambda: wait("state.wait"))
+        del global_rows
+        with self.assertRaisesRegex(ValueError, "query projection failed"):
+            try:
+                raise ValueError("query projection failed")
+            finally:
+                release_v41_prefill_shared(shared)
+        self.assertEqual(events[-1], "clear")
+        self.assertEqual(len(events), 3)
+        self.assertIsNone(reference())
+        for key in ("global", "prefill_pool_ready", "prefill_state_ready"):
+            self.assertNotIn(key, shared)
+
+    def test_state_prefetch_aborted_before_pool_publication_is_joined_once(self):
+        events = []
+        shared = {
+            "layers": {},
+            "prefill_state_ready": SimpleNamespace(
+                wait=lambda: events.append("state.wait")
+            ),
+        }
+        with self.assertRaisesRegex(RuntimeError, "QKV failed"):
+            try:
+                raise RuntimeError("QKV failed")
+            finally:
+                release_v41_prefill_shared(shared)
+        release_v41_prefill_shared(shared)
+        self.assertEqual(events, ["state.wait"])
+        self.assertEqual(shared, {"layers": {}})
+
     def test_shared_tensors_live_until_their_last_consumer(self):
         layers = {
             i: SimpleNamespace(

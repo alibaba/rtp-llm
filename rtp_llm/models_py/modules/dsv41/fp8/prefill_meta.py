@@ -58,6 +58,12 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
     The layer registry and paged KV pools are not per-forward scratch.
     """
     if layer_id is None:
+        for key in ("prefill_pool_ready", "prefill_state_ready"):
+            pending = shared.pop(key, None)
+            if pending is not None:
+                # On exceptional exit, protect in-place pool/table reuse as
+                # well as allocator lifetime. This only queues a GPU event wait.
+                pending.wait()
         _clear_v41_attention_metadata(shared)
         for key in (
             "ced_indexer_projection",

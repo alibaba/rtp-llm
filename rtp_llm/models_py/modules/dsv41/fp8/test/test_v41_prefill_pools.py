@@ -32,7 +32,7 @@ class PrefillPoolsHostTest(unittest.TestCase):
         empty = request[:0]
         self.assertIs(pools._trim_rows(empty, 0), empty)
 
-    def test_joint_dispatch_starts_at_qualified_batch_boundary(self):
+    def test_joint_dispatch_covers_small_and_large_batches(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool as joint
 
         attn = SimpleNamespace(
@@ -41,19 +41,15 @@ class PrefillPoolsHostTest(unittest.TestCase):
         )
         pool = SimpleNamespace(device=torch.device("cuda:0"), dtype=torch.uint8)
         result = object()
-        for batch in (2, 6, 31, 32):
+        for batch in (1, 2, 6, 31, 32, 64, 128):
             with self.subTest(batch=batch), patch.object(
                 torch.cuda, "get_device_capability", return_value=(10, 0)
             ), patch.object(joint, "try_gather", return_value=result) as attempt:
                 actual = pools.try_gather_prefill_pools(
                     attn, pool, pool, [1] * batch, None
                 )
-                if batch < 32:
-                    attempt.assert_not_called()
-                    self.assertIsNone(actual)
-                else:
-                    attempt.assert_called_once()
-                    self.assertIs(actual, result)
+                attempt.assert_called_once()
+                self.assertIs(actual, result)
 
     def test_budget_boundary_preserves_whole_requests(self):
         limit = pools._MAX_ROWS
@@ -101,9 +97,7 @@ class PrefillPoolsHostTest(unittest.TestCase):
             )
 
         for reason in (
-            "one_request",
             "no_cp",
-            "one_rank",
             "unsharded",
             "ratio",
             "cpu",
@@ -377,6 +371,8 @@ class PrefillPoolsCudaTest(unittest.TestCase):
                             )
 
     def test_three_splits_have_no_gpu_activity_or_allocation(self):
+        import gc
+
         counts = (0, 1, 2, 3, 33, 65, 127, 129)
         parents = (
             torch.empty(sum(counts), 512, dtype=torch.bfloat16, device="cuda"),
@@ -389,6 +385,9 @@ class PrefillPoolsCudaTest(unittest.TestCase):
 
         for _ in range(10):
             split()
+        # Prior graph/mock tests can retain tensor cycles until profiler starts
+        # Python GC. Drain them before measuring this view-only operation.
+        gc.collect()
         torch.cuda.synchronize()
         allocated = torch.cuda.memory_allocated()
         with torch.profiler.profile(

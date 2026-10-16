@@ -1376,7 +1376,7 @@ def warmup_v41_attention_jit(
                         _warm_pool, attn, layout, size, rank, max_batch_size, device
                     ),
                 )
-            if kv_cache_sharded and cp_size > 1 and max_batch_size >= 2:
+            if (kv_cache_sharded or cp_size == 1) and max_batch_size >= 1:
                 from rtp_llm.models_py.modules.dsv41.attn_type import (
                     CSA_KV,
                     CSA_STATE,
@@ -1398,7 +1398,13 @@ def warmup_v41_attention_jit(
                         producer_layouts += (
                             (state_layout,) if state_layout is not None else ()
                         )
-                    if len(producer_layouts) == (3 if main_layout.ratio == 2 else 2):
+                    if (
+                        kv_cache_sharded
+                        and cp_size > 1
+                        and max_batch_size >= 2
+                        and len(producer_layouts)
+                        == (3 if main_layout.ratio == 2 else 2)
+                    ):
                         run(
                             ("fused_producer", producer_layouts, cp_size, cp_rank),
                             partial(
@@ -1409,18 +1415,17 @@ def warmup_v41_attention_jit(
                                 device,
                             ),
                         )
-                    if max_batch_size >= 32:
-                        run(
-                            ("joint_pool", main_layout, index_layout, cp_size, cp_rank),
-                            partial(
-                                _warm_joint_pool,
-                                main_layout,
-                                index_layout,
-                                cp_size,
-                                cp_rank,
-                                device,
-                            ),
-                        )
+                    run(
+                        ("joint_pool", main_layout, index_layout, cp_size, cp_rank),
+                        partial(
+                            _warm_joint_pool,
+                            main_layout,
+                            index_layout,
+                            cp_size,
+                            cp_rank,
+                            device,
+                        ),
+                    )
             logging.info(
                 "[DSV41 Attention] warmed %d private pool layouts", len(layouts)
             )
