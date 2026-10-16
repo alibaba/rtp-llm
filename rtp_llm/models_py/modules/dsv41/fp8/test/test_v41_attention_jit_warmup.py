@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import re
 import sys
 import unittest
 from itertools import product
@@ -36,6 +37,419 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_index_plan_warms_scalar_and_packed_ragged_metadata(self):
+        import torch
+
+        build = Mock(return_value=object())
+        module = "rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_index_plan"
+        with patch.dict(
+            sys.modules, {module: SimpleNamespace(try_build_index_plan=build)}
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            warmup._warm_index_plan(attention(2), "cpu")
+        observed = set()
+        packed_alignments = set()
+        for call in build.call_args_list:
+            selected, positions, offset, count, start, window = call.args
+            self.assertEqual(selected.dtype, torch.int32)
+            self.assertTrue(selected.is_contiguous())
+            self.assertEqual(selected.shape, (len(positions), 512))
+            self.assertEqual(window, 128)
+            scalar = isinstance(offset, int)
+            observed.add(
+                (
+                    len(positions),
+                    positions.dtype,
+                    positions.stride(0),
+                    positions.storage_offset(),
+                    scalar,
+                )
+            )
+            if scalar:
+                self.assertEqual((offset, count, start), (0, 1, 0))
+            else:
+                for tensor in (offset, count, start):
+                    self.assertEqual(tensor.shape, (len(positions), 1))
+                    self.assertEqual(tensor.dtype, positions.dtype)
+                    self.assertEqual(tensor.stride(0), 1)
+                self.assertEqual(
+                    len(
+                        {x.untyped_storage().data_ptr() for x in (offset, count, start)}
+                    ),
+                    1,
+                )
+                packed_alignments.add(
+                    (
+                        positions.dtype,
+                        tuple(x.data_ptr() % 16 for x in (offset, count, start)),
+                    )
+                )
+        self.assertEqual(
+            observed,
+            {
+                (rows, dtype, stride, offset, scalar)
+                for (rows, stride, offset), dtype, scalar in product(
+                    warmup._indexer_warmup_layouts(),
+                    (torch.int32, torch.int64),
+                    (False, True),
+                )
+            },
+        )
+        self.assertEqual(
+            packed_alignments,
+            {
+                (torch.int32, (0, 4, 8)),
+                (torch.int32, (0, 8, 0)),
+                (torch.int32, (0, 0, 0)),
+                (torch.int64, (0, 8, 0)),
+                (torch.int64, (0, 0, 0)),
+            },
+        )
+        build.return_value = None
+        with patch.dict(
+            sys.modules, {module: SimpleNamespace(try_build_index_plan=build)}
+        ):
+            with self.assertRaisesRegex(RuntimeError, "scalar FlashMLA index plan"):
+                warmup._warm_index_plan(attention(2), "cpu")
+
+    def test_fused_producer_uses_configured_cp_geometry(self):
+        import torch
+
+        producer = SimpleNamespace(
+            SlotLayout=lambda *args: args,
+            prepare_raw=Mock(return_value=SimpleNamespace(key_counts=object())),
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(_v41_producer_metadata=producer)}
+        ), patch.object(warmup, "__package__", package), patch.object(
+            warmup,
+            "__spec__",
+            importlib.util.spec_from_loader(
+                package + "._v41_attention_jit_warmup", loader=None
+            ),
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            for cp_size in (2, 4):
+                for ratio in (1, 2):
+                    layouts = tuple(
+                        warmup.PoolLayout(
+                            region,
+                            2 if region == 2 else 64,
+                            64 * 288,
+                            512 if region == 2 else 128,
+                            512 if region == 2 else 256,
+                            ratio,
+                        )
+                        for region in range(3 if ratio == 2 else 2)
+                    )
+                    producer.prepare_raw.reset_mock()
+                    warmup._warm_fused_producer_metadata(
+                        layouts, cp_size, cp_size - 1, "cpu"
+                    )
+                    self.assertEqual(producer.prepare_raw.call_count, 12)
+                    for call in producer.prepare_raw.call_args_list:
+                        self.assertEqual(call.args[0].cp_size, cp_size)
+                        descriptors = call.kwargs["slot_layouts"]
+                        self.assertEqual(len(descriptors), len(layouts))
+                        self.assertTrue(
+                            all(d[4:] == (cp_size, cp_size - 1) for d in descriptors)
+                        )
+                        self.assertTrue(all(d[3] == 256 for d in descriptors))
+                        self.assertEqual(
+                            [d[1:3] for d in descriptors],
+                            [
+                                (layout.entries, layout.tokens_per_block)
+                                for layout in layouts
+                            ],
+                        )
+
+    def test_main_compression_warms_independent_boundary_view_alignment(self):
+        import torch
+
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        producer = SimpleNamespace(
+            _enabled=lambda value: True, compress_main=Mock(return_value=object())
+        )
+        fp4 = SimpleNamespace(
+            **{
+                name: Mock()
+                for name in (
+                    "quantize_and_insert_k_cache_fp4",
+                    "dequantize_k_cache_slots_fp4",
+                    "gather_k_cache_bytes_fp4",
+                    "dequantize_k_cache_bytes_fp4",
+                )
+            }
+        )
+        meta = SimpleNamespace(try_slot_mapping=Mock(return_value=object()))
+        modules = {
+            package: SimpleNamespace(
+                _v41_fp4_triton=fp4,
+                _v41_prefill_global=producer,
+                _v41_prefill_metadata=meta,
+                _v41_swa_triton=SimpleNamespace(),
+                _v41_batched_producer=SimpleNamespace(is_supported=lambda value: False),
+            ),
+            package
+            + "._v41_prefill_pools": SimpleNamespace(_group_row_metadata=Mock()),
+            "rtp_llm.models_py.modules.dsv41.attn_type": SimpleNamespace(
+                CSA_KV=1,
+                CSA_STATE=2,
+                HCA_KV=3,
+                INDEXER_KV=4,
+                SWA_KV=5,
+            ),
+        }
+        with patch.dict(sys.modules, modules), patch.object(
+            warmup, "__package__", package
+        ), patch.object(
+            warmup,
+            "__spec__",
+            importlib.util.spec_from_loader(
+                package + "._v41_attention_jit_warmup", loader=None
+            ),
+        ), patch.object(
+            warmup, "_warm_chunk_metadata"
+        ), patch.object(
+            warmup, "_warm_raw_producer_metadata"
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            for ratio in (1, 2):
+                attn = attention(2, ratio=ratio)
+                attn.global_norm = torch.ones(512, dtype=torch.bfloat16)
+                layout = warmup.PoolLayout(1, 64, 64 * 288, 128, 128, ratio)
+                producer.compress_main.reset_mock()
+                warmup._warm_pool(attn, layout, 4, 0, 64, "cpu")
+                observed = set()
+                for call in producer.compress_main.call_args_list:
+                    values, _, _, _, positions, requests, _, _, indices = call.args[:9]
+                    slots, carry = call.args[11], call.args[13]
+                    count = len(indices)
+                    self.assertEqual(indices.tolist(), list(range(1, 2 * count, 2)))
+                    self.assertEqual(
+                        positions.storage_offset(), requests.storage_offset()
+                    )
+                    observed.add(
+                        (
+                            count,
+                            values.stride(0),
+                            positions.storage_offset(),
+                            slots.storage_offset(),
+                            indices.storage_offset(),
+                            carry is not None,
+                        )
+                    )
+                self.assertEqual(
+                    observed,
+                    set(
+                        product(
+                            (1, 8, 16),
+                            (512, 1024),
+                            (0, 1),
+                            (0, 1),
+                            (0, 1),
+                            (False, True) if ratio == 2 else (False,),
+                        )
+                    ),
+                )
+
+    def test_native_selector_warmup_calls_both_waves_and_fallback_functions(self):
+        import torch
+
+        native_raw, native_finite = Mock(), Mock()
+        dense = SimpleNamespace(
+            is_available=Mock(return_value=True),
+            try_select_tokens=Mock(return_value=object()),
+        )
+        sparse = SimpleNamespace(
+            is_available=Mock(return_value=True),
+            try_select_sparse_tokens=Mock(return_value=object()),
+        )
+        topk = SimpleNamespace(
+            _TOPK_V3_OK=True,
+            rtp_llm_ops=SimpleNamespace(
+                topk_v3=native_raw, dsv41_topk_v3_finite=native_finite
+            ),
+            _get_topk_workspace=Mock(return_value=object()),
+            supports_bf16=lambda: True,
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=sparse,
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=topk,
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ) as properties, patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            warmup._warm_native_selectors(32769, "cpu")
+            properties.assert_called_once_with("cpu")
+            self.assertEqual(
+                {
+                    (c.args[0].shape[0], c.args[0].dtype, c.kwargs["filter_finite"])
+                    for c in dense.try_select_tokens.call_args_list
+                },
+                set(product((1, 149), (torch.float32, torch.bfloat16), (False, True))),
+            )
+            self.assertEqual(
+                {
+                    c.args[0].shape[0]
+                    for c in sparse.try_select_sparse_tokens.call_args_list
+                },
+                {1, 149},
+            )
+            for call in (
+                dense.try_select_tokens.call_args_list
+                + sparse.try_select_sparse_tokens.call_args_list
+            ):
+                logits, ends = call.args[:2]
+                self.assertEqual(logits.shape[1], 1024)
+                self.assertEqual(logits.stride(0), 1536)
+                self.assertEqual(ends.dtype, torch.int32)
+                self.assertEqual(ends.tolist(), [1024] * len(ends))
+            expected = {
+                (rows, width, dtype, aligned)
+                for (rows, width), dtype, aligned in product(
+                    warmup._native_topk_warmup_shapes(32769),
+                    (torch.float32, torch.bfloat16),
+                    (False, True),
+                )
+            }
+            for select in (native_raw, native_finite):
+                observed = set()
+                for call in select.call_args_list:
+                    logits, ends, output, workspace, k, width = call.args
+                    alignment = 4 * logits.element_size()
+                    observed.add(
+                        (
+                            len(logits),
+                            width,
+                            logits.dtype,
+                            logits.data_ptr() % alignment == 0,
+                        )
+                    )
+                    self.assertEqual(logits.stride(0) % 4, 0)
+                    self.assertEqual(ends.tolist(), [width] * len(logits))
+                    self.assertEqual(output.shape, (len(logits), k))
+                    self.assertIs(workspace, topk._get_topk_workspace.return_value)
+                    self.assertEqual(k, 512)
+                self.assertEqual(observed, expected)
+            # Explicitly disabled/unavailable DeepSelect still warms fallback;
+            # no device-property query is necessary for that branch.
+            properties.reset_mock()
+            dense.is_available.return_value = False
+            sparse.is_available.return_value = False
+            dense.try_select_tokens.reset_mock()
+            sparse.try_select_sparse_tokens.reset_mock()
+            native_raw.reset_mock()
+            warmup._warm_native_selectors(512, "cpu")
+            properties.assert_not_called()
+            dense.try_select_tokens.assert_not_called()
+            sparse.try_select_sparse_tokens.assert_not_called()
+            self.assertEqual(native_raw.call_count, 4)
+            dense.is_available.return_value = True
+            dense.try_select_tokens.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "native dense DeepSelect"):
+                warmup._warm_native_selectors(512, "cpu")
+
+    def test_topk_witnesses_cover_actual_native_dispatcher(self):
+        # Read conditions from the native source, rather than maintaining a
+        # second handwritten dispatcher. A native routing change must update
+        # the bounded startup witnesses before this coverage assertion passes.
+        kernels = _FP8.parents[2] / "bindings" / "cuda" / "kernels"
+        source = (kernels / "topk_v3.cu").read_text()
+        header = (kernels / "topk_v3.cuh").read_text()
+        constants = {
+            name: int(value)
+            for name, value in re.findall(
+                r"constexpr uint32_t\s+(\w+)\s*=\s*(\d+);", source + header
+            )
+        }
+        for scale in (1, 2, 4):
+            constants[f"kReg{scale}MaxSeqLen"] = (
+                constants["kBlockSize"] * constants["kVecSize"] * scale
+            )
+        capacities = [
+            (int(a), int(b)) for a, b in re.findall(r"\{(\d+), (\d+)\}", source)
+        ]
+
+        def uniform_plan_uses_cluster(batch, width):
+            for threshold, capacity in capacities:
+                if (batch if width > threshold else 0) <= capacity:
+                    return width > threshold
+            return False
+
+        dispatch = source.split("cudaError_t launch_topk(", 1)[1].split(
+            "return error ==", 1
+        )[0]
+        branches = re.findall(
+            r"(?:else )?if \((.*?)\) \{(.*?)\}\s*(?=else|$)", dispatch, re.S
+        )
+        self.assertEqual(len(branches), 17)
+
+        def family(batch, width):
+            values = dict(
+                constants,
+                batch=batch,
+                max_seq_len=width,
+                k=512,
+                uniform_plan_uses_cluster=uniform_plan_uses_cluster,
+            )
+            for condition, body in branches:
+                expression = condition.replace(
+                    "static_cast<uint32_t>(max_seq_len)", "max_seq_len"
+                )
+                expression = (
+                    expression.replace("&&", " and ")
+                    .replace("||", " or ")
+                    .replace("!", "not ")
+                )
+                if eval(" ".join(expression.split()), {"__builtins__": {}}, values):
+                    return re.search(
+                        r"(main_kernel<[-\d]+|direct_cluster_kernel<Cluster\d+)", body
+                    ).group(1)
+            return "persistent_cluster"
+
+        row_boundaries = {1, 32, 33}
+        width_boundaries = {512}
+        for name, value in constants.items():
+            if "BatchLimit" in name:
+                row_boundaries.update((value, value + 1))
+            if "MaxSeqLen" in name:
+                width_boundaries.update((value, value + 1))
+        for width, capacity in capacities:
+            row_boundaries.update((capacity, capacity + 1))
+            width_boundaries.update((width, width + 1))
+        for limit in (512, 4096, 4097, 8193, 16385, 32769, 131072, 524288, 1048576):
+            observed = {
+                family(rows, width)
+                for rows, width in warmup._native_topk_warmup_shapes(limit)
+            }
+            reachable = {
+                family(rows, width)
+                for rows, width in product(row_boundaries, width_boundaries | {limit})
+                if 512 <= width <= limit
+            }
+            self.assertEqual(observed, reachable)
+            self.assertNotIn("persistent_cluster", reachable)
+        self.assertLess(
+            max(
+                rows * ((width + 3) // 4 * 4) * 4
+                for rows, width in warmup._native_topk_warmup_shapes(1048576)
+            ),
+            5 * 1024 * 1024,
+        )
+
     def test_joint_pool_is_scheduled_for_single_request_and_cp1(self):
         from rtp_llm.models_py.modules.dsv41.attn_type import HCA_KV, INDEXER_KV
 
