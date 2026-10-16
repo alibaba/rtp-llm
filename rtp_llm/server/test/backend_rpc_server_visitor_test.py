@@ -186,13 +186,99 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
     def test_cache_key_block_size_tracks_routed_key_granularity(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
-        visitor.seq_size_per_block = 256
-        visitor._page_rr_route_cache_keys = False
-        visitor._page_rr_cp_size = 4
-        self.assertEqual(visitor._cache_key_block_size(), 256)
+        for physical in (128, 256):
+            for cp_size in (1, 2, 4):
+                for sharded in (False, True):
+                    with self.subTest(
+                        physical=physical, cp_size=cp_size, sharded=sharded
+                    ):
+                        visitor.seq_size_per_block = physical
+                        visitor._page_rr_route_cache_keys = sharded
+                        visitor._page_rr_cp_size = cp_size
+                        self.assertEqual(
+                            visitor._cache_key_block_size(),
+                            physical * cp_size if sharded else physical,
+                        )
 
-        visitor._page_rr_route_cache_keys = True
-        self.assertEqual(visitor._cache_key_block_size(), 1024)
+    @patch.dict(
+        "os.environ",
+        {
+            "CUDA_VISIBLE_DEVICES": "",
+            "MODEL_TYPE": "deepseek_v41",
+            "SP_MODEL_TYPE": "deepseek_v41_dspark",
+            "ROLE_TYPE": "FRONTEND",
+            "TP_SIZE": "4",
+            "WORLD_SIZE": "4",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "4",
+            "PREFILL_CP_SIZE": "4",
+            "PREFILL_CP_KV_CACHE_SHARDED": "1",
+            "SEQ_SIZE_PER_BLOCK": "128",
+            "KERNEL_SEQ_SIZE_PER_BLOCK": "128",
+            "FRONTEND_SERVER_COUNT": "4",
+            "CONCURRENCY_LIMIT": "128",
+            "DSV41_CED": "1",
+            "DSV41_SWA_BOUNDED_REPLAY": "1",
+        },
+        clear=True,
+    )
+    @patch("sys.argv", ["frontend-cache-routing-test"])
+    def test_frontend_env_keeps_physical_hashes_and_advertises_cp_virtual_blocks(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.server_config_setup import setup_and_configure_server
+        from rtp_llm.models.dsv41_kv_cache import configure_v41_kv_cache
+        from rtp_llm.server.backend_rpc_server_visitor import (
+            create_backend_rpc_server_visitor,
+        )
+        from rtp_llm.server.cache_key_routing import get_block_cache_keys
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        configs = setup_args()
+        with patch("rtp_llm.config.server_config_setup.fetch_model_files_to_local"):
+            setup_and_configure_server(configs)
+        self.assertEqual(configs.parallelism_config.tp_size, 4)
+        self.assertEqual(configs.prefill_cp_config.prefill_cp_size, 4)
+        self.assertTrue(configs.prefill_cp_config.kv_cache_sharded)
+        self.assertEqual(configs.server_config.frontend_server_count, 4)
+        self.assertEqual(configs.concurrency_config.concurrency_limit, 128)
+
+        # These are the model geometry assignments made by build_model_config;
+        # cache namespace selection remains the real V4.1 model initializer.
+        model = ModelConfig()
+        model.max_seq_len = 32768
+        model.num_layers = 1
+        model.attn_config.tokens_per_block = configs.kv_cache_config.seq_size_per_block
+        model.attn_config.kernel_tokens_per_block = (
+            configs.kv_cache_config.kernel_seq_size_per_block
+        )
+        model.attn_config.size_per_head = 512
+        model.attn_config.layer_compress_ratios = [1]
+        model.attn_config.v41_kv_source_layer_ids = [0]
+        configure_v41_kv_cache(model, configs.kv_cache_config)
+        self.assertEqual(model.cache_key_hash_seed, 0x4453563431494231)
+        with (
+            patch("rtp_llm.distribute.distributed_server.get_world_info"),
+            patch(
+                "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",
+                return_value=[],
+            ),
+            patch("rtp_llm.server.backend_rpc_server_visitor.ModelRpcClient"),
+            patch("rtp_llm.server.backend_rpc_server_visitor.HostService"),
+            patch("rtp_llm.server.backend_rpc_server_visitor.MasterClient"),
+        ):
+            visitor = create_backend_rpc_server_visitor(configs, model)
+        self.assertEqual(visitor.seq_size_per_block, 128)
+        self.assertEqual(visitor._cache_key_block_size(), 512)
+        self.assertEqual(visitor.cache_key_seed, model.cache_key_hash_seed)
+        for length in (127, 128, 511, 512, 513, 1023, 1024):
+            with self.subTest(length=length):
+                tokens = list(range(length))
+                physical_keys = get_block_cache_keys(
+                    tokens, 128, cache_key_seed=model.cache_key_hash_seed
+                )
+                self.assertEqual(
+                    visitor._route_cache_keys(physical_keys), physical_keys[3::4]
+                )
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
