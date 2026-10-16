@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -8,6 +9,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
@@ -182,8 +184,7 @@ void HiddenStateCapturePublisher::recordBatch() {
     reportMetrics(collector);
 }
 
-void HiddenStateCapturePublisher::recordFailure(FailureStage       failure_stage,
-                                                FailureDisposition failure_disposition) {
+void HiddenStateCapturePublisher::recordFailure(FailureStage failure_stage, FailureDisposition failure_disposition) {
     failure_count_.fetch_add(1, std::memory_order_relaxed);
     RtpLLMHiddenStateCaptureMetricsCollector collector;
     collector.failure_qps                = true;
@@ -262,8 +263,13 @@ void HiddenStateCapturePublisher::recordPublish(bool success, const PublishMetri
 }
 
 bool HiddenStateCapturePublisher::observeAsyncErrors(FailureStage failure_stage, const char* phase) {
+    RTP_LLM_PROFILE_SCOPE("hidden_state_capture.observe_async_errors");
     bool       success = true;
-    py::object result  = store_.attr("take_async_errors")();
+    py::object result;
+    {
+        RTP_LLM_PROFILE_SCOPE("hidden_state_capture.take_async_errors");
+        result = store_.attr("take_async_errors")();
+    }
     if (!py::isinstance<py::list>(result)) {
         throw std::runtime_error("EagleMooncakeStore.take_async_errors() must return a list");
     }
@@ -462,6 +468,7 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
                                                    int64_t              expected_rows,
                                                    const std::string&   layout_context,
                                                    const c10::Device&   fallback_device) {
+    RTP_LLM_PROFILE_SCOPE("hidden_state_capture.publish");
     const int64_t publish_start_us = owner_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     // `shouldPublish()` records the disabled/broken request state before the
     // Python forward. Keep producing packed hidden states on every TP rank so
@@ -562,13 +569,17 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
 
     if (owner_) {
         try {
+            std::optional<ProfilingScope> gil_scope(std::in_place, "hidden_state_capture.gil_acquire");
             py::gil_scoped_acquire gil;
+            gil_scope.reset();
 
             perform(FailureStage::STORE,
                     FailureDisposition::OPERATIONAL,
                     "TorchSpec hidden-state store async-error polling failed",
                     [&]() { observeAsyncErrors(FailureStage::STORE, "publish start"); });
 
+            // End preparation before admission without shortening any payload lifetime.
+            std::optional<ProfilingScope> prepare_scope(std::in_place, "hidden_state_capture.prepare_payload");
             // Only the TP owner publishes. Keep request metadata and store payload
             // materialization owner-local; non-owners only preserve the same packed
             // model-output contract needed by the existing TP/FFN paths.
@@ -660,10 +671,11 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
                         [&]() { return last_hidden_states.to(torch::kBFloat16).contiguous(); });
             torch::Tensor hidden_states_scale;
             if (capture_dtype_ == HiddenStateCaptureDtype::FP8_E4M3) {
-                auto quantizer_input         = perform(FailureStage::QUANTIZE,
+                auto quantizer_input = perform(FailureStage::QUANTIZE,
                                                FailureDisposition::OPERATIONAL,
                                                "failed to prepare TorchSpec FP8 quantizer input",
                                                [&]() { return auxiliary_hidden_view.contiguous(); });
+                RTP_LLM_PROFILE_SCOPE("hidden_state_capture.quantize");
                 metrics.has_quantize_latency = true;
                 quantize_start_us            = autil::TimeUtility::currentTimeInMicroSeconds();
                 py::object quantized_result  = perform(FailureStage::QUANTIZE,
@@ -759,10 +771,17 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
             const auto last_request_id  = request_ids_host.data_ptr<int64_t>()[request_ids_host.numel() - 1];
             const auto batch_id         = makeBatchId(batch_sequence, first_request_id, last_request_id);
 
+            prepare_scope.reset();
+            {
+                // Correlate this publish with store workers without truncating the existing batch ID.
+                ProfilingScope batch_marker(batch_id.c_str());
+            }
+            std::optional<ProfilingScope> admit_scope(std::in_place, "hidden_state_capture.put_batch_admit");
             metrics.has_store_put_latency = true;
             store_put_start_us            = autil::TimeUtility::currentTimeInMicroSeconds();
             py::object acceptance;
             try {
+                RTP_LLM_PROFILE_SCOPE("hidden_state_capture.put_batch_python");
                 if (hidden_states_scale.defined()) {
                     acceptance = store_.attr("put_batch")(py::arg("batch_id")            = batch_id,
                                                           py::arg("request_ids")         = batch_keys,
@@ -812,6 +831,7 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
             }
             metrics.store_put_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - store_put_start_us;
             store_put_latency_completed  = true;
+            admit_scope.reset();
 
             const bool flush_succeeded = perform(FailureStage::STORE,
                                                  FailureDisposition::OPERATIONAL,
@@ -849,7 +869,11 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
 }
 
 bool HiddenStateCapturePublisher::flushPending() {
-    store_.attr("flush")();
+    RTP_LLM_PROFILE_SCOPE("hidden_state_capture.flush");
+    {
+        RTP_LLM_PROFILE_SCOPE("hidden_state_capture.flush_python");
+        store_.attr("flush")();
+    }
     return observeAsyncErrors(FailureStage::STORE, "after publish flush");
 }
 

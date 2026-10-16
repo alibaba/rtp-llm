@@ -664,14 +664,14 @@ exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
     # via anyio
-fast-safetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl \
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:46355b2e6b138248677f5306060a3eee5d05d9baf1d9c026ef069c84b2ea5a99
     # via -r deps/requirements_cuda13_arm.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r deps/requirements_base.txt
-fastsafetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl \
+fastsafetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:c2a9945c4a11a4b8afa8eafe20d51aaf5b77ab1bfe6decd66d2c65396a213605
     # via -r deps/requirements_cuda13_arm.txt
 filelock==3.32.0 \
@@ -3977,7 +3977,7 @@ tokenizers==0.22.2 \
     --hash=sha256:e10bf9113d209be7cd046d40fbabbaf3278ff6d18eb4da4c500443185dc1896c \
     --hash=sha256:f01a9c019878532f98927d2bacb79bbb404b43d3437455522a00a30718cdedb5
     # via transformers
-torch @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
+torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
     --hash=sha256:4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21
     # via
     #   -r deps/requirements_cuda13_arm.txt
@@ -4019,7 +4019,7 @@ torch-c-dlpack-ext==0.1.5 \
     --hash=sha256:e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524 \
     --hash=sha256:fba674110e1fab0b176bb5a28223e157db65c90767d4ba74abdbee9f537b0e9d
     # via tilelang
-torchvision @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
+torchvision @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
     --hash=sha256:3094bed175eee817f9fc61d1c8bdecb1d807c25f49517fbfe60f15d24135fcde
     # via
     #   -r deps/requirements_cuda13_arm.txt
@@ -4300,7 +4300,7 @@ yarl==1.24.5 \
     --hash=sha256:ff405d91509d88e8d44129cd87b18d70acd1f0c1aeabd7bc3c46792b1fe2acba \
     --hash=sha256:ffcd54362564dc1a30fb74d8b8a6e5a6b11ebd5e27266adc3b7427a21a6c9104
     # via aiohttp
-z3-solver @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl \
+z3-solver @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl \
     --hash=sha256:e94170200c64f5d67295529e0568b15ba59a5f3b29c496402f8c941aec4aaa9b
     # via
     #   -r deps/requirements_cuda13_arm.txt

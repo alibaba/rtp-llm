@@ -1,6 +1,7 @@
 from collections.abc import Callable, Sequence
 
 import torch
+from torch._C import _profiler as torch_profiler
 
 from rtp_llm.ops.compute_ops import PyModelOutputs
 
@@ -26,6 +27,8 @@ class CaptureContext:
         "_captured_hidden_states",
         "_supported",
         "_enabled",
+        "_profile_enabled",
+        "_profile_noop",
     )
 
     def __init__(
@@ -46,6 +49,21 @@ class CaptureContext:
         self._captured_hidden_states = captured_hidden_states
         self._supported = supported
         self._enabled = enabled
+        self._profile_enabled = False
+        self._profile_noop = None
+        if enabled:
+            # Reuse the existing owner lazily: importing a capture plan must not
+            # initialize the MoE package. Snapshot before DSV4 suppresses nested ranges.
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+                _NOOP_RECORD_FUNCTION_RANGE,
+                record_function_ranges_enabled,
+            )
+
+            self._profile_noop = _NOOP_RECORD_FUNCTION_RANGE
+            profiler_enabled = getattr(torch.autograd, "_profiler_enabled", None)
+            self._profile_enabled = record_function_ranges_enabled() and (
+                profiler_enabled is None or profiler_enabled()
+            )
 
     @classmethod
     def unsupported(cls) -> "CaptureContext":
@@ -121,7 +139,14 @@ class CaptureContext:
         captured_hidden_states = self._captured_hidden_states
         if canonical_layer is None or captured_hidden_states is None:
             raise RuntimeError("active capture context is missing canonical hooks")
-        captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
+        with (
+            torch_profiler._RecordFunctionFast(
+                f"hidden_state_capture.layer(layer={layer_id})"
+            )
+            if self._profile_enabled
+            else self._profile_noop
+        ):
+            captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
 
     def finalize(
         self,
@@ -154,11 +179,20 @@ class CaptureContext:
                 "hidden-state capture did not visit configured layers "
                 f"{missing_layer_ids}"
             )
-        packed_hidden_states = torch.cat(
-            [captured for captured in captured_hidden_states if captured is not None]
-            + [final_hidden_states],
-            dim=-1,
-        )
+        with (
+            torch_profiler._RecordFunctionFast("hidden_state_capture.pack")
+            if self._profile_enabled
+            else self._profile_noop
+        ):
+            packed_hidden_states = torch.cat(
+                [
+                    captured
+                    for captured in captured_hidden_states
+                    if captured is not None
+                ]
+                + [final_hidden_states],
+                dim=-1,
+            )
         return PyModelOutputs(packed_hidden_states)
 
 

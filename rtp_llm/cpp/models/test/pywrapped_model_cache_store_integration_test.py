@@ -1571,6 +1571,298 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             bf16_publish=1,
         )
 
+    def assertCaptureProfileStoreCalls(self, events, store_events) -> None:
+        prefix = "hidden_state_capture."
+        for scope, call, parent in (
+            ("put_batch_python", "store.put_batch", "put_batch_admit"),
+            ("flush_python", "store.flush", "flush"),
+            ("take_async_errors", "store.take_async_errors", "observe_async_errors"),
+        ):
+            scopes = [e for e in events if e.name == prefix + scope]
+            self.assertEqual(
+                len(scopes), sum(e.split(":", 1)[0] == call for e in store_events)
+            )
+            for event in scopes:
+                self.assertIsNotNone(event.cpu_parent)
+                self.assertEqual(event.cpu_parent.name, prefix + parent)
+        for event in events:
+            if not event.name.startswith(prefix):
+                continue
+            self.assertLessEqual(event.time_range.start, event.time_range.end)
+            if event.cpu_parent is not None:
+                self.assertLessEqual(
+                    event.cpu_parent.time_range.start, event.time_range.start
+                )
+                self.assertLessEqual(
+                    event.time_range.end, event.cpu_parent.time_range.end
+                )
+            if event.name == prefix + "observe_async_errors":
+                self.assertEqual(
+                    [e.name for e in events if e.cpu_parent is event],
+                    [prefix + "take_async_errors"],
+                )
+            elif event.name == prefix + "flush":
+                children = [e for e in events if e.cpu_parent is event]
+                self.assertIn(
+                    [e.name for e in children],
+                    (
+                        [prefix + "flush_python"],
+                        [prefix + "flush_python", prefix + "observe_async_errors"],
+                    ),
+                )
+                if len(children) == 2:
+                    self.assertLessEqual(
+                        children[0].time_range.end, children[1].time_range.start
+                    )
+
+    def test_capture_profile_scopes_preserve_forward_contract(self) -> None:
+        _register_identity_allreduce()
+        self.addCleanup(clear_comm_ops)
+        scenarios = [
+            "capture_bf16",
+            "capture_micro_batch",
+            "capture_non_owner",
+            "capture_explicit_off",
+        ]
+        if os.environ.get("TEST_USING_DEVICE") != "ROCM":
+            scenarios += ["capture_fp8", "capture_cp"]
+        for scenario in scenarios:
+            namespace = (
+                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+            )
+            with self.subTest(scenario=scenario), patch.dict(
+                os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
+            ):
+                model_type = (
+                    PositionAwareCaptureModel
+                    if scenario == "capture_cp"
+                    else CacheStoreForwardModel
+                )
+                baseline_calls = []
+                _FakeEagleMooncakeStore.events = baseline_calls
+                baseline = run_scenario(model_type(), scenario)
+                store_calls = []
+                _FakeEagleMooncakeStore.events = store_calls
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as prof:
+                    result = run_scenario(model_type(), scenario)
+                self.assertEqual(
+                    result["deferred_capture_errors"],
+                    baseline["deferred_capture_errors"],
+                )
+                self.assertEqual(result["hidden_width"], baseline["hidden_width"])
+                for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
+                    self.assertEqual(
+                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                    )
+                self.assertEqual(
+                    len(result["forward_hidden_states"]),
+                    len(baseline["forward_hidden_states"]),
+                )
+                for actual, expected in zip(
+                    result["forward_hidden_states"], baseline["forward_hidden_states"]
+                ):
+                    torch.testing.assert_close(actual, expected)
+                events = prof.events()
+                self.assertEqual(store_calls, baseline_calls)
+                self.assertCaptureProfileStoreCalls(events, store_calls)
+                batch_ids = [
+                    call.split(":", 1)[1]
+                    for call in store_calls
+                    if call.startswith("store.put_batch:")
+                ]
+                expected_calls = []
+                if scenario != "capture_non_owner":
+                    expected_calls = ["store.setup", "store.warmup"]
+                    if scenario != "capture_explicit_off":
+                        self.assertEqual(len(batch_ids), 1)
+                        expected_calls += [
+                            "store.take_async_errors",
+                            f"store.put_batch:{batch_ids[0]}",
+                            "store.flush",
+                            "store.take_async_errors",
+                        ]
+                    expected_calls += [
+                        "store.flush",
+                        "store.take_async_errors",
+                        "store.close",
+                    ]
+                self.assertEqual(store_calls, expected_calls)
+                markers = [e for e in events if e.name.startswith("rtp-forward-")]
+                self.assertEqual([e.name for e in markers], batch_ids)
+                publish = [
+                    e for e in events if e.name == "hidden_state_capture.publish"
+                ]
+                if scenario == "capture_explicit_off":
+                    self.assertFalse(publish)
+                    # A configured but inactive publisher still drains at shutdown.
+                    capture_events = [
+                        e for e in events if e.name.startswith("hidden_state_capture.")
+                    ]
+                    self.assertEqual(
+                        [e.name for e in capture_events],
+                        [
+                            "hidden_state_capture.flush",
+                            "hidden_state_capture.flush_python",
+                            "hidden_state_capture.observe_async_errors",
+                            "hidden_state_capture.take_async_errors",
+                        ],
+                    )
+                    self.assertIsNone(capture_events[0].cpu_parent)
+                    continue
+                self.assertEqual(len(publish), 1)
+                children = {e.name: e for e in events if e.cpu_parent is publish[0]}
+                if scenario == "capture_non_owner":
+                    self.assertNotIn("hidden_state_capture.gil_acquire", children)
+                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
+                    self.assertNotIn("hidden_state_capture.prepare_payload", children)
+                    self.assertNotIn("hidden_state_capture.put_batch_admit", children)
+                    self.assertNotIn("hidden_state_capture.flush", children)
+                else:
+                    gil = children["hidden_state_capture.gil_acquire"]
+                    poll = children["hidden_state_capture.observe_async_errors"]
+                    prepare = children["hidden_state_capture.prepare_payload"]
+                    admit = children["hidden_state_capture.put_batch_admit"]
+                    flush = children["hidden_state_capture.flush"]
+                    self.assertLessEqual(gil.time_range.end, poll.time_range.start)
+                    self.assertLessEqual(poll.time_range.end, prepare.time_range.start)
+                    marker = markers[0]
+                    if scenario == "capture_bf16":
+                        self.assertGreater(len(marker.name), 256)
+                    self.assertIs(marker.cpu_parent, publish[0])
+                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
+                    self.assertLessEqual(marker.time_range.start, marker.time_range.end)
+                    self.assertLessEqual(marker.time_range.end, admit.time_range.start)
+                    self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
+                    self.assertLessEqual(admit.time_range.end, flush.time_range.start)
+                    quantize = [
+                        e for e in events if e.name == "hidden_state_capture.quantize"
+                    ]
+                    self.assertEqual(len(quantize), int(scenario == "capture_fp8"))
+                    if quantize:
+                        self.assertIs(quantize[0].cpu_parent, prepare)
+                    for name in (
+                        "publish_request_count",
+                        "publish_token_count",
+                        "publish_payload_bytes",
+                    ):
+                        key = f"{_CAPTURE_METRIC_PREFIX}{name}"
+                        self.assertEqual(
+                            result["capture_metrics"][key],
+                            baseline["capture_metrics"][key],
+                        )
+                names = {e.name for e in events}
+                if scenario == "capture_micro_batch":
+                    self.assertIn("py_model.forwardMicroBatched(python_forward)", names)
+                    self.assertIn("py_model.capture_microbatch_layout", names)
+                    self.assertIn("py_model.forwardMicroBatched(merge)", names)
+                else:
+                    layout = next(
+                        e for e in events if e.name == "py_model.capture_layout_status"
+                    )
+                    self.assertLessEqual(
+                        layout.time_range.end, publish[0].time_range.start
+                    )
+                if scenario == "capture_cp":
+                    restore = next(
+                        e for e in events if e.name == "py_model.capture_cp_restore"
+                    )
+                    self.assertLessEqual(
+                        layout.time_range.end, restore.time_range.start
+                    )
+                    self.assertLessEqual(
+                        restore.time_range.end, publish[0].time_range.start
+                    )
+
+    def test_capture_profile_scopes_close_on_admission_and_flush_failure(self) -> None:
+        original_poll = _FakeEagleMooncakeStore.take_async_errors
+        for failure, stage, poll_failure_at in (
+            ("fail_put", "put_batch_admit", 0),
+            ("fail_flush", "flush", 0),
+            ("poll_raises", "observe_async_errors", 1),
+            ("poll_invalid", "observe_async_errors", 1),
+            ("poll_raises", "flush", 2),
+            ("poll_invalid", "flush", 2),
+        ):
+            poll_count = 0
+
+            def poll(store):
+                nonlocal poll_count
+                poll_count += 1
+                errors = original_poll(store)
+                if poll_count == poll_failure_at:
+                    if failure == "poll_raises":
+                        raise RuntimeError("injected async-error polling failure")
+                    return None
+                return errors
+
+            with self.subTest(failure=failure, poll=poll_failure_at), patch.multiple(
+                _FakeEagleMooncakeStore,
+                fail_put=failure == "fail_put",
+                fail_flush=failure == "fail_flush",
+            ), patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll):
+                store_calls = []
+                _FakeEagleMooncakeStore.events = store_calls
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as prof:
+                    result = run_scenario(
+                        CacheStoreForwardModel(),
+                        "capture_bf16",
+                        ignore_deferred_errors=True,
+                    )
+                self.assertEqual(len(result["deferred_capture_errors"]), 1)
+                metrics = result["capture_metrics"]
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
+                )
+                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
+                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
+                self.assertCaptureStatus(metrics, enabled=1, broken=0)
+                events = prof.events()
+                self.assertCaptureProfileStoreCalls(events, store_calls)
+                publish = next(
+                    e for e in events if e.name == "hidden_state_capture.publish"
+                )
+                children = {e.name: e for e in events if e.cpu_parent is publish}
+                expected_stage = "hidden_state_capture." + stage
+                self.assertIn(expected_stage, children)
+                self.assertLessEqual(
+                    children[expected_stage].time_range.end, publish.time_range.end
+                )
+                expected_calls = [
+                    "store.setup",
+                    "store.warmup",
+                    "store.take_async_errors",
+                ]
+                store = _FakeEagleMooncakeStore.instances[-1]
+                if poll_failure_at != 1:
+                    self.assertEqual(len(store.put_batch_calls), 1)
+                    batch_id = store.put_batch_calls[0]["batch_id"]
+                    expected_calls.append(f"store.put_batch:{batch_id}")
+                    self.assertIn(batch_id, children)
+                    self.assertIn("hidden_state_capture.put_batch_admit", children)
+                    if failure != "fail_put":
+                        expected_calls.append("store.flush")
+                        if failure != "fail_flush":
+                            expected_calls.append("store.take_async_errors")
+                else:
+                    self.assertEqual(store.put_batch_calls, [])
+                    self.assertNotIn("hidden_state_capture.prepare_payload", children)
+                    self.assertNotIn("hidden_state_capture.put_batch_admit", children)
+                    self.assertFalse(
+                        any(e.name.startswith("rtp-forward-") for e in events)
+                    )
+                if failure == "fail_put" or poll_failure_at == 1:
+                    self.assertNotIn("hidden_state_capture.flush", children)
+                expected_calls.append("store.flush")
+                if failure != "fail_flush":
+                    expected_calls.append("store.take_async_errors")
+                expected_calls.append("store.close")
+                self.assertEqual(store_calls, expected_calls)
+                self.assertTrue(store.closed)
+
     def test_capture_bf16_store_contract_slices_each_request_and_flushes_on_shutdown(
         self,
     ) -> None:
@@ -1767,7 +2059,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                PositionAwareCaptureModel(), "capture_cp"
+            )
             return
         events = []
         _FakeEagleMooncakeStore.events = events
@@ -1872,7 +2166,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         # Context-parallel input processing is a CUDA-only feature: the production
         # processor rejects ROCm builds by design. The ROCm lane verifies that
         # guard; the CUDA lane covers the full CP planning and restore logic.
-        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+        with self.assertRaisesRegex(
+            RuntimeError, "Context parallel not supported on ROCm"
+        ):
             run_scenario(model, scenario)
 
     def test_capture_fp8_passes_per_token_per_layer_scale(self) -> None:
@@ -2077,7 +2373,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens"
+            )
             return
         layout_statuses = []
 
@@ -2100,7 +2398,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(MalformedCaptureLayoutModel(), "capture_cp_malformed_layout")
+            self.assertRocmContextParallelRejected(
+                MalformedCaptureLayoutModel(), "capture_cp_malformed_layout"
+            )
             return
         layout_statuses = []
 
@@ -2130,7 +2430,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp"
+            )
             return
         layout_reduce_calls = []
 
@@ -2160,7 +2462,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_malformed_restored_width")
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp_malformed_restored_width"
+            )
             return
         layout_statuses = []
 
@@ -2254,7 +2558,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            self.assertRocmContextParallelRejected(
+                PositionAwareCaptureModel(), "capture_cp"
+            )
             return
         layout_statuses = []
 

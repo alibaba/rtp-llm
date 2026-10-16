@@ -21,6 +21,10 @@ from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextModel
 from rtp_llm.models_py.model_desc.qwen3vl import Qwen3VLModel
 from rtp_llm.models_py.model_desc.qwen3vl_moe import Qwen3VLMoeModel
+from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+    _NOOP_RECORD_FUNCTION_RANGE,
+    disable_record_function_ranges,
+)
 
 
 class _CaptureModel(GptModelBase):
@@ -444,6 +448,97 @@ def _forward_kimi(model: KimiLinearModel, inputs: SimpleNamespace) -> torch.Tens
 
 
 class HiddenStateCaptureTest(unittest.TestCase):
+
+    def test_capture_profiler_off_allocates_no_ranges(self) -> None:
+        class UnformattableLayerId(int):
+            def __format__(self, spec):
+                raise AssertionError("profiler-off path formatted a dynamic range")
+
+        model = _CaptureModel([2, 0])
+        hidden = torch.tensor([[1.0, 2.0]])
+        with patch.object(
+            torch.autograd, "_profiler_enabled", return_value=False
+        ), patch.object(torch._C._profiler, "_RecordFunctionFast") as record_range:
+            capture = model.capture_context(True)
+            self.assertIs(capture._profile_noop, _NOOP_RECORD_FUNCTION_RANGE)
+            for layer_id in range(3):
+                capture.capture_layer(UnformattableLayerId(layer_id), hidden)
+            output = capture.finalize(hidden).hidden_states
+        record_range.assert_not_called()
+        torch.testing.assert_close(output, torch.cat([hidden] * 3, dim=-1))
+
+    def test_capture_profiler_selected_layers_and_pack_preserve_values(self) -> None:
+        model = _CaptureModel([2, 0])
+        hidden = torch.tensor([[1.0, 2.0]])
+        residual = torch.tensor([[3.0, 4.0]])
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            capture = model.capture_context(True)
+            for layer_id in range(3):
+                capture.capture_layer(layer_id, hidden + layer_id, residual)
+            output = capture.finalize(hidden, residual).hidden_states
+        events = [
+            e for e in prof.events() if e.name.startswith("hidden_state_capture.")
+        ]
+        self.assertEqual(
+            [e.name for e in events],
+            [
+                "hidden_state_capture.layer(layer=0)",
+                "hidden_state_capture.layer(layer=2)",
+                "hidden_state_capture.pack",
+            ],
+        )
+        self.assertTrue(all(not e.is_user_annotation for e in events))
+        torch.testing.assert_close(
+            output,
+            torch.cat(
+                [hidden + 2 + residual, hidden + residual, hidden + residual], dim=-1
+            ),
+        )
+
+    def test_capture_profiler_respects_outer_disable_and_inactive_capture(self) -> None:
+        model = _CaptureModel([0])
+        hidden = torch.ones(1, 2)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            with disable_record_function_ranges():
+                capture = model.capture_context(True)
+            capture.capture_layer(0, hidden)
+            capture.finalize(hidden)
+            inactive = model.capture_context(False)
+            inactive.capture_layer(0, hidden)
+            output = inactive.finalize(hidden).hidden_states
+        self.assertEqual(output.data_ptr(), hidden.data_ptr())
+        self.assertFalse(
+            any(e.name.startswith("hidden_state_capture.") for e in prof.events())
+        )
+
+    def test_capture_profiler_exception_closes_layer_and_pack_ranges(self) -> None:
+        hidden = torch.ones(1, 2)
+        model = _CaptureModel([0])
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            capture = model.capture_context(True)
+            with patch.object(
+                capture, "_canonical_layer", side_effect=RuntimeError("layer failure")
+            ), self.assertRaisesRegex(RuntimeError, "layer failure"):
+                capture.capture_layer(0, hidden)
+            capture.capture_layer(0, hidden)
+            with patch.object(
+                torch, "cat", side_effect=RuntimeError("pack failure")
+            ), self.assertRaisesRegex(RuntimeError, "pack failure"):
+                capture.finalize(hidden)
+            output = capture.finalize(hidden).hidden_states
+        events = [
+            e for e in prof.events() if e.name.startswith("hidden_state_capture.")
+        ]
+        self.assertEqual(len(events), 4)
+        self.assertTrue(all(e.cpu_parent is None for e in events))
+        torch.testing.assert_close(output, torch.cat([hidden, hidden], dim=-1))
+
     def test_context_packs_layers_in_configured_order(self) -> None:
         model = _CaptureModel([2, 0])
         capture = model.capture_context(True)
@@ -658,7 +753,8 @@ class HiddenStateCaptureTest(unittest.TestCase):
                     outputs.hidden_states, expected_capture if enabled else layer1 * 10
                 )
                 torch.testing.assert_close(
-                    outputs.mtp_target_hidden_states, torch.cat((layer0, layer1), dim=-1)
+                    outputs.mtp_target_hidden_states,
+                    torch.cat((layer0, layer1), dim=-1),
                 )
                 if aux_buffer is None:
                     aux_buffer = model._mtp_target_prompt_buffer
