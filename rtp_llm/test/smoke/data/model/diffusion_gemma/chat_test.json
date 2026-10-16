@@ -1,6 +1,6 @@
 {
  "model_type": "diffusion_gemma",
- "model_path": "/mnt/nas1/hf/diffusiongemma-26B-A4B-it",
+ "model_path": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
  "query_result": [
   {
    "endpoint": "/inference",
