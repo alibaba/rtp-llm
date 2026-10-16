@@ -1,6 +1,6 @@
 """Stage-local MXFP8 dispatch with ordered FP32 peer accumulation.
 
-Returns use MXFP8 by default or opt-in lossless FP32 partials."""
+Returns use MXFP8 by default; BF16 or lossless FP32 partials are opt-in."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def _is_sm120_runtime() -> bool:
 
 @register_strategy
 class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
-    """Stage-local NCCL all_to_all_single with MXFP8 activation and return."""
+    """Stage-local NCCL all_to_all_single: MXFP8 dispatch; MXFP8/BF16/FP32 return."""
 
     name = BACKEND_NAME
     requires_synchronized_chunk_schedule = True
@@ -101,8 +101,8 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
     def __init__(self, cfg: MoeCfg):
         super().__init__(cfg)
         self._return_dtype = os.environ.get("DSV4_MOE_RETURN_DTYPE", "mxfp8")
-        if self._return_dtype not in ("mxfp8", "fp32"):
-            raise ValueError("DSV4_MOE_RETURN_DTYPE must be mxfp8 or fp32")
+        if self._return_dtype not in ("mxfp8", "bf16", "fp32"):
+            raise ValueError("DSV4_MOE_RETURN_DTYPE must be mxfp8, bf16, or fp32")
         if cfg.ep_size <= 1:
             raise RuntimeError(
                 "%s requires ep_size > 1 (got %d)" % (BACKEND_NAME, cfg.ep_size)
@@ -721,12 +721,17 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
     def _pack_return(
         self, local_out: torch.Tensor, hidden: int, scale_cols: int, n_total: int
     ) -> torch.Tensor:
-        if self._return_dtype == "fp32":
+        if self._return_dtype in ("bf16", "fp32"):
             if local_out.dtype != torch.float32 or local_out.shape != (n_total, hidden):
                 raise ValueError(
-                    "FP32 MoE return requires float32 [rows, hidden] partials"
+                    "%s MoE return requires float32 [rows, hidden] partials"
+                    % self._return_dtype.upper()
                 )
-            return local_out.contiguous().view(torch.uint8)
+            if self._return_dtype == "fp32":
+                return local_out.contiguous().view(torch.uint8)
+            # Same BF16 rounding the MXFP8 path already does, without the
+            # following E4M3 block-scale quantization.
+            return local_out.to(torch.bfloat16).contiguous().view(torch.uint8)
         from flashinfer import mxfp8_quantize
 
         ret_cols = hidden + scale_cols
@@ -747,20 +752,27 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         return buf
 
     def _combine_return(self, received, n_rows, hidden, world):
-        if self._return_dtype == "fp32":
+        if self._return_dtype in ("bf16", "fp32"):
             from .._nccl_ep_combine_triton import fp32_peer_sum
 
+            bytes_per_elem = 2 if self._return_dtype == "bf16" else 4
+            wire_dtype = (
+                torch.bfloat16 if self._return_dtype == "bf16" else torch.float32
+            )
             if received.dtype != torch.uint8 or received.shape != (
                 world * n_rows,
-                hidden * 4,
+                hidden * bytes_per_elem,
             ):
                 raise ValueError(
-                    "FP32 MoE return requires byte rows with four bytes per element"
+                    "%s MoE return requires byte rows with %d bytes per element"
+                    % (self._return_dtype.upper(), bytes_per_elem)
                 )
             output = torch.empty(
                 (n_rows, hidden), dtype=torch.float32, device=received.device
             )
-            return fp32_peer_sum(received.view(torch.float32), world, output)
+            if n_rows == 0:
+                return output
+            return fp32_peer_sum(received.view(wire_dtype), world, output)
         return mxfp8_dequant_peer_sum(
             received,
             n_rows=n_rows,

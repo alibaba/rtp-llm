@@ -90,6 +90,45 @@ class Sm120PrecisionContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             NcclEpMxfp8Strategy._combine_return(strategy, received, 4, 128, 2)
 
+    def test_bf16_return_matches_ordered_rounded_sum(self):
+        strategy = SimpleNamespace(_return_dtype="bf16")
+        for world in (2, 4, 8):
+            for rows in (0, 1, 7, 31):
+                hidden = 128
+                peers = torch.randn(world, rows, hidden, device="cuda")
+                peers *= torch.exp2(torch.arange(world, device="cuda") * 3)[
+                    :, None, None
+                ]
+                flat = peers.reshape(world * rows, hidden)
+                packed = NcclEpMxfp8Strategy._pack_return(
+                    strategy, flat, hidden, hidden // 32, world * rows
+                )
+                self.assertEqual(packed.dtype, torch.uint8)
+                self.assertEqual(packed.shape, (world * rows, hidden * 2))
+                actual = NcclEpMxfp8Strategy._combine_return(
+                    strategy, packed, rows, hidden, world
+                )
+                expected = torch.zeros(rows, hidden, device="cuda")
+                for peer in peers:
+                    expected.add_(peer.to(torch.bfloat16).float())
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                if rows == 31 and world == 2:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = NcclEpMxfp8Strategy._combine_return(
+                            strategy, packed, rows, hidden, world
+                        )
+                    packed.view(torch.bfloat16).neg_()
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(captured, -expected, rtol=0, atol=0)
+
+    def test_bf16_return_rejects_fp32_payload(self):
+        strategy = SimpleNamespace(_return_dtype="bf16")
+        received = torch.zeros(8, 128 * 4, dtype=torch.uint8, device="cuda")
+        with self.assertRaises(ValueError):
+            NcclEpMxfp8Strategy._combine_return(strategy, received, 4, 128, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
