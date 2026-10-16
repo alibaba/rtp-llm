@@ -256,13 +256,13 @@ bool executeWrite(P2PConnector&                           connector,
                 break;
         }
     }
-    std::shared_ptr<P2PSchedulerPrefillWrite::RequestState> registration;
+    std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest> registration;
     if (p2p_request->type() == HANDLE_WRITE) {
         auto& scheduler = connector.prefill_->write_scheduler_;
         std::lock_guard<std::mutex> lock(scheduler->requests_mutex_);
         auto&                       state = scheduler->requests_[p2p_request->unique_key()];
         if (!state) {
-            state = std::make_shared<P2PSchedulerPrefillWrite::RequestState>(p2p_request->deadline_ms());
+            state = std::make_shared<P2PSchedulerPrefillWrite::PrefillWriteRequest>(p2p_request->deadline_ms());
             state->registered_workers.assign(1, false);
             state->plan_digest = p2p_request->plan_digest();
         }
@@ -903,7 +903,7 @@ protected:
         auto manager   = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 4, 1, DataType::TYPE_FP16),
                                                         /*warmup=*/true);
         manager->p2p_connector_ = std::move(connector);
-        registration_           = std::make_shared<P2PSchedulerPrefillWrite::RequestState>(currentTimeMs() + 60000);
+        registration_ = std::make_shared<P2PSchedulerPrefillWrite::PrefillWriteRequest>(currentTimeMs() + 60000);
         registration_->registered_workers.assign(1, false);
         registration_->plan_digest = 123;
         manager->p2p_connector_->prefill_->write_scheduler_->requests_.emplace("write_request", registration_);
@@ -945,7 +945,7 @@ protected:
             return {};
         return P2PBroadcastClient::leaseStatus(result);
     }
-    std::shared_ptr<P2PSchedulerPrefillWrite::RequestState> registration_;
+    std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest> registration_;
     WriteRpcService                     service_;
     std::unique_ptr<grpc::Server>       server_;
     std::string                         address_;

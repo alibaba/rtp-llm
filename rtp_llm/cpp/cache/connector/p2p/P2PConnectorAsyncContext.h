@@ -273,7 +273,6 @@ class P2PConnectorAsyncWriteContext:
     public AsyncContext,
     public std::enable_shared_from_this<P2PConnectorAsyncWriteContext> {
 public:
-    using ReadyHandler = std::function<ErrorInfo(const P2PConnectorWriteReadyRequestPB&)>;
     using PeerCancel   = std::function<std::shared_ptr<DecodeWriteHelper::CancelResult>()>;
 
     P2PConnectorAsyncWriteContext(std::string                         unique_key,
@@ -291,19 +290,15 @@ public:
     void               checkDone();
     void               cancel(const ErrorInfo& error = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled"));
     bool               beginKickoff();
-    void               setCallResults(std::shared_ptr<P2PBroadcastClient::Result> result);
     bool               resourceHoldPending() const;
     const std::string& uniqueKey() const {
         return unique_key_;
     }
     ErrorInfo errorInfo() const override;
 
-    bool      beginWorkerCall();
     void      finishWithoutTransfer(const ErrorInfo& error = ErrorInfo::OkStatus());
     int64_t   deadlineMs() const;
     void      setPlannedBytes(int64_t bytes);
-    void      setReadyHandler(ReadyHandler handler);
-    ErrorInfo acceptWriteReady(const P2PConnectorWriteReadyRequestPB& request);
     bool      beginPeerCall(PeerCancel cancel);
     void      setPeerCallResult(std::shared_ptr<DecodeWriteHelper::Result> result);
 
@@ -348,21 +343,16 @@ private:
     std::vector<DoneCallback>                   done_callbacks_;
     std::shared_ptr<P2PNotification>            notification_;
     bool                                        kickoff_started_{false};
-    bool                                        calls_ready_{false};
     bool                                        cancelled_{false};
     bool                                        done_{false};
     bool                                        released_{false};
     bool                                        transfer_stopped_{false};
-    std::shared_ptr<P2PBroadcastClient::Result> start_result_;
     bool                                        control_submitting_{false};
     int64_t                                     control_next_ms_{0};
     int64_t                                     control_interval_ms_{10};
 
     std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> control_result_;
 
-    ReadyHandler                                     ready_handler_;
-    std::string                                      ready_request_;
-    bool                                             ready_submitting_{false};
     bool                                             peer_pending_{false};
     bool                                             peer_stopped_{false};
     PeerCancel                                       peer_cancel_;
@@ -380,7 +370,6 @@ public:
     void   cancelAll();
     void   stop();
     size_t inflightContextCount() const;
-    std::shared_ptr<P2PConnectorAsyncWriteContext> findContext(const std::string& key) const;
 
 private:
     void    checkOnce();

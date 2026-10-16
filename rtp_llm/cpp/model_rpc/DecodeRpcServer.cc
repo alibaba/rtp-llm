@@ -506,17 +506,4 @@ void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_p
     }
 }
 
-grpc::Status DecodeRpcServer::WriteReady(grpc::ServerContext*                   context,
-                                         const P2PConnectorWriteReadyRequestPB* request,
-                                         P2PConnectorWriteReadyResponsePB*      response) {
-    if (context->IsCancelled()) {
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
-    }
-    if (!engine_ || !engine_->getCacheManager()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
-    }
-    engine_->getCacheManager()->handleWriteReady(*request, *response);
-    return grpc::Status::OK;
-}
-
 }  // namespace rtp_llm

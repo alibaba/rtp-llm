@@ -54,7 +54,7 @@ P2PSchedulerPrefillWrite::~P2PSchedulerPrefillWrite() {
 }
 
 void P2PSchedulerPrefillWrite::stop() {
-    std::vector<std::shared_ptr<RequestState>> requests;
+    std::vector<std::shared_ptr<PrefillWriteRequest>> requests;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
         stopping_ = true;
@@ -93,6 +93,18 @@ bool P2PSchedulerPrefillWrite::init() {
     control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
     initialized_  = control_pool_->start();
     return initialized_;
+}
+
+std::shared_ptr<P2PBroadcastClient> P2PSchedulerPrefillWrite::sourceClient(const std::vector<std::string>& addresses) {
+    std::lock_guard<std::mutex> lock(source_clients_mutex_);
+    const auto                  it = source_clients_.find(addresses);
+    if (it != source_clients_.end())
+        return it->second;
+    auto client = std::make_shared<P2PBroadcastClient>(addresses, config_.p2p_cancel_broadcast_timeout_ms);
+    if (!client->init())
+        return nullptr;
+    source_clients_.emplace(addresses, client);
+    return client;
 }
 
 std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_tp_size) {
@@ -191,7 +203,7 @@ ErrorInfo P2PSchedulerPrefillWrite::buildPrefillRankRoutes(const TransferPlan&  
     return ErrorInfo::OkStatus();
 }
 
-void P2PSchedulerPrefillWrite::RequestState::fail(const ErrorInfo& failure) {
+void P2PSchedulerPrefillWrite::PrefillWriteRequest::fail(const ErrorInfo& failure) {
     std::lock_guard<std::mutex> lock(mutex);
     if (stopped)
         return;
@@ -201,12 +213,12 @@ void P2PSchedulerPrefillWrite::RequestState::fail(const ErrorInfo& failure) {
     cv.notify_all();
 }
 
-ErrorInfo P2PSchedulerPrefillWrite::RequestState::errorInfo() const {
+ErrorInfo P2PSchedulerPrefillWrite::PrefillWriteRequest::errorInfo() const {
     std::lock_guard<std::mutex> lock(mutex);
     return error;
 }
 
-bool P2PSchedulerPrefillWrite::RequestState::resourceHoldPending() const {
+bool P2PSchedulerPrefillWrite::PrefillWriteRequest::resourceHoldPending() const {
     std::lock_guard<std::mutex> lock(mutex);
     return !stopped;
 }
@@ -230,7 +242,7 @@ void P2PSchedulerPrefillWrite::pruneRequestsLocked(int64_t now_ms) {
     }
 }
 
-std::shared_ptr<P2PSchedulerPrefillWrite::RequestState>
+std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest>
 P2PSchedulerPrefillWrite::findRequest(const std::string& key) const {
     std::lock_guard<std::mutex> lock(requests_mutex_);
     const auto                  it = requests_.find(key);
@@ -260,13 +272,13 @@ void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteRequestP
         response.set_error_message("invalid CancelWrite key or deadline");
         return;
     }
-    std::shared_ptr<RequestState> state;
+    std::shared_ptr<PrefillWriteRequest> state;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
         pruneRequestsLocked(currentTimeMs());
         auto it = requests_.find(request.unique_key());
         if (it == requests_.end() && !stopping_) {
-            state            = std::make_shared<RequestState>(request.deadline_ms());
+            state            = std::make_shared<PrefillWriteRequest>(request.deadline_ms());
             state->error     = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before StartWrite");
             state->cancelled = true;
             state->stopped   = true;
@@ -345,6 +357,17 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         != ShardLayoutFactory::writebackLayoutDigest(*config_.topology, config_.parallelism_config.tp_size)) {
         return invalid("writeback layout mismatch");
     }
+    if (request.plan_digest() != planned->plan.digest() || request.decode_workers_size() != request.decode_tp_size()) {
+        return invalid("writeback source workers or plan mismatch");
+    }
+    std::vector<std::string> source_addrs;
+    for (const auto& source : request.decode_workers()) {
+        std::string host;
+        int32_t     port = 0;
+        if (!parseGrpcHostPort(source.worker_addr(), host, port))
+            return invalid("writeback source worker address is invalid");
+        source_addrs.push_back(source.worker_addr());
+    }
 
     // step1: validate request and calculate the accepted start_block and block_count
     const size_t block_size    = config_.topology->groups().front().seq_size_per_block;
@@ -366,7 +389,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     }
 
     const auto& unique_key = request.unique_key();
-    auto        state      = std::make_shared<RequestState>(deadline_ms);
+    auto        state      = std::make_shared<PrefillWriteRequest>(deadline_ms);
     bool        inserted   = false;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
@@ -381,7 +404,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
 
     WriteSchedulerMetricsCollector metrics;
     metrics.prefill   = true;
-    const auto notify = [weak = std::weak_ptr<RequestState>(state)] {
+    const auto notify = [weak = std::weak_ptr<PrefillWriteRequest>(state)] {
         if (const auto current = weak.lock())
             current->cv.notify_all();
     };
@@ -389,9 +412,12 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         std::unique_lock<std::mutex> lock(state->mutex);
         state->cv.wait_for(lock, std::chrono::milliseconds(kControlInitialIntervalMs));
     };
+    KVCacheResourcePtr                                       resource;
     std::shared_ptr<LoadAsyncContext>                        load_context;
     std::future<std::shared_ptr<P2PBroadcastClient::Result>> start_submission;
     std::shared_ptr<P2PBroadcastClient::Result>              receive_result;
+    std::future<std::shared_ptr<P2PBroadcastClient::Result>> send_submission;
+    std::shared_ptr<P2PBroadcastClient::Result>              send_result;
     bool                                                     receive_started = false;
     bool                                                     receive_stopped = true;
     size_t                                                   start           = 0;
@@ -415,12 +441,28 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
             if (receive_result->done()) {
                 if (receive_result->success()) {
                     receive_stopped = true;
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    state->receive_stopped = true;
                 } else {
                     state->fail(ErrorInfo(receive_result->errorCode(), receive_result->errorMessage()));
                 }
             }
+        }
+        if (send_submission.valid()
+            && send_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            try {
+                send_result = send_submission.get();
+            } catch (...) {}
+            if (send_result)
+                send_result->setDoneCallback(notify);
+            else
+                state->fail(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "writeback sender broadcast failed"));
+        }
+        if (send_result) {
+            const auto first = send_result->firstError();
+            if (first.error.hasError())
+                state->fail(first.error);
+            if (send_result->done() && !send_result->success())
+                state->fail(ErrorInfo(send_result->errorCode(), send_result->errorMessage()));
         }
         if (load_context && load_context->done() && !load_context->success())
             state->fail(ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed"));
@@ -443,12 +485,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         observe();
         if (state->errorInfo().hasError())
             return state->errorInfo();
-        KVCacheResourcePtr resource;
         const auto error = allocator_->admitWriteBackDecodeCache(keys, prompt_blocks, resource, start, load_context);
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            state->resource = std::move(resource);
-        }
         if (error.hasError())
             return error;
         if (load_context)
@@ -461,12 +498,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
             return ErrorInfo::OkStatus();
         P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
         if (count > 0) {
-            std::string host;
-            int32_t     port = 0;
-            if (!parseGrpcHostPort(request.decode_addr(), host, port))
-                return ErrorInfo(ErrorCode::INVALID_PARAMS, "StartWrite has no valid Decode callback address");
             const auto error =
-                buildPrefillRankRoutes(planned->plan, *state->resource, start, count, routes, &metrics.planned_bytes);
+                buildPrefillRankRoutes(planned->plan, *resource, start, count, routes, &metrics.planned_bytes);
             if (error.hasError())
                 return error;
         }
@@ -499,10 +532,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
             receive_started   = true;
             receive_stopped   = false;
             metrics.submitted = true;
-            {
-                std::lock_guard<std::mutex> lock(state->mutex);
-                state->receive_stopped = false;
-            }
             if (!waitFor([&] {
                     std::lock_guard<std::mutex> lock(state->mutex);
                     return std::all_of(state->registered_workers.begin(),
@@ -510,46 +539,40 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
                                        [](bool registered) { return registered; });
                 }))
                 return state->errorInfo();
-            P2PConnectorWriteReadyRequestPB ready;
-            ready.set_unique_key(unique_key);
-            ready.set_accepted_start_block(start);
-            ready.set_accepted_block_count(count);
-            ready.set_plan_digest(planned->plan.digest());
-            ready.set_deadline_ms(deadline_ms);
-            for (const auto& address : transfer_addrs_)
-                ready.add_prefill_worker_transfer_addrs(address);
-            auto ready_submission = submitWriteRpc(
+            P2PBroadcastClient::BroadcastParams send;
+            send.request_id          = request.request_id();
+            send.unique_key          = unique_key;
+            send.deadline_ms         = deadline_ms;
+            send.request_deadline_ms = deadline_ms;
+            send.type                = WRITE;
+            send.plan_digest         = planned->plan.digest();
+            for (const auto& address : transfer_addrs_) {
+                std::string host;
+                int32_t     port = 0;
+                parseGrpcHostPort(address, host, port);
+                send.peer_workers.emplace_back(std::move(host), port);
+            }
+            for (const auto& source : request.decode_workers())
+                send.routes.emplace_back(source.routes().begin(), source.routes().end());
+            send_submission = submitWriteRpc(
                 control_pool_,
-                [this, address = request.decode_addr(), ready = std::move(ready), deadline_ms]() mutable {
-                    return server_caller_.ready(address, std::move(ready), deadline_ms);
+                [this, addresses = source_addrs, send = std::move(send)]() mutable {
+                    const auto client = sourceClient(addresses);
+                    return client ? client->broadcast(std::move(send)) : nullptr;
                 },
                 notify);
-            if (!ready_submission.valid())
-                return ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback ready submission queue unavailable");
-            if (!waitFor([&] {
-                    return ready_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
-                }))
-                return state->errorInfo();
-            auto result = ready_submission.get();
-            if (result)
-                result->setProgressCallback(notify);
-            if (!result || !waitFor([&] { return result->done(); }))
-                return state->errorInfo().hasError() ? state->errorInfo() :
-                                                       ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                                                 "WriteReady submission failed");
-            if (!result->success() || result->responses().size() != 1)
-                return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "WriteReady RPC failed");
-            const auto reply = result->responses().front();
-            if (reply.error_code() != ErrorCodePB::NONE_ERROR)
-                return ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(reply.error_code())),
-                                 reply.error_message());
+            if (!send_submission.valid())
+                return ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback sender submission queue unavailable");
         }
-        if (!waitFor([&] { return receive_stopped && (!load_context || load_context->done()); }))
+        if (!waitFor([&] {
+                return receive_stopped && (count == 0 || (send_result && send_result->done() && send_result->success()))
+                       && (!load_context || load_context->done());
+            }))
             return state->errorInfo();
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->cancelled)
             return state->error;
-        return allocator_->commitWriteBackDecodeCache(*state->resource, start, deadline_ms);
+        return allocator_->commitWriteBackDecodeCache(*resource, start, deadline_ms);
     };
     try {
         const auto error = run();
@@ -590,8 +613,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
                 if (status.success) {
                     cancel_confirmed = true;
                     receive_stopped  = receive_stopped || status.allStopped();
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    state->receive_stopped = receive_stopped;
                 }
                 control_result.reset();
                 next_control_ms = currentTimeMs() + interval_ms;
@@ -636,7 +657,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     {
         std::lock_guard<std::mutex> requests_lock(requests_mutex_);
         std::lock_guard<std::mutex> lock(state->mutex);
-        state->resource.reset();
+        resource.reset();
         state->stopped = true;
         error          = state->error;
         state->cv.notify_all();

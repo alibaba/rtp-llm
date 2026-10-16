@@ -1427,16 +1427,6 @@ void KVCacheManager::handleWrite(const P2PConnectorStartWriteRequestPB& request,
     }
 }
 
-void KVCacheManager::handleWriteReady(const P2PConnectorWriteReadyRequestPB& request,
-                                      P2PConnectorWriteReadyResponsePB&      response) {
-    if (p2p_connector_) {
-        p2p_connector_->handleWriteReady(request, response);
-    } else {
-        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
-        response.set_error_message("writeback is unavailable");
-    }
-}
-
 void KVCacheManager::cancelP2PWrite(const P2PConnectorCancelWriteRequestPB& request,
                                     P2PConnectorStartWriteResponsePB&       response) {
     if (p2p_connector_) {

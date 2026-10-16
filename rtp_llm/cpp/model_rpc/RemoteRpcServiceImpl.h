@@ -75,15 +75,6 @@ public:
         return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWrite");
     }
 
-    grpc::Status WriteReady(grpc::ServerContext*                   context,
-                            const P2PConnectorWriteReadyRequestPB* request,
-                            P2PConnectorWriteReadyResponsePB*      response) override {
-        if (decode_server_) {
-            return decode_server_->WriteReady(context, request, response);
-        }
-        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement WriteReady");
-    }
-
     grpc::Status CancelWrite(grpc::ServerContext*                    context,
                              const P2PConnectorCancelWriteRequestPB* request,
                              P2PConnectorStartWriteResponsePB*       response) override {

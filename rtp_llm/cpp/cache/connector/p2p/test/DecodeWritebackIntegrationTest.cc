@@ -70,11 +70,7 @@ public:
         ++handshakes;
         return prefill.StartWrite(context, request, response);
     }
-    grpc::Status WriteReady(grpc::ServerContext*                   context,
-                            const P2PConnectorWriteReadyRequestPB* request,
-                            P2PConnectorWriteReadyResponsePB*      response) override {
-        return decode.WriteReady(context, request, response);
-    }
+
     grpc::Status CancelWrite(grpc::ServerContext*                    context,
                              const P2PConnectorCancelWriteRequestPB* request,
                              P2PConnectorStartWriteResponsePB*       response) override {
@@ -92,6 +88,7 @@ public:
               std::function<void(transfer::TransferErrorCode, const std::string&)> callback) override {
         {
             std::unique_lock<std::mutex> lock(mutex_);
+            offered_blocks.fetch_add(request.block_info.size());
             ++started;
             cv_.wait(lock, [this]() { return released_; });
         }
@@ -104,6 +101,7 @@ public:
     }
     std::shared_ptr<transfer::tcp::TcpKVCacheSender> sender_;
     std::atomic<int>                                 started{0};
+    std::atomic<size_t>                              offered_blocks{0};
 
 private:
     std::mutex              mutex_;
@@ -407,6 +405,46 @@ TEST_F(DecodeWritebackIntegrationTest, FinishedStreamReleasesBeforeTcpCopyAndNex
         }
     }
     prefill_->free(FreeInfo{reused, ids});
+}
+
+TEST_F(DecodeWritebackIntegrationTest, ReceiverPullsOnlyMissingSuffixFromCandidateSourceBlocks) {
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, {keys_[0], keys_[1]}).success);
+    prepare();
+    stream_->releaseResource();
+    ASSERT_TRUE(await([&] { return sender_->started > 0; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_TRUE(write->resourceHoldPending());
+    sender_->release();
+    ASSERT_TRUE(await([&] { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+    EXPECT_EQ(sender_->offered_blocks, 4u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 3u);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config_.topologyPtr());
+    auto ids               = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor(tokens_, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ids->init(input);
+    MallocInfo info;
+    info.batch_kv_cache_resource = resource;
+    info.complete_token_ids      = ids;
+    info.reuse_cache             = true;
+    info.enable_cache_lookup     = true;
+    const auto result            = prefill_->malloc(info);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.reuse_len, 12);
+    for (int layer = 0; layer < 2; ++layer) {
+        for (const auto& block : target_->convertIndexToBufferByTag(
+                 layer, config_.topology().groups().front().tag, resource->blocks(0, 0)[2], 1, 0)) {
+            std::vector<uint8_t> bytes(block.size_bytes);
+            ASSERT_EQ(cudaMemcpy(bytes.data(), block.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+            EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [&](uint8_t b) { return b == 10 * layer + 3; }));
+        }
+    }
+    prefill_->free(FreeInfo{resource, ids});
 }
 
 TEST_F(DecodeWritebackIntegrationTest, LastSampleAtBlockBoundaryIsExcluded) {

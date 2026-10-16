@@ -849,6 +849,11 @@ message LeaseStatusResponsePB {
     bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
+message P2PConnectorWriteSourcePB {
+    string worker_addr = 1;
+    repeated TransferRoutePB routes = 2;
+}
+
 message P2PConnectorStartWriteRequestPB {
     int64 request_id = 1;
     string unique_key = 2;
@@ -858,8 +863,10 @@ message P2PConnectorStartWriteRequestPB {
     uint64 layout_digest = 6;
     repeated int32 token_ids = 9;
     int32 input_length = 10;
-    string decode_addr = 11;
+    reserved 11;
     int64 deadline_ms = 12;
+    repeated P2PConnectorWriteSourcePB decode_workers = 13;
+    uint64 plan_digest = 14;
 }
 
 message P2PConnectorStartWriteResponsePB {
@@ -867,24 +874,12 @@ message P2PConnectorStartWriteResponsePB {
     string error_message = 2;
     int32 accepted_start_block = 3;
     int32 accepted_block_count = 4;
-    repeated string prefill_worker_transfer_addrs = 5;
+    reserved 5;
     uint64 plan_digest = 6;
     bool stopped = 7;
 }
 
-message P2PConnectorWriteReadyRequestPB {
-    string unique_key = 1;
-    int32 accepted_start_block = 2;
-    int32 accepted_block_count = 3;
-    repeated string prefill_worker_transfer_addrs = 4;
-    uint64 plan_digest = 5;
-    int64 deadline_ms = 6;
-}
 
-message P2PConnectorWriteReadyResponsePB {
-    int32 error_code = 1;
-    string error_message = 2;
-}
 
 message P2PConnectorCancelWriteRequestPB {
     string unique_key = 1;
@@ -1114,7 +1109,6 @@ service RpcService {
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc StartWrite(P2PConnectorStartWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
-    rpc WriteReady(P2PConnectorWriteReadyRequestPB) returns (P2PConnectorWriteReadyResponsePB);
     rpc CancelWrite(P2PConnectorCancelWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);

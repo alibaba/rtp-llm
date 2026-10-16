@@ -58,7 +58,6 @@ public:
 
     void cancelWrite(const std::shared_ptr<AsyncContext>& context);
 
-    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
 
     bool writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/connector/p2p/DecodeWriteHelper.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "autil/ThreadPool.h"
 #include <condition_variable>
@@ -29,8 +29,8 @@ public:
     size_t    inflightContextCount() const;
 
 private:
-    struct RequestState {
-        explicit RequestState(int64_t deadline): deadline_ms(deadline) {}
+    struct PrefillWriteRequest {
+        explicit PrefillWriteRequest(int64_t deadline): deadline_ms(deadline) {}
         void      fail(const ErrorInfo& error);
         ErrorInfo errorInfo() const;
         bool      resourceHoldPending() const;
@@ -38,20 +38,19 @@ private:
         const int64_t           deadline_ms;
         mutable std::mutex      mutex;
         std::condition_variable cv;
-        KVCacheResourcePtr      resource;
         std::vector<bool>       registered_workers;
         uint64_t                plan_digest{0};
         bool                    cancelled{false};
-        bool                    receive_stopped{true};
         bool                    stopped{false};
         ErrorInfo               error;
     };
 
-    std::shared_ptr<RequestState> findRequest(const std::string& unique_key) const;
-    void                          pruneRequestsLocked(int64_t now_ms);
-    int64_t                       holdUntilMs(int64_t deadline_ms) const;
+    std::shared_ptr<PrefillWriteRequest> findRequest(const std::string& unique_key) const;
+    void                                 pruneRequestsLocked(int64_t now_ms);
+    int64_t                              holdUntilMs(int64_t deadline_ms) const;
 
     std::shared_ptr<const PlanResult> planFor(int decode_tp_size);
+    std::shared_ptr<P2PBroadcastClient> sourceClient(const std::vector<std::string>& addresses);
     ErrorInfo                         buildPrefillRankRoutes(const TransferPlan&             plan,
                                                              KVCacheResource&                resource,
                                                              size_t                          start_block,
@@ -66,13 +65,14 @@ private:
     std::shared_ptr<P2PBroadcastClient>              client_;
     kmonitor::MetricsReporterPtr                     metrics_reporter_;
     std::vector<std::string>                         transfer_addrs_;
-    DecodeWriteHelper                                server_caller_;
-    std::shared_ptr<autil::ThreadPool>                   control_pool_;
-    mutable std::mutex                                   requests_mutex_;
-    std::condition_variable                              requests_cv_;
-    std::map<std::string, std::shared_ptr<RequestState>> requests_;
-    std::multimap<int64_t, std::string>                  request_expirations_;
-    bool                                                 stopping_{false};
+    std::mutex                                                              source_clients_mutex_;
+    std::map<std::vector<std::string>, std::shared_ptr<P2PBroadcastClient>> source_clients_;
+    std::shared_ptr<autil::ThreadPool>                          control_pool_;
+    mutable std::mutex                                          requests_mutex_;
+    std::condition_variable                                     requests_cv_;
+    std::map<std::string, std::shared_ptr<PrefillWriteRequest>> requests_;
+    std::multimap<int64_t, std::string>                         request_expirations_;
+    bool                                                        stopping_{false};
     bool                                             initialized_{false};
 };
 

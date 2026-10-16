@@ -223,16 +223,6 @@ void P2PConnector::handleWrite(const P2PConnectorStartWriteRequestPB& request,
     }
 }
 
-void P2PConnector::handleWriteReady(const P2PConnectorWriteReadyRequestPB& request,
-                                    P2PConnectorWriteReadyResponsePB&      response) {
-    if (decode_) {
-        decode_->handleWriteReady(request, response);
-    } else {
-        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
-        response.set_error_message("writeback is unavailable");
-    }
-}
-
 void P2PConnector::handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request,
                                      P2PConnectorStartWriteResponsePB&       response) {
     if (prefill_) {

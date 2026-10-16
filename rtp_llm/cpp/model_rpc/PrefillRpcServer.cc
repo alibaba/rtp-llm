@@ -661,7 +661,10 @@ grpc::Status PrefillRpcServer::StartWrite(grpc::ServerContext*                  
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
     if (!engine_ || !engine_->getCacheManager()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is unavailable");
+        response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        response->set_error_message("cache manager is unavailable");
+        response->set_stopped(true);
+        return grpc::Status::OK;
     }
     engine_->getCacheManager()->handleWrite(*request, *response, [context]() { return context->IsCancelled(); });
     return grpc::Status::OK;

@@ -256,7 +256,6 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         request.set_unique_key(routing.unique_key);
         request.set_input_length(input_length);
         request.set_decode_tp_size(config_.parallelism_config.tp_size);
-        request.set_decode_addr(config_.worker_grpc_addrs.front());
         request.set_layout_digest(
             ShardLayoutFactory::writebackLayoutDigest(*config_.topology, config_.parallelism_config.tp_size));
         for (const auto key : resource.cacheKeys()) {
@@ -266,70 +265,26 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
             request.add_token_ids(token);
         }
 
-        context->setReadyHandler([this,
-                                  weak = std::weak_ptr<P2PConnectorAsyncWriteContext>(context),
-                                  planned,
-                                  source_group,
-                                  routing,
-                                  blocks,
-                                  min_start = static_cast<size_t>(input_length) / block_size](const auto& ready) {
-            auto context = weak.lock();
-            if (!context) {
-                return ErrorInfo(ErrorCode::CANCELLED, "writeback context is gone");
+        P2PBroadcastClient::RankRoutes routes(config_.worker_grpc_addrs.size());
+        int64_t                        planned_bytes   = 0;
+        const size_t                   candidate_start = static_cast<size_t>(input_length) / block_size;
+        const auto                     error           = buildDecodeRankRoutes(
+            planned->plan, resource, candidate_start, blocks - candidate_start, routes, &planned_bytes);
+        if (error.hasError()) {
+            return context->finishWithoutTransfer(error);
+        }
+        request.set_plan_digest(planned->plan.digest());
+        for (size_t rank = 0; rank < routes.size(); ++rank) {
+            auto* source = request.add_decode_workers();
+            source->set_worker_addr(config_.worker_grpc_addrs[rank]);
+            for (auto& route : routes[rank]) {
+                source->add_routes()->Swap(&route);
             }
-            const auto start = ready.accepted_start_block();
-            const auto count = ready.accepted_block_count();
-            if (start < 0 || count <= 0 || static_cast<size_t>(start) > blocks
-                || static_cast<size_t>(count) != blocks - start || static_cast<size_t>(start) < min_start
-                || ready.plan_digest() != planned->plan.digest()
-                || ready.prefill_worker_transfer_addrs_size() != routing.prefill_tp_size) {
-                return ErrorInfo(ErrorCode::INVALID_PARAMS, "WriteReady returned an invalid range or plan");
-            }
-            std::vector<std::pair<std::string, uint32_t>> peers;
-            for (const auto& address : ready.prefill_worker_transfer_addrs()) {
-                std::string host;
-                int32_t     port = 0;
-                if (!parseGrpcHostPort(address, host, port)) {
-                    return ErrorInfo(ErrorCode::INVALID_PARAMS, "WriteReady returned an invalid transfer endpoint");
-                }
-                peers.emplace_back(std::move(host), port);
-            }
-            auto owner = source_group->sourceResource();
-            if (!owner) {
-                return ErrorInfo(ErrorCode::CANCELLED, "writeback source was released");
-            }
-            auto resource = *owner;
-            resource.cacheKeys().resize(blocks);
-            resource.setLastBlockAligned(true);
-            P2PBroadcastClient::RankRoutes routes(config_.worker_grpc_addrs.size());
-            int64_t                        planned_bytes = 0;
-            const auto error = buildDecodeRankRoutes(planned->plan, resource, start, count, routes, &planned_bytes);
-            if (error.hasError()) {
-                return error;
-            }
-            if (!context->beginWorkerCall() || !source_group->beginSourceTransfer(context->deadlineMs())) {
-                return ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before send");
-            }
-            context->setPlannedBytes(planned_bytes);
-            P2PBroadcastClient::BroadcastParams params;
-            params.request_id          = routing.request_id;
-            params.unique_key          = routing.unique_key;
-            params.deadline_ms         = context->deadlineMs();
-            params.request_deadline_ms = params.deadline_ms;
-            params.type                = WRITE;
-            params.peer_workers        = std::move(peers);
-            params.routes              = std::move(routes);
-            params.plan_digest         = planned->plan.digest();
-            try {
-                auto result = client_->broadcast(std::move(params));
-                context->setCallResults(std::move(result));
-            } catch (...) {
-                context->setCallResults(nullptr);
-                return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                 "writeback sender broadcast failed");
-            }
-            return ErrorInfo::OkStatus();
-        });
+        }
+        context->setPlannedBytes(planned_bytes);
+        if (!source_group->beginSourceTransfer(deadline_ms)) {
+            return context->finishWithoutTransfer(ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before start"));
+        }
         const auto prefill_addr = formatGrpcHostPort(routing.prefill_addr.first, routing.prefill_addr.second);
         if (!context->beginPeerCall([this,
                                      prefill_addr,
@@ -355,16 +310,6 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         context->cancel(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback kickoff failed"));
         context->finishWithoutTransfer(context->errorInfo());
     }
-}
-
-void P2PSchedulerDecodeWrite::handleWriteReady(const P2PConnectorWriteReadyRequestPB& request,
-                                               P2PConnectorWriteReadyResponsePB&      response) {
-    response.Clear();
-    const auto context = checker_.findContext(request.unique_key());
-    const auto error =
-        context ? context->acceptWriteReady(request) : ErrorInfo(ErrorCode::CANCELLED, "unknown writeback ready key");
-    response.set_error_code(transErrorCodeToRPC(error.code()));
-    response.set_error_message(error.ok() ? "" : error.ToString());
 }
 
 }  // namespace rtp_llm

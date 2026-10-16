@@ -384,14 +384,4 @@ bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key,
     return ret;
 }
 
-void P2PConnectorDecode::handleWriteReady(const P2PConnectorWriteReadyRequestPB& request,
-                                          P2PConnectorWriteReadyResponsePB&      response) {
-    if (write_scheduler_) {
-        write_scheduler_->handleWriteReady(request, response);
-    } else {
-        response.set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
-        response.set_error_message("writeback is unavailable");
-    }
-}
-
 }  // namespace rtp_llm

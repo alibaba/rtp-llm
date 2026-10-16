@@ -31,7 +31,6 @@ public:
                                                          size_t                  kv_ready_token_count,
                                                          Meta::P2PRoutingContext routing);
     void cancel(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context);
-    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
     size_t                                         inflightContextCount() const {
         return checker_.inflightContextCount();
     }

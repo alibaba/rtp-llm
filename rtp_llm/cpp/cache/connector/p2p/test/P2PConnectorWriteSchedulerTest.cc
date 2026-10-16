@@ -54,16 +54,35 @@ std::shared_ptr<P2PConnectorAsyncWriteContext> makeWriteContext(KVCacheResourceP
                                                            });
 }
 
-KVCacheResourcePtr contextResource(const std::shared_ptr<P2PSchedulerPrefillWrite::RequestState>& state) {
-    std::lock_guard<std::mutex> lock(state->mutex);
-    return state->resource;
+std::shared_ptr<DecodeWriteHelper::Result>
+peerResult(ErrorCode error = ErrorCode::NONE_ERROR, bool stopped = true, int count = 2) {
+    auto call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
+    call->response.set_error_code(transErrorCodeToRPC(error));
+    call->response.set_error_message(error == ErrorCode::NONE_ERROR ? "" : "prefill transfer failed");
+    call->response.set_stopped(stopped);
+    call->response.set_accepted_block_count(count);
+    return std::make_shared<DecodeWriteHelper::Result>(
+        std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
 }
 
-bool receiveDone(const std::shared_ptr<P2PSchedulerPrefillWrite::RequestState>& state) {
+void confirmSourceStopped(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context) {
+    auto call = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    call->response.mutable_p2p_response();
+    auto result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{call});
+    result->finishRank(0, true);
+    {
+        std::lock_guard<std::mutex> lock(context->mutex_);
+        context->control_result_ = result;
+    }
+    context->checkCancelDone();
+}
+
+bool receiveDone(const std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest>& state) {
     return !state->resourceHoldPending() || state->errorInfo().hasError();
 }
 
-bool receiveSuccess(const std::shared_ptr<P2PSchedulerPrefillWrite::RequestState>& state) {
+bool receiveSuccess(const std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest>& state) {
     return !state->resourceHoldPending() && state->errorInfo().ok();
 }
 
@@ -73,9 +92,8 @@ public:
     using Handler = std::function<void(
         const P2PConnectorStartWriteRequestPB&, P2PConnectorStartWriteResponsePB&, std::function<bool()>)>;
     Handler           handshake;
-    std::function<void(const P2PConnectorWriteReadyRequestPB&, P2PConnectorWriteReadyResponsePB&)>  ready;
     std::function<void(const P2PConnectorCancelWriteRequestPB&, P2PConnectorStartWriteResponsePB&)> cancel_write;
-    std::atomic<int>     ready_calls{0}, peer_cancels{0};
+    std::atomic<int>                                                                                peer_cancels{0};
     std::atomic<bool>    fail_start{false}, lose_handshake{false}, omit_status{false};
     std::atomic<int>     start_delay_ms{0};
     std::atomic<int>     starts{0}, cancels{0}, handshakes{0}, lease_queries{0};
@@ -93,28 +111,12 @@ public:
         return lose_handshake ? grpc::Status(grpc::StatusCode::INTERNAL, "lost handshake") : grpc::Status::OK;
     }
 
-    grpc::Status WriteReady(grpc::ServerContext*,
-                            const P2PConnectorWriteReadyRequestPB* request,
-                            P2PConnectorWriteReadyResponsePB*      response) override {
-        ++ready_calls;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            last_ready_ = *request;
-        }
-        if (ready)
-            ready(*request, *response);
-        return grpc::Status::OK;
-    }
     grpc::Status CancelWrite(grpc::ServerContext*,
                              const P2PConnectorCancelWriteRequestPB* request,
                              P2PConnectorStartWriteResponsePB*       response) override {
         ++peer_cancels;
         cancel_write(*request, *response);
         return grpc::Status::OK;
-    }
-    P2PConnectorWriteReadyRequestPB lastReady() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return last_ready_;
     }
 
     grpc::Status ExecuteFunction(grpc::ServerContext*     context,
@@ -203,6 +205,11 @@ public:
         }
         cv_.notify_all();
     }
+    bool transferStopped(const std::string& key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  it = states_.find(key);
+        return it != states_.end() && it->second.stopped;
+    }
     P2PConnectorBroadcastTpRequestPB lastStart() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_start_;
@@ -225,7 +232,6 @@ private:
     bool                             draining_{false};
     P2PConnectorBroadcastTpRequestPB last_start_;
     P2PConnectorStartWriteRequestPB  last_handshake_;
-    P2PConnectorWriteReadyRequestPB  last_ready_;
 };
 
 class P2PConnectorWriteSchedulerTest: public ::testing::Test {
@@ -274,9 +280,6 @@ protected:
         createDecode();
         prefill_workers_[0].cancel_write = [this](const auto& request, auto& response) {
             prefill_->cancelWrite(request, response);
-        };
-        decode_workers_[0].ready = [this](const auto& request, auto& response) {
-            decode_->handleWriteReady(request, response);
         };
     }
 
@@ -360,7 +363,6 @@ protected:
         request.set_timeout_ms(4000);
         request.set_deadline_ms(currentTimeMs() + 4000);
         request.set_decode_tp_size(2);
-        request.set_decode_addr(decode_addrs_.front());
         request.set_input_length(4);
         request.set_layout_digest(ShardLayoutFactory::writebackLayoutDigest(*config_.topologyPtr(), 2));
         for (const auto token : token_ids_) {
@@ -368,6 +370,17 @@ protected:
         }
         for (const auto key : keys_) {
             request.add_cache_keys(key);
+        }
+        const auto plan = mirroredWritePlan();
+        request.set_plan_digest(plan.plan.digest());
+        auto                           owner = source();
+        P2PBroadcastClient::RankRoutes routes(decode_addrs_.size());
+        EXPECT_TRUE(decode_->buildDecodeRankRoutes(plan.plan, *owner, 1, keys_.size() - 1, routes, nullptr).ok());
+        for (size_t rank = 0; rank < routes.size(); ++rank) {
+            auto* worker = request.add_decode_workers();
+            worker->set_worker_addr(decode_addrs_[rank]);
+            for (const auto& route : routes[rank])
+                *worker->add_routes() = route;
         }
         return request;
     }
@@ -436,6 +449,17 @@ protected:
         for (size_t i = 1; i < count; ++i) {
             group->releaseSingleBlock(Tier::HOST, slots[i][0].host_block, BlockTreeRefType::CACHE);
         }
+        const auto coordinator        = cache->loader_.load_context_coordinator_;
+        const auto commit             = coordinator->commit_callback_;
+        coordinator->commit_callback_ = [this, commit](const auto& load) {
+            {
+                std::lock_guard<std::mutex> lock(load_targets_mutex_);
+                for (const auto& desc : load->loadDescs()) {
+                    load_targets_[desc.path_index] = desc.target_blocks.front();
+                }
+            }
+            return commit(load);
+        };
         load_barrier_ = std::make_shared<block_tree_cache_test::CallbackBarrier>();
         load_engine_  = std::make_shared<block_tree_cache_test::ControlledPerRankBlockTransferEngine>(
             cache->groupSets(), action, load_barrier_);
@@ -444,13 +468,44 @@ protected:
         ASSERT_TRUE(prefill_->init());
     }
 
-    std::shared_ptr<P2PSchedulerPrefillWrite::RequestState> receiveContext() {
+    std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest> receiveContext() {
         return prefill_->findRequest(routing_.unique_key);
     }
 
-    static bool transferStopped(const std::shared_ptr<P2PSchedulerPrefillWrite::RequestState>& state) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        return state->receive_stopped;
+    BlockIndicesType receiveBlocks() const {
+        BlockIndicesType blocks(keys_.size(), NULL_BLOCK_IDX);
+        const auto       cache = allocator_->blockTreeCacheOwner();
+        {
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            const auto                  path = cache->tree()->findNode(keys_);
+            for (size_t i = 0; i < path.size(); ++i) {
+                const auto& device_blocks = path[i]->group_set_resources.front().device_blocks;
+                if (!device_blocks.empty())
+                    blocks[i] = device_blocks.front();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(load_targets_mutex_);
+            for (const auto& [index, block] : load_targets_)
+                blocks[index] = block;
+        }
+        const auto request = prefill_workers_[0].lastStart();
+        for (const auto& route : request.routes()) {
+            for (const auto& layer : route.layer_blocks()) {
+                for (int i = 0; i < layer.cache_keys_size(); ++i) {
+                    const auto it = std::find(keys_.begin(), keys_.end(), layer.cache_keys(i));
+                    if (it != keys_.end())
+                        blocks[std::distance(keys_.begin(), it)] = layer.block_ids(i);
+                }
+            }
+        }
+        return blocks;
+    }
+
+    bool transferStopped() const {
+        return std::all_of(std::begin(prefill_workers_), std::end(prefill_workers_), [this](const auto& worker) {
+            return worker.transferStopped(routing_.unique_key);
+        });
     }
 
     PlanResult mirroredWritePlan() const {
@@ -467,6 +522,8 @@ protected:
     size_t                                     kv_ready_token_count_{0};
     Meta::P2PRoutingContext                    routing_;
     CacheKeysType                              keys_;
+    mutable std::mutex                                                           load_targets_mutex_;
+    std::map<size_t, BlockIdxType>                                               load_targets_;
     std::shared_ptr<Allocator>                 allocator_;
     WriteSchedulerService                      prefill_workers_[2], decode_workers_[2];
     std::vector<std::unique_ptr<grpc::Server>> servers_;
@@ -534,14 +591,34 @@ TEST_F(P2PConnectorWriteSchedulerTest, MirroredRoutesAndAllRanksRequiredBeforePu
     }
 }
 
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRangeToSource) {
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, {keys_[0], keys_[1]}).success);
+    auto context = asyncWrite(source());
+    ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
+    for (int rank = 0; rank < 2; ++rank) {
+        const auto send    = decode_workers_[rank].lastStart();
+        const auto receive = prefill_workers_[rank].lastStart();
+        ASSERT_EQ(send.routes_size(), 1);
+        ASSERT_EQ(receive.routes_size(), 1);
+        for (int layer = 0; layer < 2; ++layer) {
+            EXPECT_EQ(send.routes(0).layer_blocks(layer).cache_keys_size(), 2);
+            ASSERT_EQ(receive.routes(0).layer_blocks(layer).cache_keys_size(), 1);
+            EXPECT_EQ(receive.routes(0).layer_blocks(layer).cache_keys(0), keys_[2]);
+        }
+    }
+    completeAll();
+    ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
+    EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
+    EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 3u);
+}
+
 TEST_F(P2PConnectorWriteSchedulerTest, StartWriteSendsRemainingBudgetInsteadOfAnAbsoluteDeadline) {
     DecodeWriteHelper helper;
     auto input = request();
     const auto deadline_ms = currentTimeMs() + 2000;
-    decode_workers_[0].ready      = {};
     auto result = helper.write(routing_.prefill_addr.first, routing_.prefill_addr.second, input, deadline_ms);
     ASSERT_NE(result, nullptr);
-    ASSERT_TRUE(await([&]() { return decode_workers_[0].ready_calls == 1; }));
+    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1; }));
     EXPECT_FALSE(result->done());
     completeAll();
     ASSERT_TRUE(result->waitDone(2000, false));
@@ -569,9 +646,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingB
     const auto input = request();
     P2PConnectorStartWriteResponsePB response;
     const auto before_ms = currentTimeMs();
-    decode_workers_[0].ready                   = {};
     auto handling = std::async(std::launch::async, [&]() { prefill_->handleWrite(input, response); });
-    EXPECT_TRUE(await([&]() { return decode_workers_[0].ready_calls == 1; }));
+    EXPECT_TRUE(await([&]() { return decode_workers_[0].starts == 1; }));
     completeAll();
     handling.get();
     const auto after_ms = currentTimeMs();
@@ -666,6 +742,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeReceiveSubmissionWaitsForLoca
         EXPECT_FALSE(response.stopped());
         return commit(load);
     };
+    const auto                       free_before = allocator_->freeBlocksNum();
     const auto                       input = request();
     P2PConnectorStartWriteResponsePB response;
     auto handling = std::async(std::launch::async, [&]() { prefill_->handleWrite(input, response); });
@@ -679,10 +756,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeReceiveSubmissionWaitsForLoca
     ASSERT_TRUE(load_barrier_->waitUntilEnteredFor(1, std::chrono::seconds(2)));
     auto receive = receiveContext();
     ASSERT_NE(receive, nullptr);
-    const auto blocks = contextResource(receive)->blocks(0);
+    const auto blocks = receiveBlocks();
     const auto pool   = allocator_->getDeviceBlockPool();
     EXPECT_TRUE(receive->resourceHoldPending());
-    EXPECT_TRUE(pool->isAllocated(blocks.back()));
+    EXPECT_TRUE(pool->isAllocated(blocks[1]));
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
     for (const auto& worker : prefill_workers_) {
         EXPECT_EQ(worker.starts, 0);
     }
@@ -697,7 +775,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeReceiveSubmissionWaitsForLoca
     EXPECT_TRUE(response.stopped());
     EXPECT_FALSE(receive->resourceHoldPending());
     EXPECT_EQ(prefill_->inflightContextCount(), 0u);
-    EXPECT_FALSE(pool->isAllocated(blocks.back()));
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 1);
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 2u);
 }
 
@@ -710,19 +788,20 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadRunsAlongsideReceiveAndPublicati
     }));
     auto receive = receiveContext();
     ASSERT_NE(receive, nullptr);
-    const auto blocks = contextResource(receive)->blocks(0);
+    const auto blocks = receiveBlocks();
     const auto pool   = allocator_->getDeviceBlockPool();
     EXPECT_EQ(pool->refCount(blocks[0]), 2u);
     for (int rank = 0; rank < 2; ++rank) {
         const auto request = decode_workers_[rank].lastStart();
         ASSERT_EQ(request.routes_size(), 1);
         for (const auto& layer : request.routes(0).layer_blocks()) {
-            ASSERT_EQ(layer.cache_keys_size(), 1);
-            EXPECT_EQ(layer.cache_keys(0), keys_[2]);
+            ASSERT_EQ(layer.cache_keys_size(), 2);
+            EXPECT_EQ(std::set<int64_t>(layer.cache_keys().begin(), layer.cache_keys().end()),
+                      (std::set<int64_t>{keys_[1], keys_[2]}));
         }
     }
     completeAll();
-    ASSERT_TRUE(await([&]() { return transferStopped(receive); }));
+    ASSERT_TRUE(await([&]() { return transferStopped(); }));
     EXPECT_FALSE(receiveDone(receive));
     EXPECT_TRUE(receive->resourceHoldPending());
     EXPECT_EQ(prefill_->inflightContextCount(), 1u);
@@ -745,7 +824,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFinishesFirstButReceiveStillHold
     }));
     auto receive = receiveContext();
     ASSERT_NE(receive, nullptr);
-    const auto blocks = contextResource(receive)->blocks(0);
+    const auto blocks = receiveBlocks();
     load_barrier_->release();
     ASSERT_TRUE(await([&]() { return allocator_->devicePrefixBlocksForTest(keys_) == 2; }));
     EXPECT_FALSE(receiveDone(receive));
@@ -765,7 +844,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFailureCancelsReceiveAndDoesNotP
     }));
     auto receive = receiveContext();
     ASSERT_NE(receive, nullptr);
-    const auto blocks = contextResource(receive)->blocks(0);
+    const auto blocks = receiveBlocks();
     const auto pool   = allocator_->getDeviceBlockPool();
     load_barrier_->release();
     ASSERT_TRUE(await([&]() { return prefill_workers_[0].cancels > 0; }));
@@ -790,11 +869,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancellationKeepsResourceUntilLocalLoadAl
     }));
     auto receive = receiveContext();
     ASSERT_NE(receive, nullptr);
-    const auto blocks = contextResource(receive)->blocks(0);
+    const auto blocks = receiveBlocks();
     const auto pool   = allocator_->getDeviceBlockPool();
     receive->fail(ErrorInfo(ErrorCode::CANCELLED, "test cancel"));
     completeAll();
-    ASSERT_TRUE(await([&]() { return transferStopped(receive); }));
+    ASSERT_TRUE(await([&]() { return transferStopped(); }));
     EXPECT_TRUE(receive->resourceHoldPending());
     EXPECT_TRUE(pool->isAllocated(blocks[1]));
     EXPECT_TRUE(pool->isAllocated(blocks[2]));
@@ -832,14 +911,14 @@ TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentWritesJoinLocalLoadAndPublishId
     }));
     auto first_receive = receiveContext();
     ASSERT_NE(first_receive, nullptr);
-    const auto first_blocks = contextResource(first_receive)->blocks(0);
+    const auto first_blocks = receiveBlocks();
 
     routing_.unique_key = "second-write-scheduler";
     auto second         = asyncWrite(source());
     ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 2 && decode_workers_[1].starts == 2; }));
     auto second_receive = receiveContext();
     ASSERT_NE(second_receive, nullptr);
-    const auto second_blocks = contextResource(second_receive)->blocks(0);
+    const auto second_blocks = receiveBlocks();
     EXPECT_EQ(first_blocks[0], second_blocks[0]);
     EXPECT_EQ(first_blocks[1], second_blocks[1]);
     EXPECT_NE(first_blocks[2], second_blocks[2]);
@@ -907,7 +986,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, PartialReceiveStartFailureOutlivesHandsha
     auto                           owner   = source();
     std::weak_ptr<KVCacheResource> weak    = owner;
     auto                           context = asyncWrite(std::move(owner));
-    ASSERT_TRUE(await([&]() { return context->done() && weak.expired(); }));
+    ASSERT_TRUE(await([&]() { return context->done(); }));
+    EXPECT_FALSE(weak.expired());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(decode_workers_[0].starts, 0);
     EXPECT_EQ(allocator_->freeBlocksNum(), free - 2);
@@ -1033,48 +1113,21 @@ TEST_F(P2PConnectorWriteSchedulerTest, MultipleFullGroupsRollBackEarlierAllocati
     EXPECT_TRUE(allocator->blockTreeCacheOwner()->tree()->findNode(keys_).empty());
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, InvalidReturnedRangesAndEndpointsNeverReachSenders) {
-    const auto plan = mirroredWritePlan();
-    const std::vector<std::function<void(P2PConnectorWriteReadyRequestPB&)>> mutations = {
-        [](auto& r) { r.set_accepted_start_block(-1); },
-        [](auto& r) { r.set_accepted_block_count(-1); },
-        [](auto& r) { r.set_accepted_block_count(3); },
-        [](auto& r) {
-            r.set_accepted_start_block(0);
-            r.set_accepted_block_count(3);
-        },
-        [](auto& r) { r.set_accepted_block_count(0); },
+TEST_F(P2PConnectorWriteSchedulerTest, InvalidSourceWorkersAndPlanNeverReachWorkers) {
+    const std::vector<std::function<void(P2PConnectorStartWriteRequestPB&)>> mutations = {
         [](auto& r) { r.set_plan_digest(0); },
-        [](auto& r) { r.clear_prefill_worker_transfer_addrs(); },
-        [](auto& r) { r.set_prefill_worker_transfer_addrs(0, "bad-endpoint"); }};
-    for (size_t i = 0; i < mutations.size(); ++i) {
-        prefill_workers_[0].handshake = [&, i](const auto& input, auto& response, auto) {
-            P2PConnectorWriteReadyRequestPB ready;
-            ready.set_unique_key(input.unique_key());
-            ready.set_deadline_ms(input.deadline_ms());
-            ready.set_accepted_start_block(1);
-            ready.set_accepted_block_count(2);
-            ready.set_plan_digest(plan.plan.digest());
-            ready.add_prefill_worker_transfer_addrs("127.0.0.1:12345");
-            ready.add_prefill_worker_transfer_addrs("[::1]:12345");
-            mutations[i](ready);
-            DecodeWriteHelper helper;
-            auto              result = helper.ready(input.decode_addr(), ready, input.deadline_ms());
-            EXPECT_NE(result, nullptr);
-            if (result) {
-                EXPECT_TRUE(result->waitDone(1000, false));
-            }
-            response.set_stopped(true);
-            response.set_error_code(ErrorCodePB::INVALID_PARAMS);
-        };
-        auto iteration_routing = routing_;
-        iteration_routing.unique_key += std::to_string(i);
-        auto                           owner   = source();
-        std::weak_ptr<KVCacheResource> weak    = owner;
-        auto                           context = decode_->asyncWrite(
-            std::move(owner), token_ids_, input_length_, kv_ready_token_count_, std::move(iteration_routing));
-        ASSERT_TRUE(await([&]() { return context->done() && weak.expired(); }));
-        EXPECT_FALSE(context->success()) << i;
+        [](auto& r) { r.clear_decode_workers(); },
+        [](auto& r) { r.set_decode_tp_size(1); },
+        [](auto& r) { r.mutable_decode_workers(0)->set_worker_addr("invalid-endpoint"); }};
+    const auto free = allocator_->freeBlocksNum();
+    for (const auto& mutate : mutations) {
+        auto input = request();
+        mutate(input);
+        P2PConnectorStartWriteResponsePB response;
+        prefill_->handleWrite(input, response);
+        EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_TRUE(response.stopped());
+        EXPECT_EQ(allocator_->freeBlocksNum(), free);
     }
     EXPECT_EQ(decode_workers_[0].starts, 0);
     EXPECT_EQ(prefill_workers_[0].starts, 0);
@@ -1210,24 +1263,18 @@ TEST_F(P2PConnectorWriteSchedulerTest, WorkerStartRpcTimeoutStillConfirmsBothSid
     ASSERT_TRUE(await([&]() { return !context->resourceHoldPending() && weak.expired(); }));
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, DuplicateReadyDoesNotStartWorkersAgain) {
+TEST_F(P2PConnectorWriteSchedulerTest, DuplicateStartWriteDoesNotStartWorkersAgain) {
     auto context = asyncWrite(source());
-    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
-    const auto                       ready = decode_workers_[0].lastReady();
-    P2PConnectorWriteReadyResponsePB response;
-    decode_->handleWriteReady(ready, response);
-    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
-    auto changed = ready;
-    changed.set_accepted_block_count(1);
-    decode_->handleWriteReady(changed, response);
+    ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
+    P2PConnectorStartWriteResponsePB response;
+    prefill_->handleWrite(prefill_workers_[0].lastHandshake(), response);
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_FALSE(response.stopped());
     EXPECT_EQ(decode_workers_[0].starts, 1);
     EXPECT_EQ(decode_workers_[1].starts, 1);
-    context->cancel();
-    decode_->handleWriteReady(ready, response);
-    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
     completeAll();
-    ASSERT_TRUE(await([&]() { return !context->resourceHoldPending(); }));
+    ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
+    EXPECT_TRUE(context->success());
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteFencesLateStartWithoutAllocation) {
@@ -1243,12 +1290,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteFencesLateStartWith
     EXPECT_TRUE(response.stopped());
     EXPECT_EQ(allocator_->freeBlocksNum(), free);
     EXPECT_EQ(prefill_workers_[0].starts, 0);
-    EXPECT_EQ(decode_workers_[0].ready_calls, 0);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, RegistrationBarrierChecksEveryRankAndRejectsLateReady) {
     prefill_workers_[1].registered = [](const auto&) { return ErrorInfo::OkStatus(); };
-    decode_workers_[0].ready = [](const auto&, auto& response) { response.set_error_code(ErrorCodePB::NONE_ERROR); };
     auto                             input = request();
     P2PConnectorStartWriteResponsePB response;
     auto handling = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
@@ -1257,20 +1303,36 @@ TEST_F(P2PConnectorWriteSchedulerTest, RegistrationBarrierChecksEveryRankAndReje
     EXPECT_NE(state, nullptr);
     auto registration = prefill_workers_[0].lastStart();
     EXPECT_TRUE(prefill_->workerRegistered(registration).ok());
-    EXPECT_EQ(decode_workers_[0].ready_calls, 0);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
     registration.set_worker_rank(2);
     EXPECT_TRUE(prefill_->workerRegistered(registration).hasError());
     registration.set_worker_rank(1);
     registration.set_plan_digest(registration.plan_digest() + 1);
     EXPECT_TRUE(prefill_->workerRegistered(registration).hasError());
-    EXPECT_EQ(decode_workers_[0].ready_calls, 0);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
     registration.set_plan_digest(registration.plan_digest() - 1);
     EXPECT_TRUE(prefill_->workerRegistered(registration).ok());
-    EXPECT_TRUE(await([&] { return decode_workers_[0].ready_calls == 1; }));
+    EXPECT_TRUE(await([&] { return decode_workers_[0].starts == 1; }));
     completeAll();
     handling.get();
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_TRUE(prefill_->workerRegistered(registration).hasError());
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, CheckerDoesNotCompleteQueuedOrStartingRequest) {
+    auto                           resource = std::make_shared<KVCacheResource>();
+    std::weak_ptr<KVCacheResource> owner    = resource;
+    auto context = makeWriteContext(std::move(resource), "queued-source", currentTimeMs() + 4000, nullptr, 100, 1000);
+    context->checkDone();
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(owner.expired());
+    ASSERT_TRUE(context->beginKickoff());
+    context->checkDone();
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(owner.expired());
+    context->finishWithoutTransfer();
+    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(owner.expired());
 }
 
 TEST(P2PConnectorAsyncWriteContextTest, CompletionCallbacksRunOnceOutsideStateLock) {
@@ -1288,6 +1350,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CompletionCallbacksRunOnceOutsideStateLo
     });
     EXPECT_EQ(callback_count, 0);
     context->finishWithoutTransfer();
+    EXPECT_TRUE(context->metrics_.no_transfer);
     EXPECT_EQ(callback_count, 2);
     context->checkDone();
     context->cancel();
@@ -1309,6 +1372,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CancellationNotifiesBeforeResourceHoldIs
     EXPECT_EQ(callback_count, 1);
     context->finishWithoutTransfer(context->errorInfo());
     EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_FALSE(context->metrics_.no_transfer);
     context->onDone([&](ErrorInfo error) {
         ++callback_count;
         EXPECT_EQ(error.code(), ErrorCode::CANCELLED);
@@ -1316,53 +1380,28 @@ TEST(P2PConnectorAsyncWriteContextTest, CancellationNotifiesBeforeResourceHoldIs
     EXPECT_EQ(callback_count, 2);
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesEarlierWorkerErrorUntilReceiversStop) {
+TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesAggregatedTransferErrorUntilBothSidesStop) {
     auto resource = std::make_shared<KVCacheResource>();
     std::weak_ptr<KVCacheResource> owner = resource;
     auto                           context =
-        makeWriteContext(std::move(resource), "cancel-after-worker-error", currentTimeMs() + 4000, nullptr, 100, 1000);
+        makeWriteContext(std::move(resource), "aggregated-error", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
     ASSERT_TRUE(context->beginPeerCall({}));
-    ASSERT_TRUE(context->beginWorkerCall());
-    auto failed = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    failed->response.mutable_p2p_response()->set_error_code(transErrorCodeToRPC(ErrorCode::CACHE_STORE_STORE_FAILED));
-    failed->response.mutable_p2p_response()->set_error_message("receiver failed before cancellation");
-    auto pending = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    pending->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{failed, pending});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("cancel-after-worker-error", workers, false));
-    int callback_count = 0;
-    context->onDone([&](ErrorInfo error) {
-        ++callback_count;
-        EXPECT_EQ(error.code(), ErrorCode::CACHE_STORE_STORE_FAILED);
-        EXPECT_NE(error.ToString().find("receiver failed before cancellation"), std::string::npos);
-    });
-    workers->finishRank(0, true);
-    ASSERT_FALSE(workers->done());
-    ASSERT_TRUE(context->errorInfo().ok());
-
-    context->cancel();
-    EXPECT_EQ(callback_count, 1);
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
-    EXPECT_TRUE(context->done());
-    EXPECT_TRUE(context->resourceHoldPending());
-    EXPECT_FALSE(owner.expired());
-    workers->finishRank(1, true);
-    context->checkDone();
-    EXPECT_TRUE(context->resourceHoldPending());
-    EXPECT_FALSE(owner.expired());
-
-    auto stopped = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
-    stopped->response.set_stopped(true);
-    auto peer = std::make_shared<DecodeWriteHelper::Result>(
-        std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{stopped});
+    auto peer = peerResult(ErrorCode::CACHE_STORE_STORE_FAILED, false);
     context->setPeerCallResult(peer);
     peer->finishRank(0, true);
+    context->cancel();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    confirmSourceStopped(context);
+    EXPECT_TRUE(context->resourceHoldPending());
+    auto stopped = peerResult(ErrorCode::CACHE_STORE_STORE_FAILED);
+    context->setPeerCallResult(stopped);
+    stopped->finishRank(0, true);
     context->checkDone();
     EXPECT_FALSE(context->resourceHoldPending());
     EXPECT_TRUE(owner.expired());
-    EXPECT_EQ(callback_count, 1);
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
 }
 
@@ -1390,6 +1429,8 @@ TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesCompletedStartWriteResult
         });
 
         context->cancel();
+        if (expected != ErrorCode::NONE_ERROR)
+            confirmSourceStopped(context);
         EXPECT_EQ(context->errorInfo().code(), expected);
         if (expected != ErrorCode::NONE_ERROR) {
             EXPECT_NE(context->errorInfo().ToString().find("prefill failed before cancellation"), std::string::npos);
@@ -1403,124 +1444,62 @@ TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesCompletedStartWriteResult
 }
 
 TEST(P2PConnectorAsyncWriteContextTest, CompletedBeforeDeadlineObservationRemainsSuccessful) {
-    for (const bool empty_range : {false, true}) {
-        auto                           resource = std::make_shared<KVCacheResource>();
-        std::weak_ptr<KVCacheResource> owner    = resource;
-        auto                           context  = makeWriteContext(
-            std::move(resource), "completed-before-observation", currentTimeMs() + 4000, nullptr, 100, 1000);
+    for (const int count : {0, 2}) {
+        auto context =
+            makeWriteContext(nullptr, "completed-before-deadline", currentTimeMs() + 4000, nullptr, 100, 1000);
         ASSERT_TRUE(context->beginKickoff());
         ASSERT_TRUE(context->beginPeerCall({}));
-        if (!empty_range) {
-            ASSERT_TRUE(context->beginWorkerCall());
-            auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-            worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-            auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-                std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-            context->setCallResults(
-                std::make_shared<P2PBroadcastClient::Result>("completed-before-observation", workers));
-            workers->finishRank(0, true);
-        }
-        auto peer = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
-        peer->response.set_stopped(true);
-        peer->response.set_accepted_block_count(empty_range ? 0 : 2);
-        auto result = std::make_shared<DecodeWriteHelper::Result>(
-            std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{peer});
-        context->setPeerCallResult(result);
-        result->finishRank(0, true);
-        {
-            std::lock_guard<std::mutex> lock(context->mutex_);
-            context->ready_request_ = empty_range ? "" : "registered";
-            context->deadline_ms_   = currentTimeMs() - 1;
-        }
-        context->checkDone();
+        auto peer = peerResult(ErrorCode::NONE_ERROR, true, count);
+        context->setPeerCallResult(peer);
+        peer->finishRank(0, true);
+        context->deadline_ms_ = currentTimeMs() - 1;
+        context->expireTransferDeadlineIfNeeded();
         EXPECT_TRUE(context->done());
         EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
         EXPECT_FALSE(context->resourceHoldPending());
-        EXPECT_TRUE(owner.expired());
     }
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, CompletedSendStillTimesOutWhilePeerIsPending) {
+TEST(P2PConnectorAsyncWriteContextTest, PendingStartWriteTimesOutWithoutReleasingSource) {
     auto                           resource = std::make_shared<KVCacheResource>();
     std::weak_ptr<KVCacheResource> owner    = resource;
-    auto                           context =
-        makeWriteContext(std::move(resource), "peer-pending-at-deadline", currentTimeMs() + 4000, nullptr, 100, 1000);
+    auto context = makeWriteContext(std::move(resource), "pending-peer", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
     ASSERT_TRUE(context->beginPeerCall({}));
-    ASSERT_TRUE(context->beginWorkerCall());
-    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("peer-pending-at-deadline", workers));
-    auto peer = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
-    peer->response.set_stopped(true);
-    peer->response.set_accepted_block_count(2);
-    auto result = std::make_shared<DecodeWriteHelper::Result>(
-        std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{peer});
-    context->setPeerCallResult(result);
-    workers->finishRank(0, true);
-    {
-        std::lock_guard<std::mutex> lock(context->mutex_);
-        context->ready_request_ = "registered";
-        context->deadline_ms_   = currentTimeMs() - 1;
-    }
+    auto peer = peerResult();
+    context->setPeerCallResult(peer);
+    context->deadline_ms_ = currentTimeMs() - 1;
     context->expireTransferDeadlineIfNeeded();
     EXPECT_TRUE(context->done());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_TRUE(context->resourceHoldPending());
     EXPECT_FALSE(owner.expired());
-    result->finishRank(0, true);
+    peer->finishRank(0, true);
     context->checkDone();
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(context->resourceHoldPending());
     EXPECT_TRUE(owner.expired());
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, StartWriteBusinessErrorParticipatesInFirstErrorOrdering) {
-    for (const bool prefill_first : {true, false}) {
-        auto                           resource = std::make_shared<KVCacheResource>();
-        std::weak_ptr<KVCacheResource> owner    = resource;
-        auto                           context =
-            makeWriteContext(std::move(resource), "first-business-error", currentTimeMs() + 4000, nullptr, 100, 1000);
-        ASSERT_TRUE(context->beginKickoff());
-        ASSERT_TRUE(context->beginPeerCall({}));
-        ASSERT_TRUE(context->beginWorkerCall());
-        auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-        worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::CANCELLED);
-        worker->response.mutable_p2p_response()->set_error_message("decode worker failed");
-        auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-            std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-        context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("first-business-error", workers));
-        auto peer = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
-        peer->request.set_unique_key("first-business-error");
-        peer->response.set_error_code(transErrorCodeToRPC(ErrorCode::CACHE_STORE_STORE_FAILED));
-        peer->response.set_error_message("prefill receive failed");
-        peer->response.set_stopped(true);
-        auto result = std::make_shared<DecodeWriteHelper::Result>(
-            std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{peer});
-        context->setPeerCallResult(result);
-        if (prefill_first) {
-            result->finishRank(0, true);
-            workers->finishRank(0, true);
-        } else {
-            workers->finishRank(0, true);
-            result->finishRank(0, true);
-        }
-        EXPECT_TRUE(result->rpcSuccess());
-        EXPECT_FALSE(result->success());
-        EXPECT_EQ(result->firstError().error.code(), ErrorCode::CACHE_STORE_STORE_FAILED);
-        context->checkDone();
-        const auto expected = prefill_first ? ErrorCode::CACHE_STORE_STORE_FAILED : ErrorCode::CANCELLED;
-        EXPECT_EQ(context->errorInfo().code(), expected);
-        EXPECT_NE(
-            context->errorInfo().ToString().find(prefill_first ? "prefill receive failed" : "decode worker failed"),
-            std::string::npos);
-        EXPECT_TRUE(context->peer_stopped_);
-        EXPECT_EQ(context->control_result_, nullptr);
-        EXPECT_FALSE(context->resourceHoldPending());
-        EXPECT_TRUE(owner.expired());
-    }
+TEST(P2PConnectorAsyncWriteContextTest, StartWriteBusinessErrorSurvivesCancellationAndSourceCleanup) {
+    auto                           resource = std::make_shared<KVCacheResource>();
+    std::weak_ptr<KVCacheResource> owner    = resource;
+    auto                           context =
+        makeWriteContext(std::move(resource), "first-business-error", currentTimeMs() + 4000, nullptr, 100, 1000);
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->beginPeerCall({}));
+    auto peer = peerResult(ErrorCode::CACHE_STORE_STORE_FAILED);
+    context->setPeerCallResult(peer);
+    peer->finishRank(0, true);
+    context->cancel();
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+    EXPECT_TRUE(context->peer_stopped_);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    confirmSourceStopped(context);
+    EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
 }
 
 TEST(P2PConnectorAsyncWriteContextTest, ExpiredQueuedWriteReleasesWithoutFailStop) {
@@ -1588,8 +1567,12 @@ TEST_F(P2PConnectorWriteSchedulerTest, MissingSenderAcknowledgmentsFailStopWitho
         auto context  = makeWriteContext(
             std::move(resource), "source-stop-unconfirmed", currentTimeMs() + 100, decode_client_, 20, 100);
         context->beginKickoff();
-        context->beginWorkerCall();
-        context->setCallResults(nullptr);
+        context->beginPeerCall({});
+        auto peer = peerResult(ErrorCode::CANCELLED);
+        context->setPeerCallResult(peer);
+        peer->finishRank(0, true);
+        context->checkDone();
+        context->cancel();
         P2PConnectorAsyncWriteContextChecker checker;
         if (!checker.init() || !checker.addContext(context))
             std::_Exit(43);
@@ -1607,8 +1590,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, CompletedCancelAcknowledgmentIsConsumedBe
     ASSERT_TRUE(P2PBroadcastClient::leaseStatus(result).allStopped());
     auto context = makeWriteContext(source(), "stopped-before-grace", deadline, prefill_client_, 100, 100);
     ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->beginWorkerCall());
-    context->setCallResults(nullptr);
+    ASSERT_TRUE(context->beginPeerCall({}));
+    context->cancel();
+    context->peer_stopped_ = true;
     {
         std::lock_guard<std::mutex> lock(context->mutex_);
         context->deadline_ms_    = currentTimeMs() - 500;
@@ -1618,11 +1602,10 @@ TEST_F(P2PConnectorWriteSchedulerTest, CompletedCancelAcknowledgmentIsConsumedBe
     context->failStopIfLeaseUnconfirmed();
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->resourceHoldPending());
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CANCELLED);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, SlowControlConnectionDoesNotBlockAdmissionOrDeadline) {
-    decode_workers_[0].ready = [](const auto&, auto& response) { response.set_error_code(ErrorCodePB::NONE_ERROR); };
     auto first               = request();
     first.set_timeout_ms(200);
     first.set_deadline_ms(currentTimeMs() + 200);
@@ -1652,7 +1635,6 @@ TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlRecomputesRemainingBu
     prefill_config_.p2p_lease_query_timeout_ms      = 1000;
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
-    decode_workers_[0].ready = [](const auto&, auto& response) { response.set_error_code(ErrorCodePB::NONE_ERROR); };
     auto input               = request();
     input.set_deadline_ms(currentTimeMs() + 2000);
     const auto                       hold_until = prefill_->holdUntilMs(input.deadline_ms());
@@ -1666,7 +1648,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlRecomputesRemainingBu
             resume.set_value();
         completeAll(true);
     });
-    ASSERT_TRUE(await([&] { return decode_workers_[0].ready_calls != 0; }, 1000));
+    ASSERT_TRUE(await([&] { return decode_workers_[0].starts != 0; }, 1000));
     auto blocked = std::make_shared<std::atomic<size_t>>(0);
     auto pool    = prefill_->control_pool_;
     for (size_t i = 0; i < pool->getThreadNum(); ++i) {
@@ -1703,7 +1685,6 @@ TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlRecomputesRemainingBu
 TEST_F(P2PConnectorWriteSchedulerTest, PeerOnlyCancellationUsesBackoffUntilReceiverStops) {
     auto context = makeWriteContext(source(), "peer-cancel-backoff", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->beginWorkerCall());
     std::atomic<int>     polls{0};
     std::atomic<bool>    stopped{false};
     std::mutex           times_mutex;
@@ -1721,12 +1702,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, PeerOnlyCancellationUsesBackoffUntilRecei
         result->finishRank(0, true);
         return result;
     }));
-    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    worker->response.mutable_p2p_response();
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("peer-cancel-backoff", workers));
-    workers->finishRank(0, true);
+    confirmSourceStopped(context);
     context->cancel();
     P2PConnectorAsyncWriteContextChecker checker;
     ASSERT_TRUE(checker.init());
@@ -1747,25 +1723,20 @@ TEST_F(P2PConnectorWriteSchedulerTest, PeerOnlyCancellationUsesBackoffUntilRecei
 TEST(P2PConnectorAsyncWriteContextTest, RpcProgressNotifiesInEitherRegistrationOrder) {
     for (const bool result_first : {false, true}) {
         auto context = makeWriteContext(nullptr, "write-notification", currentTimeMs() + 4000, nullptr, 100, 1000);
-        auto first = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-        auto second = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-        first->response.mutable_p2p_response()->set_error_code(ErrorCodePB::CANCELLED);
-        second->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-        auto result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-            std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{first, second});
-        auto workers = std::make_shared<P2PBroadcastClient::Result>("write-notification", result, false);
+        ASSERT_TRUE(context->beginKickoff());
+        ASSERT_TRUE(context->beginPeerCall({}));
+        auto peer         = peerResult();
         auto notification = std::make_shared<P2PNotification>();
-        if (result_first) context->setCallResults(workers);
+        if (result_first)
+            context->setPeerCallResult(peer);
         context->setNotification(notification);
-        if (!result_first) context->setCallResults(workers);
-        auto generation = notification->generation();
-        result->finishRank(0, false);
+        if (!result_first)
+            context->setPeerCallResult(peer);
+        const auto generation = notification->generation();
+        peer->finishRank(0, true);
         EXPECT_GT(notification->generation(), generation);
-        EXPECT_FALSE(result->done());
-        generation = notification->generation();
-        result->finishRank(1, true);
-        EXPECT_GT(notification->generation(), generation);
-        EXPECT_TRUE(result->done());
+        context->checkDone();
+        EXPECT_TRUE(context->success());
         auto late = std::make_shared<P2PNotification>();
         context->setNotification(late);
         EXPECT_GT(late->generation(), 0u);
@@ -1776,7 +1747,6 @@ TEST(P2PConnectorAsyncWriteContextTest, StaleCancelMustNotEraseStoppedStartWrite
     auto context = std::make_shared<P2PConnectorAsyncWriteContext>(
         "stopped-proof-race", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->beginWorkerCall());
     ASSERT_TRUE(context->beginPeerCall({}));
     context->cancel();
     auto final_call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
@@ -1816,12 +1786,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, StopKeepsCheckingWhileKickoffPoolIsBlocke
             released->set_value();
         });
     ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->beginWorkerCall());
-    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>(context->uniqueKey(), workers));
+    ASSERT_TRUE(context->beginPeerCall({}));
+    auto peer = peerResult();
+    context->setPeerCallResult(peer);
     ASSERT_TRUE(decode_->checker_.addContext(context));
 
     std::promise<void> resume;
@@ -1845,7 +1812,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, StopKeepsCheckingWhileKickoffPoolIsBlocke
     EXPECT_FALSE(decode_->checker_.addContext(
         makeWriteContext(nullptr, "stop-rejects-new", currentTimeMs() + 4000, nullptr, 100, 1000)));
     EXPECT_EQ(stop.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
-    workers->finishRank(0, true);
+    peer->finishRank(0, true);
     EXPECT_EQ(release_result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_FALSE(context->resourceHoldPending());
     unblock.reset();
@@ -1862,12 +1829,9 @@ TEST(P2PConnectorAsyncWriteContextTest, CheckerWakesAtDeadlineWithoutRpcCompleti
             released->set_value();
         });
     ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->beginWorkerCall());
-    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("deadline-notification", workers));
+    ASSERT_TRUE(context->beginPeerCall({}));
+    auto peer = peerResult();
+    context->setPeerCallResult(peer);
     auto completed = std::make_shared<std::promise<ErrorInfo>>();
     auto result = completed->get_future();
     context->onDone([completed](ErrorInfo error) { completed->set_value(error); });
@@ -1875,56 +1839,29 @@ TEST(P2PConnectorAsyncWriteContextTest, CheckerWakesAtDeadlineWithoutRpcCompleti
     ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(result.get().code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_TRUE(context->resourceHoldPending());
-    workers->finishRank(0, true);
+    peer->finishRank(0, true);
     ASSERT_EQ(release_result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_FALSE(context->resourceHoldPending());
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, ReadyHandlerCompletionWakesCheckerAfterBothRpcsCompleted) {
+TEST(P2PConnectorAsyncWriteContextTest, StartWriteCompletionWakesCheckerAndReleasesSource) {
     P2PConnectorAsyncWriteContextChecker checker;
     ASSERT_TRUE(checker.init());
-    auto context = makeWriteContext(nullptr, "ready-notification", currentTimeMs() + 4000, nullptr, 100, 1000);
+    auto context = makeWriteContext(nullptr, "peer-completion", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
     ASSERT_TRUE(context->beginPeerCall({}));
-    std::promise<void> entered;
-    auto entering = entered.get_future();
-    std::promise<void> release;
-    auto released = release.get_future();
-    context->setReadyHandler([&](const auto&) {
-        context->beginWorkerCall();
-        entered.set_value();
-        released.wait();
-        return ErrorInfo::OkStatus();
-    });
+    auto peer = peerResult();
+    context->setPeerCallResult(peer);
+    auto released   = std::make_shared<std::promise<ErrorInfo>>();
+    auto completion = released->get_future();
+    context->onDone([released](ErrorInfo error) { released->set_value(error); });
     ASSERT_TRUE(checker.addContext(context));
-    P2PConnectorWriteReadyRequestPB ready;
-    ready.set_deadline_ms(context->deadlineMs());
-    auto accepting = std::async(std::launch::async, [&] { return context->acceptWriteReady(ready); });
-    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) { release.set_value(); });
-    ASSERT_EQ(entering.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    auto worker = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    worker->response.mutable_p2p_response()->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto workers = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
-    context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("ready-notification", workers, false));
-    auto peer = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
-    peer->response.set_stopped(true);
-    peer->response.set_accepted_block_count(1);
-    auto result = std::make_shared<DecodeWriteHelper::Result>(
-        std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{peer});
-    context->setPeerCallResult(result);
-    workers->finishRank(0, true);
-    result->finishRank(0, true);
-    auto completed = std::make_shared<std::promise<ErrorInfo>>();
-    auto completion = completed->get_future();
-    context->onDone([completed](ErrorInfo error) { completed->set_value(error); });
-    context->checkDone();
-    EXPECT_FALSE(context->done());
-    cleanup.reset();
-    EXPECT_TRUE(accepting.get().ok());
+    EXPECT_TRUE(context->resourceHoldPending());
+    peer->finishRank(0, true);
     ASSERT_EQ(completion.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_TRUE(completion.get().ok());
     EXPECT_FALSE(context->resourceHoldPending());
+    checker.stop();
 }
 
 }  // namespace
