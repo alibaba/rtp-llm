@@ -717,22 +717,26 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        qo_bs = int(self._t_qo_indptr_d.size(0)) - 1
-        kv_bs = int(self._t_kvlen_d.size(0))
-        tokens = q_nope.shape[0]
-        if (
-            _use_trtllm_gen_decode()
+        if _use_trtllm_gen_decode():
             # Plain decode (tokens == requests) or the MTP verify
             # (tokens == requests * (1+gen)) — the latter only when the
             # metadata is self-consistent (qo count == kvlen count and the
             # rows divide evenly); any disagreement falls back to the
-            # wrapper path.
-            and qo_bs == kv_bs
-            and tokens % qo_bs == 0
-        ):
-            attn_output = self._trtllm_decode_run(
-                q_nope, q_pe, kv_cache, tokens // qo_bs
-            )
+            # wrapper path. The captured plan tensors are only touched
+            # under this gate: plan() fills them under the same env gate,
+            # so the default (env-off) path leaves them None and must not
+            # read them (reading them unconditionally crashed the first
+            # default-env decode forward with AttributeError).
+            qo_bs = int(self._t_qo_indptr_d.size(0)) - 1
+            kv_bs = int(self._t_kvlen_d.size(0))
+            tokens = q_nope.shape[0]
+            if qo_bs == kv_bs and tokens % qo_bs == 0:
+                attn_output = self._trtllm_decode_run(
+                    q_nope, q_pe, kv_cache, tokens // qo_bs
+                )
+            else:
+                attn_output = torch.empty_like(q_nope)
+                self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
         else:
             attn_output = torch.empty_like(q_nope)
             self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
