@@ -246,9 +246,8 @@ class EngineSyncRunnerTest {
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.PREFILL, ipPort, status);
-        ((java.util.concurrent.atomic.AtomicReference<WorkerStatus.PollHealth>)
-                org.springframework.test.util.ReflectionTestUtils.getField(status, "pollHealth"))
-                .set(new WorkerStatus.PollHealth(System.nanoTime()/1000-2_000_000L, 20_000L, 0L, true));
+        Object progress = org.springframework.test.util.ReflectionTestUtils.getField(status, "statusProgress");
+        org.springframework.test.util.ReflectionTestUtils.setField(progress, "health", new WorkerStatus.PollHealth(System.nanoTime()/1000-2_000_000L, 20_000L, 0L, true));
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of());
 

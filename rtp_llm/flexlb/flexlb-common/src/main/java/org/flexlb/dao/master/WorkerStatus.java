@@ -53,9 +53,6 @@ public class WorkerStatus {
         return trace;
     }
 
-    /** Set under {@link #lock}; read lock-free by poll gates. */
-    private volatile boolean retiring;
-
     public record TopologySnapshot(
             String group,
             String ip,
@@ -148,20 +145,32 @@ public class WorkerStatus {
     /** The single public value for one successfully committed status round. */
     public record CommittedWorkerStatus(
             EngineObservation fields,
-            AppliedStatusCursor cursor) {
+            AppliedStatusCursor cursor,
+            long snapshotReceivedUs) {
     }
 
+    public enum StatusContact { UNKNOWN, ALIVE, DEAD }
+
     /**
-     * Status-poll transport health. It is never consulted for routing: the
-     * endpoint registry and the endpoint generation gate own routability.
+     * Status-poll transport health. Scheduling also requires a fresh applied
+     * snapshot and an open endpoint generation gate.
      */
     public record PollHealth(
             long lastSuccessfulPollUs,
             long successfulPollIntervalUs,
             long consecutiveTransportFailures,
-            boolean reportedAlive) {
+            StatusContact contact) {
+
+        public PollHealth(long lastSuccessfulPollUs, long successfulPollIntervalUs,
+                          long consecutiveTransportFailures, boolean reportedAlive) {
+            this(lastSuccessfulPollUs, successfulPollIntervalUs, consecutiveTransportFailures,
+                    reportedAlive ? StatusContact.ALIVE : StatusContact.DEAD);
+        }
+
+        public boolean reportedAlive() { return contact == StatusContact.ALIVE; }
 
         public PollHealth {
+            Objects.requireNonNull(contact, "contact");
             if (lastSuccessfulPollUs < 0L
                     || successfulPollIntervalUs < 0L
                     || consecutiveTransportFailures < 0L) {
@@ -273,102 +282,153 @@ public class WorkerStatus {
 
     private final AtomicReference<CommittedWorkerStatus> committedStatus;
 
-    private final AtomicReference<PollHealth> pollHealth;
-
     /** Cache polling is independent from worker-status polling. */
     private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =
             new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
 
-    // Transport contact and applied scheduling state deliberately have separate clocks.
-    private final AtomicLong lastStatusAppliedUs = new AtomicLong();
-    private final AtomicReference<PollLease> statusApplicationLease = new AtomicReference<>();
-    private volatile long statusApplicationReceivedUs;
-    private volatile boolean statusFreshnessEnforced;
-    private volatile long statusFreshnessUs = 10_000_000L;
-    private volatile boolean receivedStatusRpc;
-    // Never held across state reduction, endpoint withdrawal, logging or cleanup.
-    private final Object transportHealthLock = new Object();
-    private volatile boolean healthRetirementClaimed;
+    private static final long DEFAULT_STATUS_FRESHNESS_US = 10_000_000L;
+
+    /** Owns transport, application ownership and lifecycle transitions for this generation. */
+    private final StatusProgress statusProgress;
+
+    private enum StatusLifecycle { ACTIVE, RETIREMENT_CLAIMED, RETIRING }
+
+    /**
+     * Only constant-time progress transitions take this monitor. Never hold it
+     * across conversion, state reduction, endpoint withdrawal, logging or cleanup.
+     */
+    private final class StatusProgress {
+        private final long maximumAgeUs;
+        private volatile PollHealth health;
+        private volatile StatusLifecycle lifecycle = StatusLifecycle.ACTIVE;
+        // Its receipt time lives on the same lease; both are published under this monitor.
+        private PollLease application;
+
+        private StatusProgress(long maximumAgeUs) {
+            if (maximumAgeUs <= 0L) { throw new IllegalArgumentException("status freshness must be positive"); }
+            this.maximumAgeUs = maximumAgeUs;
+            health = new PollHealth(System.nanoTime()/1000, 0L, 0L, StatusContact.UNKNOWN);
+        }
+
+        private synchronized boolean claimRetirement(PollHealth expected) {
+            if (lifecycle != StatusLifecycle.ACTIVE || health != expected) { return false; }
+            lifecycle = StatusLifecycle.RETIREMENT_CLAIMED;
+            return true;
+        }
+
+        private synchronized boolean beginRetirement() {
+            if (lifecycle == StatusLifecycle.RETIRING) { return false; }
+            lifecycle = StatusLifecycle.RETIRING;
+            return true;
+        }
+
+        private synchronized void rpcStarted() {
+            if (lifecycle != StatusLifecycle.ACTIVE) { return; }
+            // Change identity so a prior expiration scan cannot claim this generation.
+            health = new PollHealth(health.lastSuccessfulPollUs(), health.successfulPollIntervalUs(),
+                    health.consecutiveTransportFailures(), health.contact());
+        }
+
+        private synchronized Stage rpcResult(PollLease lease, boolean valid, boolean alive, Throwable failure) {
+            if (statusPollLease.get() != lease || lifecycle != StatusLifecycle.ACTIVE) { return null; }
+            if (failure != null) {
+                failedPoll();
+                return Stage.TRANSPORT_FAILURE_RECORDED;
+            }
+            if (valid) {
+                successfulPoll(alive, System.nanoTime()/1000);
+                return Stage.STATUS_HEALTH_UPDATED;
+            }
+            return null;
+        }
+
+        private synchronized PollHealth successfulPoll(boolean alive, long receivedUs) {
+            if (lifecycle != StatusLifecycle.ACTIVE) { return health; }
+            health = new PollHealth(receivedUs, Math.max(0L, receivedUs-health.lastSuccessfulPollUs()),
+                    0L, alive ? StatusContact.ALIVE : StatusContact.DEAD);
+            return health;
+        }
+
+        private synchronized PollHealth failedPoll() {
+            if (lifecycle != StatusLifecycle.ACTIVE) { return health; }
+            health = new PollHealth(health.lastSuccessfulPollUs(), health.successfulPollIntervalUs(),
+                    health.consecutiveTransportFailures() == Long.MAX_VALUE ? Long.MAX_VALUE
+                            : health.consecutiveTransportFailures()+1L, health.contact());
+            return health;
+        }
+
+        private synchronized boolean beginApplication(PollLease lease, long receivedUs) {
+            if (lease == null || lease.owner != WorkerStatus.this || lease.kind != PollKind.STATUS) {
+                throw new IllegalArgumentException("status application requires this generation's status lease");
+            }
+            if (lifecycle != StatusLifecycle.ACTIVE || application != null || statusPollLease.get() != lease) { return false; }
+            lease.applicationReceivedUs = receivedUs;
+            application = lease;
+            return true;
+        }
+
+        private synchronized void finishApplication(PollLease lease) {
+            if (application == lease) { application = null; }
+        }
+
+        private synchronized long applicationReceivedUs() {
+            return application == null ? System.nanoTime()/1000 : application.applicationReceivedUs;
+        }
+
+        private synchronized boolean schedulingFresh(long nowUs) {
+            long received = committedStatus.get().snapshotReceivedUs();
+            return lifecycle == StatusLifecycle.ACTIVE && health.reportedAlive()
+                    && health.consecutiveTransportFailures() < 3L && received > 0L
+                    && nowUs >= received && nowUs-received <= maximumAgeUs;
+        }
+    }
 
     /** Fence a stale-health decision against an RPC start/result which raced the scan. */
     public boolean tryClaimHealthRetirement(PollHealth expected) {
         requireGenerationLock();
-        synchronized (transportHealthLock) {
-            if (retiring || healthRetirementClaimed || pollHealth.get() != expected) { return false; }
-            healthRetirementClaimed = true;
-            return true;
-        }
+        return statusProgress.claimRetirement(expected);
     }
 
-    private void noteStatusRpcStarted() {
-        synchronized (transportHealthLock) {
-            if (retiring || healthRetirementClaimed) { return; }
-            PollHealth current = pollHealth.get();
-            // Invalidate an expiration scan's identity without refreshing success age.
-            pollHealth.set(new PollHealth(current.lastSuccessfulPollUs(), current.successfulPollIntervalUs(),
-                    current.consecutiveTransportFailures(), current.reportedAlive()));
-        }
-    }
+    private void noteStatusRpcStarted() { statusProgress.rpcStarted(); }
 
-    public void configureStatusFreshness(long maximumAgeUs) {
-        if (maximumAgeUs <= 0L) { throw new IllegalArgumentException("status freshness must be positive"); }
-        statusFreshnessUs = maximumAgeUs;
-        statusFreshnessEnforced = true;
-    }
+    /** Original receipt time of the snapshot whose state was successfully applied. */
+    public long appliedSnapshotReceivedUs() { return committedStatus.get().snapshotReceivedUs(); }
 
-    public boolean isStatusFreshnessEnforced() { return statusFreshnessEnforced; }
+    /** @deprecated Use appliedSnapshotReceivedUs; this is not the application completion time. */
+    @Deprecated
+    public long lastStatusAppliedUs() { return appliedSnapshotReceivedUs(); }
 
-    public long lastStatusAppliedUs() { return lastStatusAppliedUs.get(); }
-
-    public boolean hasReceivedStatusRpc() { return receivedStatusRpc; }
+    public boolean hasReceivedStatusRpc() { return statusProgress.health.contact() != StatusContact.UNKNOWN; }
 
     /** Advisory admission guard; existing request cleanup remains allowed. */
-    public boolean isSchedulingStatusFresh(long nowUs) {
-        long applied = lastStatusAppliedUs.get();
-        PollHealth health = pollHealth.get();
-        return !retiring && !healthRetirementClaimed && health.reportedAlive() && health.consecutiveTransportFailures() < 3L
-                && applied > 0L && nowUs >= applied && nowUs - applied <= statusFreshnessUs;
-    }
+    public boolean isSchedulingStatusFresh(long nowUs) { return statusProgress.schedulingFresh(nowUs); }
 
-    /** One retained response per generation. Busy responses are re-polled without advancing the finished cursor. */
+    /** One retained response per generation; no additional per-response application object. */
     public boolean tryBeginStatusApplication(PollLease lease, long receivedUs) {
-        if (retiring || healthRetirementClaimed || !statusApplicationLease.compareAndSet(null, lease)) { return false; }
-        statusApplicationReceivedUs = receivedUs;
-        return true;
+        return statusProgress.beginApplication(lease, receivedUs);
     }
 
-    public void finishStatusApplication(PollLease lease) {
-        statusApplicationLease.compareAndSet(lease, null);
-    }
+    public void finishStatusApplication(PollLease lease) { statusProgress.finishApplication(lease); }
 
-    /** Runs at wire completion, never takes the state/application lock or changes capacity. */
+    /** Runs at wire completion without taking the state/application lock. */
     public void recordStatusRpcResult(PollLease lease, boolean validResponse, boolean alive, Throwable failure) {
-        synchronized (transportHealthLock) {
-            if (statusPollLease.get() != lease || retiring || healthRetirementClaimed) { return; }
-            if (failure != null) {
-                pollHealth.updateAndGet(current -> new PollHealth(current.lastSuccessfulPollUs(),
-                        current.successfulPollIntervalUs(),
-                        current.consecutiveTransportFailures() == Long.MAX_VALUE ? Long.MAX_VALUE
-                                : current.consecutiveTransportFailures() + 1L, current.reportedAlive()));
-                lease.pollTrace().record(Stage.TRANSPORT_FAILURE_RECORDED);
-            } else if (validResponse) {
-                long nowUs = System.nanoTime() / 1000;
-                pollHealth.updateAndGet(current -> new PollHealth(nowUs,
-                        Math.max(0L, nowUs-current.lastSuccessfulPollUs()), 0L, alive));
-                receivedStatusRpc = true;
-                lease.pollTrace().record(Stage.STATUS_HEALTH_UPDATED);
-            }
-
-        }
+        Stage stage = statusProgress.rpcResult(lease, validResponse, alive, failure);
+        if (stage != null) { lease.pollTrace().record(stage); }
     }
 
     public void recordStatusApplied(EndpointTrace.Poll trace) {
         requireGenerationLock();
         requireActiveGeneration();
-        long receivedUs = statusApplicationLease.get() == null ? System.nanoTime()/1000 : statusApplicationReceivedUs;
-        lastStatusAppliedUs.set(receivedUs);
+        refreshAppliedReceipt(statusProgress.applicationReceivedUs());
         if (trace != null) { trace.record(Stage.STATUS_APPLIED); }
+    }
+
+    private void refreshAppliedReceipt(long receivedUs) {
+        CommittedWorkerStatus current = committedStatus.get();
+        if (current.snapshotReceivedUs() != receivedUs) {
+            committedStatus.set(new CommittedWorkerStatus(current.fields(), current.cursor(), receivedUs));
+        }
     }
 
     private final AtomicReference<PollLease> statusPollLease =
@@ -393,6 +453,7 @@ public class WorkerStatus {
         private final EndpointTrace.Poll pollTrace;
 
         private volatile StatusPollProgress statusProgress;
+        private long applicationReceivedUs;
 
         /** Called when the RPC actually starts, never while merely queued. */
         public void statusRpcStarted(long timeoutMs) {
@@ -437,7 +498,7 @@ public class WorkerStatus {
     public boolean isStatusPollProtected(long nowUs, long commitGraceUs) {
         PollLease lease = statusPollLease.get();
         StatusPollProgress progress = lease == null ? null : lease.statusProgress;
-        if (progress == null || retiring) {
+        if (progress == null || !isActiveGeneration()) {
             return false;
         }
         long budgetUs = progress.awaitingCommit() ? commitGraceUs : progress.rpcTimeoutUs();
@@ -447,14 +508,12 @@ public class WorkerStatus {
 
     private WorkerStatus(
             TopologySnapshot initialTopology,
-            EngineObservation initialStatus) {
+            EngineObservation initialStatus, long maximumStatusAgeUs) {
         topology = new AtomicReference<>(initialTopology);
         committedStatus = new AtomicReference<>(new CommittedWorkerStatus(
                 initialStatus,
-                new AppliedStatusCursor(-1L, -1L)));
-        long discoveredAtUs = System.nanoTime() / 1000;
-        pollHealth = new AtomicReference<>(new PollHealth(
-                discoveredAtUs, 0L, 0L, false));
+                new AppliedStatusCursor(-1L, -1L), 0L));
+        statusProgress = new StatusProgress(maximumStatusAgeUs);
     }
 
     /** Create one fully initialized service-discovery generation. */
@@ -465,6 +524,12 @@ public class WorkerStatus {
             int port,
             int grpcPort,
             String site) {
+        return createDiscovered(role, group, ip, port, grpcPort, site, DEFAULT_STATUS_FRESHNESS_US);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role, String group, String ip, int port, int grpcPort, String site,
+            long maximumStatusAgeUs) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
@@ -487,7 +552,7 @@ public class WorkerStatus {
                         0L,
                         0L,
                         0L,
-                        0L));
+                        0L), maximumStatusAgeUs);
     }
 
     @JsonIgnore
@@ -587,7 +652,7 @@ public class WorkerStatus {
         return new PreparedStatus(
                 current,
                 observation,
-                new CommittedWorkerStatus(observation.engine(), cursor),
+                new CommittedWorkerStatus(observation.engine(), cursor, statusProgress.applicationReceivedUs()),
                 pollTrace);
     }
 
@@ -616,7 +681,6 @@ public class WorkerStatus {
             throw new IllegalStateException(
                     "prepared status is stale or has already been published");
         }
-        recordStatusApplied(null);
         if (prepared.pollTrace != null) {
             prepared.pollTrace.record(Stage.STATUS_COMMITTED);
         }
@@ -627,12 +691,8 @@ public class WorkerStatus {
         requireGenerationLock();
         requireActiveGeneration();
         long nowUs = System.nanoTime() / 1000;
-        lastStatusAppliedUs.set(nowUs);
-        PollHealth updated = pollHealth.updateAndGet(current -> new PollHealth(
-                nowUs,
-                nowUs - current.lastSuccessfulPollUs(),
-                0L,
-                reportedAlive));
+        refreshAppliedReceipt(nowUs);
+        PollHealth updated = statusProgress.successfulPoll(reportedAlive, nowUs);
         if (pollTrace != null) {
             pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         }
@@ -643,13 +703,7 @@ public class WorkerStatus {
     public PollHealth recordTransportFailure() {
         requireGenerationLock();
         requireActiveGeneration();
-        return pollHealth.updateAndGet(current -> new PollHealth(
-                current.lastSuccessfulPollUs(),
-                current.successfulPollIntervalUs(),
-                current.consecutiveTransportFailures() == Long.MAX_VALUE
-                        ? Long.MAX_VALUE
-                        : current.consecutiveTransportFailures() + 1L,
-                current.reportedAlive()));
+        return statusProgress.failedPoll();
     }
 
     public void requireGenerationLock() {
@@ -662,7 +716,7 @@ public class WorkerStatus {
     /** Reject any new publication or ownership after retirement starts. */
     public void requireActiveGeneration() {
         requireGenerationLock();
-        if (retiring) {
+        if (!isActiveGeneration()) {
             throw new IllegalStateException(
                     "WorkerStatus generation is retiring: " + generationId);
         }
@@ -671,7 +725,7 @@ public class WorkerStatus {
     /** Require an operation to target the one retiring generation. */
     public void requireRetiringGeneration() {
         requireGenerationLock();
-        if (!retiring) {
+        if (isActiveGeneration()) {
             throw new IllegalStateException(
                     "WorkerStatus generation is not retiring: " + generationId);
         }
@@ -686,17 +740,14 @@ public class WorkerStatus {
      */
     public boolean beginRetirementAfterEndpointGateClosed() {
         requireGenerationLock();
-        if (retiring) {
-            return false;
-        }
-        retiring = true;
+        if (!statusProgress.beginRetirement()) { return false; }
         trace.record(Stage.GENERATION_RETIRING);
         return true;
     }
 
     @JsonIgnore
     public boolean isActiveGeneration() {
-        return !retiring;
+        return statusProgress.lifecycle != StatusLifecycle.RETIRING;
     }
 
     private static long mergedFinishedVersion(
@@ -825,17 +876,17 @@ public class WorkerStatus {
     }
 
     public PollHealth pollHealth() {
-        return pollHealth.get();
+        return statusProgress.health;
     }
 
     /** Acquire the one in-flight status-poll slot for this generation. */
     public PollLease tryBeginStatusPoll(long syncCycleId) {
-        if (retiring || healthRetirementClaimed) { return null; }
+        if (statusProgress.lifecycle != StatusLifecycle.ACTIVE) { return null; }
         PollLease active = statusPollLease.get();
         if (active != null) { active.pollTrace.skippedBusy(); return null; }
         PollLease lease = new PollLease(this, PollKind.STATUS, statusPollLease, syncCycleId);
         if (!statusPollLease.compareAndSet(null, lease)) { return null; }
-        if (retiring || healthRetirementClaimed) { lease.close(); return null; }
+        if (statusProgress.lifecycle != StatusLifecycle.ACTIVE) { lease.close(); return null; }
         return lease;
     }
 
@@ -854,12 +905,12 @@ public class WorkerStatus {
 
     private PollLease tryBeginPoll(PollKind kind, AtomicReference<PollLease> slot,
                                    long syncCycleId) {
-        if (retiring) { return null; }
+        if (!isActiveGeneration()) { return null; }
         PollLease active = slot.get();
         if (active != null) { active.pollTrace.skippedBusy(); return null; }
         PollLease lease = new PollLease(this, kind, slot, syncCycleId);
         if (!slot.compareAndSet(null, lease)) { return null; }
-        if (retiring) { lease.close(); return null; }
+        if (!isActiveGeneration()) { lease.close(); return null; }
         return lease;
     }
 
@@ -912,10 +963,10 @@ public class WorkerStatus {
     public String toString() {
         return "WorkerStatus{" +
                 "generationId=" + generationId +
-                ", retiring=" + retiring +
+                ", retiring=" + !isActiveGeneration() +
                 ", topology=" + topology.get() +
                 ", committedStatus=" + committedStatus.get() +
-                ", pollHealth=" + pollHealth.get() +
+                ", pollHealth=" + pollHealth() +
                 '}';
     }
 }
