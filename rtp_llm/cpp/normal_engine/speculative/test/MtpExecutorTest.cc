@@ -3522,6 +3522,11 @@ void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hi
         auto mtp_hidden_buffer = torch::arange(24, torch::kFloat32).reshape({12, 2}) + 100;
         components.fake_target_model->setMtpTargetHiddenStates(mtp_hidden_buffer);
         target_hidden = mtp_hidden_buffer.narrow(0, 0, 10);
+    } else if (seed_mode < 0) {
+        // Replay returns live rows even when the capture-time buffer is stale.
+        target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+        components.fake_target_model->setMtpTargetHiddenStates(
+            torch::full_like(target_output.all_hidden_states, -99.0f));
     }
     next_draft_input.last_hidden_states = torch::cat({target_hidden.narrow(0, 0, 1), target_hidden.narrow(0, 5, 5)});
 
