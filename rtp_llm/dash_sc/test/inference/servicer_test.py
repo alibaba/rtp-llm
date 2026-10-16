@@ -283,6 +283,7 @@ def _dsv4_tokenizer() -> _FakeTokenizer:
     return _FakeTokenizer(
         {
             "<think>\n": [128821, 198],
+            "<think>": [128821],
             "</think>\n\n": [128822, 271],
             "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
             "</think>": [128822],
@@ -378,6 +379,68 @@ class DeriveMaxTokenIdTest(unittest.TestCase):
 
 
 class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_resolves_bare_anchor_without_assuming_a_token_prefix(self) -> None:
+        tok = _dsv4_tokenizer()
+        # Qwen2 BPE merges '>' with LF, so the bare tag has a different last id.
+        tok._mapping["<think>\n"] = [13708, 766, 397]
+        tok._mapping["<think>"] = [13708, 766, 29]
+
+        runtime = build_think_runtime(tok, _GenerateEnvCfg(), "qwen_2")
+
+        self.assertEqual(runtime.bos_tokens, (13708, 766, 397))
+        self.assertEqual(runtime.bare_bos_tokens, (13708, 766, 29))
+
+    def test_reasoning_capability_uses_renderer_metadata(self) -> None:
+        for model_type, expected in (
+            (None, False),
+            ("qwen_2", False),
+            ("qwen_tool", False),
+            ("qwen_3", True),
+            ("deepseek_v4", True),
+        ):
+            with self.subTest(model_type=model_type):
+                runtime = build_think_runtime(
+                    _dsv4_tokenizer(), _GenerateEnvCfg(), model_type
+                )
+                self.assertTrue(runtime.eos_tokens)
+                self.assertEqual(runtime.emits_reasoning_stream, expected)
+
+    def test_renderer_override_does_not_change_model_phase2_rules(self) -> None:
+        runtime = build_think_runtime(
+            _dsv4_tokenizer(),
+            _GenerateEnvCfg(),
+            "deepseek_v4",
+            renderer_model_type="qwen_2",
+        )
+
+        self.assertFalse(runtime.emits_reasoning_stream)
+        self.assertTrue(runtime.phase2_enabled)
+
+    def test_renderer_resolution_errors_preserve_startup_and_forced_thinking(
+        self,
+    ) -> None:
+        for error in (
+            ImportError("missing optional renderer dependency"),
+            RuntimeError("registration failed"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "rtp_llm.openai.renderer_factory.ChatRendererFactory.model_emits_reasoning_stream",
+                    side_effect=error,
+                ),
+                self.assertLogs(
+                    "rtp_llm.dash_sc.inference.servicer", level="WARNING"
+                ) as logs,
+            ):
+                runtime = build_think_runtime(
+                    _dsv4_tokenizer(), _GenerateEnvCfg(), "qwen_2"
+                )
+                self.assertTrue(runtime.emits_reasoning_stream)
+                self.assertTrue(runtime.bos_tokens)
+                self.assertTrue(runtime.eos_tokens)
+                self.assertIn("preserving request-forced thinking", logs.output[0])
+
     def test_derives_eos_token_id_from_tokenizer(self) -> None:
         runtime = build_think_runtime(_FakeTokenizer({}), None, None)
 
@@ -1320,6 +1383,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -1427,6 +1491,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -1511,6 +1576,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -1839,6 +1905,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -1901,6 +1968,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -1950,6 +2018,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2004,6 +2073,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2056,6 +2126,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2109,6 +2180,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2167,6 +2239,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2305,6 +2378,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2365,6 +2439,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _FakeTokenizer(
             {
                 "<think>\n": [128821, 198],
+                "<think>": [128821],
                 "</think>\n\n": [128822, 271],
                 "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
                 "</think>": [128822],
@@ -2769,12 +2844,15 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         # call emit_access_log strictly before report_frontend_rpc_done.
         servicer = DashScInferenceServicer(backend_visitor=self._terminal_visitor())
         order = MagicMock()
-        with patch(
-            "rtp_llm.dash_sc.inference.servicer.emit_access_log",
-            order.emit_access_log,
-        ), patch(
-            "rtp_llm.dash_sc.inference.servicer.report_frontend_rpc_done",
-            order.report_frontend_rpc_done,
+        with (
+            patch(
+                "rtp_llm.dash_sc.inference.servicer.emit_access_log",
+                order.emit_access_log,
+            ),
+            patch(
+                "rtp_llm.dash_sc.inference.servicer.report_frontend_rpc_done",
+                order.report_frontend_rpc_done,
+            ),
         ):
             await _drain(
                 servicer.ModelStreamInfer(
@@ -3236,6 +3314,368 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.begin_think_token_ids, [128821, 198])
         self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
         self.assertIsNone(generate_config.structural_tag)
+
+    async def test_non_reasoning_request_thinking_is_disabled_before_enqueue(
+        self,
+    ) -> None:
+        for model_type in ("qwen_2", "qwen_tool"):
+            for env_mode in ("0", "disabled", "adaptive"):
+                for control in (
+                    "true",
+                    "false",
+                    "thinking_budget",
+                    "max_new_think_tokens",
+                ):
+                    with self.subTest(
+                        model_type=model_type, env_mode=env_mode, control=control
+                    ):
+                        visitor = _FakeVisitor(_FakeAsyncStream([]))
+                        tok = _dsv4_tokenizer()
+                        env_cfg = _GenerateEnvCfg()
+                        env_cfg.think_mode = env_mode
+                        servicer = DashScInferenceServicer(
+                            backend_visitor=visitor,
+                            tokenizer=tok,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(tok, env_cfg, model_type),
+                            extra_stop_word_ids=[[2], [3]],
+                        )
+                        req = self._valid_infer_request()
+                        if control in ("true", "false"):
+                            req.parameters["enable_thinking"].bool_param = (
+                                control == "true"
+                            )
+                        else:
+                            req.parameters[control].int64_param = 10
+
+                        await _drain(
+                            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                        )
+
+                        self.assertEqual(visitor.enqueue_called, 1)
+                        config = visitor.last_generate_input.generate_config
+                        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+                        self.assertFalse(config.in_think_mode)
+                        self.assertEqual(config.max_thinking_tokens, 0)
+                        self.assertIsNone(config.structural_tag)
+                        self.assertEqual(config.stop_words_list, [[2], [3]])
+                        self.assertEqual(
+                            visitor.last_generate_input.token_ids.tolist(), [42]
+                        )
+
+    async def test_clamped_thinking_warns_once_after_a_request_is_clamped(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        env_cfg.think_mode = "disabled"
+        runtime = build_think_runtime(tok, env_cfg, "qwen_2")
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=runtime,
+        )
+
+        with (
+            patch.dict(
+                "rtp_llm.dash_sc.inference.servicer._THINK_CLAMP_WARNED", clear=True
+            ),
+            patch("rtp_llm.dash_sc.inference.servicer._LOGGER.warning") as warning,
+        ):
+            for input_ids, enabled in (
+                ([7, 128821], True),
+                ([42], False),
+                ([42], True),
+                ([42], True),
+            ):
+                req = self._valid_infer_request()
+                req.inputs[0].shape[:] = [len(input_ids)]
+                req.raw_input_contents[0] = struct.pack(
+                    f"<{len(input_ids)}i", *input_ids
+                )
+                req.parameters["enable_thinking"].bool_param = enabled
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+                if len(input_ids) > 1 or not enabled:
+                    warning.assert_not_called()
+
+            warning.assert_called_once()
+            self.assertIn("clamped to DISABLED", warning.call_args.args[0])
+            self.assertEqual(
+                warning.call_args.args[1:], ("qwen_2", "qwen_2", "DISABLED")
+            )
+        self.assertEqual(visitor.enqueue_called, 4)
+
+    async def test_clamp_warning_distinguishes_deployment_configuration(self) -> None:
+        with (
+            patch.dict(
+                "rtp_llm.dash_sc.inference.servicer._THINK_CLAMP_WARNED", clear=True
+            ),
+            patch("rtp_llm.dash_sc.inference.servicer._LOGGER.warning") as warning,
+        ):
+            for renderer_type, env_mode in (
+                ("qwen_2", "disabled"),
+                ("qwen_tool", "disabled"),
+                ("qwen_2", "adaptive"),
+            ):
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = env_mode
+                runtime = build_think_runtime(
+                    tok, env_cfg, "qwen_2", renderer_model_type=renderer_type
+                )
+                servicer = DashScInferenceServicer(
+                    backend_visitor=_FakeVisitor(_FakeAsyncStream([])),
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=runtime,
+                )
+                req = self._valid_infer_request()
+                req.parameters["enable_thinking"].bool_param = True
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+            self.assertEqual(warning.call_count, 3)
+
+    async def test_forced_thinking_matches_full_and_bare_multitoken_anchors(
+        self,
+    ) -> None:
+        for suffix, expected_mode in (
+            ([13708, 766, 397], ThinkingMode.ENABLED),
+            ([13708, 766, 29], ThinkingMode.ENABLED),
+            ([13708], ThinkingMode.DISABLED),
+            ([42], ThinkingMode.DISABLED),
+        ):
+            with self.subTest(suffix=suffix):
+                tok = _dsv4_tokenizer()
+                tok._mapping["<think>\n"] = [13708, 766, 397]
+                tok._mapping["<think>"] = [13708, 766, 29]
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = "disabled"
+                runtime = build_think_runtime(tok, env_cfg, "qwen_2")
+                startup_encode_calls = list(tok.encode_calls)
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=len(suffix) + 1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=runtime,
+                    echo_prefix_ids=[13708, 766, 397],
+                )
+                req = self._valid_infer_request()
+                input_ids = [7] + suffix
+                req.inputs[0].shape[:] = [len(input_ids)]
+                req.raw_input_contents[0] = struct.pack(
+                    f"<{len(input_ids)}i", *input_ids
+                )
+                req.parameters["enable_thinking"].bool_param = True
+
+                chunks = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                config = visitor.last_generate_input.generate_config
+                self.assertEqual(config.thinking_mode, expected_mode)
+                if expected_mode == ThinkingMode.ENABLED:
+                    self.assertEqual(
+                        config.structural_tag["format"]["elements"][0]["begin"], ""
+                    )
+                    self.assertEqual(_gen_ids(chunks[0]), suffix + [9])
+                else:
+                    self.assertIsNone(config.structural_tag)
+                    self.assertEqual(_gen_ids(chunks[0]), [9])
+                # Begin-tag variants are cached; fixed thinking only encodes its end tag.
+                request_encodes = tok.encode_calls[len(startup_encode_calls) :]
+                self.assertNotIn(("<think>", False), request_encodes)
+                self.assertNotIn(("<think>\n", False), request_encodes)
+
+    async def test_forced_thinking_preserves_anchor_with_trailing_newlines(
+        self,
+    ) -> None:
+        pieces = {
+            7: "user\n",
+            13708: "<th",
+            766: "ink",
+            29: ">",
+            397: ">\n",
+            1363: ">\n\n",
+            198: "\n",
+            271: "\n\n",
+            42: "plain",
+            1001: " <th",
+        }
+
+        class _DecodingTokenizer(_FakeTokenizer):
+            def decode(self, ids, skip_special_tokens=False):
+                return "".join(pieces[i] for i in ids)
+
+        for suffix, expected_mode in (
+            ([13708, 766, 1363], ThinkingMode.ENABLED),
+            ([13708, 766, 29, 271, 198], ThinkingMode.ENABLED),
+            ([13708, 766, 397, 271], ThinkingMode.ENABLED),
+            ([1001, 766, 1363], ThinkingMode.ENABLED),
+            ([13708, 198], ThinkingMode.DISABLED),
+            ([42, 198], ThinkingMode.DISABLED),
+        ):
+            for env_mode in ("disabled", "adaptive"):
+                with self.subTest(suffix=suffix, env_mode=env_mode):
+                    tok = _DecodingTokenizer(_dsv4_tokenizer()._mapping)
+                    tok._mapping["<think>\n"] = [13708, 766, 397]
+                    tok._mapping["<think>"] = [13708, 766, 29]
+                    env_cfg = _GenerateEnvCfg()
+                    env_cfg.think_mode = env_mode
+                    runtime = build_think_runtime(tok, env_cfg, "qwen_2")
+                    out = GenerateOutput(
+                        output_ids=torch.tensor([9], dtype=torch.int32),
+                        finished=True,
+                        aux_info=AuxInfo(input_len=len(suffix) + 1, reuse_len=0),
+                    )
+                    visitor = _FakeVisitor(
+                        _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                    )
+                    servicer = DashScInferenceServicer(
+                        backend_visitor=visitor,
+                        tokenizer=tok,
+                        generate_env_config=env_cfg,
+                        think_runtime=runtime,
+                        echo_prefix_ids=list(runtime.bos_tokens),
+                    )
+                    req = self._valid_infer_request()
+                    input_ids = [7] + suffix
+                    req.inputs[0].shape[:] = [len(input_ids)]
+                    req.raw_input_contents[0] = struct.pack(
+                        f"<{len(input_ids)}i", *input_ids
+                    )
+                    req.parameters["enable_thinking"].bool_param = True
+
+                    chunks = await _drain(
+                        servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                    )
+
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    config = visitor.last_generate_input.generate_config
+                    self.assertEqual(config.thinking_mode, expected_mode)
+                    self.assertEqual(
+                        visitor.last_generate_input.token_ids.tolist(), input_ids
+                    )
+                    if expected_mode == ThinkingMode.ENABLED:
+                        self.assertEqual(
+                            config.structural_tag["format"]["elements"][0]["begin"], ""
+                        )
+                        self.assertEqual(
+                            _gen_ids(chunks[0]),
+                            [9] if suffix[0] == 1001 else suffix + [9],
+                        )
+                    else:
+                        self.assertIsNone(config.structural_tag)
+                        self.assertEqual(_gen_ids(chunks[0]), [9])
+
+    async def test_forced_thinking_preserves_capability_and_anchor_exemptions(
+        self,
+    ) -> None:
+        for model_type, env_mode, input_ids in (
+            ("qwen_3", "disabled", [1, 2]),
+            ("deepseek_v4", "disabled", [1, 2]),
+            ("qwen_2", "enabled", [1, 2]),
+            ("qwen3_vl", "enabled", [1, 2]),
+            ("qwen3_vl_moe", "enabled", [1, 2]),
+            ("deepseek3", "enabled", [1, 2]),
+            ("qwen_2", "disabled", [7, 128821, 198]),
+        ):
+            with self.subTest(
+                model_type=model_type, env_mode=env_mode, input_ids=input_ids
+            ):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = env_mode
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, model_type),
+                )
+                req = self._valid_infer_request()
+                req.inputs[0].shape[:] = [len(input_ids)]
+                req.raw_input_contents[0] = struct.pack(
+                    f"<{len(input_ids)}i", *input_ids
+                )
+                req.parameters["enable_thinking"].bool_param = True
+
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                config = visitor.last_generate_input.generate_config
+                self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+                self.assertTrue(config.in_think_mode)
+                self.assertEqual(config.structural_tag["format"]["type"], "sequence")
+                self.assertEqual(
+                    config.structural_tag["format"]["elements"][0]["begin"],
+                    "" if len(input_ids) == 3 else "<think>\n",
+                )
+
+    async def test_clamped_thinking_preserves_json_and_tool_constraints(self) -> None:
+        tool_tag = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<tool_call>"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": "<tool_call>",
+                        "end": "</tool_call>",
+                        "content": {
+                            "type": "json_schema",
+                            "json_schema": {"type": "object"},
+                        },
+                    }
+                ],
+            }
+        }
+        for parameter, value, expected_field in (
+            ("response_format", {"type": "json_object"}, "json_schema"),
+            ("guided_json", [{"type": "object"}], "json_schema"),
+            ("tool_call_structural_tag", tool_tag, "structural_tag"),
+        ):
+            with self.subTest(parameter=parameter):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = "disabled"
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "qwen_2"),
+                )
+                req = self._valid_infer_request()
+                req.parameters["enable_thinking"].bool_param = True
+                req.parameters[parameter].string_param = json.dumps(value)
+
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                config = visitor.last_generate_input.generate_config
+                self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
+                if expected_field == "structural_tag":
+                    self.assertEqual(
+                        config.structural_tag["format"], tool_tag["format"]
+                    )
+                else:
+                    self.assertEqual(
+                        config.json_schema,
+                        (
+                            {"anyOf": [{"type": "object"}, {"type": "array"}]}
+                            if parameter == "response_format"
+                            else {"type": "object"}
+                        ),
+                    )
+                    self.assertIsNone(config.structural_tag)
 
     async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
         self,
@@ -3743,9 +4183,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
         servicer = DashScInferenceServicer(backend_visitor=visitor)
 
-        with patch.object(
-            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
-        ) as info, self.assertRaises(asyncio.CancelledError):
+        with (
+            patch.object(
+                logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+            ) as info,
+            self.assertRaises(asyncio.CancelledError),
+        ):
             await _drain(
                 servicer.ModelStreamInfer(
                     _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()

@@ -17,9 +17,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator, Callable, Iterable, Optional, Protocol
+from typing import (
+    TYPE_CHECKING,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Optional,
+    Protocol,
+    Sequence,
+)
 
 import torch
 
@@ -32,9 +42,13 @@ from rtp_llm.config.exceptions import (
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     ThinkingMode,
+    should_disable_forced_thinking,
     thinking_mode_from_value,
 )
-from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format import (
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
     restore_final_constraint,
@@ -122,6 +136,12 @@ _DEFAULT_TERMINATE_TOKEN_ID = 1
 # Model types whose dash_sc protocol uses the empty-think second pass.
 _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
+_LOGGER = logging.getLogger(__name__)
+_THINK_CLAMP_WARN_LOCK = threading.Lock()
+_THINK_CLAMP_WARN_CACHE_SIZE = 128
+_THINK_CLAMP_WARNED: OrderedDict[
+    tuple[Optional[str], Optional[str], ThinkingMode], None
+] = OrderedDict()
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
 _DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
@@ -495,7 +515,7 @@ def _uses_dash_sc_empty_think_phase2(model_type: Optional[str]) -> bool:
 
 
 def _matched_echo_prefix_ids(
-    input_ids_list: list[int], echo_prefix_ids: Optional[list[int]]
+    input_ids_list: list[int], echo_prefix_ids: Optional[Sequence[int]]
 ) -> list[int]:
     """Return the exact think-BOS ids already present at the input tail."""
     prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
@@ -503,10 +523,41 @@ def _matched_echo_prefix_ids(
         return []
     if input_ids_list[-len(prefix_ids) :] == prefix_ids:
         return prefix_ids
-    # Some tokenizers collapse the think-BOS prefix to its first token.
-    if len(prefix_ids) > 1 and input_ids_list[-1:] == prefix_ids[:1]:
-        return prefix_ids[:1]
     return []
+
+
+def _match_think_anchor(
+    input_ids_list: list[int],
+    runtime: _ThinkRuntime,
+    tokenizer: BaseTokenizer | None,
+    generate_env_config: GenerateEnvConfig | None,
+) -> tuple[bool, list[int]]:
+    matched_ids = _matched_echo_prefix_ids(input_ids_list, runtime.bos_tokens)
+    if not matched_ids:
+        matched_ids = _matched_echo_prefix_ids(input_ids_list, runtime.bare_bos_tokens)
+    if matched_ids or tokenizer is None or generate_env_config is None:
+        return bool(matched_ids), matched_ids
+    # Decode only a bounded tail on the uncommon path. BPE can merge the closing
+    # '>' with several newlines, so trimming newline token ids is insufficient.
+    hf_tok = _hf_tokenizer(tokenizer)
+    decode = getattr(hf_tok, "decode", None)
+    anchor = _decode_env_tag(generate_env_config.think_start_tag).rstrip("\n")
+    if decode is None or not anchor:
+        return False, []
+    tail = input_ids_list[-max(64, len(runtime.bos_tokens) + 16) :]
+    if not prompt_ends_with_think_anchor(
+        decode(tail, skip_special_tokens=False), anchor
+    ):
+        return False, []
+    # Return the actual token suffix for prefill echo and phase-2 removal;
+    # never remove preceding prompt tokens when the anchor shares a BPE token.
+    for size in range(1, len(tail) + 1):
+        suffix = tail[-size:]
+        if decode(suffix, skip_special_tokens=False).rstrip("\n") == anchor:
+            return True, suffix
+    # A context-merged token may contain text before the anchor. Preserve the
+    # textual gate without echoing or stripping that preceding prompt text.
+    return True, []
 
 
 def _dash_sc_reasoning_format(
@@ -550,6 +601,8 @@ class _ThinkRuntime:
 
     Fields:
       ``bos_tokens``         encode(think_start_tag), e.g. ``<think>\\n``
+      ``bare_bos_tokens``    encode(think_start_tag.rstrip("\\n")); its encoding
+                             need not be a prefix of ``bos_tokens``
       ``eos_tokens``         encode(think_end_tag),   e.g. ``</think>\\n\\n``
       ``empty_tokens``       encode(start + body + end); used as phase-2 prompt body
       ``close_token_id``     first id of ``eos_tokens`` (the ``</think>`` token);
@@ -561,6 +614,8 @@ class _ThinkRuntime:
                              and ``empty_tokens`` is available. ``terminate_token_id``
                              is a separate request-path gate for actually entering
                              phase-2.
+      ``emits_reasoning_stream`` renderer capability, independent of whether
+                             the tokenizer can encode the configured think tags
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -568,11 +623,15 @@ class _ThinkRuntime:
     """
 
     bos_tokens: tuple[int, ...] = ()
+    bare_bos_tokens: tuple[int, ...] = ()
     eos_tokens: tuple[int, ...] = ()
     empty_tokens: tuple[int, ...] = ()
     close_token_id: Optional[int] = None
     terminate_token_id: Optional[int] = None
     phase2_enabled: bool = False
+    emits_reasoning_stream: bool = False
+    model_type: Optional[str] = None
+    renderer_model_type: Optional[str] = None
     eos_token_id: Optional[int] = None
     max_token_id: Optional[int] = None
 
@@ -585,6 +644,7 @@ def build_think_runtime(
     terminate_token_id: Optional[int] = _DEFAULT_TERMINATE_TOKEN_ID,
     eos_token_id: Optional[int] = None,
     max_token_id: Optional[int] = None,
+    renderer_model_type: Optional[str] = None,
 ) -> _ThinkRuntime:
     """Pre-compute the per-startup think/dashllm snapshot.
 
@@ -595,10 +655,29 @@ def build_think_runtime(
     ``eos_token_id`` / ``max_token_id`` of ``None`` fall back to tokenizer-derived
     values; explicit values from the caller win.
 
+    ``renderer_model_type`` honors a deployment's MODEL_TEMPLATE_TYPE override
+    for the reasoning capability, without changing model-specific phase-2 rules.
+
     Returns a safe-empty runtime (``phase2_enabled=False``, all token tuples
     empty) when ``tokenizer`` or ``generate_env_config`` is ``None``, matching
     the "missing tokenizer" fallback shape the previous derive helpers produced.
     """
+    try:
+        # Defer renderer dependencies and preserve DashSC's startup fallback.
+        from rtp_llm.openai.renderer_factory import ChatRendererFactory
+
+        emits_reasoning_stream = ChatRendererFactory.model_emits_reasoning_stream(
+            renderer_model_type or model_type
+        )
+    except Exception:
+        # Unknown capability must preserve the previous request behavior.
+        emits_reasoning_stream = True
+        _LOGGER.warning(
+            "[DashScGrpc] Failed to resolve reasoning capability for renderer %s; "
+            "preserving request-forced thinking",
+            renderer_model_type or model_type,
+            exc_info=True,
+        )
     eos_tid = (
         eos_token_id if eos_token_id is not None else _tokenizer_eos_token_id(tokenizer)
     )
@@ -612,6 +691,9 @@ def build_think_runtime(
     )
     if tokenizer is None or generate_env_config is None:
         return _ThinkRuntime(
+            emits_reasoning_stream=emits_reasoning_stream,
+            model_type=model_type,
+            renderer_model_type=renderer_model_type or model_type,
             terminate_token_id=term_id,
             eos_token_id=eos_tid,
             max_token_id=max_tid,
@@ -619,6 +701,13 @@ def build_think_runtime(
     think_start_tag = _decode_env_tag(generate_env_config.think_start_tag)
     think_end_tag = _decode_env_tag(generate_env_config.think_end_tag)
     bos_tokens = tuple(_encode_tag(tokenizer, think_start_tag))
+    # Match the same raw/bare tag forms as the OpenAI token-level fallback.
+    # Encode the bare tag separately: BPE may merge '>' with the following LF.
+    bare_bos_tokens = (
+        tuple(_encode_tag(tokenizer, think_start_tag.rstrip("\n")))
+        if think_start_tag.endswith("\n")
+        else bos_tokens
+    )
     eos_tokens = tuple(_encode_tag(tokenizer, think_end_tag))
     empty_tokens = tuple(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
@@ -627,13 +716,40 @@ def build_think_runtime(
     phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
+        bare_bos_tokens=bare_bos_tokens,
         eos_tokens=eos_tokens,
         empty_tokens=empty_tokens,
         close_token_id=close_token_id,
         terminate_token_id=term_id,
         phase2_enabled=phase2_enabled,
+        emits_reasoning_stream=emits_reasoning_stream,
+        model_type=model_type,
+        renderer_model_type=renderer_model_type or model_type,
         eos_token_id=eos_tid,
         max_token_id=max_tid,
+    )
+
+
+def _warn_forced_thinking_clamped(
+    runtime: _ThinkRuntime, default_thinking_mode: ThinkingMode
+) -> None:
+    # Clients may force thinking on every request. Bound process-wide deduplication
+    # by deployment configuration, and only record it after a request is clamped.
+    key = (runtime.model_type, runtime.renderer_model_type, default_thinking_mode)
+    with _THINK_CLAMP_WARN_LOCK:
+        if key in _THINK_CLAMP_WARNED:
+            _THINK_CLAMP_WARNED.move_to_end(key)
+            return
+        _THINK_CLAMP_WARNED[key] = None
+        if len(_THINK_CLAMP_WARNED) > _THINK_CLAMP_WARN_CACHE_SIZE:
+            _THINK_CLAMP_WARNED.popitem(last=False)
+    _LOGGER.warning(
+        "[DashScGrpc] Request-forced thinking was clamped to DISABLED: "
+        "model_type=%s renderer_model_type=%s default_thinking_mode=%s; "
+        "the renderer does not emit reasoning and the prompt has no think anchor",
+        runtime.model_type,
+        runtime.renderer_model_type,
+        default_thinking_mode.name,
     )
 
 
@@ -866,6 +982,14 @@ async def iter_real_model_stream_infer(
         sampling,
     )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
+    if (
+        not matched_echo_ids
+        and echo_prefix_ids
+        and tuple(echo_prefix_ids) == runtime.bos_tokens
+    ):
+        matched_echo_ids = _matched_echo_prefix_ids(
+            input_ids_list, runtime.bare_bos_tokens
+        )
     should_echo = bool(matched_echo_ids)
     echoed = False
     stream: object | None = None
@@ -887,10 +1011,39 @@ async def iter_real_model_stream_infer(
             default_thinking_mode,
         )
         configured_thinking_mode = generate_config.thinking_mode
-        matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
-            input_ids_list, begin_think_tokens
+        matched_think_bos_ids = (
+            matched_echo_ids
+            or _matched_echo_prefix_ids(input_ids_list, begin_think_tokens)
+            or _matched_echo_prefix_ids(input_ids_list, runtime.bare_bos_tokens)
         )
-        if configured_thinking_mode == ThinkingMode.ADAPTIVE and matched_think_bos_ids:
+        prompt_has_think_anchor = bool(matched_think_bos_ids)
+        if not prompt_has_think_anchor and configured_thinking_mode in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ):
+            prompt_has_think_anchor, matched_think_bos_ids = _match_think_anchor(
+                input_ids_list, runtime, tokenizer, generate_env_config
+            )
+            if echo_prefix_ids and tuple(echo_prefix_ids) == runtime.bos_tokens:
+                matched_echo_ids = matched_think_bos_ids
+                should_echo = bool(matched_echo_ids)
+        if should_disable_forced_thinking(
+            configured_thinking_mode,
+            default_thinking_mode,
+            emits_reasoning_stream=runtime.emits_reasoning_stream,
+            prompt_has_think_anchor=prompt_has_think_anchor,
+        ):
+            # Upstream tokenization can ignore enable_thinking (e.g. Qwen2).
+            # Clamp before compiling a grammar that would keep EOS masked.
+            _warn_forced_thinking_clamped(runtime, default_thinking_mode)
+            generate_config.thinking_mode = ThinkingMode.DISABLED
+            generate_config.in_think_mode = False
+            generate_config.max_thinking_tokens = 0
+            configured_thinking_mode = ThinkingMode.DISABLED
+        if (
+            configured_thinking_mode == ThinkingMode.ADAPTIVE
+            and prompt_has_think_anchor
+        ):
             generate_config.thinking_mode = ThinkingMode.ENABLED
             generate_config.in_think_mode = True
             configured_thinking_mode = ThinkingMode.ENABLED
@@ -905,7 +1058,7 @@ async def iter_real_model_stream_infer(
         ):
             reasoning_format = _dash_sc_reasoning_format(
                 generate_env_config,
-                prompt_end_with_think=bool(matched_think_bos_ids),
+                prompt_end_with_think=prompt_has_think_anchor,
             )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list

@@ -625,6 +625,9 @@ class DashScApp:
                     base_tok,
                     self.py_env_configs.generate_env_config,
                     model_config.model_type,
+                    renderer_model_type=(
+                        self.py_env_configs.render_config.model_template_type
+                    ),
                     terminate_token_id=(
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
