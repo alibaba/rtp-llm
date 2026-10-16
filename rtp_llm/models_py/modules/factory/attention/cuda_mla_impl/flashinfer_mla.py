@@ -169,6 +169,11 @@ def _use_trtllm_gen_prefill() -> bool:
     return os.environ.get("XING4_MLA_TRTLLM_GEN_PREFILL", "0") == "1"
 
 
+def _use_trtllm_gen_decode() -> bool:
+    """Env gate for the trtllm-gen MLA decode (default off, A/B form)."""
+    return os.environ.get("XING4_MLA_TRTLLM_GEN_DECODE", "0") == "1"
+
+
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
     _trtllm_gen_workspace = None  # class-level lazy workspace (uint8, 128 MiB)
@@ -476,7 +481,10 @@ class MlaFlashInferPrefillOp(object):
         import flashinfer
 
         if MlaFlashInferPrefillOp._trtllm_gen_workspace is None:
-            MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.empty(
+            # Zero-init: the trtllm counter workspace carved from this
+            # buffer must start zeroed (decode multi-block semaphores
+            # device-assert on garbage).
+            MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.zeros(
                 128 * 1024 * 1024, dtype=torch.uint8, device=q.device
             )
         ws = MlaFlashInferPrefillOp._trtllm_gen_workspace
@@ -567,6 +575,11 @@ class MlaFlashInferDecodeOp(object):
         self.use_mla = use_mla
         self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
+        self.max_context_len = max_context_len
+        self._t_kvlen_d = None
+        self._t_page_indice_d = None
+        self._t_decode_page_indptr_d = None
+        self._t_bs = 0
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
             ((max_context_len + self.token_per_block - 1) // self.token_per_block)
@@ -604,6 +617,14 @@ class MlaFlashInferDecodeOp(object):
         )
 
     def plan(self, fmha_params: Any):
+        if _use_trtllm_gen_decode():
+            # trtllm-gen decode branch captures (refreshed every plan, so
+            # graph replays read the live page table through the scatter
+            # captured alongside the kernel):
+            self._t_kvlen_d = fmha_params.kvlen_d
+            self._t_page_indice_d = fmha_params.page_indice_d
+            self._t_decode_page_indptr_d = fmha_params.decode_page_indptr_d
+            self._t_bs = int(fmha_params.kvlen_h.size(0))
         if self.use_cuda_graph and self.kv_indices_d.size(
             0
         ) < fmha_params.page_indice_d.size(0):
@@ -654,11 +675,112 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        attn_output = torch.empty_like(q_nope)
-        self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
+        if (
+            _use_trtllm_gen_decode()
+            # Plain decode only: the MTP verify capture flows bs*(1+gen)
+            # rows with plan metadata that disagrees (kvlen count vs row
+            # grouping); the trtllm branch scopes to tokens == requests,
+            # which is exactly the 6.94ms/step attention it targets.
+            and q_nope.shape[0] == int(self._t_kvlen_d.size(0))
+            # Large-batch regime only: the kernel halves the attention time
+            # (3.69 vs 6.94 ms/step at bs64) but the aten scatter machinery
+            # costs ~1.6ms of extra launches, which loses below ~bs32.
+            and q_nope.shape[0] >= 32
+        ):
+            attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache)
+        else:
+            attn_output = torch.empty_like(q_nope)
+            self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
 
         attn_output = attn_output.view(-1, self.num_heads, self.kv_lora_rank)
         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         attn_bmm_output = attn_bmm_output.transpose(0, 1)
 
         return attn_bmm_output
+
+    def _trtllm_decode_run(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+    ) -> torch.Tensor:
+        """trtllm-gen MLA decode (XING4_MLA_TRTLLM_GEN_DECODE=1).
+
+        Microbench-resolved contract (fusion_workflow/p2_2 plan): query is
+        the pre-absorbed latent [bs, 1, H, 576] (nope part = q_nope @ w_kc,
+        already computed by the caller); kv_cache is the SAME paged latent
+        view forward already builds ([pages, block, 576]); output is the
+        latent [bs, 1, H, 512] the caller's w_vc bmm consumes. The padded
+        block table is scattered from the flat page table + per-request
+        indptr every step so graph replays read the live page ids (the C1
+        refresh pattern).
+        """
+        import flashinfer
+
+        # Live read: fill_params resizes the SAME kvlen tensor each plan, so
+        # size(0) is the current request count (a plan-time python int went
+        # stale by one cycle during the MTP verify capture: 124 rows with a
+        # recorded bs of 32 instead of the live 31).
+        bs = int(self._t_kvlen_d.size(0))
+        flat_pages = self._t_page_indice_d
+        indptr = self._t_decode_page_indptr_d
+        total_pages = int(flat_pages.numel())
+        # The kernel walks block_table columns up to max_seq_len/block_size
+        # regardless of each request's live seq_len (the max_seq_len we
+        # pass is the construction bound), so the table must be padded to
+        # that width — a total_pages-wide table device-asserts on the
+        # out-of-bounds column reads.
+        table_width = (
+            self.max_context_len + self.token_per_block - 1
+        ) // self.token_per_block
+        padded = torch.zeros(
+            (bs, table_width), dtype=torch.int32, device=flat_pages.device
+        )
+        # Graph-safe scatter: searchsorted (fixed output shape, no host
+        # sync) maps each flat page to its request; repeat_interleave would
+        # sync on the device counts and abort stream capture.
+        col_flat = torch.arange(
+            total_pages, device=flat_pages.device, dtype=torch.int64
+        )
+        row_ids = torch.searchsorted(
+            indptr[1:].to(torch.int64), col_flat, right=True
+        )
+        col_ids = col_flat - indptr.to(torch.int64)[row_ids]
+        # The flat page table's numel can lag the indptr coverage by one
+        # plan cycle (both are resized shared buffers): clamp stale tail
+        # entries into the last row's unused table region with value 0 —
+        # deterministic shapes stay graph-safe and live entries untouched.
+        row_c = row_ids.clamp(max=bs - 1)
+        col_c = col_ids.clamp(min=0, max=table_width - 1)
+        vals = torch.where(
+            row_ids < bs, flat_pages, torch.zeros_like(flat_pages)
+        )
+        padded[row_c, col_c] = vals
+
+        full_kv = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+        )
+        # MTP verify rows flow through this op as bs x (1 + gen) tokens; the
+        # API takes them natively as q_len_per_request.
+        query = torch.cat([q_nope, q_pe], dim=-1).reshape(
+            bs, 1, self.num_heads, -1
+        )
+        if MlaFlashInferPrefillOp._trtllm_gen_workspace is None:
+            MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.zeros(
+                128 * 1024 * 1024, dtype=torch.uint8, device=query.device
+            )
+        out = flashinfer.mla.trtllm_batch_decode_with_kv_cache_mla(
+            query,
+            full_kv,
+            MlaFlashInferPrefillOp._trtllm_gen_workspace,
+            self.qk_nope_head_dim,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            padded,
+            self._t_kvlen_d,
+            self.max_context_len,
+            bmm1_scale=self.scale * self.softmax_extra_scale,
+            bmm2_scale=1.0,
+        )
+        return out.reshape(-1, self.num_heads, self.kv_lora_rank)
+
