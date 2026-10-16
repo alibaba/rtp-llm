@@ -69,6 +69,8 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    // Stable input to the optional embedding-model Transformer-only graph.
+    at::Tensor               transformer_input_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

@@ -30,6 +30,7 @@ static const char* names[] = {
     "input_ids",
     "attention_mask",
     "moe_gating",
+    "cls_indices",
 };
 static_assert(sizeof(names) / sizeof(names[0]) <= NUM_INPUT_TYPES, "redundant handler arg name");
 static_assert(sizeof(names) / sizeof(names[0]) >= NUM_INPUT_TYPES, "missing handler arg name");
@@ -68,6 +69,22 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         0,
         parallelism_config,
     });
+    // Embedding uses the same Python wrapper as generation. Forward the engine
+    // configuration explicitly; aggregate defaults otherwise leave graphs off
+    // and their shape/block capacities at zero even when the server enables them.
+    model_init_params.hw_kernel_config             = params.hw_kernel_config;
+    model_init_params.profile_debug_logging_config = params.profiling_debug_logging_config;
+    model_init_params.runtime_config               = params.runtime_config;
+    model_init_params.concurrency_config           = params.concurrency_config;
+    model_init_params.device_resource_config       = params.device_resource_config;
+    model_init_params.max_seq_len                  = model_config_.max_seq_len;
+    model_init_params.hidden_size                  = model_config_.hidden_size;
+    model_init_params.tokens_per_block             = model_config_.attn_config.tokens_per_block;
+    model_init_params.kernel_tokens_per_block      = model_config_.attn_config.kernel_tokens_per_block > 0 ?
+                                                         model_config_.attn_config.kernel_tokens_per_block :
+                                                         model_init_params.tokens_per_block;
+    model_init_params.hc_mult                      = model_config_.hc_mult;
+    model_init_params.moe_config                   = params.moe_config;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
@@ -275,6 +292,20 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     model_request.sequence_lengths     = to_cpu(model_input.sequence_lengths);
     model_request.prefix_lengths       = to_cpu(model_input.prefix_lengths);
     model_request.attention_mask       = model_input.attention_mask;
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::CLS_INDICES)) {
+        // CLS offsets depend only on lengths. Upload before model forward so
+        // the classifier never submits a blocking index upload after replay.
+        model_request.cls_indices_host = torch::empty(
+            {model_request.context_batch_size}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+        const auto* lengths = model_request.input_lengths.data_ptr<int32_t>();
+        auto*       indices = model_request.cls_indices_host.data_ptr<int64_t>();
+        int64_t     offset  = 0;
+        for (int i = 0; i < model_request.context_batch_size; ++i) {
+            indices[i] = offset;
+            offset += lengths[i];
+        }
+        model_request.cls_indices = model_request.cls_indices_host.to(torch::kCUDA, /*non_blocking=*/true);
+    }
     return model_request;
 }
 
@@ -370,6 +401,9 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
         py::dict kwargs;
         if (has_arg(handler_args_, Arg::INPUT_LENGTHS)) {
             kwargs[get_name(Arg::INPUT_LENGTHS)] = model_request.input_lengths;
+        }
+        if (has_arg(handler_args_, Arg::CLS_INDICES)) {
+            kwargs[get_name(Arg::CLS_INDICES)] = model_request.cls_indices;
         }
         if (has_arg(handler_args_, Arg::HIDDEN_STATES)) {
             kwargs[get_name(Arg::HIDDEN_STATES)] = gpu_outputs.all_hidden_states;

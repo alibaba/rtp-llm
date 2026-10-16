@@ -162,6 +162,9 @@ class BertModel(GptModelBase):
             eps=config.layernorm_eps,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        # Enabled by VisionBert after construction. Ordinary BERT keeps its
+        # existing graph path; the split path owns only Transformer kernels.
+        self.use_transformer_cuda_graph = False
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -191,6 +194,23 @@ class BertModel(GptModelBase):
         # Use device-specific two-pass attention for the user-profile block mask.
         if self.use_user_profile_mask and is_cuda_graph:
             raise ValueError("BERT user-profile attention does not support CUDA graphs")
+        if self.use_transformer_cuda_graph and is_cuda_graph:
+            from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
+                BertEncoderGraphImpl,
+            )
+
+            if self.kv_cache is not None:
+                raise ValueError(
+                    "BERT Transformer graph requires an encoder without KV cache"
+                )
+            return BertEncoderGraphImpl(
+                self.config.getAttentionConfigs(
+                    self.parallelism_config.get_attn_tp_size()
+                ),
+                inputs.attention_inputs,
+                inputs.input_ids.size(0),
+                max_sequence_length=self.config.max_seq_len,
+            )
         if self.use_user_profile_mask:
             attn_inputs = inputs.attention_inputs
             if attn_inputs.is_prefill:
@@ -266,8 +286,13 @@ class BertModel(GptModelBase):
         if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:
             if int(attn_inputs.uqi_b_indptr[batch_size]) == 0:
                 schedule = BertUqiTwoPassSchedule(
-                    has_b=False, perm=None, inv_perm=None, b_rows=None,
-                    qo_indptr_p1=cu_host, qo_indptr_p2=None, kv_indptr_p2=None,
+                    has_b=False,
+                    perm=None,
+                    inv_perm=None,
+                    b_rows=None,
+                    qo_indptr_p1=cu_host,
+                    qo_indptr_p2=None,
+                    kv_indptr_p2=None,
                 )
             else:
                 dev = inputs.input_ids.device
@@ -292,7 +317,12 @@ class BertModel(GptModelBase):
             input_ids = inputs.input_ids[: int(cu_host[-1])]
             text_mask = inputs.embedding_inputs.text_tokens_mask
             if text_mask is not None and text_mask.numel():
-                input_ids = input_ids.masked_fill(~text_mask[:input_ids.numel()].to(device=input_ids.device, dtype=torch.bool), -1)
+                input_ids = input_ids.masked_fill(
+                    ~text_mask[: input_ids.numel()].to(
+                        device=input_ids.device, dtype=torch.bool
+                    ),
+                    -1,
+                )
             seg_ids = derive_bert_uqi_segment_ids_hostlen(
                 input_ids, cu_dev, cu_host, self.cls_uqi_token_id
             )
@@ -308,6 +338,13 @@ class BertModel(GptModelBase):
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
+        hidden_states = self.prepare_transformer_inputs(inputs)
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        return self.forward_transformer(hidden_states, fmha_impl)
+
+    def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Request-owned embedding and visual injection, always outside graphs."""
         self._reject_input_embeddings(inputs)
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
@@ -357,8 +394,12 @@ class BertModel(GptModelBase):
             multimodal_locs,
         )
 
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
+        return hidden_states
+
+    def forward_transformer(
+        self, hidden_states: torch.Tensor, fmha_impl: FMHAImplBase
+    ) -> PyModelOutputs:
+        """Transformer-only entry point shared by eager and graph execution."""
         quantized_hidden_states = None
         uqi_perm = getattr(fmha_impl, "uqi_perm", None)
         if uqi_perm is not None:

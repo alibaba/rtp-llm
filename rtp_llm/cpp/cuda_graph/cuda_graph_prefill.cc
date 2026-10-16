@@ -123,7 +123,8 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        const int output_capacity           = isGenerativePrefillCudaGraph() ? seq_len : max_bs_ * num_tokens_per_bs_;
+        const int output_capacity =
+            (transformer_only_ || isGenerativePrefillCudaGraph()) ? seq_len : max_bs_ * num_tokens_per_bs_;
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
@@ -182,9 +183,12 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     std::vector<int> result = prefill_capture_seq_lens_;
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
-    RTP_LLM_CHECK_WITH_INFO(result.front() > 0 && result.back() <= max_seq_len_,
-                            "prefill CUDA graph buckets must be in [1, max_seq_len=%d], got min=%d max=%d",
-                            max_seq_len_,
+    // Split encoder graphs bucket packed tokens across all sequence rows.
+    // Position embeddings remain outside the graph and retain max_seq_len_.
+    const int64_t max_capture_tokens = transformer_only_ ? static_cast<int64_t>(max_bs_) * max_seq_len_ : max_seq_len_;
+    RTP_LLM_CHECK_WITH_INFO(result.front() > 0 && result.back() <= max_capture_tokens,
+                            "prefill CUDA graph buckets must be in [1, token_capacity=%lld], got min=%d max=%d",
+                            static_cast<long long>(max_capture_tokens),
                             result.front(),
                             result.back());
 

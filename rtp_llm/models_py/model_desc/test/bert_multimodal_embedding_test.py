@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main, mock
 
 import torch
@@ -74,6 +75,90 @@ class BertMultimodalEmbeddingTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+
+    def test_encoder_graph_replans_layout_and_isolates_padding(self):
+        from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
+            BertEncoderGraphImpl,
+        )
+
+        capacity, dim = 8, 64
+        configs = SimpleNamespace(
+            is_causal=False,
+            head_num=1,
+            kv_head_num=1,
+            size_per_head=dim,
+            dtype=torch.bfloat16,
+        )
+        inputs = PyAttentionInputs()
+        inputs.input_lengths = torch.tensor([8, 0], dtype=torch.int32).pin_memory()
+        inputs.prefix_lengths = torch.zeros(2, dtype=torch.int32).pin_memory()
+        impl = BertEncoderGraphImpl(configs, inputs, capacity)
+        qkv = torch.randn(capacity, 3 * dim, dtype=torch.bfloat16, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            impl.forward(qkv, None)
+            impl.forward(qkv, None)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = impl.forward(qkv, None)
+        pointer = impl.cu_device.data_ptr()
+        for lengths in ([3, 2], [8, 0], [2, 0], [1, 5], [4, 4]):
+            with self.subTest(lengths=lengths):
+                torch.cuda.synchronize()
+                inputs.input_lengths.copy_(torch.tensor(lengths, dtype=torch.int32))
+                impl.prepare_cuda_graph(inputs)
+                qkv.normal_()
+                real_tokens = sum(lengths)
+                # Adversarial padding would contaminate a real sequence if its
+                # length were incorrectly extended to the token bucket.
+                qkv[real_tokens:].fill_(20)
+                graph.replay()
+                torch.cuda.synchronize()
+                self.assertEqual(impl.cu_device.data_ptr(), pointer)
+                offset = 0
+                for length in lengths:
+                    if length:
+                        q, k, v = qkv[offset : offset + length].chunk(3, dim=-1)
+                        expected = F.scaled_dot_product_attention(
+                            q[None, None],
+                            k[None, None],
+                            v[None, None],
+                        )[0, 0]
+                        torch.testing.assert_close(
+                            output[offset : offset + length],
+                            expected,
+                            atol=2e-2,
+                            rtol=2e-2,
+                        )
+                    offset += length
+
+    def test_split_forward_preserves_visual_injection(self):
+        model = self._build_one_layer_model()
+        inputs = _build_inputs(hidden_size=_ONE_LAYER_HIDDEN_SIZE)
+        inputs.multimodal_inputs.multimodal_features = [
+            torch.randn(1, _ONE_LAYER_HIDDEN_SIZE, dtype=torch.float16, device="cuda")
+        ]
+        inputs.multimodal_inputs.mm_features_locs = torch.tensor([1], dtype=torch.int32)
+        inputs.embedding_inputs.text_tokens_mask = torch.tensor(
+            [1, 0, 1, 1], device="cuda", dtype=torch.int32
+        )
+
+        # A simple independent attention function keeps this focused on the
+        # split boundary, including the one-layer residual/MLP path.
+        class IdentityAttention:
+            def forward(self, qkv, kv_cache, layer_idx=0):
+                return qkv[:, :_ONE_LAYER_HIDDEN_SIZE]
+
+        attention = IdentityAttention()
+        expected = model.forward(inputs, attention).hidden_states
+        prepared = model.prepare_transformer_inputs(inputs)
+        torch.testing.assert_close(
+            prepared[1], inputs.multimodal_inputs.multimodal_features[0][0]
+        )
+        actual = model.forward_transformer(prepared, attention).hidden_states
+        torch.testing.assert_close(actual, expected)
 
     def test_user_mask_routes_only_text_markers_to_flashinfer(self):
         with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):

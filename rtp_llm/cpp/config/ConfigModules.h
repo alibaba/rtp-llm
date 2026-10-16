@@ -237,6 +237,8 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
+    // Sequence rows per embedding batch, independent of frontend RPC concurrency.
+    int embedding_cuda_graph_max_requests = 32;
     // Experimental full-model prefill CUDA graph for graph-safe, no-prefix
     // generative attention backends. It is intentionally independent from
     // decode CUDA graph and defaults to disabled.

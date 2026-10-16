@@ -219,6 +219,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.hc_mult                      = params.hc_mult;
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+        if (is_prefill_cuda_graph_mode && py::hasattr(py_instance, "use_transformer_cuda_graph")
+            && py_instance.attr("use_transformer_cuda_graph").cast<bool>()) {
+            RTP_LLM_CHECK_WITH_INFO(params.hw_kernel_config.embedding_cuda_graph_max_requests > 0,
+                                    "EMBEDDING_CUDA_GRAPH_MAX_REQUESTS must be positive");
+            graph_params.max_context_batch_size = params.hw_kernel_config.embedding_cuda_graph_max_requests;
+        }
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {

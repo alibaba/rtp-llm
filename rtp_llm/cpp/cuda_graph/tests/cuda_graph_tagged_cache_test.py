@@ -105,6 +105,40 @@ class InputEmbeddingOverrideModel:
         )
 
 
+class TransformerOnlyEmbeddingModel:
+    use_transformer_cuda_graph = True
+
+    def __init__(self):
+        self.prepare_calls = 0
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def prepare_transformer_inputs(self, inputs):
+        assert not torch.cuda.is_current_stream_capturing()
+        self.prepare_calls += 1
+        hidden = (
+            inputs.input_ids.to(torch.bfloat16)
+            .unsqueeze(1)
+            .expand(-1, HIDDEN_SIZE)
+            .clone()
+        )
+        locs = inputs.multimodal_inputs.mm_features_locs
+        if locs is not None:
+            for feature, loc in zip(
+                inputs.multimodal_inputs.multimodal_features, locs.tolist()
+            ):
+                hidden[loc : loc + feature.size(0)].copy_(feature)
+        return hidden
+
+    def forward_transformer(self, hidden, fmha_impl):
+        # Including the tail in this reduction detects stale bucket padding.
+        return PyModelOutputs(hidden * 2 + hidden.sum(dim=0))
+
+    def forward(self, inputs, fmha_impl=None):
+        raise AssertionError("embedding forward must never enter the captured graph")
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -276,6 +310,100 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_transformer_only_32_sequences_exceed_single_sequence_capacity(self):
+        runner = CudaGraphRunner()
+        model = TransformerOnlyEmbeddingModel()
+        runner.init_prefill(model, 32, 512, 8, 8, [6144], HIDDEN_SIZE, GROUP_TAGS)
+        self.assertEqual(model.prepare_calls, 0)
+        # Alternate a packed 32-item batch and a short batch in the same graph.
+        # Every real sequence fits 512; the aggregate batch is much larger.
+        for lengths in ([170] * 32, [12], [180] * 32):
+            attention = PyAttentionInputs()
+            attention.is_prefill = True
+            attention.input_lengths = torch.tensor(
+                lengths, dtype=torch.int32
+            ).pin_memory()
+            attention.prefix_lengths = torch.zeros(
+                len(lengths), dtype=torch.int32
+            ).pin_memory()
+            attention.cu_seqlens = torch.tensor(
+                [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+                dtype=torch.int32,
+            ).pin_memory()
+            attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+            attention.cu_kv_seqlens_device = attention.cu_seqlens_device.clone()
+            attention.context_total_kv_length = sum(lengths)
+            inputs = _build_common_inputs(
+                attention,
+                GROUP_TAGS,
+                {"full": 1, "aux": 2},
+                len(lengths),
+                sum(lengths),
+                1,
+            )
+            self.assertTrue(runner.canRun(inputs))
+            result = runner.forward(inputs).hidden_states.clone()
+            torch.cuda.synchronize()
+            hidden = (
+                inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+            )
+            torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+
+        over_capacity = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, 6145)
+        self.assertFalse(runner.canRun(over_capacity))
+
+    def test_transformer_only_replays_request_owned_visual_inputs(self):
+        model = TransformerOnlyEmbeddingModel()
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            model,
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4, 8],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        self.assertEqual(model.prepare_calls, 0)
+        for seq_len, loc, value in [
+            (4, 0, 9),
+            (6, 3, -2),
+            (1, 0, 5),
+            (3, 1, 7),
+            (4, 2, 1),
+        ]:
+            with self.subTest(seq_len=seq_len, loc=loc, value=value):
+                inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len
+                )
+                inputs.multimodal_inputs.multimodal_features = [
+                    torch.full(
+                        (1, HIDDEN_SIZE), value, dtype=torch.bfloat16, device="cuda"
+                    )
+                ]
+                inputs.multimodal_inputs.mm_features_locs = torch.tensor(
+                    [loc], dtype=torch.int32
+                )
+                inputs.embedding_inputs.text_tokens_mask = torch.ones(
+                    seq_len, dtype=torch.int32, device="cuda"
+                )
+                self.assertTrue(runner.canRun(inputs))
+                # Also exercise the production path that plans before forward.
+                runner.prepareAttentionInputs(inputs)
+                before = model.prepare_calls
+                result = runner.forward(inputs).hidden_states.clone()
+                torch.cuda.synchronize()
+                self.assertEqual(model.prepare_calls, before + 1)
+                hidden = (
+                    inputs.input_ids.to(torch.bfloat16)
+                    .unsqueeze(1)
+                    .expand(-1, HIDDEN_SIZE)
+                    .clone()
+                )
+                hidden[loc] = value
+                torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:

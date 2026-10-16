@@ -201,6 +201,7 @@ std::string HWKernelConfig::to_string() const {
         << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
+        << "embedding_cuda_graph_max_requests: " << embedding_cuda_graph_max_requests << "\n"
         << "enable_full_prefill_cuda_graph: " << enable_full_prefill_cuda_graph << "\n"
         << "full_prefill_cuda_graph_max_requests: " << full_prefill_cuda_graph_max_requests << "\n"
         << "full_prefill_cuda_graph_max_padding_ratio: " << full_prefill_cuda_graph_max_padding_ratio << "\n"

@@ -35,6 +35,12 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "bert_encoder_graph_source",
+    srcs = ["modules/factory/attention/bert_encoder_graph.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([

@@ -12,6 +12,9 @@ public:
     torch::Tensor combo_token_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;    // [cumulated_seq_len]
     torch::Tensor input_lengths;         // [batch_size]
+    // Request-owned pinned source stays alive until postprocessing completes.
+    torch::Tensor cls_indices_host;      // [batch_size], int64
+    torch::Tensor cls_indices;           // [batch_size], int64, device
     torch::Tensor sequence_lengths;      // [decoder_batch_size]
     torch::Tensor prefix_lengths;        // [batch_size]
     torch::Tensor max_prefix_length;     // [1]

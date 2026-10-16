@@ -65,6 +65,13 @@ public:
         is_target_verify_     = role_ == CudaGraphRole::TARGET_VERIFY;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
+        transformer_only_     = isEmbeddingStylePrefillCudaGraph()
+                            && py::hasattr(py_instance_, "use_transformer_cuda_graph")
+                            && py_instance_.attr("use_transformer_cuda_graph").cast<bool>();
+        if (transformer_only_) {
+            py_forward_method_             = py_instance_.attr("forward_transformer");
+            py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
+        }
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -162,6 +169,8 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    py::object              py_prepare_transformer_inputs_;
+    bool                    transformer_only_{false};
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};

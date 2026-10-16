@@ -60,6 +60,13 @@ py_test(
 # Keep the broader Bert model integration suite on H20. The focused operator
 # contract is exercised by the CUDA target below.
 py_test(
+    name = "bert_encoder_graph_metadata_test",
+    srcs = ["bert_encoder_graph_metadata_test.py"],
+    data = ["//rtp_llm/models_py:bert_encoder_graph_source"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
     name = "bert_multimodal_embedding_test",
     srcs = ["bert_multimodal_embedding_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
