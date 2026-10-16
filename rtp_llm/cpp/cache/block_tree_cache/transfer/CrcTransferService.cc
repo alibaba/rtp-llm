@@ -44,7 +44,7 @@ CrcTransferService::CrcTransferService(const std::vector<GroupSetPtr>& groups,
         // its layout without allocating or reading payload bytes.
         const std::vector<BlockIdxType> geometry_blocks(group->devicePools().size(), 0);
         const size_t                    tiles = getDeviceHostCopyTiles(*group, geometry_blocks).size();
-        shape.tiles = std::max(shape.tiles, tiles);
+        shape.tiles                           = std::max(shape.tiles, tiles);
     }
     for (const auto& [device, shape] : geometry) {
         if (!shape.tiles || shape.tiles > std::numeric_limits<size_t>::max() / max_batch) {
@@ -112,7 +112,7 @@ TransferResult CrcTransferService::execute(int                                  
             return false;
         });
     }
-    block_tree_cache_detail::ScopeRollback                   release([&] {
+    block_tree_cache_detail::ScopeRollback release([&] {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             slot->busy = false;
@@ -121,13 +121,14 @@ TransferResult CrcTransferService::execute(int                                  
         // Wake every waiter so a free slot cannot be stranded by waking another device.
         cv_.notify_all();
     });
-    std::vector<CrcCopyFailure> failures;
-    const auto result = operation == Operation::STORE ? slot->copy->store(items, &failures) :
-                                                       slot->copy->load(items, &failures);
+    std::vector<CrcCopyFailure>            failures;
+    const auto                             result =
+        operation == Operation::STORE ? slot->copy->store(items, &failures) : slot->copy->load(items, &failures);
     TransferResult transfer_result(statusFor(result));
     transfer_result.expandBlockErrors(items.size());
     if (result == CrcCopyStatus::CRC_MISMATCH || result == CrcCopyStatus::CRC_COMPUTE_ERROR) {
-        // Store has already copied its output to host; load has not scattered any destination yet.
+        // A failed load may have scattered every item. Keep the whole batch
+        // uncommitted so callers discard its targets, including healthy items.
         std::fill(transfer_result.block_errors.begin(),
                   transfer_result.block_errors.end(),
                   operation == Operation::STORE ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
@@ -180,9 +181,7 @@ TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     h
         for (const auto& tile : getDeviceHostCopyTiles(group, blocks)) {
             item.tiles.push_back({tile.buffer.addr, tile.host_offset, tile.buffer.size_bytes});
         }
-        item.dump_metadata = [&, i] {
-            return CrcDumpWriter::dumpMetadata(descriptors[i], *groups[i]);
-        };
+        item.dump_metadata = [&, i] { return CrcDumpWriter::dumpMetadata(descriptors[i], *groups[i]); };
         items.push_back(std::move(item));
     }
     return execute(deviceFor(*groups.front()), items, store ? Operation::STORE : Operation::LOAD, descriptors);

@@ -101,7 +101,8 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
-// and NOT_EXECUTED means it was skipped (for example, CRC stopped a load before scatter).
+// and NOT_EXECUTED means no target was committed to the caller. The copy may
+// have been skipped or discarded after a batch CRC failure; target bytes can change.
 // An empty block_errors vector represents a uniform result until the task boundary expands it.
 // status.code() and copy_error summarize the highest-priority failure, while status keeps all failure messages.
 struct TransferResult {

@@ -154,29 +154,31 @@ struct Workspace {
     Layout                             layout;
     size_t                             p, e, hostStride, sourceBytes, evictBytes, stride;
     int                                poolBlocks;
+    int                                maxBackings;
     Stream                             stream;
     std::unique_ptr<Buffer>            source, eviction, host;
     std::vector<std::unique_ptr<Plan>> plans;
     std::vector<size_t>                planStarts;
     std::vector<int>                   rotationCounts;
 
-    Workspace(Layout shape, size_t l2): layout(std::move(shape)) {
+    Workspace(Layout shape, size_t l2, int max_backings): layout(std::move(shape)) {
+        maxBackings          = max_backings;
         p                    = layout.payload();
         e                    = CrcBlockCopyBatch::encodedBytes(p);
         stride               = CrcBlockCopyBatch::encodedBytes(maximumLayoutPayload());
         hostStride           = e;  // Ordinary HOST pool uses the encoded 16-byte-aligned record stride.
-        const size_t minimum = std::max(kEvictMultiplier * l2, size_t(4 * kMaxBackings) * p);
+        const size_t minimum = std::max(kEvictMultiplier * l2, size_t(4 * maxBackings) * p);
         poolBlocks           = int((minimum + p - 1) / p) + 1;  // block 0 is the framework sentinel
         sourceBytes          = size_t(poolBlocks) * p;
         evictBytes           = alignUp(kEvictMultiplier * l2, 16);
         source               = std::make_unique<Buffer>(sourceBytes);
         eviction             = std::make_unique<Buffer>(evictBytes);
-        host                 = std::make_unique<Buffer>(kMaxBackings * hostStride, true);
+        host                 = std::make_unique<Buffer>(size_t(maxBackings) * hostStride, true);
         initRandom<<<4096, 256, 0, stream.s>>>(eviction->bytes(), evictBytes);
         cu(cudaGetLastError());
         cu(cudaStreamSynchronize(stream.s));
         std::mt19937 rng(20260922);
-        for (int n = 1; n <= kMaxBackings; ++n) {
+        for (int n = 1; n <= maxBackings; ++n) {
             planStarts.push_back(plans.size());
             const int rotations = (poolBlocks - 1 + n - 1) / n;
             rotationCounts.push_back(rotations);
@@ -226,13 +228,12 @@ __global__ void checkSyncPool(const unsigned char* actual,
                               const CheckLayer*    layers,
                               size_t               poolBlocks,
                               const unsigned char* selected,
-                              bool                 acceptSelected,
                               unsigned int*        errors) {
     const auto   layer = layers[blockIdx.x];
     const size_t span  = layer.width * poolBlocks;
     for (size_t i = size_t(blockIdx.y) * blockDim.x + threadIdx.x; i < span; i += size_t(gridDim.y) * blockDim.x) {
         const size_t        absolute = layer.offset + i;
-        const unsigned char expected = acceptSelected && selected[i / layer.width] ? oracle[absolute] : deviceGuard;
+        const unsigned char expected = selected[i / layer.width] ? oracle[absolute] : deviceGuard;
         if (actual[absolute] != expected)
             atomicExch(errors, 1U);
     }
@@ -250,10 +251,10 @@ struct Benchmark {
     volatile uintptr_t         metadataSink = 0;
     std::mutex                 copyMutex;
 
-    Benchmark(Layout layout, size_t l2):
-        w(layout, l2),
+    Benchmark(Layout layout, size_t l2, int max_backings):
+        w(layout, l2, max_backings),
         framework(0),
-        production(0, kMaxBackings, maximumLayoutPayload(), kMaxBackings * maximumLayoutTiles()),
+        production(0, size_t(max_backings), maximumLayoutPayload(), size_t(max_backings) * maximumLayoutTiles()),
         cpuOracle(w.sourceBytes),
         recordCrc(w.poolBlocks),
         deviceOracle(w.sourceBytes),
@@ -264,12 +265,12 @@ struct Benchmark {
         // specific list of pool/layer counts. The per-call builder rechecks them.
         const auto& tiles = w.plans.front()->items.front().tiles;
         for (size_t first = 0; first < tiles.size();) {
-            const auto& head = tiles[first];
-            const auto begin = reinterpret_cast<uintptr_t>(head.device);
-            size_t rows = 1, pitch = head.bytes;
+            const auto& head  = tiles[first];
+            const auto  begin = reinterpret_cast<uintptr_t>(head.device);
+            size_t      rows = 1, pitch = head.bytes;
             if (first + 1 < tiles.size()) {
-                const auto& next = tiles[first + 1];
-                const auto next_address = reinterpret_cast<uintptr_t>(next.device);
+                const auto& next         = tiles[first + 1];
+                const auto  next_address = reinterpret_cast<uintptr_t>(next.device);
                 if (next.bytes == head.bytes && next.offset == head.offset + head.bytes
                     && next_address >= begin + head.bytes) {
                     pitch = next_address - begin;
@@ -321,9 +322,26 @@ struct Benchmark {
         cu(cudaStreamSynchronize(w.stream.s));
     }
 
+    // Maps a payload offset of one pool block to its device pool position.
+    size_t deviceOffsetOf(int block, size_t payloadOffset) const {
+        size_t prefix = 0;
+        for (const auto& layer : layers) {
+            if (payloadOffset < prefix + layer.width)
+                return layer.offset + size_t(block) * layer.width + (payloadOffset - prefix);
+            prefix += layer.width;
+        }
+        throw std::runtime_error("payload offset outside layout");
+    }
+    void flipOracleByte(size_t position) {
+        cpuOracle[position] ^= 1;
+        cu(cudaMemcpyAsync(
+            deviceOracle.bytes() + position, &cpuOracle[position], 1, cudaMemcpyHostToDevice, w.stream.s));
+        cu(cudaStreamSynchronize(w.stream.s));
+    }
+
     void prepareHost(size_t ix) {
         const auto& plan = *w.plans[ix];
-        std::memset(w.host->p, 0xa5, 32 * w.hostStride);
+        std::memset(w.host->p, 0xa5, size_t(w.maxBackings) * w.hostStride);
         for (int b = 0; b < plan.n; ++b) {
             auto* host = w.host->bytes() + size_t(b) * w.hostStride;
             packCpuBlock(plan.blocks[b], host);
@@ -355,10 +373,10 @@ struct Benchmark {
             size_t first = 0;
             for (size_t rows : groupRows) {
                 requireSync(rows >= 1 && first + rows <= item.tiles.size(), "invalid 3D affine span");
-                const auto& head  = item.tiles[first];
-                const auto  begin = reinterpret_cast<uintptr_t>(head.device);
-                const size_t pitch = rows == 1 ? head.bytes :
-                                     reinterpret_cast<uintptr_t>(item.tiles[first + 1].device) - begin;
+                const auto&  head  = item.tiles[first];
+                const auto   begin = reinterpret_cast<uintptr_t>(head.device);
+                const size_t pitch =
+                    rows == 1 ? head.bytes : reinterpret_cast<uintptr_t>(item.tiles[first + 1].device) - begin;
                 requireSync(pitch >= head.bytes, "invalid 3D device pitch");
                 for (size_t r = 0; r < rows; ++r) {
                     const auto& tile = item.tiles[first + r];
@@ -422,7 +440,7 @@ struct Benchmark {
         cu(cudaStreamSynchronize(w.stream.s));
     }
 
-    void verifyDevice(bool validPayload) {
+    void verifyDevice() {
         cu(cudaMemsetAsync(checkErrors.p, 0, sizeof(unsigned int), w.stream.s));
         checkSyncPool<<<dim3(unsigned(layers.size()), 32), 256, 0, w.stream.s>>>(
             w.source->bytes(),
@@ -430,20 +448,18 @@ struct Benchmark {
             static_cast<const CheckLayer*>(deviceLayers.p),
             w.poolBlocks,
             selectedBlocks.bytes(),
-            validPayload,
             static_cast<unsigned int*>(checkErrors.p));
         cu(cudaGetLastError());
         unsigned int errors = 0;
         cu(cudaMemcpyAsync(&errors, checkErrors.p, sizeof(errors), cudaMemcpyDeviceToHost, w.stream.s));
         cu(cudaStreamSynchronize(w.stream.s));
-        requireSync(errors == 0,
-                    validPayload ? "H2D payload or unselected guard mismatch" : "CRC failure wrote a GPU destination");
+        requireSync(errors == 0, "H2D payload or unselected guard mismatch");
     }
 
     void verifyHost(size_t ix, bool hasCrc, bool inputRecord = false) {
         const auto&                plan = *w.plans[ix];
         std::vector<unsigned char> packed(w.p);
-        for (int b = 0; b < 32; ++b) {
+        for (int b = 0; b < w.maxBackings; ++b) {
             const auto* host = w.host->bytes() + size_t(b) * w.hostStride;
             if (b < plan.n) {
                 packCpuBlock(plan.blocks[b], packed.data());
@@ -465,14 +481,14 @@ struct Benchmark {
     void verify(size_t ix, int variant, bool store) {
         try {
             if (store) {
-                std::memset(w.host->p, 0xa5, 32 * w.hostStride);
+                std::memset(w.host->p, 0xa5, size_t(w.maxBackings) * w.hostStride);
                 requireSync(invoke(ix, variant, true) == rtp_llm::CrcCopyStatus::OK, "D2H call failed");
                 verifyHost(ix, variant == 0);
             } else {
                 prepareHost(ix);
                 poisonDevice(ix);
                 requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK, "H2D call failed");
-                verifyDevice(true);
+                verifyDevice();
                 verifyHost(ix, true, true);
             }
 
@@ -490,12 +506,12 @@ struct Benchmark {
     }
 
     void verifyCorruption(size_t ix, int variant) {
-        const int n = w.plans[ix]->n;
+        const auto& plan = *w.plans[ix];
         prepareHost(ix);
         poisonDevice(ix);
         requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK, "initial good CRC load failed");
-        verifyDevice(true);
-        const int    indices[]{0, n / 2, n - 1};
+        verifyDevice();
+        const int    indices[]{0, plan.n / 2, plan.n - 1};
         const size_t offsets[]{0, w.p / 2, w.p - 1};
         for (int location = 0; location < 3; ++location) {
             for (bool footer : {false, true}) {
@@ -505,11 +521,20 @@ struct Benchmark {
                 poisonDevice(ix);
                 requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::CRC_MISMATCH,
                             "corrupted whole record was accepted");
-                verifyDevice(false);
+                // Ungated scatter: the rejected load still lands the record's
+                // payload. Footer damage lands a clean payload; payload damage
+                // lands the damaged byte, mirrored by flipping the oracle byte.
+                const size_t flipped =
+                    footer ? ~size_t(0) : deviceOffsetOf(plan.blocks[indices[location]], offsets[location]);
+                if (flipped != ~size_t(0))
+                    flipOracleByte(flipped);
+                verifyDevice();
+                if (flipped != ~size_t(0))
+                    flipOracleByte(flipped);
                 *damaged ^= 1;
                 requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK,
                             "good record rejected after failed load");
-                verifyDevice(true);
+                verifyDevice();
             }
         }
     }
@@ -547,14 +572,9 @@ static void mixedCrcSelfTest() {
             items.push_back(
                 {record, bytes, hostSlot - 3, {{target, 0, 3}, {target + 3, 3, 17}, {target + 20, 20, bytes - 20}}});
         }
-        auto check = [&](bool good) {
+        auto check = [&] {
             cu(cudaMemcpy(observed.data(), device.p, observed.size(), cudaMemcpyDeviceToHost));
-            if (good)
-                requireSync(observed == expected, "mixed load payload/guard mismatch");
-            else
-                requireSync(
-                    std::all_of(observed.begin(), observed.end(), [](unsigned char c) { return c == deviceGuard; }),
-                    "mixed rejected batch wrote a destination");
+            requireSync(observed == expected, "mixed load payload/guard mismatch");
         };
         auto poison = [&] {
             cu(cudaMemsetAsync(device.p, deviceGuard, 32 * slot, setup.s));
@@ -562,15 +582,18 @@ static void mixedCrcSelfTest() {
         };
         poison();
         requireSync(backend.load(items) == rtp_llm::CrcCopyStatus::OK, "mixed old-record load failed");
-        check(true);
+        check();
         auto* corrupt = static_cast<unsigned char*>(items.back().host) + items.back().payload_bytes - 1;
         *corrupt ^= 1;
+        // Ungated scatter: the rejected load still lands the corrupted payload byte.
+        expected[size_t(n - 1) * slot + 17 + items.back().payload_bytes - 1] ^= 1;
         poison();
         requireSync(backend.load(items) == rtp_llm::CrcCopyStatus::CRC_MISMATCH, "mixed corruption accepted");
-        check(false);
+        check();
+        expected[size_t(n - 1) * slot + 17 + items.back().payload_bytes - 1] ^= 1;
         *corrupt ^= 1;
         requireSync(backend.load(items) == rtp_llm::CrcCopyStatus::OK, "mixed stale verdict after failure");
-        check(true);
+        check();
         // Poison the entire output so footer/padding must be produced by store.
         std::memset(host.p, 0xa5, 32 * hostSlot);
         requireSync(backend.store(items) == rtp_llm::CrcCopyStatus::OK, "mixed store failed");
@@ -593,7 +616,7 @@ static void mixedCrcSelfTest() {
         }
         poison();
         requireSync(backend.load(items) == rtp_llm::CrcCopyStatus::OK, "mixed new-record load failed");
-        check(true);
+        check();
         ++round;
     }
 }
@@ -606,10 +629,12 @@ struct Options {
     bool        correctnessOnly   = false;
     bool        tileThreadProfile = false;
     bool        stagedMemcpyProfile{false};
-    bool        profileCapture    = false;
-    bool        exclude1dH2d      = false;
-    bool        seedProvided      = false;
+    bool        profileCapture = false;
+    bool        exclude1dH2d   = false;
+    bool        seedProvided   = false;
     std::string output;
+    // Empty means the default 1..kMaxBackings; otherwise the exact measured list.
+    std::vector<int> blocks;
 };
 uint32_t parseUnsigned(const std::string& text, const char* name) {
     requireSync(!text.empty() && text.front() != '-', std::string("invalid ") + name);
@@ -617,6 +642,52 @@ uint32_t parseUnsigned(const std::string& text, const char* name) {
     const auto value = std::stoull(text, &end);
     requireSync(end == text.size() && value <= std::numeric_limits<uint32_t>::max(), std::string("invalid ") + name);
     return static_cast<uint32_t>(value);
+}
+std::vector<int> parseBlocks(const std::string& text) {
+    std::vector<int> result;
+    size_t           start = 0;
+    while (true) {
+        const size_t      comma = text.find(',', start);
+        const std::string token = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        requireSync(!token.empty() && token.front() != '-', "invalid --blocks entry");
+        size_t     end   = 0;
+        const auto value = std::stoull(token, &end);
+        requireSync(end == token.size() && value >= 1 && value <= size_t(std::numeric_limits<int>::max()),
+                    "invalid --blocks entry");
+        result.push_back(static_cast<int>(value));
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+std::vector<int> measuredBlockCounts(const Options& options) {
+    if (options.stagedMemcpyProfile)
+        return {1, 8, 32};
+    if (!options.blocks.empty())
+        return options.blocks;
+    std::vector<int> counts;
+    for (int n = 1; n <= kMaxBackings; ++n)
+        counts.push_back(n);
+    return counts;
+}
+int backingCapacity(const Options& options) {
+    // Corruption checks stay pinned to BS 1..kMaxBackings, so capacity must cover them.
+    if (options.blocks.empty())
+        return kMaxBackings;
+    return std::max(kMaxBackings, options.blocks.back());
+}
+std::string blockCountsJson(const Options& options) {
+    std::string            json   = "[";
+    const std::vector<int> counts = measuredBlockCounts(options);
+    for (size_t i = 0; i < counts.size(); ++i) {
+        if (i)
+            json += ',';
+        json += std::to_string(counts[i]);
+    }
+    return json + "]";
 }
 Options parseOptions(int argc, char** argv) {
     Options result;
@@ -647,8 +718,10 @@ Options parseOptions(int argc, char** argv) {
         if (key == "--help") {
             std::cout
                 << "CrcCopyBenchmark --output FILE [--iterations 100] [--warmup 30] [--repeat 80] [--seed UINT]\n"
-                   "                 [--correctness-only] [--exclude-1d-h2d] [--tile-thread-profile] [--profile-capture]\n"
-                   "Five paths, both directions, FULL/SWA, local backing BS=1..32. CUDA13 required.\n"
+                   "                 [--blocks 1,2,4,..] [--correctness-only] [--exclude-1d-h2d] [--tile-thread-profile]\n"
+                   "                 [--profile-capture]\n"
+                   "Five paths, both directions, FULL/SWA, local backing counts from --blocks (default 1..32).\n"
+                   "CUDA13 required.\n"
                    "--exclude-1d-h2d explicitly omits that path; it never substitutes another copy implementation.\n";
             std::exit(0);
         }
@@ -663,6 +736,10 @@ Options parseOptions(int argc, char** argv) {
         }
         if (key == "--output") {
             result.output = value;
+            continue;
+        }
+        if (key == "--blocks") {
+            result.blocks = parseBlocks(value);
             continue;
         }
         const auto number = parseUnsigned(value, key.c_str());
@@ -683,12 +760,13 @@ Options parseOptions(int argc, char** argv) {
     }
     requireSync(result.iterations > 0 && result.warmup <= std::numeric_limits<int>::max() - result.iterations,
                 "iterations must be positive and iterations+warmup must fit INT_MAX");
+    requireSync(!result.tileThreadProfile || result.blocks.empty(), "--tile-thread-profile does not support --blocks");
     if (!result.seedProvided)
         result.seed = 20260924U + static_cast<uint32_t>(result.repeat);
 #ifdef RTP_LLM_STAGED_MEMCPY_PROFILE
     requireSync(result.stagedMemcpyProfile && !result.tileThreadProfile && !result.correctnessOnly
-                    && !result.exclude1dH2d && !result.profileCapture,
-                "diagnostic binary requires --staged-memcpy-profile without other profiling/exclusion modes");
+                    && !result.exclude1dH2d && !result.profileCapture && result.blocks.empty(),
+                "diagnostic binary requires --staged-memcpy-profile without other modes or --blocks");
 #endif
     requireSync(!result.output.empty(), "--output FILE is required");
     return result;
@@ -708,10 +786,9 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
     };
     os << "{\"type\":\"metadata\",\"implementation\":\""
        << (options.stagedMemcpyProfile ? "staged_memcpy_profile_v2" : "crc_copy_benchmark_v5")
-       << "\",\"seed\":" << options.seed
-       << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
-       << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT")
-       << "\",\"binary_sha256\":\"" << provenance("CRC_BENCH_BINARY_SHA256") << "\""
+       << "\",\"seed\":" << options.seed << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
+       << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT") << "\",\"binary_sha256\":\""
+       << provenance("CRC_BENCH_BINARY_SHA256") << "\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
        << ",\"staged_no_crc_source\":\"production StagedSmDeviceHostCopyStrategy with shared CopyTileKernel and direct HOST-segment DMA\""
        << ",\"variants\":[\"integrated_crc\",\"copy1d_batch\",\"copy3d_batch\",\"staged_no_crc\",\"main_staged\"]"
@@ -737,9 +814,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"copy3d_stream\":\"independent Torch nondefault pooled stream\""
        << ",\"copy3d_submit_mutex\":\"benchmark-local mutex; production private mutex is not exported\""
        << ",\"host_input\":\"independent CPU whole-record oracle prepared outside timing\""
-       << ",\"block_counts\":"
-       << (options.stagedMemcpyProfile ? "[1,8,32]" :
-               "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]")
+       << ",\"block_counts\":" << blockCountsJson(options)
        << ",\"seq_size_per_block\":128,\"cp_size\":4,\"tp_size\":4,\"cp_mode\":\"CP_RR\""
        << ",\"h2d_host_payload\":\"recently prepared on CPU once per shared round; host cache is not claimed cold\",\"fallback_allowed\":false}\n";
 }
@@ -788,7 +863,7 @@ struct TileProfile {
     size_t                     stagingBytes;
 
     TileProfile(Layout layout, size_t l2):
-        w(std::move(layout), l2),
+        w(std::move(layout), l2, kMaxBackings),
         staging(kMaxBackings * w.stride + 64),
         descriptors(kMaxBackings * maximumLayoutTiles() * sizeof(CopyTile)),
         deviceLayers(w.layout.sizes.size() * sizeof(CheckLayer)),
@@ -985,13 +1060,10 @@ int run(int argc, char** argv) {
     knownVector();
     mixedCrcSelfTest<CrcBlockCopyBatch>();
     os << "{\"type\":\"mixed_crc_selftest\",\"variant\":\"integrated_crc\",\"success\":true}\n";
-    std::mt19937 source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
-    std::vector<int> block_counts;
-    for (int n = 1; n <= kMaxBackings; ++n)
-        if (!options.stagedMemcpyProfile || n == 1 || n == 8 || n == 32)
-            block_counts.push_back(n);
+    std::mt19937           source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
+    const std::vector<int> block_counts = measuredBlockCounts(options);
     for (bool is_full : {true, false}) {
-        Benchmark benchmark(orderedLayout(is_full), prop.l2CacheSize);
+        Benchmark benchmark(orderedLayout(is_full), prop.l2CacheSize, backingCapacity(options));
         auto&     w = benchmark.w;
         os << "{\"type\":\"layout\",\"layout\":\"" << w.layout.name << "\",\"payload_bytes\":" << w.p
            << ",\"encoded_bytes\":" << w.e << ",\"host_stride\":" << w.hostStride << ",\"staging_stride\":" << w.stride
@@ -1002,13 +1074,13 @@ int run(int argc, char** argv) {
             os << w.layout.sizes[t];
         }
         os << "],\"geometry\":" << w.layout.geometryJson()
-           << ",\"reserved_sentinel_blocks\":1,\"source_bytes\":" << w.sourceBytes << ",\"destination_bytes\":" << w.sourceBytes
-           << ",\"pool_blocks\":" << w.poolBlocks << ",\"evict_bytes\":" << w.evictBytes
-           << ",\"crc_payload_bytes_per_backing\":" << w.e << ",\"baseline_payload_bytes_per_backing\":" << w.p
+           << ",\"reserved_sentinel_blocks\":1,\"source_bytes\":" << w.sourceBytes
+           << ",\"destination_bytes\":" << w.sourceBytes << ",\"pool_blocks\":" << w.poolBlocks
+           << ",\"evict_bytes\":" << w.evictBytes << ",\"crc_payload_bytes_per_backing\":" << w.e
+           << ",\"baseline_payload_bytes_per_backing\":" << w.p
            << ",\"crc_result_bytes_per_backing\":12,\"host_pinned_verified\":true,\"source_device_verified\":true"
            << ",\"copy3d_operations_per_backing\":" << benchmark.groupRows.size()
-           << ",\"copy3d_expanded_rows_per_backing\":" << w.layout.sizes.size()
-           << ",\"copy3d_max_device_pitch\":"
+           << ",\"copy3d_expanded_rows_per_backing\":" << w.layout.sizes.size() << ",\"copy3d_max_device_pitch\":"
            << *std::max_element(w.layout.sizes.begin(), w.layout.sizes.end()) * size_t(w.poolBlocks)
            << ",\"copy3d_max_host_pitch\":" << *std::max_element(w.layout.sizes.begin(), w.layout.sizes.end())
            << ",\"guard_check\":\"entire device pool against CPU oracle plus unselected sentinel\"}\n";
@@ -1034,7 +1106,7 @@ int run(int argc, char** argv) {
             benchmark.verifyCorruption(w.planIndex(n, 1), 0);
             os << "{\"type\":\"crc_corruption\",\"direction\":\"h2d\",\"layout\":\"" << w.layout.name
                << "\",\"blocks\":" << n << ",\"variant\":\"integrated_crc\",\"cases\":6,\"corruption_cases\":6"
-               << ",\"all_targets_unchanged\":true,\"recovery_success\":true,\"good_bad_good\":true"
+               << ",\"ungated_scatter_verified\":true,\"recovery_success\":true,\"good_bad_good\":true"
                << ",\"entire_pool_guards\":true,\"success\":true}\n";
         }
         benchmark.restoreDeviceOracle();
@@ -1077,13 +1149,14 @@ int run(int argc, char** argv) {
                             requireSync(profile.calls == 0 && profile.bytes == 0 && profile.nanoseconds == 0,
                                         "optimized staged unexpectedly copied payload on CPU");
                         if (variant == 4)
-                            requireSync(profile.calls == size_t(n) && profile.bytes == size_t(n) * w.p,
-                                        "main staged payload memcpy count/bytes mismatch; profile interception is incomplete");
+                            requireSync(
+                                profile.calls == size_t(n) && profile.bytes == size_t(n) * w.p,
+                                "main staged payload memcpy count/bytes mismatch; profile interception is incomplete");
 #endif
                         requireSync(status == CrcCopyStatus::OK, "measured copy call failed");
                         // Check the actual measured addresses without including oracle work in the timing.
                         if (!store)
-                            benchmark.verifyDevice(true);
+                            benchmark.verifyDevice();
                         if (round >= 0)
                             os << "{\"type\":\"sample\",\"direction\":\"" << (store ? "d2h" : "h2d")
                                << "\",\"layout\":\"" << w.layout.name << "\",\"blocks\":" << n << ",\"variant\":\""
@@ -1094,10 +1167,9 @@ int run(int argc, char** argv) {
 #ifdef RTP_LLM_STAGED_MEMCPY_PROFILE
                         if (round >= 0 && (variant == 3 || variant == 4))
                             os << "{\"type\":\"staged_memcpy_profile\",\"direction\":\"" << (store ? "d2h" : "h2d")
-                               << "\",\"layout\":\"" << w.layout.name << "\",\"blocks\":" << n
-                               << ",\"variant\":\"" << syncNames[variant] << "\",\"repeat\":" << options.repeat
-                               << ",\"round\":" << round << ",\"position\":" << position
-                               << ",\"source_plan\":" << source << ",\"wall_us\":" << us
+                               << "\",\"layout\":\"" << w.layout.name << "\",\"blocks\":" << n << ",\"variant\":\""
+                               << syncNames[variant] << "\",\"repeat\":" << options.repeat << ",\"round\":" << round
+                               << ",\"position\":" << position << ",\"source_plan\":" << source << ",\"wall_us\":" << us
                                << ",\"payload_bytes\":" << w.p << ",\"memcpy_calls\":" << profile.calls
                                << ",\"memcpy_bytes\":" << profile.bytes
                                << ",\"memcpy_us\":" << double(profile.nanoseconds) / 1000.0 << "}\n";

@@ -255,7 +255,6 @@ cc_library(
 cc_library(
     name = "crc_block_copy",
     srcs = ["CrcBlockCopy.cu"],
-    hdrs = ["CrcBlockCopyInternal.cuh"],
     copts = cuda_copts(),
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache:crc_dump_writer",
