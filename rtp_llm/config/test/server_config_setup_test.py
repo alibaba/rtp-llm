@@ -5,17 +5,26 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
-from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import QuantizationConfig as PyQuantizationConfig
+from rtp_llm.config.py_config_modules import ServerConfig
+from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
+    Fp8BlockWiseQuantConfig,
+    init_quant_config,
+)
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
+from rtp_llm.ops import CPRotateMethod, KvCacheDataType, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.start_backend_server import start_backend_server
 
@@ -29,6 +38,122 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class _W8A8QuantAlgo:
+    def setQuantAlgo(self, *args):
+        self.args = args
+
+
+class _W8A8ModelConfig:
+    def __init__(self, quantization, model_type="qwen35_moe", chunk_rows=1024):
+        self.ckpt_path = "/checkpoint"
+        self.quantization = quantization
+        self.model_type = model_type
+        self.w8a8_quant_chunk_rows = chunk_rows
+        self.quant_algo = _W8A8QuantAlgo()
+        self.config_dtype = None
+        self.attn_config = SimpleNamespace(kv_cache_dtype=KvCacheDataType.BASE)
+        self.data_type = None
+        self.quant_config = None
+
+
+class W8A8OnlineQuantConfigTest(TestCase):
+    def test_online_preset_is_fresh_and_has_validated_chunk_rows(self):
+        first = init_quant_config("W8A8_INT8_PER_CHANNEL")
+        second = init_quant_config("W8A8_INT8_PER_CHANNEL")
+
+        self.assertIsInstance(first, CompressedW8A8Int8PerChannelQuantConfig)
+        self.assertFalse(first.is_quanted())
+        self.assertIsNot(first, second)
+        self.assertEqual(first.get_method(), "W8A8_INT8_PER_CHANNEL_COMPRESSED")
+        self.assertEqual(first.load_chunk_rows, 1024)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            first.load_chunk_rows = 0
+
+    def test_explicit_online_w8a8_uses_configured_chunk_rows(self):
+        model_config = _W8A8ModelConfig("W8A8_INT8_PER_CHANNEL", chunk_rows=256)
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=None,
+        ):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+        self.assertIsInstance(
+            model_config.quant_config, CompressedW8A8Int8PerChannelQuantConfig
+        )
+        self.assertFalse(model_config.quant_config.is_quanted())
+        self.assertEqual(model_config.quant_config.load_chunk_rows, 256)
+
+    def test_explicit_online_w8a8_preserves_prequantized_checkpoint(self):
+        checkpoint_quant = CompressedW8A8Int8PerChannelQuantConfig(is_quanted=True)
+        model_config = _W8A8ModelConfig("W8A8_INT8_PER_CHANNEL", chunk_rows=128)
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=checkpoint_quant,
+        ):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+        self.assertIs(model_config.quant_config, checkpoint_quant)
+        self.assertTrue(model_config.quant_config.is_quanted())
+        self.assertEqual(model_config.quant_config.load_chunk_rows, 128)
+
+    def test_explicit_online_w8a8_rejects_other_checkpoint_quantization(self):
+        model_config = _W8A8ModelConfig("W8A8_INT8_PER_CHANNEL")
+        checkpoint_quant = Fp8BlockWiseQuantConfig(
+            bits=8, group_size=128, is_quanted=True
+        )
+
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=checkpoint_quant,
+        ), self.assertRaisesRegex(ValueError, "checkpoint quantization is"):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+    def test_online_w8a8_checks_resolved_model_identity(self):
+        model_config = _W8A8ModelConfig(
+            "W8A8_INT8_PER_CHANNEL", model_type="qwen_3_moe"
+        )
+
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=None,
+        ), self.assertRaisesRegex(ValueError, "qwen35_moe"):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+    def test_legacy_int8_settings_conflict_with_explicit_online_w8a8(self):
+        config = PyQuantizationConfig()
+        config.quantization = "W8A8_INT8_PER_CHANNEL"
+        config.int8_mode = 1
+        with self.assertRaisesRegex(ValueError, "INT8_MODE=1"):
+            config.get_quantization()
+
+        config.int8_mode = 0
+        with patch.dict(os.environ, {"WEIGHT_TYPE": "INT8"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "WEIGHT_TYPE=INT8"):
+                config.get_quantization()
+
+    def test_cli_and_environment_bind_chunk_rows_to_py_config(self):
+        with patch.dict(
+            os.environ,
+            _jit_env(W8A8_QUANT_CHUNK_ROWS="96"),
+            clear=True,
+        ):
+            self.assertEqual(setup_args().quantization_config.w8a8_quant_chunk_rows, 96)
+            self.assertEqual(
+                setup_args(
+                    ["--w8a8_quant_chunk_rows", "64"]
+                ).quantization_config.w8a8_quant_chunk_rows,
+                64,
+            )
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -257,6 +382,21 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
+    @patch.dict(
+        "os.environ",
+        _jit_env(KV_CACHE_POOL_BLOCK_WEIGHTS='{"full":8,"linear":1}'),
+        clear=True,
+    )
+    def test_pool_block_weights_reach_python_runtime_config(self):
+        from_env = setup_args([]).kv_cache_config
+        self.assertEqual(from_env.kv_cache_pool_block_weights, '{"full":8,"linear":1}')
+        raw = '{"full": 3, "linear": 2}'
+        overridden = setup_args(["--kv_cache_pool_block_weights", raw]).kv_cache_config
+        self.assertEqual(overridden.kv_cache_pool_block_weights, raw)
+        disabled = setup_args(["--kv_cache_pool_block_weights", ""]).kv_cache_config
+        self.assertEqual(disabled.kv_cache_pool_block_weights, "")
+        self.assertEqual(PyEnvConfigs().kv_cache_config.kv_cache_pool_block_weights, "")
+
     @patch.dict("os.environ", _jit_env(), clear=True)
     def test_kv_cache_scheduler_reserve_defaults_and_override(self):
         self.assertEqual(setup_args().kv_cache_config.reserve_block_ratio, 5)
@@ -378,8 +518,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 69)
-        self.assertEqual(state[:2], ("KVCacheConfig", 7))
+        self.assertEqual(len(state), 71)
+        self.assertEqual(state[:2], ("KVCacheConfig", 9))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -414,7 +554,7 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-5])
+        state = (state[0], 6, *state[2:64])
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
@@ -479,6 +619,8 @@ class GenerateConfigTest(TestCase):
         from rtp_llm.ops import KVCacheConfig
 
         expected_fields = {
+            "kv_cache_pool_block_weights": "str",
+            "enable_linear_cache_reclaim": "bool",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",

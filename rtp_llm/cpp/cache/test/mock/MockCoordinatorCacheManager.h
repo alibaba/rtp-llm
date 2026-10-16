@@ -47,7 +47,8 @@ public:
                  int                    seq_len,
                  int                    remaining_tokens,
                  int                    reserve_step,
-                 bool                   enable_reuse_cache),
+                 bool                   enable_reuse_cache,
+                 LinearCachePolicy      linear_cache_policy),
                 (const, override));
     MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
@@ -60,12 +61,13 @@ protected:
     MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
     MOCK_METHOD(int,
                 estimateInitialBatchPeakNeedBlocks,
-                (int  seq_len,
-                 int  common_seq_len,
-                 int  remaining_tokens,
-                 int  reserve_step,
-                 bool enable_reuse_cache,
-                 int  target_batch_size),
+                (int               seq_len,
+                 int               common_seq_len,
+                 int               remaining_tokens,
+                 int               reserve_step,
+                 bool              enable_reuse_cache,
+                 int               target_batch_size,
+                 LinearCachePolicy linear_cache_policy),
                 (const, override));
 };
 

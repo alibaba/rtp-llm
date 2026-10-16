@@ -318,19 +318,98 @@ def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
 ):
+    """Start VIT children and ensure each successful child has an owner."""
+    started_processes = []
+
+    try:
+        return _start_vit_server_impl(
+            py_env_configs, process_manager, started_processes
+        )
+    except Exception:
+        if process_manager is None:
+            _cleanup_unmanaged_vit_processes(started_processes)
+        raise
+
+
+def _cleanup_unmanaged_vit_processes(processes):
+    """Best-effort bounded cleanup that never replaces the startup exception.
+
+    Two bounded phases: up to 5s to terminate (SIGTERM) and join, then up to
+    5s to kill (SIGKILL) and reap stragglers, so the worst case is ~10s.
+    """
+    deadline = time.monotonic() + 5
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            logging.exception(
+                "Failed to terminate partially started VIT child %s", process
+            )
+    for process in processes:
+        try:
+            process.join(timeout=max(0, deadline - time.monotonic()))
+        except Exception:
+            logging.exception("Failed to join partially started VIT child %s", process)
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.kill()
+        except Exception:
+            logging.exception("Failed to kill partially started VIT child %s", process)
+    deadline = time.monotonic() + 5
+    for process in processes:
+        try:
+            process.join(timeout=max(0, deadline - time.monotonic()))
+        except Exception:
+            logging.exception("Failed to reap partially started VIT child %s", process)
+
+
+def _start_vit_server_impl(
+    py_env_configs: PyEnvConfigs,
+    process_manager: ProcessManager,
+    started_processes: list,
+):
     """
     启动 VIT 服务器
 
     Args:
         py_env_configs: 配置对象
         process_manager: 进程管理器
+        started_processes: successfully started children for failure cleanup
     """
     from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server
+    from rtp_llm.server.vit_proxy_server import resolve_min_healthy_workers
+
+    def start_vit_process(process):
+        process.start()
+        started_processes.append(process)
+        if process_manager is not None:
+            try:
+                process_manager.add_process(process)
+            except Exception:
+                # Never leak a started child when registration fails: the
+                # manager does not own it yet, so reap it locally before
+                # propagating the failure.
+                try:
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=5)
+                except Exception:
+                    logging.exception(
+                        "Failed to reap unregistered VIT child %s", process
+                    )
+                raise
 
     server_config = py_env_configs.server_config
     start_port = server_config.start_port
     vit_server_count = server_config.vit_server_count
+    resolve_min_healthy_workers(
+        vit_server_count, py_env_configs.vit_config.vit_proxy_min_healthy_workers
+    )
 
     # Load once before spawning workers. Each worker consumes the inherited
     # mapping with the existing process-local rank semantics.
@@ -393,8 +472,8 @@ def start_vit_server_impl(
                 ),
                 name=f"vit_worker_{i}",
             )
+            start_vit_process(process)
             worker_processes.append(process)
-            process.start()
 
         external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
         external_http_port = py_env_configs.server_config.server_port
@@ -415,7 +494,7 @@ def start_vit_server_impl(
             ),
             name="vit_proxy",
         )
-        proxy_process.start()
+        start_vit_process(proxy_process)
 
         vit_processes = [proxy_process] + worker_processes
 
@@ -442,10 +521,10 @@ def start_vit_server_impl(
             ),
             name="vit_server",
         )
-        process.start()
+        start_vit_process(process)
         vit_processes = [process]
 
-    if process_manager and vit_processes:
+    if process_manager is not None and vit_processes:
         logging.info(
             f"[VIT_SERVER] Registering health check for {len(vit_processes)} VIT processes, "
             f"current_managed_processes={len(process_manager.processes)}"
@@ -687,8 +766,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
-            vit_processes = start_vit_server_impl(py_env_configs, process_manager)
-            process_manager.add_processes(vit_processes)
+            start_vit_server_impl(py_env_configs, process_manager)
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -839,7 +917,7 @@ def _get_startup_real_warmup_speculative_reserve_step(
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
     gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
-    if sp_type == SpeculativeType.DSPARK:
+    if sp_type in (SpeculativeType.DSPARK, SpeculativeType.DFLASH):
         # Keep startup request sizing identical to NormalEngine's fixed DSpARK
         # reserve, including async rounds whose host bookkeeping can lag.
         return 3 * gamma

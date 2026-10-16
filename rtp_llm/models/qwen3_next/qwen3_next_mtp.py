@@ -98,6 +98,9 @@ class Qwen3NextMTPMixin:
         config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.NONE
         ]
+        # MTP has no recurrent-state pool, even when the target model supports
+        # reclaim. Its shared KV-cache options must not imply that capability.
+        config.linear_attention_config.supports_history_state_reclaim = False
         config.moe_layer_index = list(cls._mtp_moe_layer_index)
         config.num_layers = 1
         config.is_mtp = True

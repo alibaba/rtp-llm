@@ -37,7 +37,71 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class PDLinearTailArgumentsTest(TestCase):
+    def test_default_env_cli_and_pickle(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([]).pd_separation_config
+            self.assertFalse(default.decode_linear_tail_only)
+            enabled = server_args.setup_args(
+                ["--decode_linear_tail_only", "true"]
+            ).pd_separation_config
+            self.assertTrue(enabled.decode_linear_tail_only)
+            self.assertTrue(pickle.loads(pickle.dumps(enabled)).decode_linear_tail_only)
+            config_type = type(enabled)
+            legacy = config_type.__new__(config_type)
+            legacy.__setstate__(enabled.__getstate__()[:22])
+            self.assertFalse(legacy.decode_linear_tail_only)
+            self.assertEqual(legacy.role_type, enabled.role_type)
+
+        with patch.dict(os.environ, {"DECODE_LINEAR_TAIL_ONLY": "1"}, clear=True):
+            from_env = server_args.setup_args([]).pd_separation_config
+            overridden = server_args.setup_args(
+                ["--decode_linear_tail_only", "false"]
+            ).pd_separation_config
+            self.assertTrue(from_env.decode_linear_tail_only)
+            self.assertFalse(overridden.decode_linear_tail_only)
+
+
 class CacheConfigArgumentsTest(TestCase):
+    def test_pool_block_weights_default_env_and_cli_precedence(self):
+        from_env = '{"full":8,"linear":1}'
+        from_cli = '{"full": 5, "linear": 2, "draft-linear": 1}'
+        for args, env, expected in (
+            ([], {}, ""),
+            (["--kv_cache_pool_block_weights", from_cli], {}, from_cli),
+            ([], {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env}, from_env),
+            (
+                ["--kv_cache_pool_block_weights", from_cli],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                from_cli,
+            ),
+            (
+                ["--kv_cache_pool_block_weights", ""],
+                {"KV_CACHE_POOL_BLOCK_WEIGHTS": from_env},
+                "",
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.kv_cache_pool_block_weights, expected)
+
+    def test_linear_cache_reclaim_is_opt_in_and_cli_overrides_environment(self):
+        for args, env, expected in (
+            ([], {}, False),
+            (["--enable_linear_cache_reclaim", "1"], {}, True),
+            ([], {"ENABLE_LINEAR_CACHE_RECLAIM": "1"}, True),
+            (
+                ["--enable_linear_cache_reclaim", "0"],
+                {"ENABLE_LINEAR_CACHE_RECLAIM": "1"},
+                False,
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.enable_linear_cache_reclaim, expected)
+
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
         "enable_vipserver": True,
@@ -265,6 +329,38 @@ class CacheConfigArgumentsTest(TestCase):
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_vit_proxy_health_threshold_default_environment_and_cli(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 0
+            )
+        with patch.dict(os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": "3"}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_proxy_min_healthy_workers, 3
+            )
+            config = server_args.setup_args(["--vit_proxy_min_healthy_workers", "4"])
+            self.assertEqual(config.vit_config.vit_proxy_min_healthy_workers, 4)
+            self.assertIn(
+                "vit_proxy_min_healthy_workers: 4", config.vit_config.to_string()
+            )
+
+    def test_vit_proxy_health_threshold_rejects_invalid_cli_and_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("-1", "1.5", "nan", "abc"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--vit_proxy_min_healthy_workers", value])
+            with self.subTest(env=value), patch.dict(
+                os.environ, {"VIT_PROXY_MIN_HEALTHY_WORKERS": value}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args([])
 
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args
@@ -1751,6 +1847,61 @@ class ServerArgsGrammarConfigTest(TestCase):
                 sys.argv = ["prog", flag, "0"]
                 with self.assertRaises(SystemExit):
                     self._setup()
+
+
+
+
+class MaxGenerateBatchSizeArgumentsTest(TestCase):
+    """--max_generate_batch_size: scheduler-side decode running-batch cap.
+
+    The arg is a tri-state override (None = not provided) stored on
+    PyEnvConfigs; EngineConfig.create derives max_generate_batch_size from
+    concurrency_limit first, then applies the explicit override.
+    """
+
+    def _create_engine_config(self, args):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(args)
+        return configs, EngineConfig.create(configs)
+
+    def test_unspecified_value_keeps_concurrency_limit_derivation(self):
+        configs, engine_config = self._create_engine_config(
+            ["--concurrency_limit", "16"]
+        )
+        self.assertIsNone(configs.max_generate_batch_size_override)
+        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 16)
+
+    def test_explicit_cli_value_overrides_derivation(self):
+        configs, engine_config = self._create_engine_config(
+            ["--concurrency_limit", "32", "--max_generate_batch_size", "8"]
+        )
+        self.assertEqual(configs.max_generate_batch_size_override, 8)
+        self.assertEqual(engine_config.runtime_config.max_generate_batch_size, 8)
+
+    def test_explicit_env_value_overrides_derivation(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {"CONCURRENCY_LIMIT": "32", "MAX_GENERATE_BATCH_SIZE": "8"},
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+
+        self.assertEqual(configs.max_generate_batch_size_override, 8)
+
+    def test_non_positive_value_is_rejected(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(["--max_generate_batch_size", "0"])
+
+        with self.assertRaises(ValueError):
+            EngineConfig.create(configs)
 
 
 if __name__ == "__main__":

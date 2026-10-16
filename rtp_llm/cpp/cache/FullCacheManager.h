@@ -27,23 +27,26 @@ public:
                 const RequiredPositions& required_positions   = {}) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
-    int  estimatePeakNeedBlocks(int                     seq_len,
-                                const BlockIndicesType& current_block_indices,
-                                int                     remaining_tokens,
-                                int                     reserve_step,
-                                bool                    enable_reuse_cache) const override;
-    int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                            int  common_seq_len,
-                                            int  remaining_tokens,
-                                            int  reserve_step,
-                                            bool enable_reuse_cache,
-                                            int  target_batch_size) const override;
+    int            estimatePeakNeedBlocks(int                     seq_len,
+                                          const BlockIndicesType& current_block_indices,
+                                          int                     remaining_tokens,
+                                          int                     reserve_step,
+                                          bool                    enable_reuse_cache,
+                                          bool                    reclaim_history = false) const override;
+    int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                      int  common_seq_len,
+                                                      int  remaining_tokens,
+                                                      int  reserve_step,
+                                                      bool enable_reuse_cache,
+                                                      int  target_batch_size,
+                                                      bool reclaim_history = false) const override;
     NeedBlocksInfo getNeedBlocks(int                      common_seq_len,
                                  int                      seq_len,
                                  int                      reserve_step,
                                  int                      reuse_blocks_len,
-                                 bool                     reuse_enabled      = false,
-                                 const RequiredPositions& required_positions = {}) const override;
+                                 bool                     reuse_enabled           = false,
+                                 const RequiredPositions& required_positions      = {},
+                                 size_t                   reclaimed_prefix_blocks = 0) const override;
 
 private:
 };

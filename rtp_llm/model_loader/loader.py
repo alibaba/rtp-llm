@@ -1,18 +1,22 @@
 import gc
 import logging
 import os
+import time
 from collections import OrderedDict
 from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
+from rtp_llm.model_loader.load_quant_w8a8_int8_weight import (
+    is_load_time_w8a8,
+    validate_w8a8_source,
+)
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
@@ -51,6 +55,22 @@ class ModelLoader:
         self.model_config = model_config
         self._task_type = model_config.task_type
         self._load_method = load_method
+        self._load_time_w8a8 = is_load_time_w8a8(model_config.quant_config)
+        if self._load_time_w8a8:
+            if load_method not in (LoadMethod.AUTO, LoadMethod.SCRATCH):
+                raise ValueError(
+                    "load-time W8A8 supports LOAD_METHOD=scratch or auto only"
+                )
+            if getattr(model_config, "lora_infos", None):
+                raise ValueError("load-time W8A8 does not support LoRA")
+            targets = validate_w8a8_source(database)
+            self._load_method = LoadMethod.SCRATCH
+            force_cpu_load_weights = True
+            logging.info(
+                "W8A8 quant_source=load_time targets=%d chunk_rows=%d device=cpu load_method=scratch",
+                len(targets),
+                model_config.quant_config.load_chunk_rows,
+            )
         self._weights_info = weights_info
         self._misc_weights_info: Optional[CustomAtomicWeight] = misc_weights_info
         if self._misc_weights_info is None:
@@ -80,6 +100,14 @@ class ModelLoader:
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
+        if self._load_time_w8a8 and self._load_config.merge_lora:
+            raise ValueError("load-time W8A8 does not support merging LoRA")
+        if self._load_time_w8a8 and self._load_config.tp_size > 1:
+            logging.warning(
+                "load-time W8A8 TP=%d is enabled but has not been validated on multiple devices; "
+                "channel scales are computed before K-dimension sharding",
+                self._load_config.tp_size,
+            )
 
     def get_load_config(self) -> LoadConfig:
         return self._load_config
@@ -502,6 +530,7 @@ class ModelLoader:
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
+                del results
 
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
@@ -685,6 +714,7 @@ class ModelLoader:
         return device
 
     def _load_from_scratch(self, device: str):
+        started = time.perf_counter()
         weights = self._create_model_weights(device)
         convert_device = self._choose_weight_convert_device(
             device
@@ -698,6 +728,13 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
+        if self._load_time_w8a8:
+            logging.info(
+                "w8a8_load_quant_complete seconds=%.3f tp=%d rank=%d",
+                time.perf_counter() - started,
+                self._load_config.tp_size,
+                self._load_config.tp_rank,
+            )
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):

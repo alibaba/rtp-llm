@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -48,6 +49,7 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 void StreamCacheResource::releaseResource() {
@@ -123,6 +125,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -148,15 +151,32 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
-int StreamCacheResource::estimatePeakNeedBlocks(
-    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+int StreamCacheResource::estimatePeakNeedBlocks(int                seq_len,
+                                                int                common_seq_len,
+                                                int                remaining_tokens,
+                                                int                reserve_step,
+                                                int                target_batch_size,
+                                                const std::string& pool_tag) const {
     return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
                                                                    seq_len,
                                                                    common_seq_len,
                                                                    remaining_tokens,
                                                                    reserve_step,
                                                                    reuseCache(),
-                                                                   target_batch_size);
+                                                                   target_batch_size,
+                                                                   linearCachePolicy(target_batch_size),
+                                                                   pool_tag);
+}
+
+LinearCachePolicy StreamCacheResource::linearCachePolicy(int target_batch_size) const {
+    // A verified P->D handoff owns a tail-only layout even while the stream is
+    // still marked as context/Fusion. Admission must match its initial allocator,
+    // and committed-history publication must never run on that sparse layout.
+    if (pd_decode_linear_tail_only_) {
+        return LinearCachePolicy::TAIL_ONLY;
+    }
+    return canReclaimLinearHistory(target_batch_size) ? LinearCachePolicy::RECLAIM_COMMITTED :
+                                                        LinearCachePolicy::KEEP_HISTORY;
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -197,6 +217,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -380,6 +401,11 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
+    // The scheduler owns host block-table mutation. In particular, an async
+    // output worker may have committed tokens while the previous gather still
+    // read this table. Its watermark is safe to consume here, before the next
+    // allocation/gather, and is independent of a speculative allocation bound.
+    drainLinearHistory();
 
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
@@ -390,6 +416,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
@@ -409,6 +436,41 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     }
 
     return absl::OkStatus();
+}
+
+void StreamCacheResource::reclaimLinearHistory(int committed_tokens) {
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+        || committed_tokens <= 0) {
+        return;
+    }
+    pending_linear_history_committed_tokens_ = std::max(pending_linear_history_committed_tokens_, committed_tokens);
+}
+
+bool StreamCacheResource::canReclaimLinearHistory(int target_batch_size) const {
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+        || fake_inited_ || resource_released_ || !need_release_resource_ || allocator_load_context_
+        || stream_->hasErrorWithoutLock() || stream_->hasNumBeams() || batch_kv_cache_resource_->batchSize() != 1
+        || target_batch_size != 1 || stream_->maxBatchSize() != 1 || !block_update_mapping_.empty()
+        || pd_decode_linear_tail_only_ || resource_context_.role_type != RoleType::PDFUSION || stream_->queryPdSep()
+        || pd_kvcache_ref_) {
+        return false;
+    }
+    // DEVICE publication acquires tree references synchronously. Lower-tier
+    // stores only queue a transfer, so retain the request references there.
+    return !reuseCache() || enableDeviceCache();
+}
+
+void StreamCacheResource::drainLinearHistory() {
+    if (pending_linear_history_committed_tokens_ <= 0 || !canReclaimLinearHistory(stream_->maxBatchSize())
+        || isContextStream() || curBlocksNum() == 0) {
+        return;
+    }
+    const bool reuse_cache = reuseCache();
+    const int committed_tokens =
+        std::min(pending_linear_history_committed_tokens_, std::max(0, stream_->seqLength() - 1));
+    updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
+    resource_context_.cache_manager->reclaimLinearHistory(batch_kv_cache_resource_, committed_tokens, reuse_cache);
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -462,6 +524,7 @@ BatchKVCacheResource& StreamCacheResource::kvCacheMutable() {
 
 void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
     *batch_kv_cache_resource_ = kv_cache_resource;
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {

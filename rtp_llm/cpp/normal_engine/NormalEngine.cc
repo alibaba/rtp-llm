@@ -618,7 +618,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
@@ -909,7 +910,7 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_DSPARK;
+               || isBlockDraftType(propose_params_->sp_type);
     }
     return false;
 }
@@ -922,7 +923,7 @@ bool NormalEngine::isEagle() {
 }
 
 bool NormalEngine::isDSpark() {
-    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
+    return propose_params_ && isBlockDraftType(propose_params_->sp_type);
 }
 
 size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only) {
@@ -941,7 +942,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        const bool is_dspark      = isBlockDraftType(propose_params_->sp_type);
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {

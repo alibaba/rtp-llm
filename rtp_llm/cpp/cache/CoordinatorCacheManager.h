@@ -33,6 +33,12 @@ struct KVCacheTokenCapacity {
     size_t available_tokens = 0;
 };
 
+struct KVCachePoolCapacity {
+    std::string tag;
+    size_t      available_blocks = 0;
+    size_t      reserve_blocks   = 0;
+};
+
 struct KVCachePoolMetricsSnapshot {
     size_t      pool_index                 = 0;
     std::string pool_name                  = "unnamed";
@@ -68,6 +74,7 @@ public:
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
+    void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
@@ -94,7 +101,9 @@ public:
                                     int                            remaining_tokens,
                                     int                            reserve_step,
                                     bool                           enable_reuse_cache,
-                                    int                            target_batch_size) const;
+                                    int                            target_batch_size,
+                                    LinearCachePolicy  linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
+                                    const std::string& pool_tag            = {}) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -156,6 +165,7 @@ public:
     virtual size_t               maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    std::vector<KVCachePoolCapacity>                poolCapacities() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
@@ -192,19 +202,25 @@ protected:
     static size_t heldRequestBlocks(const MallocInfo& malloc_info, std::string_view tag);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag);
+    static InitBlockDemand
+    initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag, bool reuse_enabled);
+    // Shared runtime/forecast guard. Request-specific ownership and execution checks remain in the stream.
+    bool canReclaimLinearHistory(int batch_size, bool reuse_cache) const;
     // Estimate peak additional blocks for one sequence resource.
-    virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
-                                         int                    seq_len,
-                                         int                    remaining_tokens,
-                                         int                    reserve_step,
-                                         bool                   enable_reuse_cache) const;
-    virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                     int  common_seq_len,
-                                                     int  remaining_tokens,
-                                                     int  reserve_step,
-                                                     bool enable_reuse_cache,
-                                                     int  target_batch_size) const;
+    virtual int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                       int                    seq_len,
+                                       int                    remaining_tokens,
+                                       int                    reserve_step,
+                                       bool                   enable_reuse_cache,
+                                       LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY) const;
+    virtual int
+                  estimateInitialBatchPeakNeedBlocks(int               seq_len,
+                                                     int               common_seq_len,
+                                                     int               remaining_tokens,
+                                                     int               reserve_step,
+                                                     bool              enable_reuse_cache,
+                                                     int               target_batch_size,
+                                                     LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
@@ -247,7 +263,8 @@ protected:
                                                      BatchKVCacheResource&                kv_resource,
                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                                      PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
+                                                     const std::function<bool(size_t)>&   valid_prefix = {},
+                                                     bool                                 skip_linear  = false);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

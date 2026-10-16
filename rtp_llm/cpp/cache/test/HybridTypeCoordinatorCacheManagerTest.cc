@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -318,14 +319,16 @@ static int estimateBatchPeakForSingleSequence(const CoordinatorCacheManager& all
                                               int                            seq_len,
                                               int                            remaining_tokens,
                                               int                            reserve_step,
-                                              bool                           enable_reuse_cache) {
+                                              bool                           enable_reuse_cache,
+                                              LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY) {
     return allocator.estimateBatchPeakNeedBlocks(batch_resource,
                                                  seq_len,
                                                  /*common_seq_len=*/seq_len,
                                                  remaining_tokens,
                                                  reserve_step,
                                                  enable_reuse_cache,
-                                                 /*target_batch_size=*/1);
+                                                 /*target_batch_size=*/1,
+                                                 linear_cache_policy);
 }
 
 static size_t countValidBlocks(const BlockIndicesType& blocks) {
@@ -1114,6 +1117,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, GetNeedBlocksUsesGroupGetNeedBlock
         // extra_total  = 1 + 1 = 2
         // total = 5 + 2*2 = 9
         EXPECT_EQ(allocator->getNeedBlocks(info), 9);
+
+        // PD decode tail-only disables only LINEAR reuse.  Its historical sparse
+        // slots therefore cannot inflate admission; FULL keeps the same reuse
+        // accounting and the demand returns to the no-linear-reuse total.
+        info.pd_decode_linear_tail_only = true;
+        EXPECT_EQ(allocator->getNeedBlocks(info), 8);
     }
 }
 
@@ -1981,6 +1990,93 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryBecomesReusableAndEvictableWhileRequestRuns) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 6);
+    const auto full        = allocateReferencedBlocks(full_pool, 6);
+    auto       resource    = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105});
+    resource->mutableBlockIds(0, "linear").assign(linear);
+    resource->mutableBlockIds(0, "full1").assign(full);
+
+    allocator->reclaimLinearHistory(resource, /*committed_tokens=*/20, /*reuse_cache=*/true);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(resource->blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(resource->blocks(0, "full1"), full);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 3u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(), 6u);
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102});
+    ASSERT_EQ(path.size(), 3u);
+    EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{linear[0]}));
+    auto match = allocator->blockTreeCacheOwner()->match({100, 101, 102});
+    EXPECT_EQ(match.matched_device_blocks, 3u);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+
+    // Eviction can recover historical states even though FULL remains pinned by this request.
+    for (const auto& group : allocator->cacheGroups()) {
+        if (group->tag() == "linear") {
+            EXPECT_TRUE(group->ensureFreeBlocks(6));
+            EXPECT_GE(linear_pool->freeBlocksNum(), 6u);
+            ASSERT_TRUE(group->malloc(resource->mutableBlockIds(0, "linear"), 28, true));
+        }
+    }
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 4u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(resource->blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+    for (const auto& group : allocator->cacheGroups()) {
+        group->unreference(resource->blocks(0, group->tag()));
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryPrefixHitDoesNotRematerializeRetiredCheckpoints) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 8);
+    const auto full        = allocateReferencedBlocks(full_pool, 8);
+    auto       running     = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105, 106, 107});
+    running->mutableBlockIds(0, "linear").assign(linear);
+    running->mutableBlockIds(0, "full1").assign(full);
+    allocator->reclaimLinearHistory(running, 32, true);
+
+    auto       incoming = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105, 999});
+    auto       tokens   = makeCompleteTokenIds(1, 28, 4);
+    MallocInfo info{incoming, tokens};
+    info.enable_remove_skipped_blocks = false;
+    const auto result                 = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 24);
+    const auto& ids = incoming->blocks(0, "linear");
+    ASSERT_EQ(ids.size(), 7u);
+    for (size_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(ids[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(ids[5], linear[5]);
+    EXPECT_EQ(std::count_if(ids.begin(), ids.end(), [](auto id) { return !isNullBlockIdx(id); }), 2);
+    // An evicted historical checkpoint must stay absent; this request never
+    // recomputed it and cannot republish an allocated-but-uninitialized state.
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForGroup("linear", 5), 5);
+    allocator->reclaimLinearHistory(incoming, 28, true);
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102, 103, 104});
+    ASSERT_EQ(path.size(), 5u);
+    EXPECT_FALSE(path.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+    allocator->free(FreeInfo{incoming, tokens});
+    for (const auto& group : allocator->cacheGroups()) {
+        group->unreference(running->blocks(0, group->tag()));
+    }
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
@@ -2121,6 +2217,327 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupp
     auto result                    = allocator->malloc(hit_malloc);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 12);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyKeepsFullReuseAndLeavesLinearSlotsNull) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const CacheKeysType seed_keys{100, 101, 102};
+    auto                seed_res    = makeBatchResource(1, config, seed_keys);
+    auto                seed_tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo          seed_info{seed_res, seed_tokens};
+    seed_info.enable_cache_lookup = false;
+    seed_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(seed_info).success);
+    size_t resident_prefix_length = 0;
+    allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, false}, resident_prefix_length);
+
+    auto       decode_res    = makeBatchResource(1, config, CacheKeysType{100, 101, 102, 103});
+    auto       decode_tokens = makeCompleteTokenIds(1, 16, 4);
+    MallocInfo decode_info{decode_res, decode_tokens};
+    decode_info.enable_cache_lookup        = true;
+    decode_info.reuse_cache                = true;
+    decode_info.pd_decode_linear_tail_only = true;
+    const auto result                      = allocator->malloc(decode_info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 12);
+
+    const auto& full_blocks   = decode_res->blocks(0, "full1");
+    const auto& linear_blocks = decode_res->blocks(0, "linear");
+    ASSERT_EQ(full_blocks.size(), 4u);
+    ASSERT_EQ(linear_blocks.size(), 4u);
+    EXPECT_EQ(full_blocks[0], seed_res->blocks(0, "full1")[0]);
+    EXPECT_EQ(full_blocks[1], seed_res->blocks(0, "full1")[1]);
+    EXPECT_EQ(full_blocks[2], seed_res->blocks(0, "full1")[2]);
+    EXPECT_TRUE(isNullBlockIdx(linear_blocks[0]));
+    EXPECT_TRUE(isNullBlockIdx(linear_blocks[1]));
+    // makeCompleteTokenIds(1, 16, 4) has exactly four logical slots.  The
+    // default LINEAR policy has active_tail_blocks=1, so tail-only materializes
+    // only slot 3; the first three historical slots stay logical NULLs.
+    EXPECT_TRUE(isNullBlockIdx(linear_blocks[2]));
+    EXPECT_FALSE(isNullBlockIdx(linear_blocks[3]));
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailKeepsEntireActiveTailAfterFullPrefixHitWithReclaim) {
+    for (bool enable_reclaim : {false, true}) {
+        SCOPED_TRACE(enable_reclaim);
+        auto config                        = makeTinyHybridConfig();
+        config.enable_linear_cache_reclaim = enable_reclaim;
+        std::vector<CacheGroupPolicy> policies;
+        for (const auto& group : config.topology().groups()) {
+            auto policy = group.policy;
+            if (policy.group_type == CacheGroupType::LINEAR) {
+                policy.active_tail_blocks = 2;
+            }
+            policies.push_back(policy);
+        }
+        setTestGroupPolicies(config, policies);
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        auto       seed_res    = makeBatchResource(1, config, CacheKeysType{100, 101, 102});
+        auto       seed_tokens = makeCompleteTokenIds(1, 12, 4);
+        MallocInfo seed_info{seed_res, seed_tokens};
+        seed_info.enable_cache_lookup = false;
+        seed_info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(seed_info).success);
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, false}, resident_prefix_length);
+
+        auto       decode_res    = makeBatchResource(1, config, CacheKeysType{100, 101, 102, 103});
+        auto       decode_tokens = makeCompleteTokenIds(1, 16, 4);
+        MallocInfo decode_info{decode_res, decode_tokens};
+        decode_info.enable_cache_lookup        = true;
+        decode_info.reuse_cache                = true;
+        decode_info.pd_decode_linear_tail_only = true;
+        const auto result                      = allocator->malloc(decode_info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, 12);
+        const auto& full   = decode_res->blocks(0, "full1");
+        const auto& linear = decode_res->blocks(0, "linear");
+        ASSERT_EQ(full.size(), 4u);
+        ASSERT_EQ(linear.size(), 4u);
+        EXPECT_TRUE(std::equal(full.begin(), full.begin() + 3, seed_res->blocks(0, "full1").begin()));
+        EXPECT_TRUE(isNullBlockIdx(linear[0]));
+        EXPECT_TRUE(isNullBlockIdx(linear[1]));
+        // The Full prefix hit does not provide Linear state. A generic two-state
+        // handoff must materialize both active slots, including the one inside
+        // the reused Full prefix; it is not a retired Fusion checkpoint.
+        EXPECT_FALSE(isNullBlockIdx(linear[2]));
+        EXPECT_FALSE(isNullBlockIdx(linear[3]));
+        EXPECT_NE(linear[2], linear[3]);
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyIncrementKeepsLogicalNullSlots) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    auto       resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+    MallocInfo init_info{resource, token_ids};
+    init_info.enable_cache_lookup        = false;
+    init_info.reuse_cache                = true;
+    init_info.pd_decode_linear_tail_only = true;
+    ASSERT_TRUE(allocator->malloc(init_info).success);
+
+    token_ids->setSeqLength(9);  // Crosses from two logical blocks to three.
+    MallocInfo incr_info{resource, token_ids};
+    incr_info.enable_cache_lookup        = false;
+    incr_info.reuse_cache                = true;
+    incr_info.pd_decode_linear_tail_only = true;
+    ASSERT_TRUE(allocator->malloc(incr_info).success);
+
+    const auto& linear_blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(linear_blocks.size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(linear_blocks[0]));
+    EXPECT_FALSE(isNullBlockIdx(linear_blocks[1]));  // The previous decode tail remains usable.
+    EXPECT_FALSE(isNullBlockIdx(linear_blocks[2]));
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyAdmissionIgnoresHistoricalLinearDemand) {
+    struct AdmissionCase {
+        int reserve_step;
+        int linear_pool_blocks;
+        int expected_linear_blocks;
+        int expected_full_blocks;
+    };
+
+    for (const AdmissionCase test_case : {AdmissionCase{0, 4, 1, 16}, AdmissionCase{8, 9, 8, 18}}) {
+        SCOPED_TRACE(test_case.reserve_step);
+        auto config = makeTinyHybridConfig();
+        setGroupBlockCounts(config, test_case.linear_pool_blocks, /*full_count=*/20);
+
+        auto legacy_allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(legacy_allocator->init());
+        auto legacy_resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+        auto legacy_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/64, /*seq_size_per_block=*/4);
+        legacy_tokens->setReserveStep(test_case.reserve_step);
+        MallocInfo legacy_info{legacy_resource, legacy_tokens};
+        legacy_info.enable_cache_lookup = false;
+        legacy_info.reuse_cache         = true;
+        EXPECT_FALSE(legacy_allocator->malloc(legacy_info).success);
+
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+        auto tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/64, /*seq_size_per_block=*/4);
+        tokens->setReserveStep(test_case.reserve_step);
+
+        const int    estimate           = allocator->estimateBatchPeakNeedBlocks(resource,
+                                                                    /*seq_len=*/64,
+                                                                    /*common_seq_len=*/64,
+                                                                    /*remaining_tokens=*/0,
+                                                                    test_case.reserve_step,
+                                                                    /*enable_reuse_cache=*/true,
+                                                                    /*target_batch_size=*/1,
+                                                                    LinearCachePolicy::TAIL_ONLY);
+        const auto   linear_pool        = poolForTag(*allocator, "linear");
+        const auto   full_pool          = poolForTag(*allocator, "full1");
+        const size_t linear_free_before = linear_pool->freeBlocksNum();
+        const size_t full_free_before   = full_pool->freeBlocksNum();
+
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup        = false;
+        info.reuse_cache                = true;
+        info.pd_decode_linear_tail_only = true;
+        ASSERT_TRUE(allocator->malloc(info).success);
+
+        const int linear_used = static_cast<int>(linear_free_before - linear_pool->freeBlocksNum());
+        const int full_used   = static_cast<int>(full_free_before - full_pool->freeBlocksNum());
+        EXPECT_EQ(linear_used, test_case.expected_linear_blocks);
+        EXPECT_EQ(full_used, test_case.expected_full_blocks);
+        EXPECT_EQ(linear_used + full_used, estimate);
+        const int expected_linear_slots = 16 + (test_case.reserve_step > 0 ? test_case.reserve_step - 1 : 0);
+        EXPECT_EQ(resource->blocksNum(0, "linear"), expected_linear_slots);
+        EXPECT_EQ(resource->blocksNum(0, "full1"), test_case.expected_full_blocks);
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyRetainsReserveScratchAndMatchesEstimate) {
+    for (const int reserve_step : {7, 8}) {
+        SCOPED_TRACE(reserve_step);
+        auto config    = makeTinyHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+
+        auto resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+        auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+        token_ids->setReserveStep(reserve_step);
+
+        const int    expected_blocks = allocator->estimateBatchPeakNeedBlocks(resource,
+                                                                           /*seq_len=*/4,
+                                                                           /*common_seq_len=*/4,
+                                                                           /*remaining_tokens=*/0,
+                                                                           reserve_step,
+                                                                           /*enable_reuse_cache=*/true,
+                                                                           /*target_batch_size=*/1,
+                                                                           LinearCachePolicy::TAIL_ONLY);
+        const size_t free_before =
+            allocator->groupBlockPools()[0]->freeBlocksNum() + allocator->groupBlockPools()[1]->freeBlocksNum();
+
+        MallocInfo info{resource, token_ids};
+        info.enable_cache_lookup        = false;
+        info.reuse_cache                = true;
+        info.pd_decode_linear_tail_only = true;
+        ASSERT_TRUE(allocator->malloc(info).success);
+
+        const size_t free_after =
+            allocator->groupBlockPools()[0]->freeBlocksNum() + allocator->groupBlockPools()[1]->freeBlocksNum();
+        EXPECT_EQ(static_cast<int>(free_before - free_after), expected_blocks);
+        const auto& linear_blocks = resource->blocks(0, "linear");
+        ASSERT_EQ(linear_blocks.size(), static_cast<size_t>(reserve_step));
+        for (const auto block : linear_blocks) {
+            EXPECT_FALSE(isNullBlockIdx(block));
+        }
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyDoesNotReuseAllLinearTopology) {
+    auto config = makeSimpleLinearCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto pool     = poolForTag(*allocator, "linear");
+    auto blocks   = allocateReferencedBlocks(pool, 2);
+    auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{500, 501});
+    resource->mutableBlockIds(0, "linear").assign(blocks);
+    size_t resident_prefix_length = 0;
+    allocator->insertIntoCache(InsertInfo{resource, nullptr, false}, resident_prefix_length);
+
+    const auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{500, 501}, {}, true);
+    EXPECT_EQ(match.matched_device_blocks, 0u);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+    pool->decRef(blocks);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyPublishesFullGroupWithoutLinearResource) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto       linear_pool   = poolForTag(*allocator, "linear");
+    auto       full_pool     = poolForTag(*allocator, "full1");
+    const auto linear_blocks = allocateReferencedBlocks(linear_pool, 2);
+    const auto full_blocks   = allocateReferencedBlocks(full_pool, 2);
+    auto       batch_res     = makeBatchResource(1, config, CacheKeysType{200, 201});
+    batch_res->mutableBlockIds(0, "linear").assign({linear_blocks[0], linear_blocks[1]});
+    batch_res->mutableBlockIds(0, "full1").assign({full_blocks[0], full_blocks[1]});
+
+    InsertInfo insert_info{batch_res, nullptr, false};
+    insert_info.pd_decode_linear_tail_only = true;
+    size_t resident_prefix_length          = 0;
+    allocator->insertIntoCache(insert_info, resident_prefix_length);
+
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{200, 201});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
+    EXPECT_EQ(path[0]->group_set_resources[1].device_blocks, (BlockIndicesType{full_blocks[0]}));
+    EXPECT_EQ(path[1]->group_set_resources[1].device_blocks, (BlockIndicesType{full_blocks[1]}));
+
+    const auto ordinary_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201});
+    EXPECT_EQ(ordinary_match.matched_device_blocks, 0u);
+    const auto pd_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201}, {}, true);
+    EXPECT_EQ(pd_match.matched_device_blocks, 2u);
+    EXPECT_TRUE(std::all_of(pd_match.matched_device_resources.begin(),
+                            pd_match.matched_device_resources.end(),
+                            [&](const MultiNodeResource& resource) {
+                                return allocator->blockTreeCacheOwner()->groupSets()[resource.group_set_id]->groupType()
+                                       != CacheGroupType::LINEAR;
+                            }));
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                     ordinary_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                     pd_match.matched_device_resources);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlySkipsLinearLowerTierDescriptors) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+
+    KVCacheConfig tiered_config;
+    tiered_config.enable_memory_cache  = true;
+    tiered_config.memory_cache_size_mb = 1;
+    allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
+    ASSERT_TRUE(allocator->init());
+
+    const auto& cache           = allocator->blockTreeCacheOwner();
+    auto        transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
+
+    const CacheKeysType                        cached_keys{300, 301};
+    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+                                                     std::vector<GroupSetResource>(cache->groupSets().size()));
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        ASSERT_NE(group_set->hostPool(), nullptr);
+        for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+            const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_FALSE(isNullBlockIdx(source_block));
+            slots[path_index][group_set->groupSetId()].host_block = source_block;
+        }
+    }
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
+
+    auto       request_resource = makeBatchResource(1, config, CacheKeysType{300, 301, 302});
+    auto       request_tokens   = makeCompleteTokenIds(1, 9, 4);
+    MallocInfo request_info{request_resource, request_tokens};
+    request_info.enable_cache_lookup        = true;
+    request_info.reuse_cache                = true;
+    request_info.pd_decode_linear_tail_only = true;
+    const auto result                       = allocator->malloc(request_info);
+    ASSERT_TRUE(result.success);
+    const auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->loadDescs().empty());
+    EXPECT_TRUE(
+        std::all_of(context->loadDescs().begin(), context->loadDescs().end(), [&](const TransferDescriptor& desc) {
+            return cache->groupSets()[desc.group_set_id]->groupType() != CacheGroupType::LINEAR;
+        }));
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
@@ -2309,6 +2726,132 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseClean
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(linear_pool->freeBlocksNum(), 6u);
     EXPECT_EQ(full_pool->freeBlocksNum(), 6u);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastRequiresConfigAndRequestOptIn) {
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        auto config                        = makeTinyHybridConfig();
+        config.enable_linear_cache_reclaim = enabled;
+        config.linear_step                 = 1;
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        auto resource = makeBatchResource(1, config, {});
+
+        const int legacy = estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true);
+        EXPECT_EQ(
+            estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, LinearCachePolicy::KEEP_HISTORY),
+            legacy);
+        const int forecast = estimateBatchPeakForSingleSequence(
+            *allocator, resource, 24, 80, 0, true, LinearCachePolicy::RECLAIM_COMMITTED);
+        if (enabled) {
+            EXPECT_LT(forecast, legacy);
+        } else {
+            EXPECT_EQ(forecast, legacy);
+        }
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastPreservesInitialPrefillPeak) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(1, config, {});
+
+    // The complete prompt is allocated before any forward/commit can retire a checkpoint: six blocks per group.
+    EXPECT_EQ(
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 0, 0, true, LinearCachePolicy::RECLAIM_COMMITTED),
+        12);
+    EXPECT_GE(
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, LinearCachePolicy::RECLAIM_COMMITTED),
+        12);
+    EXPECT_LT(
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, LinearCachePolicy::RECLAIM_COMMITTED),
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, LinearCachePolicy::KEEP_HISTORY));
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastFallsBackForUnsafeLayoutsAndStorage) {
+    struct Case {
+        int  current_width;
+        int  target_width;
+        bool cp_sharded;
+        bool device_cache;
+    };
+    for (const auto& test_case :
+         std::vector<Case>{{1, 2, false, true}, {2, 1, false, true}, {1, 1, true, true}, {1, 1, false, false}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "current=" << test_case.current_width << " target=" << test_case.target_width
+                     << " cp=" << test_case.cp_sharded << " device_cache=" << test_case.device_cache);
+        auto config                        = makeTinyHybridConfig();
+        config.enable_linear_cache_reclaim = true;
+        config.linear_step                 = 1;
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        KVCacheConfig kv_config;
+        kv_config.enable_device_cache = test_case.device_cache;
+        allocator->setBlockTreeCacheConfigForTest(kv_config);
+        ASSERT_TRUE(allocator->init());
+        if (test_case.cp_sharded) {
+            allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, config.seq_size_per_block));
+        }
+        auto resource = makeBatchResource(test_case.current_width, config, {});
+        auto estimate = [&](LinearCachePolicy linear_cache_policy) {
+            return allocator->estimateBatchPeakNeedBlocks(
+                resource, 24, 24, 80, 0, true, test_case.target_width, linear_cache_policy);
+        };
+        EXPECT_EQ(estimate(LinearCachePolicy::RECLAIM_COMMITTED), estimate(LinearCachePolicy::KEEP_HISTORY));
+
+        // The same guard applies after initial allocation and before a future batch expansion.
+        for (int batch = 0; batch < test_case.current_width; ++batch) {
+            resource->setBatchBlocks(batch, "linear", {1, 2, 3, 4, 5, 6});
+            resource->setBatchBlocks(batch, "full1", {1, 2, 3, 4, 5, 6});
+        }
+        EXPECT_EQ(estimate(LinearCachePolicy::RECLAIM_COMMITTED), estimate(LinearCachePolicy::KEEP_HISTORY));
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastDoesNotCreditSharedOrLoadPinnedCurrentBlocks) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 6);
+    const auto full        = allocateReferencedBlocks(full_pool, 6);
+    auto       resource    = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105});
+    resource->mutableBlockIds(0, "linear").assign(linear);
+    resource->mutableBlockIds(0, "full1").assign(full);
+
+    // A second request and an in-flight load keep the current history active even if this request retires it later.
+    linear_pool->incRef(linear);
+    linear_pool->incTreeRef(linear, BlockTreeRefType::LOAD);
+    const auto available_before = allocator->availableBlocksNum();
+    EXPECT_EQ(
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 0, 0, true, LinearCachePolicy::RECLAIM_COMMITTED),
+        0);
+    EXPECT_EQ(
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 4, 0, true, LinearCachePolicy::RECLAIM_COMMITTED),
+        2);
+    const int forecast =
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, LinearCachePolicy::RECLAIM_COMMITTED);
+    // Ten future FULL blocks and at least one future LINEAR allocation cannot use any current-block release credit.
+    EXPECT_GE(forecast, 11);
+    EXPECT_LT(
+        forecast,
+        estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, LinearCachePolicy::KEEP_HISTORY));
+    EXPECT_EQ(allocator->availableBlocksNum(), available_before);
+    EXPECT_EQ(resource->blocks(0, "linear"), linear);
+    for (const auto block : linear) {
+        EXPECT_EQ(linear_pool->refCount(block), 3u);
+    }
+
+    linear_pool->decTreeRef(linear, BlockTreeRefType::LOAD);
+    linear_pool->decRef(linear);
+    linear_pool->decRef(linear);
+    full_pool->decRef(full);
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {

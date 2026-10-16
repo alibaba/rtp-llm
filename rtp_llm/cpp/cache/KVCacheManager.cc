@@ -478,6 +478,14 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
+void KVCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resource,
+                                          int                            committed_tokens,
+                                          bool                           reuse_cache) {
+    if (config_.enable_linear_cache_reclaim && coordinator_manager_) {
+        coordinator_manager_->reclaimLinearHistory(resource, committed_tokens, reuse_cache);
+    }
+}
+
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
@@ -500,14 +508,18 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                            int                            remaining_tokens,
                                            int                            reserve_step,
                                            bool                           enable_reuse_cache,
-                                           int                            target_batch_size) const {
+                                           int                            target_batch_size,
+                                           LinearCachePolicy              linear_cache_policy,
+                                           const std::string&             pool_tag) const {
     return coordinator_manager_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
                                                              seq_len,
                                                              common_seq_len,
                                                              remaining_tokens,
                                                              reserve_step,
                                                              enable_reuse_cache,
-                                                             target_batch_size);
+                                                             target_batch_size,
+                                                             linear_cache_policy,
+                                                             pool_tag);
 }
 
 // 块操作相关

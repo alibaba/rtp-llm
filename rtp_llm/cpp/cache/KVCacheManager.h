@@ -62,6 +62,7 @@ public:
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
+    void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
@@ -74,13 +75,19 @@ public:
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
 
+    std::vector<KVCachePoolCapacity> poolCapacities() const {
+        return coordinator_manager_->poolCapacities();
+    }
+
     int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                int                            seq_len,
                                int                            common_seq_len,
                                int                            remaining_tokens,
                                int                            reserve_step,
                                bool                           enable_reuse_cache,
-                               int                            target_batch_size) const;
+                               int                            target_batch_size,
+                               LinearCachePolicy              linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
+                               const std::string&             pool_tag            = {}) const;
 
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
