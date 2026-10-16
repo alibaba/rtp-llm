@@ -18,14 +18,14 @@ from benchmark_cases import ALL_CASES, PROFILE_CASES, SMOKE_CASES
 class BenchmarkRegistryDocumentationTest(unittest.TestCase):
     def test_canonical_case_counts_and_unique_names(self):
         self.assertEqual(len(SMOKE_CASES), 2)
-        self.assertEqual(len(PROFILE_CASES), 81)
+        self.assertEqual(len(PROFILE_CASES), 109)
         names = [case.name for case in ALL_CASES]
         self.assertEqual(len(names), len(set(names)))
         families = {
             "tree_": 1,
-            "transfer_": 16,
-            "matrix_": 16,
-            "e2e_": 48,
+            "transfer_": 20,
+            "matrix_": 24,
+            "e2e_": 64,
         }
         for prefix, expected in families.items():
             with self.subTest(prefix=prefix):
@@ -38,8 +38,8 @@ class BenchmarkRegistryDocumentationTest(unittest.TestCase):
         with open(path) as source:
             documentation = source.read()
         self.assertIn(
-            "当前 profile 共 81 个 case：1 个 Tree、16 个 mixed Transfer"
-            "（含 4 个并发变体）、16 个 batch API matrix 和 48 个 e2e case。",
+            "当前 profile 共 109 个 case：1 个 Tree、20 个 mixed Transfer"
+            "（含 6 个并发变体）、24 个 batch API matrix 和 64 个 e2e case。",
             documentation,
         )
 

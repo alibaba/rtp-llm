@@ -288,7 +288,7 @@ class ScopedCopyPriorityEnv {
 public:
     explicit ScopedCopyPriorityEnv(const char* value) {
         const char* original = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
-        had_original_ = original != nullptr;
+        had_original_        = original != nullptr;
         if (had_original_) {
             original_ = original;
         }
@@ -349,7 +349,7 @@ TEST(DeviceHostTransferExecutorConfigTest, IncludesTemplateStrategyBeforeLegacyF
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PrefersCuda3DBatchThenCudaBatchThenStagedSmThenGeneric) {
-    ScopedCopyPriorityEnv priority(nullptr);
+    ScopedCopyPriorityEnv      priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
@@ -370,7 +370,7 @@ TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyA
                                                          {"cuda_3d_batch", "TBSG"},
                                                          {"unknown", "TBSG"},
                                                          {"SM", "TBSG"}};
-    BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
+    BlockTreeTaskPool                         task_pool(1, 8, "CopyPriorityTest");
     for (const auto& [value, expected] : cases) {
         SCOPED_TRACE(value != nullptr ? value : "<unset>");
         ScopedCopyPriorityEnv priority(value);
