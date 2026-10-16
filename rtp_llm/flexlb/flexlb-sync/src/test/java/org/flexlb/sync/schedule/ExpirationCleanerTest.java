@@ -41,7 +41,7 @@ class ExpirationCleanerTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus status = status("127.0.0.1", 8080);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
         ConfigService service = mock(ConfigService.class);
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
@@ -180,6 +180,10 @@ class ExpirationCleanerTest {
                     "the second routing gate must close before the first drain waits");
             releaseFirstAwait.countDown();
             cleaning.get(5, TimeUnit.SECONDS);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!directory.statusSnapshot(RoleType.PREFILL).isEmpty() && System.nanoTime() < deadline) {
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+            }
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
             verify(cache).removeEngineBlockCache(
                     first.getIpPort(), first.trace());

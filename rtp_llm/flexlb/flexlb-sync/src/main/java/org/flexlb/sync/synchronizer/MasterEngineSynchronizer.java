@@ -54,6 +54,7 @@ public final class MasterEngineSynchronizer {
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
     private final ThreadPoolExecutor cacheStatusExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
     // Retain only operations that currently occupy an executor thread or a caller thread.
     private final Map<EndpointTrace.Poll, RoleType> activeSyncs = new ConcurrentHashMap<>();
@@ -89,6 +90,10 @@ public final class MasterEngineSynchronizer {
         int statusThreads = flexlbConfig.getInternalRuntime()
                 .getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        statusApplicationExecutor = new ThreadPoolExecutor(
+                statusThreads, statusThreads, 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15_000), new NamedThreadFactory("status-application-executor"),
+                new ThreadPoolExecutor.AbortPolicy());
         // Cache overload must not run cache work on a health/discovery caller.
         int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
         cacheStatusExecutor = new ThreadPoolExecutor(
@@ -123,6 +128,9 @@ public final class MasterEngineSynchronizer {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor", statusApplicationExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "cacheStatusExecutor", cacheStatusExecutor);
@@ -168,7 +176,7 @@ public final class MasterEngineSynchronizer {
             for (RoleType roleType : requiredRoles) {
                 EngineSyncRunner runner = new EngineSyncRunner(
                         modelName, workerDirectory,
-                        workerAddressService, statusCheckExecutor, cacheStatusExecutor, engineHealthReporter,
+                        workerAddressService, statusCheckExecutor, cacheStatusExecutor, statusApplicationExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
@@ -201,6 +209,7 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
         cacheStatusExecutor.shutdown();
         activeSyncs.clear();
     }

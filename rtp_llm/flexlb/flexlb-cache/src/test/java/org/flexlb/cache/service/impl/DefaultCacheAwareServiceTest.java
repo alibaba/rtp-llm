@@ -28,11 +28,11 @@ class DefaultCacheAwareServiceTest {
         var status = new CacheStatus();
         Set<Long> keys = Set.of(1L, 2L);
         status.setCachedKeys(keys);
-        worker.lock.lock();
+        worker.cacheMutationLock.lock();
         try {
             worker.publishCacheStatus(status);
         } finally {
-            worker.lock.unlock();
+            worker.cacheMutationLock.unlock();
         }
         var lease = worker.tryBeginCachePoll(1L);
         try {

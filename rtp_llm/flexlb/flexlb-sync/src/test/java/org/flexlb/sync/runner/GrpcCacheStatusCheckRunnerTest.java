@@ -40,6 +40,82 @@ class GrpcCacheStatusCheckRunnerTest {
             Mockito.mock(DynamicCacheIntervalService.class);
 
     @Test
+    void cachePollAndPublicationProceedWhileStatusLockIsHeld() throws Exception {
+        var status = workerStatus();
+        var directory = directory(status);
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.completedFuture(
+                        EngineRpcService.CacheStatusPB.newBuilder().setVersion(1L).build()));
+        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        status.lock.lock();
+        try {
+            executor.submit(() -> {
+                var lease = status.tryBeginCachePoll(1L);
+                org.junit.jupiter.api.Assertions.assertNotNull(lease);
+                new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
+                        status, lease, directory, engineHealthReporter, engineGrpcService,
+                        localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, Runnable::run).run();
+            }).get(2, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(1L, status.getCacheIndexedVersion());
+        } finally {
+            status.lock.unlock();
+            executor.shutdownNow();
+            directory.close();
+        }
+    }
+
+    @Test
+    void delayedOldCacheResponseCannotWriteAfterCleanupAndReplacement() {
+        var old = workerStatus();
+        var directory = directory(old);
+        var rpc = new CompletableFuture<EngineRpcService.CacheStatusPB>();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(old), anyLong(), anyLong(), any()))
+                .thenReturn(rpc);
+        new GrpcCacheStatusCheckRunner("model", old.getIpPort(), "test", RoleType.PREFILL,
+                old, old.tryBeginCachePoll(1L), directory, engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, Runnable::run).run();
+        old.lock.lock();
+        EndpointRegistry.DetachedGeneration detached;
+        try {
+            detached = directory.beginRetirement(RoleType.PREFILL, old.getIpPort(), old, "TEST", -1L);
+        } finally {
+            old.lock.unlock();
+        }
+        directory.completeRetirement(RoleType.PREFILL, old.getIpPort(), old, detached,
+                localKvCacheAwareManager, org.slf4j.LoggerFactory.getLogger(getClass()));
+        var replacement = workerStatus();
+        org.junit.jupiter.api.Assertions.assertSame(replacement,
+                directory.currentOrDiscover(RoleType.PREFILL, old.getIpPort(), () -> replacement));
+        rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(2L).putCacheKeys(123L, true).build());
+        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(any(), any());
+        org.junit.jupiter.api.Assertions.assertNull(replacement.getCacheStatus());
+        assertEquals(-1L, replacement.getCacheIndexedVersion());
+        directory.close();
+    }
+
+    @Test
+    void cacheConversionWaitsForCacheExecutorInsteadOfGrpcCompletionThread() {
+        var status = workerStatus();
+        var lease = status.tryBeginCachePoll(1L);
+        var rpc = new CompletableFuture<EngineRpcService.CacheStatusPB>();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(), anyLong(), anyLong(), any()))
+                .thenReturn(rpc);
+        var queue = new java.util.ArrayList<Runnable>();
+        new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
+                status, lease, directory(status), engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, queue::add).run();
+        rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(1L).build());
+        assertEquals(1, queue.size());
+        assertEquals(-1, status.trace().snapshot().poll().times().convertStartMs());
+        verifyNoInteractions(localKvCacheAwareManager);
+        queue.removeFirst().run();
+        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().poll().times().convertStartMs() >= 0);
+        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().poll().leaseReleased());
+    }
+
+    @Test
     void cacheUpdateDoesNotHoldHealthLockAndRetirementWaitsForCacheWriter() throws Exception {
         WorkerStatus status = workerStatus();
         WorkerDirectory directory = directory(status);
@@ -88,9 +164,15 @@ class GrpcCacheStatusCheckRunnerTest {
                     directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
                         throw new AssertionError("replacement published before old cache writer drained");
                     }));
-            release.countDown();
-            update.get(2, java.util.concurrent.TimeUnit.SECONDS);
-            retiring.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            // Even final cleanup/removal must not wait on the status lock.
+            status.lock.lock();
+            try {
+                release.countDown();
+                update.get(2, java.util.concurrent.TimeUnit.SECONDS);
+                retiring.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            } finally {
+                status.lock.unlock();
+            }
             verify(localKvCacheAwareManager).removeEngineBlockCache(status.getIpPort(), status.trace());
             org.junit.jupiter.api.Assertions.assertTrue(cleanupHeldCacheLock.get(),
                     "detached-key cleanup must serialize with the old cache writer");
@@ -141,7 +223,7 @@ class GrpcCacheStatusCheckRunnerTest {
         var snapshot = status.trace().snapshot().poll();
         String expectedFailure = switch (failurePoint) {
             case "RPC_THROW" -> "RPC_INITIATION_FAILED";
-            case "CONVERSION_FAILED" -> "CALLBACK_READY";
+            case "CONVERSION_FAILED" -> "CONVERSION_FAILED";
             case "CALLBACK_REJECTED" -> "CALLBACK_FAILED";
             default -> "RPC_COMPLETED";
         };

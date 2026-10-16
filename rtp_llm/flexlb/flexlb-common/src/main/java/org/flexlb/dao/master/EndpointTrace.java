@@ -39,6 +39,8 @@ public final class EndpointTrace {
         CALLBACK_READY,
         CALLBACK_STARTED,
         CONVERSION_STARTED,
+        CONVERSION_COMPLETED,
+        CONVERSION_FAILED,
         SYNC_DISCOVERY,
         SYNC_RETIREMENT,
         SYNC_DISPATCH,
@@ -398,6 +400,7 @@ public final class EndpointTrace {
                     rpcCompletedNanos = now;
                 }
                 case CONVERSION_STARTED -> conversionStartedNanos = now;
+                case CONVERSION_COMPLETED, CONVERSION_FAILED -> conversionEndedNanos = now;
                 case CALLBACK_READY -> {
                     callbackReadyNanos = now;
                     if (conversionStartedNanos != 0L) {conversionEndedNanos = now;}

@@ -13,6 +13,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class WorkerStatusPollLeaseTest {
 
     @Test
+    void transportProgressInvalidatesStaleRetirementAndClaimFencesLateSuccess() {
+        WorkerStatus status = workerStatus();
+        var lease = status.tryBeginStatusPoll(1L);
+        var beforeStart = status.pollHealth();
+        lease.statusRpcStarted(5000L);
+        status.lock.lock();
+        try {
+            org.junit.jupiter.api.Assertions.assertFalse(status.tryClaimHealthRetirement(beforeStart));
+            var beforeSuccess = status.pollHealth();
+            status.recordStatusRpcResult(lease, true, true, null);
+            org.junit.jupiter.api.Assertions.assertFalse(status.tryClaimHealthRetirement(beforeSuccess));
+            var current = status.pollHealth();
+            org.junit.jupiter.api.Assertions.assertTrue(status.tryClaimHealthRetirement(current));
+            status.recordStatusRpcResult(lease, true, true, null);
+            org.junit.jupiter.api.Assertions.assertSame(current, status.pollHealth());
+        } finally { status.lock.unlock(); lease.close(); }
+        assertNull(status.tryBeginStatusPoll(2L));
+    }
+
+    @Test
     void rpcAndCommitProtectionAreBoundedAndLeaseFenced() {
         WorkerStatus status = workerStatus();
         WorkerStatus.PollLease first = status.tryBeginStatusPoll(1L);

@@ -150,8 +150,8 @@ public class EngineLocalView {
             return Collections.emptySet();
         }
 
-        // WorkerDirectory holds this generation's cacheMutationLock until index
-        // cleanup finishes; no cache writer can mutate the detached set meanwhile.
+        // Production retirement removes this view only after global cleanup
+        // succeeds, while holding this generation's cacheMutationLock.
         Set<Long> removed = engineViews.remove(engineIPort);
         // Warn if removal fails
         if (removed == null) {

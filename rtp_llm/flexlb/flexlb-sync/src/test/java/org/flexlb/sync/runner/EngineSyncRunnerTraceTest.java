@@ -43,7 +43,9 @@ class EngineSyncRunnerTraceTest {
         var cache = mock(CacheAwareService.class);
         WorkerStatus retiring = spy(RunnerTestSupport.discovered(
                 RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null));
-        when(retiring.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+        ((java.util.concurrent.atomic.AtomicReference<WorkerStatus.PollHealth>)
+                org.springframework.test.util.ReflectionTestUtils.getField(retiring, "pollHealth"))
+                .set(new WorkerStatus.PollHealth(
                 System.nanoTime() / 1000L - 20_000_000L, 20_000L, 0L, true));
         WorkerStatus healthy = RunnerTestSupport.alive(
                 RoleType.PREFILL, "", "127.0.0.2", 8080, 8081, null);
@@ -69,41 +71,31 @@ class EngineSyncRunnerTraceTest {
         try {
             var firstRun = runners.submit(first);
             assertTrue(cleanupEntered.await(5, TimeUnit.SECONDS));
-            assertNull(healthy.trace().snapshot().statusPoll());
-            verify(statusExecutor, never()).submit(any(Runnable.class));
+            firstRun.get(5, TimeUnit.SECONDS);
+            var healthyPoll = healthy.trace().snapshot().statusPoll();
+            assertNotNull(healthyPoll);
+            assertEquals(11L, healthyPoll.syncCycleId(), "the first cycle must dispatch before cleanup finishes");
+            verify(statusExecutor).submit(any(GrpcWorkerStatusRunner.class));
             var secondRun = runners.submit(second);
             secondRun.get(5, TimeUnit.SECONDS);
-
-            // Reading traces must finish before the first cycle releases its cache cleanup lock.
             var snapshots = reader.submit(() -> List.of(first.trace().snapshot(), second.trace().snapshot()))
                     .get(1, TimeUnit.SECONDS);
             assertEquals(11L, snapshots.getFirst().syncCycleId());
             assertEquals(12L, snapshots.getLast().syncCycleId());
-            assertNotEquals(snapshots.getFirst().thread(), snapshots.getLast().thread());
-            assertEquals(Stage.SYNC_RETIREMENT.name(), snapshots.getFirst().stage());
-            assertEquals(Stage.RUNNER_ENDED.name(), snapshots.getLast().stage());
             for (var snapshot : snapshots) {
+                assertEquals(Stage.RUNNER_ENDED.name(), snapshot.stage());
                 assertNotNull(snapshot.thread());
                 assertTrue(snapshot.runUs() > 0L);
             }
-            TimeUnit.MILLISECONDS.sleep(2L);
-            assertTrue(first.trace().snapshot().runUs() > snapshots.getFirst().runUs());
-            assertEquals(snapshots.getLast().runUs(), second.trace().snapshot().runUs());
+            assertEquals(1L, finishCleanup.getCount(), "cleanup is still blocked after both sync cycles return");
             assertTrue(healthy.pollHealth().reportedAlive());
             assertTrue(healthy.isActiveGeneration());
-            var healthyPoll = healthy.trace().snapshot().statusPoll();
-            assertNotNull(healthyPoll);
-            assertEquals(12L, healthyPoll.syncCycleId(), "the second cycle dispatches before cleanup finishes");
-            verify(statusExecutor).submit(any(GrpcWorkerStatusRunner.class));
-            assertFalse(firstRun.isDone());
-
             finishCleanup.countDown();
-            firstRun.get(5, TimeUnit.SECONDS);
-            assertEquals(Stage.RUNNER_ENDED.name(), first.trace().snapshot().stage());
         } finally {
             finishCleanup.countDown();
             runners.shutdownNow();
             reader.shutdownNow();
+            directory.close();
             assertTrue(runners.awaitTermination(5, TimeUnit.SECONDS));
             assertTrue(reader.awaitTermination(5, TimeUnit.SECONDS));
         }
@@ -112,7 +104,7 @@ class EngineSyncRunnerTraceTest {
     private static EngineSyncRunner runner(WorkerDirectory directory, WorkerAddressService addresses,
                                            ExecutorService statusExecutor, ExecutorService cacheExecutor,
                                            CacheAwareService cache, long cycle) {
-        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor,
+        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor, statusExecutor,
                 mock(EngineHealthReporter.class), mock(EngineGrpcService.class), RoleType.PREFILL,
                 cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false,
                 10_000_000L, 60_000_000L);
