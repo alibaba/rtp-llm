@@ -253,7 +253,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "block_tree_transfer_worker_count"),
         type=int,
         default=4,
-        help="BlockTreeCache 每 rank 共用的 TransferEngine worker 数。",
+        help="BlockTreeCache 每 rank 每个方向的 TransferEngine worker 数；入 GPU 和后台传输各建一个线程池。",
     )
     kv_cache_group.add_argument(
         "--block_tree_business_queue_max_size",
