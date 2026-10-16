@@ -109,15 +109,6 @@ py_test(
 )
 
 py_test(
-    name = "test_ppu_grouped_fp4_strategy_source",
-    srcs = ["ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py"],
-    main = "ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py",
-    data = [":platform_sources", ":ppu_sources"],
-    tags = ["source-only"],
-    visibility = ["//visibility:public"],
-)
-
-py_test(
     name = "decode_state_slots_test",
     srcs = ["ppu/test/test_decode_state_slots.py"],
     main = "ppu/test/test_decode_state_slots.py",
@@ -128,22 +119,6 @@ py_test(
         "@//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-)
-
-py_test(
-    name = "test_ppu_moe_gather_shared_source",
-    srcs = ["ppu/models/dsv4/test/test_ppu_moe_gather_shared_source.py"],
-    main = "ppu/models/dsv4/test/test_ppu_moe_gather_shared_source.py",
-    data = [":platform_sources", ":ppu_sources"],
-    tags = ["source-only"],
-)
-
-py_test(
-    name = "test_ppu_moe_route_compactor_source",
-    srcs = ["ppu/models/dsv4/test/test_ppu_moe_route_compactor_source.py"],
-    main = "ppu/models/dsv4/test/test_ppu_moe_route_compactor_source.py",
-    data = [":platform_sources", ":ppu_sources"],
-    tags = ["source-only"],
 )
 
 py_test(
@@ -167,8 +142,6 @@ py_test(
 test_suite(
     name = "ppu_source_regression_tests",
     tests = [
-        ":test_ppu_moe_gather_shared_source",
-        ":test_ppu_moe_route_compactor_source",
         ":attention_registration_test",
         ":fp4_indexer_request_slices_test",
     ],

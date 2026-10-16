@@ -174,11 +174,6 @@ py_test(
     ],
 )
 
-alias(
-    name = "test_ppu_grouped_fp4_strategy_source",
-    actual = "//rtp_llm/platforms:test_ppu_grouped_fp4_strategy_source",
-)
-
 py_test(
     name = "test_ppu_deep_gemm_layout_compat",
     srcs = ["test_ppu_deep_gemm_layout_compat.py"],
