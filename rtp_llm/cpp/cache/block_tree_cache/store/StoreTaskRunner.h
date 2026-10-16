@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -25,11 +27,20 @@ public:
         enum class Phase {
             CREATED,
             TRANSFERRING,
+            // Claimed exactly once when settlement is scheduled.
             FINISHED
         };
 
-        Task(Tier target, CacheKeysType keys, std::chrono::milliseconds timeout):
-            target_tier(target), cache_keys(std::move(keys)), transfer_task({}, timeout) {}
+        Task(Tier target,
+             CacheKeysType keys,
+             std::chrono::milliseconds timeout,
+             std::vector<std::vector<int>> tokens = {},
+             std::vector<PrefixCachePlanPoint> plan_points = {}):
+            target_tier(target),
+            cache_keys(std::move(keys)),
+            token_segments(std::move(tokens)),
+            plan_points(std::move(plan_points)),
+            transfer_task({}, timeout) {}
 
         const std::vector<TransferDescriptor>& descriptors() const {
             return transfer_task.descriptors();
@@ -37,8 +48,34 @@ public:
 
         Tier          target_tier{Tier::NONE};
         CacheKeysType cache_keys;
+        std::vector<std::vector<int>> token_segments;
+        std::vector<PrefixCachePlanPoint> plan_points;
+        ErrorInfo     error;
         TransferTask  transfer_task;
-        Phase         phase{Phase::CREATED};
+        bool markTransferring() {
+            Phase expected = Phase::CREATED;
+            return phase.compare_exchange_strong(expected,
+                                                 Phase::TRANSFERRING,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire);
+        }
+
+        bool markFinished() {
+            Phase expected = Phase::CREATED;
+            if (phase.compare_exchange_strong(expected,
+                                               Phase::FINISHED,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+                return true;
+            }
+            expected = Phase::TRANSFERRING;
+            return phase.compare_exchange_strong(expected,
+                                                 Phase::FINISHED,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire);
+        }
+
+        std::atomic<Phase> phase{Phase::CREATED};
     };
     using TaskPtr = std::shared_ptr<Task>;
 

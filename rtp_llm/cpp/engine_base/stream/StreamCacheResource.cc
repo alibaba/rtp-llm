@@ -13,8 +13,9 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
+#include <iomanip>
 #include <limits>
-#include <string_view>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 
@@ -41,10 +42,132 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     return topology;
 }
 
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream escaped;
+    escaped << '"';
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"':
+                escaped << "\\\"";
+                break;
+            case '\\':
+                escaped << "\\\\";
+                break;
+            case '\b':
+                escaped << "\\b";
+                break;
+            case '\f':
+                escaped << "\\f";
+                break;
+            case '\n':
+                escaped << "\\n";
+                break;
+            case '\r':
+                escaped << "\\r";
+                break;
+            case '\t':
+                escaped << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<int>(ch) << std::dec;
+                } else {
+                    escaped << static_cast<char>(ch);
+                }
+        }
+    }
+    escaped << '"';
+    return escaped.str();
+}
+
+void appendOptionalCacheKey(std::ostringstream& payload, const std::optional<CacheKeyType>& value) {
+    if (value.has_value()) {
+        payload << '"' << *value << '"';
+    } else {
+        payload << "null";
+    }
+}
+
+const char* prefixMediumStatusName(PrefixCacheMediumStatus status) {
+    switch (status) {
+        case PrefixCacheMediumStatus::NOT_CHECKED:
+            return "not_checked";
+        case PrefixCacheMediumStatus::DISABLED:
+            return "disabled";
+        case PrefixCacheMediumStatus::CHECKED:
+            return "checked";
+    }
+    return "unknown";
+}
+
+void appendOptionalSize(std::ostringstream& payload, const std::optional<size_t>& value) {
+    if (value.has_value()) {
+        payload << *value;
+    } else {
+        payload << "null";
+    }
+}
+
+void appendOptionalBool(std::ostringstream& payload, const std::optional<bool>& value) {
+    if (value.has_value()) {
+        payload << (*value ? "true" : "false");
+    } else {
+        payload << "null";
+    }
+}
+
+void appendAgeSummary(std::ostringstream& payload, const char* name, const BlockTreeAgeSummary& summary) {
+    payload << jsonEscape(name) << ":{\"count\":" << summary.count << ",\"mean_age_us\":";
+    if (summary.mean_age_us.has_value()) {
+        payload << *summary.mean_age_us;
+    } else {
+        payload << "null";
+    }
+    payload << ",\"max_age_us\":";
+    if (summary.max_age_us.has_value()) {
+        payload << *summary.max_age_us;
+    } else {
+        payload << "null";
+    }
+    payload << '}';
+}
+
+void appendTreeSnapshot(std::ostringstream& payload, const BlockTreeObservabilitySnapshot& snapshot) {
+    static constexpr const char* kTierNames[] = {"DEVICE", "HOST", "DISK"};
+    payload << "\"tree\":{\"node_count\":" << snapshot.node_count << ",\"leaf_count\":" << snapshot.leaf_count
+            << ",\"branch_count\":" << snapshot.branch_count << ',';
+    appendAgeSummary(payload, "content", snapshot.content);
+    payload << ',';
+    appendAgeSummary(payload, "recovery", snapshot.recovery);
+    for (size_t tier = 0; tier < snapshot.tier.size(); ++tier) {
+        payload << ',';
+        appendAgeSummary(payload, kTierNames[tier], snapshot.tier[tier]);
+    }
+    payload << '}';
+}
+
+const char* remoteQueryStatusName(PrefixCacheRemoteQueryStatus status) {
+    switch (status) {
+        case PrefixCacheRemoteQueryStatus::NOT_QUERIED:
+            return "not_queried";
+        case PrefixCacheRemoteQueryStatus::HIT:
+            return "hit";
+        case PrefixCacheRemoteQueryStatus::MISS:
+            return "miss";
+        case PrefixCacheRemoteQueryStatus::ERROR:
+            return "error";
+        case PrefixCacheRemoteQueryStatus::UNSET:
+            break;
+    }
+    return "unset";
+}
+
 std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const BatchKVCacheResource& resource,
-                                                                          const CompleteTokenIds&     tokens,
+                                                                          CompleteTokenIds&           tokens,
                                                                           int  incr_seq_len_override,
-                                                                          bool capture_theory_keys) {
+                                                                          bool capture_theory_keys,
+                                                                          bool capture_tokens) {
     auto snapshot                    = std::make_shared<MallocInfo::RequestLayout>();
     snapshot->match_keys             = resource.cacheKeys(0);
     snapshot->request_seq_len        = tokens.seqLength();
@@ -52,6 +175,9 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
     snapshot->request_common_seq_len = tokens.commonSeqLength();
     snapshot->request_total_seq_len  = tokens.totalSeqLength();
     snapshot->request_reserve_step   = tokens.getReserveStep();
+    if (capture_tokens) {
+        snapshot->token_ids = tokens.completeTokenIdsVec(0);
+    }
     if (capture_theory_keys) {
         std::vector<CacheKeysType> keys_by_batch;
         keys_by_batch.reserve(resource.batchSize());
@@ -69,6 +195,14 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
 
 }  // namespace
 
+bool StreamCacheResource::prefixObservationEnabled() const {
+    return resource_context_.cache_manager != nullptr
+           && resource_context_.cache_manager->blockTreeCache() != nullptr
+           && resource_context_.cache_manager->blockTreeCache()->prefixObservabilityEnabled()
+           && resource_context_.role_type == RoleType::PREFILL
+           && resource_context_.cache_manager->isAllocatorOwner();
+}
+
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
@@ -83,6 +217,20 @@ void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
+    }
+    if (allocator_load_context_) {
+        const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+        if (load_context != nullptr) {
+            remote_observation_ = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+        }
+        remote_observation_.effective = false;
+    }
+    if (prefixObservationEnabled() && !prefix_summary_emitted_) {
+        const char* log_status = prefixObservationStatus();
+        if (stream_->statusInfoWithoutLock().hasError() && prefix_plan_state_ == PrefixCachePlanState::NOT_FORMED) {
+            prefix_plan_state_ = PrefixCachePlanState::TERMINAL_UNFORMED;
+        }
+        emitPrefixObservationSummary(log_status);
     }
     // Check against double release
     if (resource_released_) {
@@ -107,9 +255,6 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     if (allocator_load_context_) {
-        // releaseResource also runs under GenerateStream's status mutex.
-        const auto status = stream_->statusInfoWithoutLock();
-        finishCacheReuseAttempt(!status.hasError() || status.code() == ErrorCode::CANCELLED ? "cancelled" : "failed");
         if (!resource_context_.cache_manager->abortPendingLoad(allocator_load_context_)) {
             RTP_LLM_LOG_DEBUG("allocator load was already committed or completed before release");
         }
@@ -146,6 +291,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int total_blocks = curBlocksNum();
     RTP_LLM_CHECK(nums == total_blocks);
 
+    if (total_blocks == 0 && prefixObservationEnabled() && !stream_->hasErrorWithoutLock()
+        && stream_->getStatus() == StreamState::FINISHED) {
+        emitPrefixPlanClosed("zero_block");
+    }
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
             const Tier target_tier = storeTarget();
@@ -155,6 +304,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                insert_info.prefix_plan_state = &prefix_plan_state_;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -164,6 +314,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               reuseCache(),
                               stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
+            if (!stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+                emitPrefixPlanClosed(reuseCache() ? "store_disabled" : "reuse_disabled");
+            }
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -220,6 +373,9 @@ absl::Status StreamCacheResource::initKVBlock() {
         resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
+    if (is_first_malloc && prefixObservationEnabled()) {
+        remote_observation_ = PrefixCacheRemoteObservation{};
+    }
 
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
@@ -242,13 +398,12 @@ absl::Status StreamCacheResource::initKVBlock() {
                                  *malloc_info.complete_token_ids,
                                  -1,
                                  is_first_malloc && malloc_info.cache_keys_initialized_now
-                                     && resource_context_.cache_manager->needsPrefillHitSnapshot());
+                                     && resource_context_.cache_manager->needsPrefillHitSnapshot(),
+                                 prefixObservationEnabled());
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
-    cache_reuse_attempt_pending_ = true;
     recordCacheReuseMallocResult(result);
     if (!result.success) {
-        finishCacheReuseAttempt("failed");
         malloc_failed_times_++;
         switch (result.status) {
             case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
@@ -271,8 +426,8 @@ absl::Status StreamCacheResource::initKVBlock() {
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
-    if (!allocator_load_context_) {
-        finishCacheReuseAttempt("success");
+    if (!allocator_load_context_ && prefixObservationEnabled()) {
+        remote_observation_.effective = false;
     }
     return absl::OkStatus();
 }
@@ -288,10 +443,10 @@ void StreamCacheResource::clearCacheReuseState() {
 }
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+    if (result.match_observation.has_value()) {
+        prefix_match_observation_ = result.match_observation;
+    }
     cache_reuse_metrics_.block_aligned_input_length = result.block_aligned_input_length;
-    cache_reuse_metrics_.query_length               = result.query_length;
-    cache_reuse_metrics_.full_key_hit_length        = result.full_key_hit_length;
-    cache_reuse_metrics_.joint_valid_hit_length      = result.joint_valid_hit_length;
     cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
     malloc_begin_time_us_                           = result.malloc_begin_time_us;
@@ -324,40 +479,20 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
     }
 }
 
-void StreamCacheResource::finishCacheReuseAttempt(const char* outcome) {
-    if (!cache_reuse_attempt_pending_) {
-        return;
-    }
-    cache_reuse_attempt_pending_ = false;
-    cache_reuse_metrics_.attempt_outcome = outcome;
-    cache_reuse_metrics_.attempt_retried = malloc_failed_times_ > 0;
-    cache_reuse_metrics_.restored_length =
-        std::string_view(outcome) == "success" ? stream_->initialReuseLength() : 0;
-    // TP0 owns the logical allocation attempt. CP shards share the global
-    // query endpoint, so reporting from every rank would multiply samples.
-    if (!stream_->metrics_reporter_ || !resource_context_.cache_manager
-        || !resource_context_.cache_manager->isAllocatorOwner()) {
-        return;
-    }
-    RtpLLMCacheReuseMetricsCollector attempt;
-    attempt.query_length          = cache_reuse_metrics_.query_length;
-    attempt.full_key_hit_length   = cache_reuse_metrics_.full_key_hit_length;
-    attempt.joint_valid_hit_length = cache_reuse_metrics_.joint_valid_hit_length;
-    attempt.restored_length       = cache_reuse_metrics_.restored_length;
-    attempt.attempt_outcome       = outcome;
-    attempt.attempt_retried       = cache_reuse_metrics_.attempt_retried;
-    attempt.load_attempted        = cache_reuse_metrics_.load_attempted;
-    attempt.load_success          = cache_reuse_metrics_.load_success;
-    attempt.report_attempt_metrics = true;
-    kmonitor::MetricsTags tags;
-    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &attempt);
-}
-
 absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const bool load_success  = allocator_load_context_->success();
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    if (prefixObservationEnabled() && load_context != nullptr) {
+        remote_observation_ = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+        const int64_t input_length = stream_->inputLength();
+        if (remote_observation_.candidate_pos.has_value() && input_length > 0) {
+            remote_observation_.candidate_pos = std::min(*remote_observation_.candidate_pos,
+                                                         static_cast<size_t>(input_length - 1));
+        }
+    }
+    remote_observation_.effective = load_success && stream_->remoteReuseLength() > 0;
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         const size_t total = load_context->matchedBlocks();
@@ -399,12 +534,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     allocator_load_context_.reset();
 
-    // A PREFILL load failure may legally fall back to its already delivered
-    // DEVICE prefix; use the returned status to classify the cache attempt.
-    const bool cache_attempt_success = load_success ||
-        (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE);
-    finishCacheReuseAttempt(cache_attempt_success ? "success" : "failed");
-
     if (load_success) {
         return absl::OkStatus();
     }
@@ -425,6 +554,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
+    if (prefixObservationEnabled() && (!allocator_load_context_ || allocator_load_context_->done())) {
+        emitPrefixObservationSummary(prefixObservationStatus());
+    }
     if (resource_context_.cache_manager == nullptr || stream_->metrics_reporter_ == nullptr || !reuseCache()) {
         return;
     }
@@ -436,10 +568,137 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
     cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
     resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
-    cache_reuse_metrics_.report_reuse_metrics  = true;
+    cache_reuse_metrics_.report_reuse_metrics = true;
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);
+}
+
+std::string StreamCacheResource::prefixObservationSummaryPayload(const char* status) const {
+    std::ostringstream payload;
+    const int64_t input_length = stream_->inputLength();
+    payload << "{\"kind\":\"request\",\"schema_version\":1,\"request_id\":" << stream_->streamId()
+            << ",\"status\":" << jsonEscape(status) << ",\"input_tokens\":" << input_length << ",\"instance\":";
+    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+        payload << jsonEscape(resource_context_.cache_manager->blockTreeCache()->prefixObservabilityInstance());
+    } else {
+        payload << "null";
+    }
+    payload << ",\"observation_time_us\":" << currentTimeUs() << ",\"match\":";
+    if (prefix_match_observation_.has_value()) {
+        const auto& match = *prefix_match_observation_;
+        payload << "{\"content_pos\":";
+        appendOptionalSize(payload, match.content_pos);
+        payload << ",\"content_key\":";
+        appendOptionalCacheKey(payload, match.content_key);
+        payload << ",\"content_node_offset\":" << match.content_node_offset
+                << ",\"content_partial\":" << (match.content_partial ? "true" : "false")
+                << ",\"local_valid_pos\":";
+        appendOptionalSize(payload, match.local_valid_pos);
+        payload << ",\"local_valid_key\":";
+        appendOptionalCacheKey(payload, match.local_valid_key);
+        payload << ",\"match_time_us\":" << match.match_time_us << ",\"media_status\":{";
+        for (size_t tier = 0; tier < match.medium_status.size(); ++tier) {
+            if (tier != 0) {
+                payload << ',';
+            }
+            payload << jsonEscape(tier == 0 ? "DEVICE" : (tier == 1 ? "HOST" : "DISK")) << ':'
+                    << jsonEscape(prefixMediumStatusName(match.medium_status[tier]));
+        }
+        payload << "},\"groups\":[";
+        for (size_t index = 0; index < match.groups.size(); ++index) {
+            const auto& group = match.groups[index];
+            if (index != 0) {
+                payload << ',';
+            }
+            payload << "{\"group_set_id\":" << group.group_set_id << ",\"member_tags\":[";
+            for (size_t tag = 0; tag < group.member_tags.size(); ++tag) {
+                if (tag != 0) {
+                    payload << ',';
+                }
+                payload << jsonEscape(group.member_tags[tag]);
+            }
+            payload << "],\"DEVICE\":";
+            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::DEVICE)]);
+            payload << ",\"DEVICE_key\":";
+            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::DEVICE)]);
+            payload << ",\"HOST\":";
+            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::HOST)]);
+            payload << ",\"HOST_key\":";
+            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::HOST)]);
+            payload << ",\"DISK\":";
+            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::DISK)]);
+            payload << ",\"DISK_key\":";
+            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::DISK)]);
+            payload << '}';
+        }
+        payload << "]}";
+    } else {
+        payload << "null";
+    }
+
+    payload << ",\"remote\":{\"query_status\":" << jsonEscape(remoteQueryStatusName(remote_observation_.query_status))
+            << ",\"candidate_pos\":";
+    appendOptionalSize(payload, remote_observation_.candidate_pos);
+    payload << ",\"effective\":";
+    appendOptionalBool(payload, remote_observation_.effective);
+    payload << "},\"used_pos\":";
+    if (absl::string_view(status) == "ready") {
+        const int64_t used = stream_->initialReuseLength();
+        payload << (used >= 0 ? static_cast<size_t>(used) : 0);
+    } else {
+        payload << "null";
+    }
+    PrefixCachePlanState plan_state = prefix_plan_state_;
+    if (plan_state == PrefixCachePlanState::NOT_FORMED && absl::string_view(status) != "ready") {
+        plan_state = PrefixCachePlanState::TERMINAL_UNFORMED;
+    }
+    payload << ",\"plan_state\":" << jsonEscape(prefixCachePlanStateName(plan_state)) << ',';
+    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+        appendTreeSnapshot(payload, resource_context_.cache_manager->blockTreeCache()->observabilitySnapshot());
+    } else {
+        payload << "\"tree\":null";
+    }
+    payload << ",\"tree_time_us\":" << currentTimeUs() << '}';
+    return payload.str();
+}
+
+const char* StreamCacheResource::prefixObservationStatus() const {
+    const ErrorInfo status = stream_->statusInfoWithoutLock();
+    if (status.hasError()) {
+        return status.code() == ErrorCode::CANCELLED ? "cancelled" : "failed";
+    }
+    if (stream_->getStatus() == StreamState::FINISHED) {
+        return "ready";
+    }
+    return "terminal_unformed";
+}
+
+void StreamCacheResource::emitPrefixObservationSummary(const char* status) {
+    if (prefix_summary_emitted_ || !prefixObservationEnabled()) {
+        return;
+    }
+    const std::string payload = prefixObservationSummaryPayload(status);
+    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.c_str());
+    prefix_summary_emitted_ = true;
+}
+
+void StreamCacheResource::emitPrefixPlanClosed(const char* reason) {
+    if (prefix_plan_event_emitted_ || !prefixObservationEnabled()) {
+        return;
+    }
+    std::ostringstream payload;
+    payload << "{\"kind\":\"plan\",\"schema_version\":1,\"instance\":";
+    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+        payload << jsonEscape(resource_context_.cache_manager->blockTreeCache()->prefixObservabilityInstance());
+    } else {
+        payload << "null";
+    }
+    payload << ",\"state\":\"formed\",\"formed_time_us\":" << currentTimeUs() << ",\"points\":[],\"reason\":"
+            << jsonEscape(reason) << '}';
+    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
+    prefix_plan_state_       = PrefixCachePlanState::FORMED;
+    prefix_plan_event_emitted_ = true;
 }
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {
@@ -494,7 +753,8 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
                                  *malloc_info.complete_token_ids,
                                  seq_len_override,
                                  batch_kv_cache_resource_->curBlocksNum() == 0 && malloc_info.cache_keys_initialized_now
-                                     && resource_context_.cache_manager->needsPrefillHitSnapshot());
+                                     && resource_context_.cache_manager->needsPrefillHitSnapshot(),
+                                 prefixObservationEnabled());
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -60,6 +61,70 @@ struct GroupBlockIdPair {
 static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
               "GroupBlockIdPair must match the three-column int32 tensor layout");
 
+enum class PrefixCacheMediumStatus : uint8_t {
+    NOT_CHECKED = 0,
+    DISABLED,
+    CHECKED,
+};
+
+struct PrefixCacheGroupObservation {
+    size_t                                 group_set_id{0};
+    std::vector<std::string>              member_tags;
+    std::array<std::optional<size_t>, 3>  max_pos;
+    std::array<std::optional<CacheKeyType>, 3> max_key;
+};
+
+struct PrefixCachePlanPoint {
+    size_t       index{0};
+    CacheKeyType key{0};
+    size_t       pos{0};
+};
+
+enum class PrefixCachePlanState : uint8_t {
+    NOT_FORMED = 0,
+    FORMED,
+    TERMINAL_UNFORMED,
+};
+
+inline const char* prefixCachePlanStateName(PrefixCachePlanState state) {
+    switch (state) {
+        case PrefixCachePlanState::FORMED:
+            return "formed";
+        case PrefixCachePlanState::TERMINAL_UNFORMED:
+            return "terminal_unformed";
+        case PrefixCachePlanState::NOT_FORMED:
+            break;
+    }
+    return "not_formed";
+}
+
+enum class PrefixCacheRemoteQueryStatus : uint8_t {
+    UNSET = 0,
+    NOT_QUERIED,
+    HIT,
+    MISS,
+    ERROR,
+};
+
+struct PrefixCacheRemoteObservation {
+    PrefixCacheRemoteQueryStatus query_status{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
+    std::optional<size_t>        candidate_pos;
+    std::optional<bool>          effective;
+};
+
+struct PrefixCacheMatchObservation {
+    int64_t                                input_tokens{0};
+    std::optional<size_t>                  content_pos;
+    std::optional<CacheKeyType>            content_key;
+    size_t                                 content_node_offset{0};
+    bool                                   content_partial{false};
+    std::optional<size_t>                  local_valid_pos;
+    std::optional<CacheKeyType>            local_valid_key;
+    std::array<PrefixCacheMediumStatus, 3> medium_status;
+    std::vector<PrefixCacheGroupObservation> groups;
+    int64_t                                match_time_us{0};
+};
+
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
@@ -98,6 +163,9 @@ struct MallocInfo {
         // drops an unaligned final key in every batch before CP sampling.
         // An empty vector is still a valid snapshot, hence optional.
         std::optional<std::vector<CacheKeysType>> theory_window_keys;
+        // Owned full-input token snapshot, populated only when complete prefix
+        // observability is enabled. Empty means content matching is unformed.
+        std::vector<int> token_ids;
     };
     std::shared_ptr<const RequestLayout> request_layout;
 
@@ -149,13 +217,11 @@ struct MallocResult {
     int64_t malloc_begin_time_us       = 0;
     int64_t load_prepare_latency_us    = 0;
     int64_t block_aligned_input_length = 0;
-    // Immutable per-attempt endpoints: full global query N, existing complete
-    // key path H, and the prefix still valid after the joint resource check.
-    // The latter is diagnostic only; successful delivery determines R.
-    int64_t query_length           = 0;
-    int64_t full_key_hit_length    = 0;
-    int64_t joint_valid_hit_length = 0;
-    bool    load_attempted         = false;
+    bool    load_attempted             = false;
+
+    // Diagnostic-only value snapshot; absence means the match observation is
+    // not formed rather than a zero endpoint.
+    std::optional<PrefixCacheMatchObservation> match_observation;
 };
 
 struct FreeInfo {
@@ -170,6 +236,9 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    // Optional request-owned plan-state sink. The cache writes only the state;
+    // plan points remain owned by the store task.
+    PrefixCachePlanState*   prefix_plan_state{nullptr};
 };
 
 }  // namespace rtp_llm

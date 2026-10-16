@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1158,12 +1159,14 @@ protected:
         resetGroup();
     }
 
-    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr, BlockTreeDiskBlockPoolPtr disk_pool = nullptr) {
+    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr,
+                    BlockTreeDiskBlockPoolPtr disk_pool      = nullptr,
+                    bool                      enable_observability = false) {
         group_ = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{device_pool_}, std::move(host_pool), std::move(disk_pool));
         initializeFullGroup(group_, device_pool_);
-        groups_  = {group_};
-        tree_    = std::make_unique<BlockTree>(groups_);
+        groups_ = {group_};
+        tree_   = std::make_unique<BlockTree>(groups_, 1, enable_observability);
         evictor_ = evictor_runtime_.make(tree_.get());
     }
 
@@ -1311,6 +1314,70 @@ TEST_F(BlockTreeEvictorTest, PendingReleaseSettlementIsTransactionalAcrossDevice
     EXPECT_EQ(evictor_->pending_release_counts_.count(second_device_pool.get()), 0u);
 
     evictor_->pending_release_counts_.clear();
+}
+
+TEST_F(BlockTreeEvictorTest, EvictionMutationBatchDoesNotRestartDependencyInterval) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool, nullptr, /*enable_observability=*/true);
+
+    const BlockIdxType source_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(source_block));
+    auto      result = insert({100}, {{makeResource(Tier::HOST, source_block)}});
+    TreeNode* node   = insertedNode(result);
+    ASSERT_NE(node, nullptr);
+    const int64_t initial_recovery_since_us = node->observation.recovery_since_us;
+    ASSERT_GE(initial_recovery_since_us, 0);
+
+    {
+        BlockTree::ObservationBatch observation_batch(*tree_);
+        node->group_set_resources[0].transfer_detached = true;
+        tree_->refreshPublishedState(node, true, "eviction");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        node->group_set_resources[0].transfer_detached = false;
+        tree_->refreshPublishedState(node, true, "eviction");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, initial_recovery_since_us);
+    EXPECT_EQ(tree_->observabilitySnapshot().recovery.count, 1u);
+
+    {
+        BlockTree::ObservationBatch observation_batch(*tree_);
+        node->group_set_resources[0].transfer_detached = true;
+        tree_->refreshPublishedState(node, true, "eviction");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, -1);
+    EXPECT_EQ(tree_->observabilitySnapshot().recovery.count, 0u);
+    node->group_set_resources[0].transfer_detached = false;
+}
+
+TEST_F(BlockTreeEvictorTest, CompleteEvictObservesFinalTierStateAfterBatch) {
+    auto host_pool = makePinnedHostPool(1);
+    auto disk_pool = makeTestDiskPool(1, "eviction_observation_disk");
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(host_pool, disk_pool, /*enable_observability=*/true);
+
+    const BlockIdxType source_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const BlockIdxType target_block = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICTION);
+    ASSERT_FALSE(isNullBlockIdx(source_block));
+    ASSERT_FALSE(isNullBlockIdx(target_block));
+
+    auto      result = insert({100}, {{makeResource(Tier::HOST, source_block)}});
+    TreeNode* node   = insertedNode(result);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(tree_->observabilitySnapshot().tier[static_cast<size_t>(Tier::HOST)].count, 1u);
+
+    TransferDescriptor desc{node, /*group_set_id=*/0, /*path_index=*/0, Tier::HOST, Tier::DISK, {source_block}};
+    desc.target_blocks = {target_block};
+    evictor_->reserveSource({desc});
+    evictor_->completeEvict({desc});
+
+    EXPECT_EQ(node->observation.tier_since_us[static_cast<size_t>(Tier::HOST)], -1);
+    EXPECT_GE(node->observation.tier_since_us[static_cast<size_t>(Tier::DISK)], 0);
+    const auto snapshot = tree_->observabilitySnapshot();
+    EXPECT_EQ(snapshot.tier[static_cast<size_t>(Tier::HOST)].count, 0u);
+    EXPECT_EQ(snapshot.tier[static_cast<size_t>(Tier::DISK)].count, 1u);
+    EXPECT_EQ(snapshot.recovery.count, 1u);
 }
 
 TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {

@@ -36,7 +36,6 @@
 #include <memory>
 #include <limits>
 #include <thread>
-#include <utility>
 
 using namespace std;
 
@@ -246,6 +245,23 @@ protected:
         prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
     }
 
+    void preparePrefixObservationResource(bool     reuse_cache = false,
+                                           RoleType role_type   = RoleType::PREFILL,
+                                           int      tp_rank     = 0) {
+        autil::EnvUtil::setEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", "true");
+        prepareResourceWithCacheConfig(init_config(),
+                                       {1, 2, 3, 4, 5, 6},
+                                       reuse_cache,
+                                       role_type,
+                                       KVCacheConfig{},
+                                       tp_rank);
+        autil::EnvUtil::unsetEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY");
+    }
+
+    void enablePrefixObservation() {
+        cache_manager_->blockTreeCache()->config_.enable_prefix_cache_observability = true;
+    }
+
     void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
                                               bool                    reuse_cache = false,
                                               RoleType                role_type   = RoleType::PDFUSION) {
@@ -263,9 +279,20 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
-        cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+                                        const KVCacheConfig&    kv_cache_config = {},
+                                        int                     tp_rank         = 0) {
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role_type;
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_rank = tp_rank;
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          parallelism_config,
+                                                          RuntimeConfig{},
+                                                          SpeculativeExecutionConfig{},
+                                                          pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
@@ -296,9 +323,11 @@ protected:
     prepareStorageBackendResource(bool block_matches,
                                   bool seed_host = false,
                                   RoleType role_type = RoleType::PDFUSION,
-                                  int cp_size = 0) {
+                                  int cp_size = 0,
+                                  bool enable_prefix_observability = false) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
+        kv_cache_config.enable_prefix_cache_observability = enable_prefix_observability;
         kv_cache_config.enable_memory_cache   = seed_host;
         kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
         KVCacheConfig manager_kv_cache_config = kv_cache_config;
@@ -1040,125 +1069,6 @@ TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength
     EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
-TEST_F(StreamCacheResourceTest, CacheReuseAttemptsKeepFrozenEndpointsAcrossRetry) {
-    prepareResource(/*reuse_cache=*/true);
-    auto& resource = stream_->streamCacheResource();
-    kmonitor::MetricsTags tags;
-    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    stream_->setMetricsReporter(reporter);
-    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
-    cache_manager_->coordinator_manager_ = allocator;
-
-    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
-            EXPECT_EQ(info.request_layout->request_seq_len, 6);
-            MallocResult result{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-            result.query_length        = info.request_layout->request_seq_len;
-            result.full_key_hit_length = 4;
-            return result;
-        }))
-        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
-            MallocResult result{true, 0};
-            result.query_length        = info.request_layout->request_seq_len;
-            result.full_key_hit_length = 0;
-            return result;
-        }));
-    EXPECT_CALL(*allocator, incrMalloc(testing::_))
-        .WillOnce(testing::Return(MallocResult{true, 0}));
-
-    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
-    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
-    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 4);
-    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 0);
-    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "failed");
-    EXPECT_FALSE(resource.cache_reuse_metrics_.attempt_retried);
-
-    ASSERT_TRUE(resource.initKVBlock().ok());
-    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
-    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 0);
-    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 0);
-    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "success");
-    EXPECT_TRUE(resource.cache_reuse_metrics_.attempt_retried);
-
-    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
-    ASSERT_NE(metrics, nullptr);
-    for (const auto& [outcome, retried] :
-         {std::pair<const char*, const char*>{"failed", "false"}, {"success", "true"}}) {
-        kmonitor::MetricsTags attempt_tags;
-        attempt_tags.AddTag("outcome", outcome);
-        attempt_tags.AddTag("retried", retried);
-        auto* series = metrics->attempt_qps_metric->DeclareMetric(&attempt_tags);
-        ASSERT_NE(series, nullptr);
-        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
-        series->Snapshot(&record, 1000);
-        EXPECT_TRUE(metrics->attempt_qps_metric->UndeclareMetric(series));
-        ASSERT_EQ(record.Values().size(), 1u);
-        EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), 1);
-    }
-}
-
-TEST(CacheReuseMetricsTest, FullKeyGapIsCountedOnceWithBothObservedReasons) {
-    kmonitor::MetricsTags tags;
-    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    RtpLLMCacheReuseMetricsCollector collector;
-    collector.report_attempt_metrics = true;
-    collector.attempt_outcome        = "success";
-    collector.query_length           = 8;
-    collector.full_key_hit_length    = 6;
-    collector.joint_valid_hit_length = 4;
-    collector.restored_length        = 2;
-    collector.load_attempted         = true;
-    collector.load_success           = false;
-    reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
-
-    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
-    ASSERT_NE(metrics, nullptr);
-    auto* gap = metrics->full_key_gap_length_metric->DeclareMetric(&tags);
-    ASSERT_NE(gap, nullptr);
-    kmonitor::MetricsRecord gap_record(nullptr, nullptr, 0);
-    gap->Snapshot(&gap_record, 1000);
-    EXPECT_TRUE(metrics->full_key_gap_length_metric->UndeclareMetric(gap));
-    ASSERT_EQ(gap_record.Values().size(), 1u);
-    EXPECT_DOUBLE_EQ(std::stod(gap_record.Values().front()->Value()), 4);
-
-    for (const char* reason : {"joint_resource_invalid", "load_failed"}) {
-        kmonitor::MetricsTags reason_tags;
-        reason_tags.AddTag("reason", reason);
-        auto* series = metrics->full_key_gap_reason_qps_metric->DeclareMetric(&reason_tags);
-        ASSERT_NE(series, nullptr);
-        kmonitor::MetricsRecord reason_record(nullptr, nullptr, 0);
-        series->Snapshot(&reason_record, 1000);
-        EXPECT_TRUE(metrics->full_key_gap_reason_qps_metric->UndeclareMetric(series));
-        ASSERT_EQ(reason_record.Values().size(), 1u);
-        EXPECT_DOUBLE_EQ(std::stod(reason_record.Values().front()->Value()), 1);
-    }
-}
-
-TEST_F(StreamCacheResourceTest, CacheReuseEndpointsSurviveIncrementalAllocationFailure) {
-    prepareResource(/*reuse_cache=*/true);
-    auto& resource = stream_->streamCacheResource();
-    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
-    cache_manager_->coordinator_manager_ = allocator;
-    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Invoke([](const MallocInfo& info) {
-            MallocResult result{true, 0};
-            result.query_length           = info.request_layout->request_seq_len;
-            result.full_key_hit_length    = 4;
-            result.joint_valid_hit_length = 2;
-            return result;
-        }));
-    EXPECT_CALL(*allocator, incrMalloc(testing::_))
-        .WillOnce(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
-
-    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
-    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 4);
-    EXPECT_EQ(resource.cache_reuse_metrics_.joint_valid_hit_length, 2);
-    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "failed");
-}
-
 TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     prepareResource(/*reuse_cache=*/true);
     StreamCacheResource& resource             = stream_->streamCacheResource();
@@ -1279,9 +1189,7 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     result.match_end_time_us    = malloc_begin_time_us;
     result.malloc_begin_time_us = malloc_begin_time_us;
     result.load_attempted       = true;
-    result.query_length         = 6;
     resource.recordCacheReuseMallocResult(result);
-    resource.cache_reuse_attempt_pending_ = true;
     resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false, false);
 
     resource.releaseResource();
@@ -1289,9 +1197,149 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_wait_latency);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
-    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
-    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "cancelled");
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRespectsDefaultAndRoleBoundaries) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& default_resource = stream_->streamCacheResource();
+    default_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(default_resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& decode_resource = stream_->streamCacheResource();
+    decode_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(decode_resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& pdfusion_resource = stream_->streamCacheResource();
+    pdfusion_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(pdfusion_resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRequiresAllocatorOwner) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL, /*tp_rank=*/1);
+    auto& resource = stream_->streamCacheResource();
+
+    resource.reportCacheReuseMetrics();
+
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationStatusDerivesTerminalStreamStatus) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+
+    // A still-running stream has no final reuse result yet.
+    stream_->generate_status_->status = StreamState::RUNNING;
+    EXPECT_STREQ(resource.prefixObservationStatus(), "terminal_unformed");
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    EXPECT_STREQ(resource.prefixObservationStatus(), "ready");
+
+    // Stream errors take precedence over the state machine value.
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+    EXPECT_STREQ(resource.prefixObservationStatus(), "cancelled");
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationStatusDerivesNonCancelledError) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::FINISHED;
+
+    stream_->reportError(ErrorCode::EXECUTION_EXCEPTION, "allocator load failed");
+    EXPECT_STREQ(resource.prefixObservationStatus(), "failed");
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationMetricsSummaryUsesDerivedStatus) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::RUNNING;
+
+    // reportCacheReuseMetrics must not assume a ready summary before the stream is terminal.
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    StreamCacheResource& cancelled_resource = stream_->streamCacheResource();
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+
+    cancelled_resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(cancelled_resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationEmitsOneRequestSummary) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+
+    const std::string payload = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(payload.find("\"kind\":\"request\""), std::string::npos);
+    EXPECT_NE(payload.find("\"status\":\"ready\""), std::string::npos);
+    EXPECT_NE(payload.find("\"instance\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"observation_time_us\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"plan_state\":\"not_formed\""), std::string::npos);
+
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationTerminalSummaryKeepsUnformedFieldsNull) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+
+    const std::string payload = resource.prefixObservationSummaryPayload("cancelled");
+    EXPECT_NE(payload.find("\"status\":\"cancelled\""), std::string::npos);
+    EXPECT_NE(payload.find("\"match\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"plan_state\":\"terminal_unformed\""), std::string::npos);
+
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+    resource.releaseResource();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    EXPECT_FALSE(resource.remote_observation_.effective.has_value());
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationClosesEmptyPlanWhenStoreIsDisabled) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::FINISHED;
+
+    resource.tryReleaseKVBlock(0);
+    EXPECT_TRUE(resource.prefix_plan_event_emitted_);
+    const std::string payload = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(payload.find("\"plan_state\":\"formed\""), std::string::npos);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRemoteReadFallbackIsNotEffective) {
+    auto backend = prepareStorageBackendResource(/*block_matches=*/false,
+                                                 /*seed_host=*/false,
+                                                 RoleType::PREFILL,
+                                                 /*cp_size=*/0,
+                                                 /*enable_prefix_observability=*/true);
+    auto& resource = stream_->streamCacheResource();
+    backend->blockReads();
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    backend->waitForReads(1);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+
+    resource.releaseResource();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
+
+    backend->releaseReads();
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
 }
 
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFalse) {
@@ -1486,16 +1534,10 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Invoke([&](const MallocInfo& info) {
-            MallocResult result{true, /*reuse_len=*/2, 0, load_context};
-            result.query_length        = info.request_layout->request_seq_len;
-            result.full_key_hit_length = 6;
-            return result;
-        }));
+        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
     ASSERT_TRUE(resource.initKVBlock().ok());
-    EXPECT_TRUE(resource.cache_reuse_attempt_pending_);
     EXPECT_EQ(stream_->reuseLength(), 2);
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
@@ -1503,13 +1545,6 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_TRUE(load_context->completeTransfers(1, true));
     EXPECT_TRUE(load_context->completeTransfers(1, true));
     ASSERT_TRUE(resource.loadCacheDone());
-    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
-    EXPECT_EQ(resource.cache_reuse_metrics_.query_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.full_key_hit_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.restored_length, 6);
-    EXPECT_EQ(resource.cache_reuse_metrics_.attempt_outcome, "success");
-    EXPECT_TRUE(resource.loadCacheDone());
-    EXPECT_FALSE(resource.cache_reuse_attempt_pending_);
     EXPECT_EQ(stream_->reuseLength(), 6);
     EXPECT_EQ(stream_->initialReuseLength(), 6);
     EXPECT_EQ(stream_->localReuseLength(), 6);

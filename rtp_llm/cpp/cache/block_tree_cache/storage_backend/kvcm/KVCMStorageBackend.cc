@@ -156,13 +156,13 @@ public:
         // block. Dropping another key here would exclude two tail blocks.
         const CacheKeysType& keys = *request.keys;
         if (request.local_matched_blocks_num >= keys.size()) {
-            return {request.local_matched_blocks_num, nullptr};
+            return {request.local_matched_blocks_num, nullptr, PrefixCacheRemoteQueryStatus::NOT_QUERIED};
         }
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         auto [success, locations] = client_wrapper_->match(
             "", trace_id, kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, request.local_matched_blocks_num, {});
         if (!success) {
-            return {request.local_matched_blocks_num, nullptr};
+            return {request.local_matched_blocks_num, nullptr, PrefixCacheRemoteQueryStatus::ERROR};
         }
         kvcm::LocationsView locations_view;
         if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
@@ -173,7 +173,9 @@ public:
         }
         auto meta       = std::make_shared<KVCMMatchMeta>();
         meta->locations = std::move(locations);
-        return {request.local_matched_blocks_num + locations_view.size(), std::move(meta)};
+        return {request.local_matched_blocks_num + locations_view.size(),
+                std::move(meta),
+                locations_view.empty() ? PrefixCacheRemoteQueryStatus::MISS : PrefixCacheRemoteQueryStatus::HIT};
     }
 
     void read(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) {

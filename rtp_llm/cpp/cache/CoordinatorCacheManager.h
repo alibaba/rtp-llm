@@ -225,8 +225,7 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
-        size_t                         full_key_hit_blocks   = 0;
-        size_t                         joint_valid_blocks    = 0;
+        std::optional<PrefixCacheMatchObservation> match_observation;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;
@@ -238,7 +237,8 @@ protected:
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
                                                      BatchKVCacheResource&                kv_resource,
                                                      PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
+                                                     const std::function<bool(size_t)>&   valid_prefix = {},
+                                                     const std::vector<int>*              request_tokens = nullptr);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -270,10 +270,10 @@ protected:
     std::vector<int>                       full_group_ids_;
     std::vector<int>                       linear_group_ids_;
     std::vector<int>                       swa_group_ids_;
-    MallocStatus                           evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
-                                                                    size_t                                reserve_blocks,
-                                                                    InitCapacityMode                      mode,
-                                                                    const std::vector<RequiredPositions>* required_positions) const;
+    MallocStatus evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
+                                          size_t                                reserve_blocks,
+                                          InitCapacityMode                      mode,
+                                          const std::vector<RequiredPositions>* required_positions) const;
     int                                    validateGroupIdForLayer(int layer_id, int group_id) const;
     int                                    defaultGroupIdForLayer(int layer_id) const;
     size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;

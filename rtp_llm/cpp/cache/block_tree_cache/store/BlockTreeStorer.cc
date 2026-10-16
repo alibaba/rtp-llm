@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cassert>
 #include <exception>
+#include <iomanip>
+#include <sstream>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -13,6 +15,67 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream escaped;
+    escaped << '"';
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"': escaped << "\\\""; break;
+            case '\\': escaped << "\\\\"; break;
+            case '\b': escaped << "\\b"; break;
+            case '\f': escaped << "\\f"; break;
+            case '\n': escaped << "\\n"; break;
+            case '\r': escaped << "\\r"; break;
+            case '\t': escaped << "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<int>(ch) << std::dec;
+                } else {
+                    escaped << static_cast<char>(ch);
+                }
+        }
+    }
+    escaped << '"';
+    return escaped.str();
+}
+
+void logPrefixPlanFormed(const std::string&                       instance,
+                         const std::vector<PrefixCachePlanPoint>& points,
+                         Tier                                      target_tier) {
+    std::ostringstream payload;
+    payload << "{\"kind\":\"plan\",\"schema_version\":1,\"instance\":" << jsonEscape(instance)
+            << ",\"state\":\"formed\","
+               "\"target_tier\":\""
+            << tierName(target_tier) << "\",\"formed_time_us\":" << currentTimeUs() << ",\"points\":[";
+    for (size_t i = 0; i < points.size(); ++i) {
+        if (i != 0) {
+            payload << ',';
+        }
+        payload << "{\"key\":\"" << points[i].key << "\",\"pos\":" << points[i].pos << '}';
+    }
+    payload << "]}";
+    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
+}
+
+void logPrefixPlanUnfulfilled(const std::string&                       instance,
+                              const std::vector<PrefixCachePlanPoint>& points,
+                              const char*                              reason,
+                              const ErrorInfo&                        error) {
+    for (const PrefixCachePlanPoint& point : points) {
+        std::ostringstream payload;
+        payload << "{\"kind\":\"plan_unfulfilled\",\"schema_version\":1,\"instance\":"
+                << jsonEscape(instance) << ",\"key\":\"" << point.key
+                << "\",\"pos\":" << point.pos << ",\"reason\":\"" << reason << "\",\"error_code\":"
+                << static_cast<int>(error.code()) << ",\"error_message\":" << jsonEscape(error.ToString()) << '}';
+        RTP_LLM_LOG_WARNING("event=prefix_cache_observation payload=%s", payload.str().c_str());
+    }
+}
+
+}  // namespace
+
 BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
                                  BlockTransferDispatcher*        transfer_dispatcher,
@@ -43,16 +106,23 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length) {
+                                              size_t& resident_prefix_length,
+                                              const std::vector<std::vector<int>>* token_segments,
+                                              PrefixCachePlanState* prefix_plan_state) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+        publishDeviceLocked(cache_keys,
+                            resources,
+                            is_resident,
+                            resident_prefix_length,
+                            token_segments,
+                            prefix_plan_state);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier);
+        submitLowerTierLocked(cache_keys, resources, target_tier, token_segments, prefix_plan_state);
         return {};
     }
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
@@ -62,13 +132,33 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
-    const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
-    if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
+                                          size_t&                                           resident_prefix_length,
+                                          const std::vector<std::vector<int>>*              token_segments,
+                                          PrefixCachePlanState*                             prefix_plan_state) {
+    const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
+                              && resources.size() == cache_keys.size();
+    std::vector<PrefixCachePlanPoint> plan_points;
+    if (plan_reached) {
+        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, Tier::DEVICE);
+        if (prefix_plan_state != nullptr) {
+            *prefix_plan_state = PrefixCachePlanState::FORMED;
+        }
+    }
+    if (tree_->observabilityEnabled() && plan_reached) {
+        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, Tier::DEVICE);
+    }
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, token_segments);
+    const auto unfulfilled = tree_->unfulfilledPlanPoints(plan_points, cache_keys);
+    logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
+                             unfulfilled,
+                             stopping_.load() ? "store_stopped" : "insert_not_fulfilled",
+                             ErrorInfo::OkStatus());
+    const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
+    if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
     }
-    if (resources_inserted) {
+    if (tree_data_mutated) {
         settled_(true);
     }
     resident_prefix_length = insert_result.resident_prefix_length;
@@ -96,19 +186,41 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
 
 void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
-                                            Tier                                              target_tier) {
+                                            Tier                                              target_tier,
+                                            const std::vector<std::vector<int>>*              token_segments,
+                                            PrefixCachePlanState*                             prefix_plan_state) {
+    const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
+                              && resources.size() == cache_keys.size();
+    std::vector<PrefixCachePlanPoint> plan_points;
+    if (plan_reached) {
+        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, target_tier);
+        if (prefix_plan_state != nullptr) {
+            *prefix_plan_state = PrefixCachePlanState::FORMED;
+        }
+    }
+    if (tree_->observabilityEnabled() && plan_reached) {
+        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, target_tier);
+    }
     if (stopping_.load()) {
+        logPrefixPlanUnfulfilled(tree_->observabilityInstance(), plan_points,
+                                 "store_stopped",
+                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before admission"));
         return;
     }
 
     StoreTaskPtr task = std::make_shared<StoreTask>(
         target_tier,
         cache_keys,
-        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
+        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
+        token_segments ? *token_segments : std::vector<std::vector<int>>{},
+        plan_points);
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    const char* failure_reason = "prepare_failed";
+    block_tree_cache_detail::ScopeRollback prepare_guard(
+        [this, &task, &failure_reason]() { settleLocked(*task, /*publish=*/false, failure_reason); });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
+        task->error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store task preparation failed");
         return;
     }
     const int64_t queue_begin = currentTimeUs();
@@ -122,9 +234,12 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
                             tierName(task->target_tier),
                             task->descriptors().size());
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "store business queue timeout"));
+        scheduleStoreSettlement(task,
+                                ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "store business queue timeout"),
+                                "store_timeout");
     };
     const auto deadline = task->transfer_task.deadline();
+    failure_reason = "queue_rejected";
     if (!task_pool_->submit(
             BlockTreeTaskClass::BACKGROUND,
             [this, task, queue_begin]() {
@@ -141,6 +256,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
                             task->descriptors().size());
+        task->error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business task submission rejected");
         return;
     }
     prepare_guard.dismiss();
@@ -148,25 +264,37 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
 
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     if (stopping_.load()) {
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
+        scheduleStoreSettlement(task,
+                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"),
+                                "store_stopped");
         return;
     }
 
     try {
         store_task_runner_.runTransfer(task, *transfer_dispatcher_, metrics_reporter_, [this, task](ErrorInfo error) {
-            scheduleStoreSettlement(task, std::move(error));
+            scheduleStoreSettlement(task, std::move(error), "copy_failed");
         });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()), "copy_failed");
     } catch (...) {
         RTP_LLM_LOG_ERROR("store copy threw an unknown exception");
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store copy exception"));
+        scheduleStoreSettlement(task,
+                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store copy exception"),
+                                "copy_failed");
     }
 }
 
-void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
-    auto          settle      = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
+void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task,
+                                             ErrorInfo            error,
+                                             const char*          failure_reason) {
+    if (!task->markFinished()) {
+        return;
+    }
+    task->error = error;
+    auto        settle      = [this, task, error = std::move(error), failure_reason]() mutable {
+        settleTask(*task, error.ok(), failure_reason);
+    };
     const int64_t queue_begin = currentTimeUs();
     if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
             metrics_reporter_.reportQueueWaitMetric(true,
@@ -182,13 +310,19 @@ void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInf
     }
 }
 
-void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
+void BlockTreeStorer::settleTask(StoreTask& task, bool copy_success, const char* failure_reason) {
     bool   stopping = false;
     size_t accepted = 0;
+    if (stopping_.load() && task.error.ok()) {
+        task.error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before settlement");
+    }
+    if (!copy_success && task.error.ok()) {
+        task.error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store copy failed");
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping = stopping_.load();
-        accepted = settleLocked(task, copy_success && !stopping);
+        accepted = settleLocked(task, copy_success && !stopping, stopping ? "store_stopped" : failure_reason);
     }
 
     if (stopping) {
@@ -208,8 +342,9 @@ void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
     }
 }
 
-size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
+size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* failure_reason) {
     BlockTreeInsertResult insert_result;
+    std::vector<PrefixCachePlanPoint> unfulfilled;
     if (publish) {
         std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
                                                              std::vector<GroupSetResource>(tree_->groupSets().size()));
@@ -217,8 +352,17 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
+        insert_result = tree_->insertNode(task.cache_keys, resources, true, false, &task.token_segments);
+        unfulfilled   = tree_->unfulfilledPlanPoints(task.plan_points, task.cache_keys);
+        logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
+                                 unfulfilled,
+                                 "insert_not_fulfilled",
+                                 ErrorInfo::OkStatus());
+    } else {
+        unfulfilled = std::move(task.plan_points);
+        logPrefixPlanUnfulfilled(tree_->observabilityInstance(), unfulfilled, failure_reason, task.error);
     }
+    task.plan_points.clear();
 
     store_task_runner_.releaseTaskResources(task);
 

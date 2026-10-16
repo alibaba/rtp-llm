@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <iterator>
+#include <unistd.h>
 #include <limits>
 #include <optional>
 #include <string>
@@ -32,6 +33,15 @@ namespace {
 
 constexpr size_t kCopyAlignment = 16;
 constexpr size_t kDirectIOAlignment = 4096;
+
+std::string makePrefixObservabilityInstance(const ParallelismConfig& parallelism_config) {
+    char host[128] = {0};
+    (void)gethostname(host, sizeof(host) - 1);
+    const auto startup_tick = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::string(host) + "|pid=" + std::to_string(static_cast<long long>(getpid()))
+           + "|dp_rank=" + std::to_string(parallelism_config.dp_rank)
+           + "|startup_tick=" + std::to_string(startup_tick);
+}
 
 std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
     std::string normalized = value;
@@ -546,6 +556,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.enable_host_cache   = host_enabled;
     config.enable_disk_cache   = disk_enabled;
     config.enable_remote_cache = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    config.enable_prefix_cache_observability = kv_cache_config.enable_prefix_cache_observability;
+    if (config.enable_prefix_cache_observability) {
+        config.prefix_observability_instance = makePrefixObservabilityInstance(parallelism_config);
+    }
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
     }
@@ -648,7 +662,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     const size_t reuse_unit_tokens =
         cache_config.cache_key_layout_resolved ? cache_config.reuse_unit_tokens : cache_config.seq_size_per_block;
-    auto tree = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
+    auto tree = std::make_unique<BlockTree>(std::move(group_sets),
+                                             reuse_unit_tokens,
+                                             config.enable_prefix_cache_observability,
+                                             config.prefix_observability_instance);
 
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
                                                    std::move(config),

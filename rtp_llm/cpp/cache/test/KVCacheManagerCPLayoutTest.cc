@@ -94,10 +94,11 @@ TEST_F(KVCacheManagerCPLayoutTest, DecodeTpReplicatesFullPagesWhilePrefillCpShar
     model.kv_cache_spec_descs        = {{full, swa}};
 
     for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
-        for (const size_t rank : {0u, 1u}) {
+        const auto ranks = role == RoleType::PREFILL ? std::vector<size_t>{0u, 1u} : std::vector<size_t>{0u};
+        for (const size_t rank : ranks) {
             ParallelismConfig par;
             par.role_type = role;
-            par.tp_size   = 2;
+            par.tp_size   = role == RoleType::PREFILL ? 2 : 1;
             par.tp_rank   = rank;
             par.prefill_cp_config.method =
                 role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
@@ -106,11 +107,10 @@ TEST_F(KVCacheManagerCPLayoutTest, DecodeTpReplicatesFullPagesWhilePrefillCpShar
             PDSepConfig pd;
             pd.role_type = role;
 
-            // Decode keeps every received FULL page. Its manager still carries
-            // the upstream TP/CP parallelism, but its cache-owned storage layout
-            // is intentionally CP1.
+            // Decode keeps every received FULL page. Its manager still knows the
+            // upstream producer CP size, but decode is TP1, so its cache-owned
+            // storage layout is intentionally CP1.
             ParallelismConfig layout_parallelism = par;
-            layout_parallelism.tp_size            = role == RoleType::PREFILL ? 2 : 1;
             auto config = finalizeCacheConfig(CacheConfigCreator::createConfig(model, layout_parallelism, {}), 20);
             EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
             EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);

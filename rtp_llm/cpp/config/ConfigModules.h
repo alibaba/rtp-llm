@@ -234,6 +234,8 @@ struct KVCacheConfig {
     // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
     // Batch size and detail cap are scanner-internal constants, not user-tunable.
     int64_t block_tree_full_prefix_scan_interval_ms = 0;
+    // C++-internal resolved startup switch; not a Python-facing schema option.
+    bool enable_prefix_cache_observability = false;
 
     // KVCM storage backend configuration fields
     bool        kvcm_enable_vipserver                = false;

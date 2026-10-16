@@ -25,6 +25,51 @@
 namespace rtp_llm {
 namespace {
 
+std::vector<std::vector<int>> makePrefixTokenSegments(const CacheConfig&                config,
+                                                     const CacheKeysType&              cache_keys,
+                                                     const std::vector<int>&           tokens,
+                                                     const std::vector<GroupSetPtr>&   group_sets) {
+    if (tokens.empty() || cache_keys.empty()) {
+        return {};
+    }
+    std::string boundary_tag;
+    for (const GroupSetPtr& group_set : group_sets) {
+        if (group_set != nullptr && group_set->groupType() == CacheGroupType::FULL
+            && !group_set->groupTags().empty()) {
+            boundary_tag = group_set->groupTags().front();
+            break;
+        }
+    }
+    if (boundary_tag.empty()) {
+        for (const GroupSetPtr& group_set : group_sets) {
+            if (group_set != nullptr && !group_set->groupTags().empty()) {
+                boundary_tag = group_set->groupTags().front();
+                break;
+            }
+        }
+    }
+    if (boundary_tag.empty()) {
+        return {};
+    }
+
+    const size_t token_unit =
+        config.cache_key_layout_resolved ? config.reuse_unit_tokens : config.seq_size_per_block;
+    std::vector<std::vector<int>> segments(cache_keys.size());
+    for (size_t key_index = 0; key_index < cache_keys.size(); ++key_index) {
+        const size_t start = std::min(config.canonicalBlockPosition(boundary_tag, key_index) * token_unit,
+                                      tokens.size());
+        const size_t end = key_index + 1 == cache_keys.size() ?
+                               tokens.size() :
+                               std::min(config.canonicalBlockPosition(boundary_tag, key_index + 1) * token_unit,
+                                        tokens.size());
+        if (end > start) {
+            segments[key_index].assign(tokens.begin() + static_cast<std::ptrdiff_t>(start),
+                                       tokens.begin() + static_cast<std::ptrdiff_t>(end));
+        }
+    }
+    return segments;
+}
+
 int resolvedGroupTokens(const CacheConfig& config, std::string_view tag, bool common, int raw_tokens) {
     // STATE request endpoints use the absolute token cursor. It is a ring
     // coordinate request, not a rank-local allocation length.
@@ -43,7 +88,8 @@ int requestIncrSeqLength(const MallocInfo& info) {
 }
 
 int requestCommonSeqLength(const MallocInfo& info) {
-    return info.request_layout ? info.request_layout->request_common_seq_len : info.complete_token_ids->commonSeqLength();
+    return info.request_layout ? info.request_layout->request_common_seq_len
+                                : info.complete_token_ids->commonSeqLength();
 }
 
 int requestTotalSeqLength(const MallocInfo& info) {
@@ -142,9 +188,6 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             incr_result.match_end_time_us          = init_result.match_end_time_us;
             incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
             incr_result.load_attempted             = init_result.load_attempted;
-            incr_result.query_length               = init_result.query_length;
-            incr_result.full_key_hit_length        = init_result.full_key_hit_length;
-            incr_result.joint_valid_hit_length     = init_result.joint_valid_hit_length;
             return finalize_init_failure(std::move(incr_result));
         }
         if (pending_async_context != nullptr) {
@@ -221,9 +264,7 @@ MallocResult CoordinatorCacheManager::malloc(const MallocInfo& malloc_info) {
         }
         return result;
     } else {
-        auto result = incrMalloc(malloc_info);
-        result.query_length = requestSeqLength(malloc_info);
-        return result;
+        return incrMalloc(malloc_info);
     }
 }
 
@@ -391,17 +432,15 @@ size_t CoordinatorCacheManager::loadTargetPosition(size_t path_index, const std:
     return config_.canonicalBlockPosition(tag, path_index);
 }
 
-std::shared_ptr<LoadAsyncContext> CoordinatorCacheManager::prepareKVCache(const CacheKeysType&  cache_keys,
-                                                                          BatchKVCacheResource& kv_resource,
-                                                                          PreparedKVCache&      prepared,
-                                                                          const std::function<bool(size_t)>& valid_prefix) {
+std::shared_ptr<LoadAsyncContext> CoordinatorCacheManager::prepareKVCache(
+    const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource, PreparedKVCache& prepared,
+    const std::function<bool(size_t)>& valid_prefix, const std::vector<int>* request_tokens) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
-    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix);
+    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix, request_tokens);
+    prepared.match_observation = match_result.match_observation;
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
-    prepared.full_key_hit_blocks                  = match_result.full_key_hit_blocks;
-    prepared.joint_valid_blocks                   = match_result.joint_valid_blocks;
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -460,7 +499,6 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     const int reuse_unit_tokens = static_cast<int>(reuse_tokens);
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
-    const int64_t        query_length       = seq_len;
     int64_t              match_cost_time_us = 0;
     int64_t              match_end_time_us  = 0;
     PreparedKVCache      prepared;
@@ -468,6 +506,10 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     prepared.referenced_blocks.resize(kv_cache_groups_.size());
     std::shared_ptr<LoadAsyncContext> load_context;
 
+    const std::vector<int>* request_tokens =
+        malloc_info.request_layout && !malloc_info.request_layout->token_ids.empty() ?
+            &malloc_info.request_layout->token_ids :
+            nullptr;
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = config_.canonicalCacheKeys(
             malloc_info.request_layout ? malloc_info.request_layout->match_keys : cache_keys);
@@ -486,16 +528,16 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                            prepared,
                            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
                                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
-                           });
+                           },
+                           request_tokens);
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
+        if (prepared.match_observation.has_value()) {
+            prepared.match_observation->match_time_us = match_cost_time_us;
+        }
         load_attempted     = load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
-    const int64_t full_key_hit_length =
-        static_cast<int64_t>(prepared.full_key_hit_blocks) * reuse_unit_tokens;
-    const int64_t joint_valid_hit_length =
-        static_cast<int64_t>(prepared.joint_valid_blocks) * reuse_unit_tokens;
 
     const auto rollback = [&]() -> MallocResult {
         load_attempted = load_attempted || load_context != nullptr;
@@ -505,12 +547,10 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         load_context.reset();
         rollbackInitMalloc(*kv_resource, prepared.referenced_blocks, prepared.original_sizes);
         MallocResult result{false, 0};
-        result.match_cost_time_us  = match_cost_time_us;
-        result.match_end_time_us   = match_end_time_us;
-        result.load_attempted      = load_attempted;
-        result.query_length        = query_length;
-        result.full_key_hit_length = full_key_hit_length;
-        result.joint_valid_hit_length = joint_valid_hit_length;
+        result.match_cost_time_us = match_cost_time_us;
+        result.match_end_time_us  = match_end_time_us;
+        result.load_attempted     = load_attempted;
+        result.match_observation  = prepared.match_observation;
         if (prepared.materialize_status != MallocStatus::NONE) {
             result.status = prepared.materialize_status;
         }
@@ -518,6 +558,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     };
 
     if (load_context && load_context->needBackendMatch()) {
+        auto match_observation = prepared.match_observation;
         auto deferred_prepared = std::make_shared<PreparedKVCache>(std::move(prepared));
         // Keeping shared_from_this() in the context can destroy this allocator
         // and its task pool on that pool's own settlement worker. Destruction
@@ -532,11 +573,9 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             static_cast<int>(deferred_prepared->matched_device_blocks) * reuse_unit_tokens,
                             match_cost_time_us,
                             load_context};
-        result.match_end_time_us   = match_end_time_us;
-        result.load_attempted      = load_attempted;
-        result.query_length        = query_length;
-        result.full_key_hit_length = full_key_hit_length;
-        result.joint_valid_hit_length = joint_valid_hit_length;
+        result.match_end_time_us = match_end_time_us;
+        result.load_attempted    = load_attempted;
+        result.match_observation = std::move(match_observation);
         return result;
     }
 
@@ -545,11 +584,9 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     }
     MallocResult result{
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
-    result.match_end_time_us   = match_end_time_us;
-    result.load_attempted      = load_attempted;
-    result.query_length        = query_length;
-    result.full_key_hit_length = full_key_hit_length;
-    result.joint_valid_hit_length = joint_valid_hit_length;
+    result.match_end_time_us = match_end_time_us;
+    result.load_attempted    = load_attempted;
+    result.match_observation = prepared.match_observation;
     return result;
 }
 
@@ -923,12 +960,29 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
+        std::vector<std::vector<int>> token_segments;
+        if (block_tree_cache_->prefixObservabilityEnabled() && insert_info.complete_token_ids != nullptr) {
+            token_segments = makePrefixTokenSegments(config_,
+                                                     insert_keys,
+                                                     insert_info.complete_token_ids->completeTokenIdsVec(batch_id),
+                                                     block_tree_cache_->groupSets());
+        }
         if (insert_info.is_resident) {
             const size_t batch_resident_prefix_length =
-                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
+                block_tree_cache_->insert(insert_keys,
+                                          resources,
+                                          insert_info.target_tier,
+                                          true,
+                                          &token_segments,
+                                          insert_info.prefix_plan_state);
             resident_prefix_length += batch_resident_prefix_length;
         } else {
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+            block_tree_cache_->insert(insert_keys,
+                                          resources,
+                                          insert_info.target_tier,
+                                          false,
+                                          &token_segments,
+                                          insert_info.prefix_plan_state);
         }
     }
 }

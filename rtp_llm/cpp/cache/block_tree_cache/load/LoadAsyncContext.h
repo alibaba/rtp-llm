@@ -59,6 +59,7 @@ public:
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
     bool     needBackendMatch() const;
+    PrefixCacheRemoteObservation remoteObservation(size_t reuse_unit_tokens) const;
 
     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
         valid_prefix_ = std::move(valid_prefix);
@@ -93,7 +94,10 @@ public:
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
-    void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
+    void onBackendMatch(size_t matched_blocks_num,
+                         std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                         bool success,
+                         PrefixCacheRemoteQueryStatus query_status);
     void onBackendRead(bool success);
     void failBeforeCommit();
     void failCommit();
@@ -117,10 +121,12 @@ private:
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
+    PrefixCacheRemoteQueryStatus    remote_query_status_{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
+    size_t                          remote_candidate_blocks_{0};
     std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
 
-    std::mutex backend_match_mutex_;
+    mutable std::mutex backend_match_mutex_;
 
     std::atomic<State>        state_{State::PENDING};
     std::atomic<MallocStatus> malloc_status_{MallocStatus::NONE};

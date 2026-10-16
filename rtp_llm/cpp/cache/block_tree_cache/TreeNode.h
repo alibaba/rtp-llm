@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -19,9 +20,14 @@ struct TreeNode {
     TreeNode*                                   parent{nullptr};
     std::vector<GroupSetResource>               group_set_resources;
     bool                                        is_resident{false};  // Must never change from true to false.
-    // Monotonic observability timestamps. A node can outlive its usable cache state.
-    int64_t attached_at_us{0};
-    int64_t cache_live_since_us{0};
+    // Prefix-observability intervals. A negative value means the interval is inactive;
+    // zero is a valid first-microsecond start.
+    struct Observation {
+        int64_t                     content_since_us{-1};
+        int64_t                     recovery_since_us{-1};
+        std::array<int64_t, 3>      tier_since_us{-1, -1, -1};
+    };
+    Observation                                 observation;
 };
 
 }  // namespace rtp_llm

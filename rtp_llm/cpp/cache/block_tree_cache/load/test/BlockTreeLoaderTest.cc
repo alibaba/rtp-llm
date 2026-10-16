@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,11 +27,66 @@ namespace {
 
 using block_tree_cache_test::FullSWAEnvironment;
 using block_tree_cache_test::FullSWAEnvironmentOptions;
+using block_tree_cache_test::MultiNodeBlocks;
+using block_tree_cache_test::allocateDeviceBlocksForTest;
 using block_tree_cache_test::cudaAvailable;
 using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+using block_tree_cache_test::unreferenceDeviceBlocksForTest;
+
+TEST(BlockTreeLoaderTest, LoadMutationBatchDoesNotRestartDependencyInterval) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    BlockTree observation_tree(environment->groups, 1, true);
+    std::vector<GroupSetResource> resources(environment->groups.size());
+    const MultiNodeBlocks full_device_blocks =
+        allocateDeviceBlocksForTest(*environment->groups[0], 1, BlockTreeRefType::CACHE);
+    const MultiNodeBlocks swa_device_blocks =
+        allocateDeviceBlocksForTest(*environment->groups[1], 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(full_device_blocks.size(), 1u);
+    ASSERT_EQ(swa_device_blocks.size(), 1u);
+    resources[0].device_blocks = full_device_blocks.front();
+    resources[1].device_blocks = swa_device_blocks.front();
+    const auto inserted =
+        observation_tree.insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
+    ASSERT_EQ(inserted.inserted_nodes.size(), 1u);
+    unreferenceDeviceBlocksForTest(*environment->groups[0], full_device_blocks, BlockTreeRefType::CACHE);
+    unreferenceDeviceBlocksForTest(*environment->groups[1], swa_device_blocks, BlockTreeRefType::CACHE);
+    TreeNode* node = inserted.inserted_nodes.front();
+    ASSERT_NE(node, nullptr);
+    const int64_t initial_recovery_since_us = node->observation.recovery_since_us;
+    ASSERT_GE(initial_recovery_since_us, 0);
+
+    {
+        BlockTree::ObservationBatch observation_batch(observation_tree);
+        node->group_set_resources[0].transfer_detached = true;
+        observation_tree.refreshPublishedState(node, true, "load");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        node->group_set_resources[0].transfer_detached = false;
+        observation_tree.refreshPublishedState(node, true, "load");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, initial_recovery_since_us);
+    EXPECT_EQ(observation_tree.observabilitySnapshot().recovery.count, 1u);
+
+    {
+        BlockTree::ObservationBatch observation_batch(observation_tree);
+        node->group_set_resources[0].transfer_detached = true;
+        observation_tree.refreshPublishedState(node, true, "load");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, -1);
+    EXPECT_EQ(observation_tree.observabilitySnapshot().recovery.count, 0u);
+    node->group_set_resources[0].transfer_detached = false;
+}
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -168,8 +224,6 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    EXPECT_EQ(result.full_key_hit_blocks, options.path_length);
-    EXPECT_EQ(result.joint_valid_blocks, options.path_length);
     EXPECT_EQ(result.matched_device_blocks, 0u);
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
@@ -415,6 +469,33 @@ TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     load_context.reset();
 }
 
+TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, nullptr, nullptr);
+    std::vector<GroupSetPtr> groups = {full};
+
+    BlockTreeCacheConfig config;
+    config.enable_device_cache               = true;
+    config.enable_prefix_cache_observability = true;
+    auto cache                               = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {}};
+    cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const std::vector<TreeNode*> path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    ASSERT_TRUE(path[1]->token_ids.empty());
+
+    const std::vector<int> request_tokens{1, 2, 3, 4};
+    const auto result = cache->match({100, 200}, {}, &request_tokens);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+    EXPECT_FALSE(result.match_observation.has_value());
+}
+
 TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -500,10 +581,6 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
         find_result.back(), group_set_id, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
     environment->cache->evictor_.suspendCandidate(find_result.back(), group_set_id, Tier::HOST);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
-    const BlockTreeMatchResult unavailable = environment->cache->match(environment->keys);
-    EXPECT_EQ(unavailable.full_key_hit_blocks, 1u);
-    EXPECT_EQ(unavailable.joint_valid_blocks, 0u);
-    EXPECT_EQ(unavailable.matched_device_blocks, 0u);
     ASSERT_TRUE(environment->cache->loader_.changeTransferState(
         find_result.back(), group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);

@@ -2,12 +2,10 @@
 
 #include <algorithm>
 #include <cassert>
-#include <map>
 #include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -78,62 +76,6 @@ BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool
 BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
     metrics_reporter_(std::move(metrics_reporter)) {}
-
-void BlockTreeCacheMetricsReporter::reportTreeObservability(const BlockTreeObservabilitySnapshot& snapshot) const {
-    if (metrics_reporter_ == nullptr) {
-        return;
-    }
-    RtpLLMBlockTreeMetricsCollector collector;
-    collector.node_count                       = static_cast<int64_t>(snapshot.node_count);
-    collector.root_child_count                 = static_cast<int64_t>(snapshot.root_child_count);
-    collector.leaf_count                       = static_cast<int64_t>(snapshot.leaf_count);
-    collector.linear_count                     = static_cast<int64_t>(snapshot.linear_count);
-    collector.branch_count                     = static_cast<int64_t>(snapshot.branch_count);
-    collector.max_child_count                  = static_cast<int64_t>(snapshot.max_child_count);
-    collector.chain_segment_count              = static_cast<int64_t>(snapshot.chain_segment_count);
-    collector.max_chain_tokens                 = static_cast<int64_t>(snapshot.max_chain_tokens);
-    collector.max_depth_tokens                 = static_cast<int64_t>(snapshot.max_depth_tokens);
-    collector.leaf_depth_sum_tokens            = static_cast<int64_t>(snapshot.leaf_depth_sum_tokens);
-    collector.max_leaf_depth_tokens            = static_cast<int64_t>(snapshot.max_leaf_depth_tokens);
-    collector.branch_depth_sum_tokens          = static_cast<int64_t>(snapshot.branch_depth_sum_tokens);
-    collector.max_branch_depth_tokens          = static_cast<int64_t>(snapshot.max_branch_depth_tokens);
-    collector.recoverable_point_count          = static_cast<int64_t>(snapshot.recoverable_point_count);
-    collector.stored_cache_count               = static_cast<int64_t>(snapshot.stored_cache_count);
-    collector.pure_content_count               = static_cast<int64_t>(snapshot.pure_content_count);
-    collector.incomplete_state_count           = static_cast<int64_t>(snapshot.incomplete_state_count);
-    collector.temporarily_busy_count           = static_cast<int64_t>(snapshot.temporarily_busy_count);
-    collector.max_recoverable_depth_tokens     = static_cast<int64_t>(snapshot.max_recoverable_depth_tokens);
-    collector.recoverable_depth_sum_tokens     = static_cast<int64_t>(snapshot.recoverable_depth_sum_tokens);
-    collector.first_recoverable_point_count    = static_cast<int64_t>(snapshot.first_recoverable_point_count);
-    collector.nearest_ancestor_gap_count      = static_cast<int64_t>(snapshot.nearest_ancestor_gap_count);
-    collector.nearest_ancestor_gap_sum_tokens = static_cast<int64_t>(snapshot.nearest_ancestor_gap_sum_tokens);
-    collector.nearest_ancestor_gap_max_tokens = static_cast<int64_t>(snapshot.nearest_ancestor_gap_max_tokens);
-    collector.node_age_sum_us                  = snapshot.node_age_sum_us;
-    collector.node_age_max_us                  = snapshot.node_age_max_us;
-    collector.live_cache_age_sum_us            = snapshot.live_cache_age_sum_us;
-    collector.live_cache_age_max_us            = snapshot.live_cache_age_max_us;
-    collector.completed_cache_lifetime_count  = static_cast<int64_t>(snapshot.completed_cache_lifetime_count);
-    collector.completed_cache_lifetime_sum_us = snapshot.completed_cache_lifetime_sum_us;
-    collector.completed_cache_lifetime_max_us = snapshot.completed_cache_lifetime_max_us;
-    collector.observation_count               = static_cast<int64_t>(snapshot.observation_count);
-    collector.observation_cpu_sum_us          = snapshot.observation_cpu_sum_us;
-    collector.observation_cpu_max_us          = snapshot.observation_cpu_max_us;
-    collector.snapshot_cpu_us                 = snapshot.snapshot_cpu_us;
-    metrics_reporter_->report<RtpLLMBlockTreeMetrics, RtpLLMBlockTreeMetricsCollector>(nullptr, &collector);
-
-    std::map<std::pair<CacheGroupType, Tier>, size_t> leaf_counts;
-    for (const auto& resource : snapshot.resource_leaves) {
-        leaf_counts[{resource.group_type, resource.tier}] += resource.leaf_count;
-    }
-    for (const auto& [key, count] : leaf_counts) {
-        RtpLLMBlockTreeResourceMetricsCollector resource_collector;
-        resource_collector.leaf_count = static_cast<int64_t>(count);
-        kmonitor::MetricsTags tags("group_type", metricCacheGroupTypeName(key.first));
-        tags.AddTag("tier", tierName(key.second));
-        metrics_reporter_->report<RtpLLMBlockTreeResourceMetrics, RtpLLMBlockTreeResourceMetricsCollector>(
-            &tags, &resource_collector);
-    }
-}
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {

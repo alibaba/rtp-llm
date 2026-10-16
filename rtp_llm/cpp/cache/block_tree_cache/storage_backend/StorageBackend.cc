@@ -298,8 +298,20 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
                 result = matchImpl(request);
             } catch (...) { success = false; }
         }
+        PrefixCacheRemoteQueryStatus query_status = PrefixCacheRemoteQueryStatus::ERROR;
+        if (success) {
+            query_status = result.query_status;
+            if (query_status == PrefixCacheRemoteQueryStatus::UNSET) {
+                query_status = result.matched_blocks_num > request.local_matched_blocks_num ?
+                                   PrefixCacheRemoteQueryStatus::HIT :
+                                   PrefixCacheRemoteQueryStatus::MISS;
+            }
+        }
         if (done) {
-            done(success ? result.matched_blocks_num : 0, success ? std::move(result.match_meta) : nullptr, success);
+            done(success ? result.matched_blocks_num : 0,
+                 success ? std::move(result.match_meta) : nullptr,
+                 success,
+                 query_status);
         }
     });
 }

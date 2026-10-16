@@ -1,8 +1,11 @@
 #pragma once
 
+#include <array>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -44,80 +47,60 @@ struct BlockTreeNodeRangeResult {
     bool   cycle_complete{false};
 };
 
-struct BlockTreeChainSegmentSnapshot {
-    size_t              start_tokens{0};
-    size_t              end_tokens{0};
-    bool                end_is_leaf{false};
-    std::vector<size_t> recoverable_points_tokens;
+struct BlockTreeContentMatch {
+    size_t       pos{0};
+    CacheKeyType key{0};
+    size_t       node_offset{0};
+    bool         partial{false};
 };
 
-struct BlockTreeResourceLeafSnapshot {
-    CacheGroupType group_type{CacheGroupType::FULL};
-    Tier           tier{Tier::DEVICE};
-    size_t         leaf_count{0};
+struct BlockTreeAgeSummary {
+    size_t                     count{0};
+    std::optional<int64_t>     mean_age_us;
+    std::optional<int64_t>     max_age_us;
 };
 
 struct BlockTreeObservabilitySnapshot {
-    size_t  node_count{0};
-    size_t  root_child_count{0};
-    size_t  leaf_count{0};
-    size_t  linear_count{0};
-    size_t  branch_count{0};
-    size_t  max_child_count{0};
-    size_t  chain_segment_count{0};
-    size_t  max_chain_tokens{0};
-    size_t  max_depth_tokens{0};
-    size_t  leaf_depth_sum_tokens{0};
-    size_t  max_leaf_depth_tokens{0};
-    size_t  branch_depth_sum_tokens{0};
-    size_t  max_branch_depth_tokens{0};
-    size_t  recoverable_point_count{0};
-    size_t  stored_cache_count{0};
-    size_t  pure_content_count{0};
-    size_t  incomplete_state_count{0};
-    size_t  temporarily_busy_count{0};
-    size_t  max_recoverable_depth_tokens{0};
-    size_t  recoverable_depth_sum_tokens{0};
-    size_t  first_recoverable_point_count{0};
-    size_t  nearest_ancestor_gap_count{0};
-    size_t  nearest_ancestor_gap_sum_tokens{0};
-    size_t  nearest_ancestor_gap_max_tokens{0};
-    int64_t node_age_sum_us{0};
-    int64_t node_age_max_us{0};
-    int64_t live_cache_age_sum_us{0};
-    int64_t live_cache_age_max_us{0};
-    size_t  completed_cache_lifetime_count{0};
-    int64_t completed_cache_lifetime_sum_us{0};
-    int64_t completed_cache_lifetime_max_us{0};
-    size_t  observation_count{0};
-    int64_t observation_cpu_sum_us{0};
-    int64_t observation_cpu_max_us{0};
-    int64_t snapshot_cpu_us{0};
-    // Detail is available for explicit baseline capture; online metrics use bounded summaries.
-    std::vector<BlockTreeChainSegmentSnapshot> chain_segments;
-    std::vector<size_t>                        child_count_histogram;
-    std::vector<size_t>                        leaf_depths_tokens;
-    std::vector<size_t>                        branch_depths_tokens;
-    std::vector<BlockTreeResourceLeafSnapshot> resource_leaves;
+    size_t                 node_count{0};
+    size_t                 leaf_count{0};
+    size_t                 branch_count{0};
+    BlockTreeAgeSummary    content;
+    BlockTreeAgeSummary    recovery;
+    std::array<BlockTreeAgeSummary, 3> tier;
 };
 
 class BlockTree {
 public:
-    explicit BlockTree(std::vector<GroupSetPtr> group_sets, size_t reuse_unit_tokens = 1);
+    explicit BlockTree(std::vector<GroupSetPtr> group_sets,
+                       size_t                    reuse_unit_tokens = 1,
+                       bool                      enable_observability = false,
+                       std::string               observability_instance = {});
     ~BlockTree();
 
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
+    size_t                 contentMatchPos(const std::vector<int>& request_tokens) const;
+    std::optional<BlockTreeContentMatch> contentMatchInfo(const std::vector<int>& request_tokens) const;
+
+    std::vector<PrefixCachePlanPoint> planRecoveryPoints(
+        const CacheKeysType&                              cache_keys,
+        const std::vector<std::vector<GroupSetResource>>& resources,
+        const std::vector<std::vector<int>>*              token_segments,
+        Tier                                              target_tier) const;
+    std::vector<PrefixCachePlanPoint> unfulfilledPlanPoints(
+        const std::vector<PrefixCachePlanPoint>& plan_points,
+        const CacheKeysType&                     cache_keys) const;
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
-                                     bool                                              is_resident);
+                                     bool                                              is_resident,
+                                     const std::vector<std::vector<int>>*              token_segments = nullptr);
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
-    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
+    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node, const char* trigger = "mutation");
 
     TreeNode* root() const {
         return root_.get();
@@ -128,6 +111,12 @@ public:
     const ReusableGroupLocation* reusableGroupLocation(std::string_view group_tag) const;
     size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
+    }
+    bool                         observabilityEnabled() const {
+        return observability_enabled_;
+    }
+    const std::string&           observabilityInstance() const {
+        return observability_instance_;
     }
     size_t size() const {
         return node_pool_.size();
@@ -145,14 +134,34 @@ public:
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
     // The owning BlockTreeCache mutex protects both state transitions and snapshots.
-    void                           observeCacheState(const TreeNode* node);
-    BlockTreeObservabilitySnapshot observabilitySnapshot(bool include_detail = true) const;
+    void                           observeCacheState(const TreeNode* node,
+                                                    const char*      trigger = "mutation");
+    BlockTreeObservabilitySnapshot observabilitySnapshot() const;
 
     // All publication operations require the owning BlockTreeCache mutex.
     // Only complete, matchable DEVICE values in every required group are advertised.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
-    void            refreshPublishedState(const TreeNode* node, bool observe_cache_state = true);
+    void            refreshPublishedState(const TreeNode* node,
+                                          bool            observe_cache_state = true,
+                                          const char*     trigger             = "store");
+
+    // Defers interval observation until the end of one locked mutation batch.
+    // The caller must already hold the owning BlockTreeCache mutex. Nested scopes
+    // are supported; only the outermost scope observes the final tree state.
+    class ObservationBatch {
+    public:
+        explicit ObservationBatch(BlockTree& tree);
+        ~ObservationBatch();
+
+        ObservationBatch(const ObservationBatch&)            = delete;
+        ObservationBatch& operator=(const ObservationBatch&) = delete;
+        ObservationBatch(ObservationBatch&&)                 = delete;
+        ObservationBatch& operator=(ObservationBatch&&)      = delete;
+
+    private:
+        BlockTree& tree_;
+    };
 
 private:
     void                               removePublishedKey(CacheKeyType key);
@@ -166,11 +175,41 @@ private:
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
-                                         bool                                              is_resident);
+                                         bool                                              is_resident,
+                                         const std::vector<std::vector<int>>*              token_segments);
 
-    void      removeNode(TreeNode* node);
+    void      removeNode(TreeNode* node, const char* trigger = "mutation");
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
     void      releaseNode(TreeNode* node);
+
+    struct IntervalSet {
+        std::multiset<int64_t> starts;
+        long double            start_sum{0.0L};
+    };
+
+    struct DeferredObservationRoot {
+        const TreeNode* node{nullptr};
+        const char*     trigger{nullptr};
+    };
+
+    static size_t tierIndex(Tier tier);
+    void deferObservationRoot(const TreeNode* node, const char* trigger);
+    void endObservationBatch();
+    void commitDeferredObservations();
+    void eraseDeferredObservationRoots(const TreeNode* node);
+    static bool isObservationAncestor(const TreeNode* ancestor, const TreeNode* candidate);
+
+    void startInterval(IntervalSet& intervals, int64_t& since_us);
+    void endInterval(IntervalSet& intervals,
+                     int64_t&     since_us,
+                     const TreeNode& node,
+                     const char* kind,
+                     const char* medium = nullptr,
+                     const char* trigger = "mutation",
+                     const char* effect = "release");
+    void updateContentShape(const TreeNode& node, size_t old_child_count, size_t new_child_count);
+    void updateTierIntervals(TreeNode& node, const char* trigger);
+    BlockTreeAgeSummary intervalSummary(const IntervalSet& intervals) const;
 
     std::vector<GroupSetPtr>              group_sets_;
     ReusableGroupLocations                reusable_group_locations_;
@@ -181,12 +220,16 @@ private:
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};
     size_t        reuse_unit_tokens_{1};
-    size_t        completed_cache_lifetime_count_{0};
-    int64_t       completed_cache_lifetime_sum_us_{0};
-    int64_t       completed_cache_lifetime_max_us_{0};
-    size_t        observation_count_{0};
-    int64_t       observation_cpu_sum_us_{0};
-    int64_t       observation_cpu_max_us_{0};
+    bool          observability_enabled_{false};
+    std::string   observability_instance_;
+    int64_t       tree_epoch_us_{0};
+    size_t        leaf_count_{0};
+    size_t        branch_count_{0};
+    IntervalSet   content_intervals_;
+    IntervalSet   recovery_intervals_;
+    std::array<IntervalSet, 3> tier_intervals_;
+    size_t       observation_batch_depth_{0};
+    std::vector<DeferredObservationRoot> deferred_observation_roots_;
 };
 
 }  // namespace rtp_llm

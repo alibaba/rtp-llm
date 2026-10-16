@@ -15,8 +15,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMBlockTreeMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMBlockTreeResourceMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
@@ -601,103 +599,6 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
     REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
 }
 
-bool RtpLLMBlockTreeMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(node_count_metric, "rtp_llm_kv_cache_tree_node_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(root_child_count_metric, "rtp_llm_kv_cache_tree_root_child_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(leaf_count_metric, "rtp_llm_kv_cache_tree_leaf_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(linear_count_metric, "rtp_llm_kv_cache_tree_linear_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(branch_count_metric, "rtp_llm_kv_cache_tree_branch_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_child_count_metric, "rtp_llm_kv_cache_tree_max_child_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(chain_segment_count_metric, "rtp_llm_kv_cache_tree_chain_segment_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_chain_tokens_metric, "rtp_llm_kv_cache_tree_max_chain_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_depth_tokens_metric, "rtp_llm_kv_cache_tree_max_depth_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(leaf_depth_sum_tokens_metric, "rtp_llm_kv_cache_tree_leaf_depth_sum_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_leaf_depth_tokens_metric, "rtp_llm_kv_cache_tree_max_leaf_depth_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(branch_depth_sum_tokens_metric, "rtp_llm_kv_cache_tree_branch_depth_sum_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_branch_depth_tokens_metric, "rtp_llm_kv_cache_tree_max_branch_depth_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(recoverable_point_count_metric, "rtp_llm_kv_cache_tree_recoverable_point_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(stored_cache_count_metric, "rtp_llm_kv_cache_tree_stored_cache_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(pure_content_count_metric, "rtp_llm_kv_cache_tree_pure_content_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(incomplete_state_count_metric, "rtp_llm_kv_cache_tree_incomplete_state_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(temporarily_busy_count_metric, "rtp_llm_kv_cache_tree_temporarily_busy_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_recoverable_depth_tokens_metric,
-                                  "rtp_llm_kv_cache_tree_max_recoverable_depth_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(recoverable_depth_sum_tokens_metric,
-                                  "rtp_llm_kv_cache_tree_recoverable_depth_sum_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(first_recoverable_point_count_metric,
-                                  "rtp_llm_kv_cache_tree_first_recoverable_point_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(nearest_ancestor_gap_count_metric,
-                                  "rtp_llm_kv_cache_tree_nearest_ancestor_gap_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(nearest_ancestor_gap_sum_tokens_metric,
-                                  "rtp_llm_kv_cache_tree_nearest_ancestor_gap_sum_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(nearest_ancestor_gap_max_tokens_metric,
-                                  "rtp_llm_kv_cache_tree_nearest_ancestor_gap_max_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(node_age_sum_us_metric, "rtp_llm_kv_cache_tree_node_age_sum_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(node_age_max_us_metric, "rtp_llm_kv_cache_tree_node_age_max_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(live_cache_age_sum_us_metric, "rtp_llm_kv_cache_tree_live_cache_age_sum_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(live_cache_age_max_us_metric, "rtp_llm_kv_cache_tree_live_cache_age_max_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(completed_cache_lifetime_count_metric,
-                                  "rtp_llm_kv_cache_tree_completed_cache_lifetime_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(completed_cache_lifetime_sum_us_metric,
-                                  "rtp_llm_kv_cache_tree_completed_cache_lifetime_sum_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(completed_cache_lifetime_max_us_metric,
-                                  "rtp_llm_kv_cache_tree_completed_cache_lifetime_max_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(observation_count_metric, "rtp_llm_kv_cache_tree_observation_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(observation_cpu_sum_us_metric, "rtp_llm_kv_cache_tree_observation_cpu_sum_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(observation_cpu_max_us_metric, "rtp_llm_kv_cache_tree_observation_cpu_max_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(snapshot_cpu_us_metric, "rtp_llm_kv_cache_tree_snapshot_cpu_us");
-    return true;
-}
-
-void RtpLLMBlockTreeMetrics::report(const kmonitor::MetricsTags* tags,
-                                    RtpLLMBlockTreeMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(node_count_metric, collector->node_count);
-    REPORT_MUTABLE_METRIC(root_child_count_metric, collector->root_child_count);
-    REPORT_MUTABLE_METRIC(leaf_count_metric, collector->leaf_count);
-    REPORT_MUTABLE_METRIC(linear_count_metric, collector->linear_count);
-    REPORT_MUTABLE_METRIC(branch_count_metric, collector->branch_count);
-    REPORT_MUTABLE_METRIC(max_child_count_metric, collector->max_child_count);
-    REPORT_MUTABLE_METRIC(chain_segment_count_metric, collector->chain_segment_count);
-    REPORT_MUTABLE_METRIC(max_chain_tokens_metric, collector->max_chain_tokens);
-    REPORT_MUTABLE_METRIC(max_depth_tokens_metric, collector->max_depth_tokens);
-    REPORT_MUTABLE_METRIC(leaf_depth_sum_tokens_metric, collector->leaf_depth_sum_tokens);
-    REPORT_MUTABLE_METRIC(max_leaf_depth_tokens_metric, collector->max_leaf_depth_tokens);
-    REPORT_MUTABLE_METRIC(branch_depth_sum_tokens_metric, collector->branch_depth_sum_tokens);
-    REPORT_MUTABLE_METRIC(max_branch_depth_tokens_metric, collector->max_branch_depth_tokens);
-    REPORT_MUTABLE_METRIC(recoverable_point_count_metric, collector->recoverable_point_count);
-    REPORT_MUTABLE_METRIC(stored_cache_count_metric, collector->stored_cache_count);
-    REPORT_MUTABLE_METRIC(pure_content_count_metric, collector->pure_content_count);
-    REPORT_MUTABLE_METRIC(incomplete_state_count_metric, collector->incomplete_state_count);
-    REPORT_MUTABLE_METRIC(temporarily_busy_count_metric, collector->temporarily_busy_count);
-    REPORT_MUTABLE_METRIC(max_recoverable_depth_tokens_metric, collector->max_recoverable_depth_tokens);
-    REPORT_MUTABLE_METRIC(recoverable_depth_sum_tokens_metric, collector->recoverable_depth_sum_tokens);
-    REPORT_MUTABLE_METRIC(first_recoverable_point_count_metric, collector->first_recoverable_point_count);
-    REPORT_MUTABLE_METRIC(nearest_ancestor_gap_count_metric, collector->nearest_ancestor_gap_count);
-    REPORT_MUTABLE_METRIC(nearest_ancestor_gap_sum_tokens_metric, collector->nearest_ancestor_gap_sum_tokens);
-    REPORT_MUTABLE_METRIC(nearest_ancestor_gap_max_tokens_metric, collector->nearest_ancestor_gap_max_tokens);
-    REPORT_MUTABLE_METRIC(node_age_sum_us_metric, collector->node_age_sum_us);
-    REPORT_MUTABLE_METRIC(node_age_max_us_metric, collector->node_age_max_us);
-    REPORT_MUTABLE_METRIC(live_cache_age_sum_us_metric, collector->live_cache_age_sum_us);
-    REPORT_MUTABLE_METRIC(live_cache_age_max_us_metric, collector->live_cache_age_max_us);
-    REPORT_MUTABLE_METRIC(completed_cache_lifetime_count_metric, collector->completed_cache_lifetime_count);
-    REPORT_MUTABLE_METRIC(completed_cache_lifetime_sum_us_metric, collector->completed_cache_lifetime_sum_us);
-    REPORT_MUTABLE_METRIC(completed_cache_lifetime_max_us_metric, collector->completed_cache_lifetime_max_us);
-    REPORT_MUTABLE_METRIC(observation_count_metric, collector->observation_count);
-    REPORT_MUTABLE_METRIC(observation_cpu_sum_us_metric, collector->observation_cpu_sum_us);
-    REPORT_MUTABLE_METRIC(observation_cpu_max_us_metric, collector->observation_cpu_max_us);
-    REPORT_MUTABLE_METRIC(snapshot_cpu_us_metric, collector->snapshot_cpu_us);
-}
-
-bool RtpLLMBlockTreeResourceMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(leaf_count_metric, "rtp_llm_kv_cache_tree_resource_leaf_count");
-    return true;
-}
-
-void RtpLLMBlockTreeResourceMetrics::report(const kmonitor::MetricsTags* tags,
-                                            RtpLLMBlockTreeResourceMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(leaf_count_metric, collector->leaf_count);
-}
-
 bool RtpLLMCacheOperationMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(malloc_retry_qps_metric, "rtp_llm_kv_cache_malloc_retry_qps");
     REGISTER_QPS_MUTABLE_METRIC(malloc_qps_metric, "rtp_llm_kv_cache_malloc_qps");
@@ -1008,17 +909,6 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(load_joined_request_qps_metric, "rtp_llm_kv_cache_load_joined_request_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(load_join_dependency_count_metric, "rtp_llm_kv_cache_load_join_dependency_count");
     REGISTER_GAUGE_MUTABLE_METRIC(load_join_wait_latency_us_metric, "rtp_llm_kv_cache_load_join_wait_latency_us");
-    REGISTER_QPS_MUTABLE_METRIC(attempt_qps_metric, "rtp_llm_kv_cache_attempt_qps");
-    REGISTER_QPS_MUTABLE_METRIC(attempt_query_tokens_metric, "rtp_llm_kv_cache_attempt_query_tokens");
-    REGISTER_GAUGE_MUTABLE_METRIC(attempt_query_length_metric, "rtp_llm_kv_cache_attempt_query_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(attempt_full_key_hit_length_metric, "rtp_llm_kv_cache_attempt_full_key_hit_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(attempt_restored_length_metric, "rtp_llm_kv_cache_attempt_restored_length");
-    REGISTER_QPS_MUTABLE_METRIC(normal_query_tokens_metric, "rtp_llm_kv_cache_normal_query_tokens");
-    REGISTER_QPS_MUTABLE_METRIC(normal_full_key_hit_tokens_metric, "rtp_llm_kv_cache_normal_full_key_hit_tokens");
-    REGISTER_QPS_MUTABLE_METRIC(normal_restored_tokens_metric, "rtp_llm_kv_cache_normal_restored_tokens");
-    REGISTER_QPS_MUTABLE_METRIC(restored_attempt_qps_metric, "rtp_llm_kv_cache_restored_attempt_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(full_key_gap_length_metric, "rtp_llm_kv_cache_full_key_gap_length");
-    REGISTER_QPS_MUTABLE_METRIC(full_key_gap_reason_qps_metric, "rtp_llm_kv_cache_full_key_gap_reason_qps");
     return true;
 }
 
@@ -1060,42 +950,6 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
     }
     if (collector->report_load_join_wait) {
         load_join_wait_latency_us_metric->Report(tags, collector->join_wait_latency_us);
-    }
-    if (collector->report_attempt_metrics) {
-        kmonitor::MetricsTags attempt_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();
-        attempt_tags.AddTag("outcome", collector->attempt_outcome);
-        attempt_tags.AddTag("retried", collector->attempt_retried ? "true" : "false");
-        attempt_qps_metric->Report(&attempt_tags, 1);
-        attempt_query_tokens_metric->Report(&attempt_tags, collector->query_length);
-        attempt_query_length_metric->Report(&attempt_tags, collector->query_length);
-        attempt_full_key_hit_length_metric->Report(&attempt_tags, collector->full_key_hit_length);
-        if (collector->attempt_outcome == "success") {
-            attempt_restored_length_metric->Report(&attempt_tags, collector->restored_length);
-            normal_query_tokens_metric->Report(tags, collector->query_length);
-            normal_full_key_hit_tokens_metric->Report(tags, collector->full_key_hit_length);
-            normal_restored_tokens_metric->Report(tags, collector->restored_length);
-            restored_attempt_qps_metric->Report(tags, collector->restored_length > 0 ? 1 : 0);
-            if (collector->full_key_hit_length > collector->restored_length) {
-                full_key_gap_length_metric->Report(tags,
-                                                   collector->full_key_hit_length - collector->restored_length);
-                bool has_known_reason = false;
-                auto report_reason = [&](const char* reason) {
-                    kmonitor::MetricsTags reason_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();
-                    reason_tags.AddTag("reason", reason);
-                    full_key_gap_reason_qps_metric->Report(&reason_tags, 1);
-                    has_known_reason = true;
-                };
-                if (collector->joint_valid_hit_length < collector->full_key_hit_length) {
-                    report_reason("joint_resource_invalid");
-                }
-                if (collector->load_attempted && !collector->load_success) {
-                    report_reason("load_failed");
-                }
-                if (!has_known_reason) {
-                    report_reason("unknown");
-                }
-            }
-        }
     }
     if (collector->report_match_to_ready_latency) {
         kmonitor::MetricsTags match_to_ready_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();

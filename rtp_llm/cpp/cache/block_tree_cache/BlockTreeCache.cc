@@ -72,6 +72,12 @@ bool BlockTreeCache::init() {
         RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
     }
+    if (config_.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("event=prefix_cache_observation payload={\"kind\":\"startup\","
+                         "\"schema_version\":1,\"enabled\":true,\"instance\":\"%s\","
+                         "\"output\":\"info\",\"role\":\"PREFILL\",\"allocator_owner\":true}",
+                         config_.prefix_observability_instance.c_str());
+    }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
@@ -143,11 +149,12 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           const std::vector<int>*            request_tokens) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        result = loader_.matchLocked(cache_keys, valid_prefix, request_tokens);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -155,19 +162,29 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
-                            Tier                                              target_tier) {
-    (void)insert(cache_keys, resources, target_tier, false);
+                            Tier                                              target_tier,
+                            PrefixCachePlanState*                             prefix_plan_state) {
+    (void)insert(cache_keys, resources, target_tier, false, nullptr, prefix_plan_state);
 }
 
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              const std::vector<std::vector<int>>*              token_segments,
+                              PrefixCachePlanState*                             prefix_plan_state) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        storage_write =
+            storer_.storeLocked(cache_keys,
+                                resources,
+                               target_tier,
+                               is_resident,
+                               resident_prefix_length,
+                               token_segments,
+                               prefix_plan_state);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
@@ -243,14 +260,11 @@ BlockTreeObservabilitySnapshot BlockTreeCache::observabilitySnapshot() const {
 
 void BlockTreeCache::reportMetrics() const {
     std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
-    BlockTreeObservabilitySnapshot                   tree_snapshot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
-        tree_snapshot = tree_->observabilitySnapshot(false);
     }
     metrics_reporter_->reportEvictableCandidateCount(snapshots);
-    metrics_reporter_->reportTreeObservability(tree_snapshot);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }

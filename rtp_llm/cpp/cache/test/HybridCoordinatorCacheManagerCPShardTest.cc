@@ -201,8 +201,6 @@ void expectCpCanonicalReuse(int                  seq_len,
     ASSERT_TRUE(result.success);
 
     EXPECT_EQ(result.reuse_len, expected_reuse_len) << "seq_len=" << seq_len;
-    EXPECT_EQ(result.query_length, seq_len) << "global N must not use rank-local block count";
-    EXPECT_EQ(result.full_key_hit_length, expected_reuse_len) << "H uses the canonical, N-1-clipped key path";
     EXPECT_EQ(batch_res->cacheKeys(0), request_keys);
     EXPECT_EQ(result.block_aligned_input_length, expected_input_length) << "seq_len=" << seq_len;
     EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), static_cast<size_t>(expected_reuse_len / (4 * cp_size)))

@@ -107,6 +107,10 @@ public:
     void failNextMatch() {
         fail_match_ = true;
     }
+
+    void setNextQueryStatus(PrefixCacheRemoteQueryStatus status) {
+        pending_match_.query_status = status;
+    }
     void failNextRead() {
         fail_read_ = true;
     }
@@ -260,6 +264,31 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
     EXPECT_EQ(callbacks, 1u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, RemoteObservationKeepsCandidateAndQueryStatusBeforeMaterialization) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    backend->setNextQueryStatus(PrefixCacheRemoteQueryStatus::HIT);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 3u);
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    backend->completeMatch(3);
+    const auto observation = context->remoteObservation(/*reuse_unit_tokens=*/2);
+    EXPECT_EQ(observation.query_status, PrefixCacheRemoteQueryStatus::HIT);
+    ASSERT_TRUE(observation.candidate_pos.has_value());
+    EXPECT_EQ(*observation.candidate_pos, 6u);
+    EXPECT_FALSE(observation.effective.has_value());
     coordinator->shutdown();
 }
 

@@ -72,6 +72,11 @@ struct BlockTreeCacheConfig {
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
     int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
 
+    // Startup-resolved complete prefix-cache observation switch. It never
+    // participates in recovery/allocation decisions.
+    bool enable_prefix_cache_observability{false};
+    std::string prefix_observability_instance;
+
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
         switch (tier) {
@@ -122,15 +127,20 @@ public:
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
+                               const std::function<bool(size_t)>& valid_prefix = {},
+                               const std::vector<int>*            request_tokens = nullptr);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
-                                Tier                                              target_tier);
+                                Tier                                              target_tier,
+                                PrefixCachePlanState*                             prefix_plan_state = nullptr);
     // Returns the resident key-prefix count, including nodes that were already resident.
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  const std::vector<std::vector<int>>*              token_segments = nullptr,
+                  PrefixCachePlanState*                             prefix_plan_state = nullptr);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
@@ -179,6 +189,12 @@ public:
 
     const BlockTreeCacheConfig& config() const {
         return config_;
+    }
+    bool prefixObservabilityEnabled() const {
+        return config_.enable_prefix_cache_observability;
+    }
+    const std::string& prefixObservabilityInstance() const {
+        return config_.prefix_observability_instance;
     }
 
 private:

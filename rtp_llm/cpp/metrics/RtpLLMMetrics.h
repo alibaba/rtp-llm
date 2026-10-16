@@ -995,108 +995,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMBlockTreeMetricsCollector final {
-public:
-    int64_t node_count                       = 0;
-    int64_t root_child_count                 = 0;
-    int64_t leaf_count                       = 0;
-    int64_t linear_count                     = 0;
-    int64_t branch_count                     = 0;
-    int64_t max_child_count                  = 0;
-    int64_t chain_segment_count              = 0;
-    int64_t max_chain_tokens                 = 0;
-    int64_t max_depth_tokens                 = 0;
-    int64_t leaf_depth_sum_tokens            = 0;
-    int64_t max_leaf_depth_tokens            = 0;
-    int64_t branch_depth_sum_tokens          = 0;
-    int64_t max_branch_depth_tokens          = 0;
-    int64_t recoverable_point_count          = 0;
-    int64_t stored_cache_count               = 0;
-    int64_t pure_content_count               = 0;
-    int64_t incomplete_state_count           = 0;
-    int64_t temporarily_busy_count           = 0;
-    int64_t max_recoverable_depth_tokens     = 0;
-    int64_t recoverable_depth_sum_tokens     = 0;
-    int64_t first_recoverable_point_count    = 0;
-    int64_t nearest_ancestor_gap_count      = 0;
-    int64_t nearest_ancestor_gap_sum_tokens = 0;
-    int64_t nearest_ancestor_gap_max_tokens = 0;
-    int64_t node_age_sum_us                  = 0;
-    int64_t node_age_max_us                  = 0;
-    int64_t live_cache_age_sum_us            = 0;
-    int64_t live_cache_age_max_us            = 0;
-    int64_t completed_cache_lifetime_count  = 0;
-    int64_t completed_cache_lifetime_sum_us = 0;
-    int64_t completed_cache_lifetime_max_us = 0;
-    int64_t observation_count               = 0;
-    int64_t observation_cpu_sum_us          = 0;
-    int64_t observation_cpu_max_us          = 0;
-    int64_t snapshot_cpu_us                 = 0;
-};
-
-class RtpLLMBlockTreeMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMBlockTreeMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* node_count_metric                       = nullptr;
-    kmonitor::MutableMetric* root_child_count_metric                 = nullptr;
-    kmonitor::MutableMetric* leaf_count_metric                       = nullptr;
-    kmonitor::MutableMetric* linear_count_metric                     = nullptr;
-    kmonitor::MutableMetric* branch_count_metric                     = nullptr;
-    kmonitor::MutableMetric* max_child_count_metric                  = nullptr;
-    kmonitor::MutableMetric* chain_segment_count_metric              = nullptr;
-    kmonitor::MutableMetric* max_chain_tokens_metric                 = nullptr;
-    kmonitor::MutableMetric* max_depth_tokens_metric                 = nullptr;
-    kmonitor::MutableMetric* leaf_depth_sum_tokens_metric            = nullptr;
-    kmonitor::MutableMetric* max_leaf_depth_tokens_metric            = nullptr;
-    kmonitor::MutableMetric* branch_depth_sum_tokens_metric          = nullptr;
-    kmonitor::MutableMetric* max_branch_depth_tokens_metric          = nullptr;
-    kmonitor::MutableMetric* recoverable_point_count_metric          = nullptr;
-    kmonitor::MutableMetric* stored_cache_count_metric               = nullptr;
-    kmonitor::MutableMetric* pure_content_count_metric               = nullptr;
-    kmonitor::MutableMetric* incomplete_state_count_metric           = nullptr;
-    kmonitor::MutableMetric* temporarily_busy_count_metric           = nullptr;
-    kmonitor::MutableMetric* max_recoverable_depth_tokens_metric     = nullptr;
-    kmonitor::MutableMetric* recoverable_depth_sum_tokens_metric     = nullptr;
-    kmonitor::MutableMetric* first_recoverable_point_count_metric    = nullptr;
-    kmonitor::MutableMetric* nearest_ancestor_gap_count_metric      = nullptr;
-    kmonitor::MutableMetric* nearest_ancestor_gap_sum_tokens_metric = nullptr;
-    kmonitor::MutableMetric* nearest_ancestor_gap_max_tokens_metric = nullptr;
-    kmonitor::MutableMetric* node_age_sum_us_metric                  = nullptr;
-    kmonitor::MutableMetric* node_age_max_us_metric                  = nullptr;
-    kmonitor::MutableMetric* live_cache_age_sum_us_metric            = nullptr;
-    kmonitor::MutableMetric* live_cache_age_max_us_metric            = nullptr;
-    kmonitor::MutableMetric* completed_cache_lifetime_count_metric  = nullptr;
-    kmonitor::MutableMetric* completed_cache_lifetime_sum_us_metric = nullptr;
-    kmonitor::MutableMetric* completed_cache_lifetime_max_us_metric = nullptr;
-    kmonitor::MutableMetric* observation_count_metric               = nullptr;
-    kmonitor::MutableMetric* observation_cpu_sum_us_metric          = nullptr;
-    kmonitor::MutableMetric* observation_cpu_max_us_metric          = nullptr;
-    kmonitor::MutableMetric* snapshot_cpu_us_metric                 = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMBlockTreeResourceMetricsCollector final {
-public:
-    int64_t leaf_count = 0;
-};
-
-class RtpLLMBlockTreeResourceMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMBlockTreeResourceMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* leaf_count_metric = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
 class RtpLLMCacheOperationMetricsCollector final {
 public:
     enum class OpType : int8_t {
@@ -1297,9 +1195,6 @@ private:
 class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t block_aligned_input_length = 0;
-    int64_t query_length               = 0;
-    int64_t full_key_hit_length        = 0;
-    int64_t joint_valid_hit_length     = 0;
     int64_t kv_cache_reuse_length      = 0;
     int64_t device_reuse_length        = 0;
     int64_t host_reuse_length          = 0;
@@ -1321,8 +1216,6 @@ public:
     int64_t match_to_ready_latency_us     = 0;
     int64_t join_dependency_count         = 0;
     int64_t join_wait_latency_us          = 0;
-    int64_t restored_length               = 0;
-    bool    attempt_retried               = false;
     bool    load_attempted                = false;
     bool    load_success                  = false;
     bool    report_reuse_metrics          = false;
@@ -1334,8 +1227,6 @@ public:
     bool    report_load_wait_latency      = false;
     bool    report_load_join              = false;
     bool    report_load_join_wait         = false;
-    bool    report_attempt_metrics        = false;
-    std::string attempt_outcome;
 };
 
 class RtpLLMRemoteCacheMatchMetricsCollector final {
@@ -1465,17 +1356,7 @@ public:
     kmonitor::MutableMetric* load_joined_request_qps_metric    = nullptr;
     kmonitor::MutableMetric* load_join_dependency_count_metric = nullptr;
     kmonitor::MutableMetric* load_join_wait_latency_us_metric  = nullptr;
-    kmonitor::MutableMetric* attempt_qps_metric                = nullptr;
-    kmonitor::MutableMetric* attempt_query_tokens_metric       = nullptr;
-    kmonitor::MutableMetric* attempt_query_length_metric       = nullptr;
-    kmonitor::MutableMetric* attempt_full_key_hit_length_metric = nullptr;
-    kmonitor::MutableMetric* attempt_restored_length_metric    = nullptr;
-    kmonitor::MutableMetric* normal_query_tokens_metric        = nullptr;
-    kmonitor::MutableMetric* normal_full_key_hit_tokens_metric = nullptr;
-    kmonitor::MutableMetric* normal_restored_tokens_metric     = nullptr;
-    kmonitor::MutableMetric* restored_attempt_qps_metric       = nullptr;
-    kmonitor::MutableMetric* full_key_gap_length_metric        = nullptr;
-    kmonitor::MutableMetric* full_key_gap_reason_qps_metric    = nullptr;
+
 private:
     AUTIL_LOG_DECLARE();
 };
