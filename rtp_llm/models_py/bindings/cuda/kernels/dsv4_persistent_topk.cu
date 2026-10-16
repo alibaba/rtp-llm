@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
@@ -29,16 +30,19 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
     const int64_t num_rows = logits.size(0);
     const int64_t stride   = logits.stride(0);
-    cudaStream_t  stream   = at::cuda::getCurrentCUDAStream();
+    cudaStream_t  stream   = at::cuda::getCurrentCUDAStream(logits.get_device());
 
-    static int num_sms            = 0;
-    static int max_smem_per_block = 0;
-    if (num_sms == 0) {
-        int device;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
-        cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    }
+    int device             = 0;
+    int num_sms            = 0;
+    int max_smem_per_block = 0;
+    TORCH_CHECK(cudaGetDevice(&device) == cudaSuccess, "failed to query current CUDA device");
+    TORCH_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device) == cudaSuccess,
+                "failed to query CUDA SM count for device ",
+                device);
+    TORCH_CHECK(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device)
+                    == cudaSuccess,
+                "failed to query CUDA shared-memory limit for device ",
+                device);
 
     if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
         cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
@@ -208,6 +212,10 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
     TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
     TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
+    TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
+    TORCH_CHECK(lengths.device() == logits.device() && output.device() == logits.device()
+                    && workspace.device() == logits.device(),
+                "logits, lengths, output, and workspace must be on the same CUDA device");
     TORCH_CHECK(logits.dtype() == torch::kFloat32, "Only float32 supported");
     TORCH_CHECK(lengths.dtype() == torch::kInt32, "lengths must be int32");
     TORCH_CHECK(output.dtype() == torch::kInt32, "output must be int32");
@@ -223,6 +231,8 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k, "output size mismatch");
     TORCH_CHECK(
         k == 512 || k == 1024 || k == 2048, "dsv4_persistent_topk supports k=512, k=1024, or k=2048, got k=", k);
+
+    const c10::cuda::CUDAGuard device_guard(logits.device());
 
     if (k == 512) {
         launch_persistent_topk<512>(logits, lengths, output, workspace, max_seq_len);

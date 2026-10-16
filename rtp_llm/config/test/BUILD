@@ -90,3 +90,13 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "expert_dtype_test",
+    srcs = [
+        "expert_dtype_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

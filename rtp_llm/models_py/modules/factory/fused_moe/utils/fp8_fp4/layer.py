@@ -54,11 +54,17 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        is_decode_role: bool = False,
+        expert_dtype: str = "fp4",
+        enable_cuda_graph: bool = False,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
                 f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
             )
+        self.is_decode_role = bool(is_decode_role)
+        self.enable_cuda_graph = bool(enable_cuda_graph)
+        self.expert_dtype = expert_dtype
         self.layer_id = int(layer_id)
         self.hidden_size = int(hidden_size)
         self.dim = self.hidden_size
@@ -151,6 +157,8 @@ class Fp8Fp4MoeLayer(nn.Module):
         warmup_include_capacity: bool = False,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        is_decode_role: bool = False,
+        enable_cuda_graph: bool = False,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -192,6 +200,11 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            is_decode_role=is_decode_role,
+            enable_cuda_graph=enable_cuda_graph,
+            expert_dtype=(
+                "fp8" if layer_weights[W.moe_w1].dtype == torch.float8_e4m3fn else "fp4"
+            ),
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights

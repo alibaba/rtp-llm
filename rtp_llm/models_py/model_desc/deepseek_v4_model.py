@@ -375,6 +375,9 @@ class DeepSeekV4Model(GptModelBase):
             moe_config=moe_config,
         )
         self._max_generate_batch_size = int(max_generate_batch_size)
+        args.enable_cuda_graph = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
             f"got {self._max_generate_batch_size}"
@@ -956,17 +959,21 @@ class DeepSeekV4Model(GptModelBase):
                     _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
                     _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_grouped_fp8_moe_shapes,
                     _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
+                    _collect_dsv4_wo_a_grouped_shapes,
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
                     warmup_dsv4_fp8_swa_slot_dequant_jit,
                     warmup_fp8_mqa_logits_jit,
+                    warmup_grouped_fp8_moe_jit,
                     warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
                     warmup_prefill_cp_metadata_jit,
+                    warmup_wo_a_grouped_jit,
                 )
 
                 _jit_device = _torch.device(device_str)
@@ -1079,6 +1086,21 @@ class DeepSeekV4Model(GptModelBase):
                 warmup_batched_fp8_einsum_jit(
                     _batched_fp8_einsum_shapes,
                     max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                # SM90 counterparts. Both collectors return {} on SM100, where the
+                # einsum above and the FP4 MoE strategies own these projections, so
+                # this costs one named_modules walk there and nothing else.
+                _wo_a_grouped_shapes = _collect_dsv4_wo_a_grouped_shapes(self.v4)
+                warmup_wo_a_grouped_jit(
+                    _wo_a_grouped_shapes,
+                    max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
+                _grouped_fp8_moe_shapes = _collect_dsv4_grouped_fp8_moe_shapes(self)
+                warmup_grouped_fp8_moe_jit(
+                    _grouped_fp8_moe_shapes,
+                    tokens_per_rank=_dense_gemm_max_m,
                     device=_jit_device,
                 )
                 _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
