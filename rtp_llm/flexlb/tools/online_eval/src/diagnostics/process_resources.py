@@ -1,4 +1,6 @@
 """Optional process RSS and explicitly scoped cgroup v2 accounting."""
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 

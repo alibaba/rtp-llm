@@ -126,7 +126,7 @@ def finish(ctx, p, deadline):
             engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
             raw = capture_window(ctx.monitor.client, e["gate_input"]["fields"], source="mock",
                 windows=[(e["window"]["start_epoch_ms"] / 1000, e["window"]["end_epoch_ms"] / 1000)],
-                epoch=e["env_epoch"], deadline=deadline, limits=e["capture_limits"],
+                epoch=e["provenance"]["env_epoch"], deadline=deadline, limits=e["capture_limits"],
                 directory=ctx.artifact_dir / "performance-measurement")
             e["engine_tps_samples"] = [row for rows in raw.field_rows().values() for row in rows]
             e["raw_evidence"] = dict(path="performance-measurement/manifest.json",

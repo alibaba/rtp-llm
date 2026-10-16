@@ -191,7 +191,6 @@ class PerformanceGateTest(unittest.TestCase):
         monitor.client.metric_chunks.side_effect = lambda identity, **kw: [[row for row in raw if row["metric_id"] == identity]]
         monitor.client.metric_definition.return_value = dict(unit='tokens/s', labels=['role', 'engine_name'])
         e['capture_limits'] = dict(max_samples=1000, max_bytes=10000000)
-        e['env_epoch'] = 1
         with tempfile.TemporaryDirectory() as d:
             flow.directory = Path(d)
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
