@@ -136,6 +136,13 @@ private:
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
+    return initWithEngineLoop(maga_init_params, std::move(propose_params), std::move(mm_process_engine), true);
+}
+
+grpc::Status LocalRpcServer::initWithEngineLoop(const EngineInitParams&                       maga_init_params,
+                                                std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                                py::object                                    mm_process_engine,
+                                                bool                                          start_engine_loop) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_                      = maga_init_params;
     weight_manager_                        = maga_init_params.weight_manager;
@@ -203,7 +210,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params), start_engine_loop));
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,

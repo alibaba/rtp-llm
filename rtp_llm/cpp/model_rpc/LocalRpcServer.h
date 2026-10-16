@@ -115,6 +115,11 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    grpc::Status initWithEngineLoop(const EngineInitParams&                       maga_init_params,
+                                    std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                    py::object                                    mm_process_engine,
+                                    bool                                          start_engine_loop);
+
     virtual bool isCancelled(grpc::ServerContext* context) const {
         return context && context->IsCancelled();
     }
