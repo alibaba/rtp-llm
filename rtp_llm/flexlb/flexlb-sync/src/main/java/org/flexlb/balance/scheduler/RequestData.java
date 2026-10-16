@@ -9,7 +9,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.util.Failures;
 
 import java.util.Map;
@@ -32,7 +31,7 @@ public final class RequestData {
     private volatile SchedulingMetadata schedulingMetadata;
     private volatile CompletableFuture<Response> future;
     private volatile AbstractRequestScheduler scheduler;
-    @Getter(lombok.AccessLevel.NONE) private volatile FutureTask<GenerateInputPB> generateInput;
+    @Getter(lombok.AccessLevel.NONE) private volatile FutureTask<GenerateInputPayload> generateInput;
     private volatile int generateInputSize;
     @Getter(lombok.AccessLevel.NONE) private volatile boolean registered;
     @Setter private Context traceContext;
@@ -99,14 +98,15 @@ public final class RequestData {
     /** Parsing remains deferred until delivery, and FutureTask memoizes both value and failure. */
     public synchronized void setGenerateInputPb(ByteString bytes) {
         checkState(!registered, "registered delivery input is immutable");
-        generateInputSize = bytes == null ? 0 : bytes.size();
-        generateInput = bytes == null || bytes.isEmpty() ? null : new FutureTask<>(() -> GenerateInputPB.parseFrom(bytes));
+        ByteString inputBytes = config.getDispatcher().requiresGenerateInput() ? bytes : null;
+        generateInputSize = inputBytes == null ? 0 : inputBytes.size();
+        generateInput = inputBytes == null || inputBytes.isEmpty() ? null : new FutureTask<>(() -> GenerateInputPayload.parse(inputBytes));
     }
 
     boolean hasGenerateInput() { return generateInput != null; }
     void prepareGenerateInput() { var input = generateInput; if (input != null) { input.run(); } }
 
-    GenerateInputPB getGenerateInput() throws InvalidProtocolBufferException, InterruptedException {
+    GenerateInputPayload getGenerateInput() throws InvalidProtocolBufferException, InterruptedException {
         var input = generateInput;
         if (input == null) { return null; }
         input.run();
@@ -119,6 +119,9 @@ public final class RequestData {
             throw interrupted;
         }
     }
+
+    /** Terminal requests no longer need their cached input; in-progress readers keep a local reference. */
+    synchronized void discardGenerateInput() { generateInput = null; }
 
     synchronized void initializeWorkerQueue(long nowMs, long sequence) {
         if (workerEnqueueSequence == 0L) {

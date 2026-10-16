@@ -114,7 +114,7 @@ final class BatchCodec {
     private static EngineRpcService.GenerateInputPB input(RequestRoute item, RoleAddresses addresses) throws Exception {
         var prepared = item.ctx().data().getGenerateInput();
         if (prepared == null) { throw new IllegalArgumentException("generateInputPb is missing for request " + item.requestId()); }
-        var input = prepared.toBuilder();
+        var input = prepared.toWireBuilder();
         checkArgument(input.getRequestId() == item.requestId(), "request_id mismatch between schedule request and GenerateInputPB");
         if (FlexlbTrace.isEnabled() && item.ctx().data().getTraceContext() != null) {
             try {

@@ -23,6 +23,12 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
+    public static List<DecodeResources.DecodeRoutingView> decodeRoutingSnapshot(EndpointRegistry registry, String group) {
+        var views = new java.util.ArrayList<DecodeResources.DecodeRoutingView>();
+        registry.decodeRoutingSnapshot(group, views);
+        return List.copyOf(views);
+    }
+
     public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, long requestId) {
         var request = snapshot.requests().get(requestId);
         return request != null && request.phase().isMasterQueued();

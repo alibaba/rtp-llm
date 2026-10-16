@@ -90,6 +90,77 @@ class GroupPlannerTest {
         assertEquals(200, budgeted.selectedPredictionMs().orElseThrow());
     }
 
+    @Test
+    void recursivePredictionAndLaterSelectionsCannotMutatePublishedGroups() {
+        var outer = List.of(item(1, 10, 20), item(2, 20, 10));
+        var inner = List.of(item(3, 30, 5), item(4, 40, 1));
+        var constraints = new Constraints(4, BIG, BIG, 1000, 0);
+        var selected = GroupPlanner.selectWithPrediction(outer, constraints, (added, prefix) -> {
+            var before = List.copyOf(prefix);
+            var nested = GroupPlanner.selectWithPrediction(inner, constraints, HUNDRED_PER_MEMBER);
+            assertEquals(inner, nested.items());
+            assertEquals(before, prefix, "recursive selection must have its own prefix");
+            return HUNDRED_PER_MEMBER.append(added, prefix);
+        });
+        GroupPlanner.selectWithPrediction(inner, constraints, null);
+        assertEquals(outer, selected.items());
+        assertEquals(40, selected.paddedTokens());
+        assertEquals(30, selected.kvTokens());
+        assertEquals(10, selected.windowOpenedAtMs());
+        assertThrows(UnsupportedOperationException.class, () -> selected.items().clear());
+    }
+
+    @Test
+    void failedPredictionClearsReferencesAndTheNextSelectionStartsEmpty() throws Exception {
+        var source = List.of(item(1, 10, 20), item(2, 20, 10));
+        var constraints = new Constraints(4, BIG, BIG, 1000, 0);
+        var failure = new IllegalStateException("prediction failed");
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> GroupPlanner.selectWithPrediction(source, constraints, (added, prefix) -> {
+                    if (prefix.size() == 2) { throw failure; }
+                    return 100;
+                })));
+        var field = GroupPlanner.class.getDeclaredField("SELECTIONS");
+        field.setAccessible(true);
+        var cached = (List<?>) ((ThreadLocal<?>) field.get(null)).get();
+        assertTrue(cached.isEmpty(), "failed projection must release all selected input references");
+        assertEquals(source, GroupPlanner.selectWithPrediction(source, constraints, null).items());
+        assertTrue(cached.isEmpty(), "successful projection must also release its input references");
+    }
+
+    @Test
+    void largeSelectionIsNotRetainedInThreadCache() throws Exception {
+        var field = GroupPlanner.class.getDeclaredField("SELECTIONS");
+        field.setAccessible(true);
+        var cache = (ThreadLocal<?>) field.get(null);
+        Object before = cache.get();
+        var source = java.util.stream.LongStream.range(0, 4097).mapToObj(id -> item(id, 1, 0)).toList();
+        var result = GroupPlanner.selectWithPrediction(source, new Constraints(4097, BIG, BIG, 0, 0), null);
+        assertEquals(source, result.items());
+        org.junit.jupiter.api.Assertions.assertNotSame(before, cache.get());
+        assertTrue(((List<?>) before).isEmpty());
+    }
+
+    @Test
+    void concurrentSelectionsKeepIndependentImmutableResults() throws Exception {
+        var constraints = new Constraints(4, BIG, BIG, 1000, 0);
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int worker = 0; worker < 4; worker++) {
+                long id = worker * 1000L;
+                futures.add(executor.submit(() -> {
+                    var inputs = List.of(item(id, 10, 20), item(id + 1, 20, 10));
+                    for (int run = 0; run < 250; run++) {
+                        var selected = GroupPlanner.selectWithPrediction(inputs, constraints, HUNDRED_PER_MEMBER);
+                        assertEquals(inputs, selected.items());
+                        assertEquals(200, selected.selectedPredictionMs().orElseThrow());
+                    }
+                }));
+            }
+            for (var future : futures) { future.get(10, java.util.concurrent.TimeUnit.SECONDS); }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     @Nested
     @DisplayName("Item validation")

@@ -1240,6 +1240,21 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void contextStoresGenerateInputOnlyForBatchDelivery(boolean batch) {
+        var config = configService.loadBalanceConfig();
+        config.getDispatcher().setType(batch ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99999L).setSeqLen(2048).setGenerateInput(bytes).build();
+        RequestContext context = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "buildContext", request);
+        var retained = org.springframework.test.util.ReflectionTestUtils.getField(context.data(), "generateInput");
+        if (batch) { org.junit.jupiter.api.Assertions.assertNotNull(retained); }
+        else { org.junit.jupiter.api.Assertions.assertNull(retained); }
+    }
+
     @Test
     void testSchedule_buildContextPreservesCacheKeyBlockSize() {
         // Given: not master, no consistency needed

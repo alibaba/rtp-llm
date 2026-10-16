@@ -85,7 +85,7 @@ public final class ContextResult {
                                 boolean transferred, long startedAtMs, long acknowledgedAtMs) { }
     public record PreemptionFacts(PreemptionRegistration identity, PreemptionCancelPhase phase,
                                   boolean cancelAcknowledged, boolean finished,
-                                  EndEvidence pendingTerminal, boolean confirmationPending,
+                                  EndEvidence pendingTerminal, boolean confirmationPending, boolean restorationObserved,
                                   ReconciliationPermit reconciliation) { }
     public record CloseFacts(EndToken endOperation, ClosePermit releaseOperation,
                              boolean prefillSettled, boolean decodeSettled,

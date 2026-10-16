@@ -132,7 +132,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         }
                     }
                     case REMOTE -> {
-                        if (permission.delivery() != null) { runtime.startDeliveryCleanup(permission.delivery()); }
                         closeRequest(ctx, new EndEvidence(permission.route(), EndKind.FRONTEND, null,
                                 false, 0L, StrategyErrorType.REQUEST_CANCELLED, reason.getMessage(), false, false), null);
                     }
@@ -606,7 +605,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     boolean deliveryFailure = ending == EndKind.DELIVERY_FAILURE && before.cancellation() == null;
                     boolean placementReady = before.placement() == null || deliveryFailure;
                     boolean preemptionReady = before.preemption() == null || before.preemption().finished()
-                            || deliveryFailure || ending == EndKind.INACTIVITY || ending == EndKind.RETIREMENT;
+                            || deliveryFailure || ending == EndKind.FRONTEND || ending == EndKind.INACTIVITY || ending == EndKind.RETIREMENT;
                     if (before.outcome() == null && placementReady && preemptionReady
                             && before.selectedResponse() == null && !ctx.data().getFuture().isDone()) {
                         publication = new ResponsePublication(runtime, ctx, false);
@@ -636,7 +635,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                     new VictimResolution(ctx.data().getRequestId(), VictimResolution.Outcome.REQUEST_END)));
                         }
                         var delivery = ctx.snapshot().delivery();
-                        if (delivery != null && delivery.abandonment() != null) {
+                        if (delivery != null && (delivery.abandonment() != null || ctx.snapshot().cancellation() != null)) {
                             failure = Failures.run(failure, () -> runtime.startDeliveryCleanup(delivery.identity()));
                         }
                         ctx.completeClose(endToken, new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, failure == null, failure == null),

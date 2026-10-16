@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
+
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.cache.service.CacheAwareService;
@@ -61,7 +63,7 @@ class EndpointRegistryCloseTest {
                     registry, RoleType.DECODE, status.getIpPort(), status));
             try {
                 assertTrue(publicationEntered.await(2, TimeUnit.SECONDS));
-                assertFalse(registry.decodeRoutingSnapshot(null).isEmpty());
+                assertFalse(decodeRoutingSnapshot(registry, null).isEmpty());
                 Future<?> owner = executor.submit(() -> {
                     Thread.currentThread().interrupt();
                     try {
@@ -71,7 +73,7 @@ class EndpointRegistryCloseTest {
                     }
                 });
                 assertTimeoutPreemptively(java.time.Duration.ofSeconds(2), () -> {
-                    while (!registry.decodeRoutingSnapshot(null).isEmpty()) { Thread.sleep(1L); }
+                    while (!decodeRoutingSnapshot(registry, null).isEmpty()) { Thread.sleep(1L); }
                 });
                 Future<?> waiter = executor.submit(registry::close);
                 var late = EndpointTestSupport.workerStatus(RoleType.VIT, "127.0.0.1", 8400, 8401);
@@ -84,7 +86,7 @@ class EndpointRegistryCloseTest {
                 owner.get(2, TimeUnit.SECONDS);
                 waiter.get(2, TimeUnit.SECONDS);
                 assertNull(published.tryPinGeneration());
-                assertTrue(registry.decodeRoutingSnapshot(null).isEmpty());
+                assertTrue(decodeRoutingSnapshot(registry, null).isEmpty());
             } finally {
                 finishPublication.countDown();
             }

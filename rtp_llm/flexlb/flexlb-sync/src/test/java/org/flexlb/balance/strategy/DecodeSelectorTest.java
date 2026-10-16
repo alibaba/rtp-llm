@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
+
 import org.flexlb.config.ConfigTestSupport;
 
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -145,7 +147,7 @@ class DecodeSelectorTest {
         EndpointRegistry actual = registry;
         Map<String, DecodeResources.DecodeRoutingView> views = new HashMap<>();
         for (DecodeResources.DecodeRoutingView view
-                : actual.decodeRoutingSnapshot(null)) {
+                : decodeRoutingSnapshot(actual, null)) {
             views.put(view.address(), view);
         }
         DecodeResources.DecodeRoutingView stale = views.get("127.0.0.1:8080");
@@ -158,9 +160,12 @@ class DecodeSelectorTest {
         Mockito.when(replacementPin.generationId()).thenReturn(
                 replacement.generationId());
         EndpointRegistry racing = Mockito.mock(EndpointRegistry.class);
-        Mockito.when(racing.decodeRoutingSnapshot(null))
-                .thenReturn(List.of(stale))
-                .thenReturn(List.of(replacement));
+        var captures = new java.util.concurrent.atomic.AtomicInteger();
+        Mockito.doAnswer(call -> {
+            List<DecodeResources.DecodeRoutingView> target = call.getArgument(1);
+            target.add(captures.getAndIncrement() == 0 ? stale : replacement);
+            return null;
+        }).when(racing).decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
         Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
         Mockito.when(racing.captureDecodeGeneration(replacement))
                 .thenReturn(replacementPin);
@@ -177,9 +182,111 @@ class DecodeSelectorTest {
         Mockito.verify(replacementPin, Mockito.never()).close();
         selected.close();
         Mockito.verify(replacementPin).close();
-        Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(null);
+        Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
         Mockito.verify(racing).captureDecodeGeneration(stale);
         Mockito.verify(racing).captureDecodeGeneration(replacement);
+    }
+
+    @Test
+    void reentrantSelectionKeepsOuterCaptureAndClearsBothWorkspaces() {
+        decodeStatuses.put("127.0.0.1:8080", createWorkerStatus("127.0.0.1", "outer"));
+        decodeStatuses.put("127.0.0.2:8080", createWorkerStatus("127.0.0.2", "inner"));
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            DecodeSelector selector = availableStrategy(registry);
+            Mockito.doAnswer(call -> {
+                call.callRealMethod();
+                var outerScratch = scratchCache().get();
+                Assertions.assertEquals("127.0.0.2", selectStatus(selector, request(1L, 2L), "inner").getServerIp());
+                Assertions.assertSame(outerScratch, scratchCache().get());
+                return null;
+            }).when(registry).decodeRoutingSnapshot(Mockito.eq("outer"), Mockito.anyList());
+            Assertions.assertEquals("127.0.0.1", selectStatus(selector, request(1L, 1L), "outer").getServerIp());
+            assertScratchReleased(scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void exceptionalPartialCaptureReleasesReferencesAndNextSelectionStillWorks() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            var view = decodeRoutingSnapshot(registry, null).getFirst();
+            DecodeSelector selector = availableStrategy(registry);
+            Mockito.doAnswer(call -> {
+                List<DecodeResources.DecodeRoutingView> target = call.getArgument(1);
+                target.add(view);
+                throw new IllegalStateException("capture failed");
+            }).doCallRealMethod().when(registry).decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
+            Assertions.assertThrows(IllegalStateException.class, () -> selector.select(request(1L, 1L), SCHEDULING, null));
+            assertScratchReleased(scratchCache().get());
+            Assertions.assertEquals("127.0.0.1", selectStatus(selector, request(1L, 2L), null).getServerIp());
+            assertScratchReleased(scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void oversizedCaptureIsNotRetainedByTheThreadCache() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            var view = decodeRoutingSnapshot(registry, null).getFirst();
+            Mockito.doAnswer(call -> {
+                List<DecodeResources.DecodeRoutingView> target = call.getArgument(1);
+                target.addAll(java.util.Collections.nCopies(4097, view));
+                return null;
+            }).when(registry).decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
+            Object previous = scratchCache().get();
+            Assertions.assertEquals("127.0.0.1", selectStatus(availableStrategy(registry), request(1L, 1L), null).getServerIp());
+            assertScratchReleased(previous);
+            Assertions.assertNotSame(previous, scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void concurrentSelectionsKeepTheirOwnViewsAndReleaseGenerationPins() throws Exception {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var selector = availableStrategy(registry);
+            var counts = new java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder>();
+            var calls = new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
+            for (int thread = 0; thread < 8; thread++) {
+                calls.add(() -> {
+                    for (int i = 0; i < 250; i++) {
+                        var selected = selectStatus(selector, request(1L, i), null);
+                        counts.computeIfAbsent(selected.getServerIp(), key -> new java.util.concurrent.atomic.LongAdder()).increment();
+                    }
+                    assertScratchReleased(scratchCache().get());
+                    return null;
+                });
+            }
+            for (var future : executor.invokeAll(calls)) { future.get(10, java.util.concurrent.TimeUnit.SECONDS); }
+            Assertions.assertEquals(1000L, counts.get("127.0.0.1").sum());
+            Assertions.assertEquals(1000L, counts.get("127.0.0.2").sum());
+            for (var view : decodeRoutingSnapshot(registry, null)) { Assertions.assertEquals(0L, view.totalLoad()); }
+        } finally {
+            registry.close();
+        }
+    }
+
+    private static ThreadLocal<?> scratchCache() {
+        return (ThreadLocal<?>) org.springframework.test.util.ReflectionTestUtils.getField(DecodeSelector.class, "SCRATCH");
+    }
+
+    private static void assertScratchReleased(Object scratch) {
+        for (String field : List.of("views", "candidates")) {
+            var list = (java.util.ArrayList<?>) org.springframework.test.util.ReflectionTestUtils.getField(scratch, field);
+            Assertions.assertTrue(list.isEmpty());
+        }
+        Assertions.assertEquals(false, org.springframework.test.util.ReflectionTestUtils.getField(scratch, "inUse"));
     }
 
     @ParameterizedTest

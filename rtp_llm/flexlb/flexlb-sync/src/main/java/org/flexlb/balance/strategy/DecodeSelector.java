@@ -32,7 +32,15 @@ import static com.google.common.base.Preconditions.checkState;
 public class DecodeSelector {
 
     private static final int MAX_SELECTION_ATTEMPTS = 2;
-    private enum Availability { READY, BUSY, IMPOSSIBLE }
+    private static final int MAX_CACHED_WORKERS = 4096;
+    private enum Availability { READY, BUSY, IMPOSSIBLE } // Ordered from most to least preferred.
+    private static final ThreadLocal<Scratch> SCRATCH = ThreadLocal.withInitial(Scratch::new);
+    private static final class Scratch {
+        private final ArrayList<DecodeRoutingView> views = new ArrayList<>();
+        private final ArrayList<DecodeRoutingView> candidates = new ArrayList<>();
+        private boolean inUse;
+    }
+
     private final EndpointRegistry endpointRegistry;
     private final EndpointRoundRobin rotation = new EndpointRoundRobin();
 
@@ -51,63 +59,73 @@ public class DecodeSelector {
 
     public PlacementResult<WorkerAssignment, RoleType> select(
             Request request, SchedulingMetadata metadata, String group) {
-        for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
-            List<DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot(group);
-            if (snapshots.isEmpty()) {
-                return PlacementResult.blocked(RoleType.DECODE);
-            }
-            Availability[] availabilityByWorker = new Availability[snapshots.size()];
-            Availability preferredAvailability = Availability.IMPOSSIBLE;
-            long largestKvBudget = 0L;
-            for (int index = 0; index < snapshots.size(); index++) {
-                DecodeRoutingView view = snapshots.get(index);
-                Availability availability = availability(request, view);
-                availabilityByWorker[index] = availability;
-                largestKvBudget = Math.max(largestKvBudget, capacity.kvBudget(view.totalKv()));
-                if (availability == Availability.READY
-                        || availability == Availability.BUSY
-                            && preferredAvailability == Availability.IMPOSSIBLE) {
-                    preferredAvailability = availability;
+        Scratch cached = SCRATCH.get();
+        Scratch scratch = cached.inUse ? new Scratch() : cached;
+        scratch.inUse = true;
+        int captured = 0;
+        try {
+            for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
+                var snapshots = scratch.views;
+                var candidates = scratch.candidates;
+                snapshots.clear();
+                candidates.clear();
+                endpointRegistry.decodeRoutingSnapshot(group, snapshots);
+                captured = Math.max(captured, snapshots.size());
+                if (snapshots.isEmpty()) { return PlacementResult.blocked(RoleType.DECODE); }
+                Availability preferred = Availability.IMPOSSIBLE;
+                long largestKvBudget = 0L;
+                for (DecodeRoutingView view : snapshots) {
+                    Availability available = availability(request, view);
+                    largestKvBudget = Math.max(largestKvBudget, capacity.kvBudget(view.totalKv()));
+                    if (available.ordinal() < preferred.ordinal()) {
+                        preferred = available;
+                        candidates.clear();
+                    }
+                    if (available == preferred) { candidates.add(view); }
                 }
-            }
-            if (preferredAvailability == Availability.IMPOSSIBLE) {
-                return PlacementResult.rejected(oversizedRequestFailure(
-                        request.getExpectedKvTokens(), largestKvBudget));
-            }
-            if (preferredAvailability == Availability.BUSY && direct) {
-                return classifyCapacityFailure(request, metadata, snapshots);
-            }
-            Availability selectedAvailability = preferredAvailability;
-            double[] costByWorker = new double[snapshots.size()];
-            double minimumCost = Double.POSITIVE_INFINITY;
-            for (int index = 0; index < snapshots.size(); index++) {
-                if (availabilityByWorker[index] == selectedAvailability) {
-                    DecodeRoutingView view = snapshots.get(index);
+                if (preferred == Availability.IMPOSSIBLE) {
+                    return PlacementResult.rejected(oversizedRequestFailure(
+                            request.getExpectedKvTokens(), largestKvBudget));
+                }
+                if (preferred == Availability.BUSY && direct) {
+                    return classifyCapacityFailure(request, metadata, snapshots);
+                }
+                double minimumCost = Double.POSITIVE_INFINITY;
+                int winners = 0;
+                for (int index = 0; index < candidates.size(); index++) {
+                    DecodeRoutingView view = candidates.get(index);
                     double cost = costFormula.evaluate(view.totalLoad(),
                             capacity.maxEngineRequests(), view.realKvUsed(), view.totalKv());
-                    costByWorker[index] = cost;
-                    if (Double.isFinite(cost)) {
-                        minimumCost = Math.min(minimumCost, cost);
+                    if (!Double.isFinite(cost)) { continue; }
+                    if (cost < minimumCost) {
+                        minimumCost = cost;
+                        winners = 0;
                     }
+                    // Compact ties in place; the write index never overtakes the read index.
+                    if (cost == minimumCost) { candidates.set(winners++, view); }
+                }
+                if (winners == 0) {
+                    throw new IllegalStateException("Decode cost formula produced no finite score: "
+                            + costFormula.expression());
+                }
+                int selectedIndex = rotation.next(RoleType.DECODE, group, winners,
+                        i -> true, i -> candidates.get(i).address());
+                checkState(selectedIndex >= 0, "Decode snapshot candidate disappeared");
+                DecodeRoutingView selected = candidates.get(selectedIndex);
+                WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(selected);
+                if (pin != null) {
+                    return PlacementResult.success(buildWorkerAssignment(selected, pin, request.getRequestId()));
                 }
             }
-            if (!Double.isFinite(minimumCost)) {
-                throw new IllegalStateException("Decode cost formula produced no finite score: "
-                        + costFormula.expression());
-            }
-            double selectedCost = minimumCost;
-            int selectedIndex = rotation.next(RoleType.DECODE, group, snapshots.size(),
-                    i -> availabilityByWorker[i] == selectedAvailability && costByWorker[i] == selectedCost,
-                    i -> snapshots.get(i).address());
-            checkState(selectedIndex >= 0, "Decode snapshot candidate disappeared");
-            DecodeRoutingView selected = snapshots.get(selectedIndex);
-            WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(selected);
-            if (pin != null) {
-                return PlacementResult.success(buildWorkerAssignment(
-                        selected, pin, request.getRequestId()));
-            }
+            return PlacementResult.blocked(RoleType.DECODE);
+        } finally {
+            // Clear every capture, including losers and partially captured exceptional traversals.
+            captured = Math.max(captured, scratch.views.size());
+            scratch.views.clear();
+            scratch.candidates.clear();
+            scratch.inUse = false;
+            if (scratch == cached && captured > MAX_CACHED_WORKERS) { SCRATCH.remove(); }
         }
-        return PlacementResult.blocked(RoleType.DECODE);
     }
 
     private PlacementResult<WorkerAssignment, RoleType> classifyCapacityFailure(
