@@ -146,7 +146,7 @@ public class WorkerEndpoint {
     }
 
     protected final boolean hasFreshSchedulingStatus() {
-        return !status.isStatusFreshnessEnforced() || status.isSchedulingStatusFresh(System.nanoTime()/1000);
+        return status.isSchedulingStatusFresh(System.nanoTime()/1000);
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
