@@ -47,6 +47,19 @@ TEST(KVCMConfigTest, FailedSdkBackendReplacementPreservesPreviousValidState) {
     EXPECT_EQ(autil::legacy::ToJsonString(config), previous_config);
 }
 
+TEST(KVCMConfigTest, PreservesPaceBackendConfiguration) {
+    SdkWrapperConfig config;
+    ASSERT_NO_THROW(config.parseBackendConfigs(R"([{"type":"pace","sdk_log_level":"INFO"}])"));
+    ASSERT_EQ(config.sdk_backend_configs().size(), 1u);
+    EXPECT_NE(std::dynamic_pointer_cast<TairMempoolSdkConfig>(config.sdk_backend_configs().front()), nullptr);
+    const auto serialized = autil::legacy::ToJsonString(config);
+    EXPECT_NE(serialized.find("pace"), std::string::npos);
+    EXPECT_NE(serialized.find("INFO"), std::string::npos);
+    SdkWrapperConfig restored;
+    ASSERT_NO_THROW(autil::legacy::FromJsonString(restored, serialized));
+    EXPECT_EQ(autil::legacy::ToJsonString(restored), serialized);
+}
+
 }  // namespace
 }  // namespace kvcm
 }  // namespace rtp_llm

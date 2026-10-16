@@ -74,7 +74,7 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "session";
-    EXPECT_CALL(*meta_ptr, StartWrite("start", keys, std::vector<int64_t>{}, std::vector<std::string>{"Ffull"}, 9))
+    EXPECT_CALL(*meta_ptr, StartWrite("start", keys, std::vector<int64_t>{}, std::vector<std::string>{"Ffull"}, 9, 0))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, write_location)));
     const auto [start_ok, actual_write_location] =
         wrapper.getWriteLocation("", "start", keys, {}, {"Ffull"}, /*write_timeout_seconds=*/9);

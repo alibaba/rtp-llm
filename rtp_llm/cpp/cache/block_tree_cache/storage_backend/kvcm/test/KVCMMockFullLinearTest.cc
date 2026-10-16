@@ -1,7 +1,33 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 
 namespace rtp_llm {
 namespace {
+
+TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComplete) {
+    auto environment = makeMultiGroupBackendEnvironment("kvcm_hybrid_write_mask", 1, 2);
+    auto groups = environment.cache_config.topology().groups();
+    for (auto& group : groups) {
+        if (group.tag == "linear1") {
+            group.policy.group_type = CacheGroupType::SWA;
+            group.policy.sliding_window_size = 16;
+        }
+    }
+    auto topology = CacheTopology::create(std::move(groups), environment.cache_config.topology().layers());
+    kvcm::FullLinearLayerGroupPolicy policy(*topology,
+        [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
+        {"full0"}, {"linear0", "linear1"}, 1);
+    ASSERT_TRUE(policy.init());
+    kvcm::GroupPolicy::LocationSpecGroups registered_groups;
+    ASSERT_TRUE(policy.buildLocationSpecGroups(1, registered_groups));
+    ASSERT_EQ(registered_groups.count("Ffull0Llinear0"), 1u);
+    StorageRequest request;
+    request.keys = std::make_shared<CacheKeysType>(CacheKeysType{101});
+    request.handles = {{{"full0", 0}, {"linear0", 0}}};
+    std::vector<std::string> selected;
+    ASSERT_TRUE(policy.getNeedWriteGroups(request, 1, selected));
+    EXPECT_EQ(selected, (std::vector<std::string>{"Ffull0Llinear0"}));
+}
 
 kv_cache_manager::Location makeFullLinearLocation(size_t             full_group_count,
                                                   size_t             linear_group_count,
@@ -92,11 +118,92 @@ void expectTaggedTransfers(MockClientWrapper&                 client,
     }
 }
 
+TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAndPayloads) {
+    BackendEnvironment environment;
+    environment.cache_config.dtype = DataType::TYPE_FP16;
+    environment.cache_config.layer_num = 4;
+    environment.cache_config.seq_size_per_block = 8;
+    auto disabled_full = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    disabled_full.enable_prefix_reuse = false;
+    auto hca_state = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    hca_state.enable_prefix_reuse = false;
+    auto window = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    window.enable_prefix_reuse = true;
+    window.sliding_window_size = 16;
+    environment.cache_config.fromGroupedSpecs(
+        {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
+         test::makeMhaSpec("full1", 8, DataType::TYPE_FP16, 1, 2),
+         test::makeMhaSpec("hca_state", 8, DataType::TYPE_FP16, 1, 2),
+         test::makeMhaSpec("window0", 8, DataType::TYPE_FP16, 1, 2)},
+        {{0}, {1}, {2}, {3}},
+        {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
+        {"full0", "full1", "hca_state", "window0"},
+        {defaultCacheGroupPolicy(CacheGroupType::FULL), disabled_full, hca_state, window});
+    environment.cache_config.finalizeBlockNums(8, RuntimeConfig{});
+    initializeEnvironmentPools(environment, "kvcm_reusable_groups", 12);
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _))
+        .WillOnce(Invoke([](const auto& configs, auto, const auto& registrations, const auto& tags) {
+            EXPECT_EQ(tags, (std::vector<std::string>{"full0", "window0"}));
+            EXPECT_EQ(registrations.size(), 2u);
+            const auto json = autil::legacy::ToJsonString(configs.at(""), true);
+            EXPECT_EQ(json.find("full1"), std::string::npos);
+            EXPECT_EQ(json.find("hca_state"), std::string::npos);
+            EXPECT_NE(json.find("tp0_Ffull0"), std::string::npos);
+            EXPECT_NE(json.find("tp0_Lwindow0"), std::string::npos);
+            return true;
+        }));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    ScopedReferencedBlocks source_blocks(environment, 3);
+    const auto& block_ids = source_blocks.get();
+    const kv_cache_manager::Locations locations{
+        {},
+        {{"tp0_Ffull0", "full_102"}, {"tp0_Lwindow0", "window_102"}},
+        {{"tp0_Ffull0", "full_103"}, {"tp0_Lwindow0", "window_103"}}};
+    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
+    EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET,
+                              std::vector<int64_t>({101, 102, 103}), offset, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto request = makeGroupedStorageRequest(environment, {101, 102, 103}, 1, block_ids,
+                                             {{"full0"}, {"full0", "window0"}, {"full0", "window0"}});
+    auto result = match(*backend.backend, request);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.matched_blocks_num, 3u);
+    ASSERT_NE(result.match_meta, nullptr);
+    const kv_cache_manager::Locations selected_locations{locations[1], locations[2]};
+    const auto read_bases = expectedBases(environment, {block_ids[1], block_ids[2]},
+                                          {{"full0", "window0"}, {"full0", "window0"}});
+    expectTaggedTransfers(*client, selected_locations, read_bases, false);
+    EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
+
+    kv_cache_manager::WriteLocation write_location;
+    write_location.write_session_id = "reusable_groups_session";
+    write_location.block_mask = kv_cache_manager::BlockMaskOffset{0};
+    write_location.locations = {{{"tp0_Ffull0", "full_101"}}, locations[1], locations[2]};
+    const std::vector<std::string> write_groups{"Ffull0", "Ffull0Lwindow0", "Ffull0Lwindow0"};
+    EXPECT_CALL(*client, getWriteLocation(_, _, std::vector<int64_t>({101, 102, 103}), _, write_groups, 600, 0))
+        .WillOnce(Return(std::make_pair(true, write_location)));
+    const std::vector<std::vector<std::string>> groups_by_key{
+        {"full0"}, {"full0", "window0"}, {"full0", "window0"}};
+    expectTaggedTransfers(*client, write_location.locations, expectedBases(environment, block_ids, groups_by_key), true);
+    EXPECT_CALL(*client, finishWrite(_, _, "reusable_groups_session", _, _)).WillOnce(Return(true));
+    backend->write(backend->prepareWrite(makeGroupedStorageRequest(environment, {101, 102, 103}, 0,
+                                                                  block_ids, groups_by_key)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+}
+
 TEST(KVCMMockFullLinearTest, ReadsCompleteMultiGroupLocationWithoutLocalReuse) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_full_linear_read_no_local", /*full_group_count=*/1, /*linear_group_count=*/2);
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
+        .WillOnce(Invoke([](const auto& configs, auto, const auto&, const auto&) {
+            EXPECT_EQ(configs.at("")->default_query_type(),
+                      static_cast<int32_t>(kv_cache_manager::QueryType::QT_PREFIX_MATCH));
+            return true;
+        }));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
@@ -142,6 +249,8 @@ TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocal
 
     ScopedReferencedBlocks      source_blocks(environment, 4);
     const auto&                 block_ids = source_blocks.get();
+    // Prefix queries include the FULL-only tail. RTP must stop at the newest
+    // complete LINEAR state (103), before the trailing FULL-only block (104).
     kv_cache_manager::Locations locations{
         makeFullLinearLocation(/*full_group_count=*/1, /*linear_group_count=*/2, /*key=*/102, false),
         makeFullLinearLocation(/*full_group_count=*/1, /*linear_group_count=*/2, /*key=*/103, true),
@@ -210,7 +319,7 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
         kv_cache_manager::LocationSpecUnit{"tp0_Ffull1", "full_uri"},
         kv_cache_manager::LocationSpecUnit{"tp0_Llinear", "linear_uri"},
     }};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{}, 600))
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{}, 600, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     for (const auto& tag : std::vector<std::string>{"full1", "linear"}) {
         const auto                        bases = tag == "full1" ? expected_full_bases : expected_linear_bases;
@@ -277,7 +386,7 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
     };
     EXPECT_CALL(*client_wrapper,
                 getWriteLocation(
-                    _, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, expected_write_groups, 600))
+                    _, _, std::vector<int64_t>({101, 102, 103}), std::vector<int64_t>{}, expected_write_groups, 600, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
 
     const auto expected_uris = flattenUris(write_location.locations);
@@ -335,7 +444,7 @@ TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
         makeFullLinearLocation(1, 2, 103, false),
     };
     EXPECT_CALL(*client_wrapper,
-                getWriteLocation(_, _, _, _, std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0"}), 600))
+                getWriteLocation(_, _, _, _, std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0"}), 600, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     const auto bases = expectedBases(environment, block_ids, groups_by_key);
     expectTaggedTransfers(*client_wrapper, write_location.locations, bases, true);
@@ -366,7 +475,7 @@ TEST(KVCMMockFullLinearTest, IncompleteLinearGroupSetFailsBeforeClientIO) {
     auto client_wrapper = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _, 0)).Times(0);
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);

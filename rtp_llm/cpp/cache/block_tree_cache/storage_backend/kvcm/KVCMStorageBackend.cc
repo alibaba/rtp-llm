@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
@@ -34,6 +35,7 @@ std::string nextTraceId(const char* operation, std::atomic<uint64_t>& sequence) 
 
 struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
+    bool                       filtered = false;
 };
 
 const StorageBlockHandle* findHandle(const std::vector<StorageBlockHandle>& handles, std::string_view tag) {
@@ -80,8 +82,13 @@ public:
         // strides; do not replace this with topology-derived geometry.
         std::unordered_map<std::string, size_t> group_block_size_bytes;
         const std::vector<GroupBase>&           groups = topology.groups();
+        topology_ = &topology;
         group_block_size_bytes.reserve(groups.size());
         for (const auto& group : groups) {
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
+            has_swa_ = has_swa_ || group.policy.group_type == CacheGroupType::SWA;
             if (group.policy.group_type == CacheGroupType::FULL) {
                 full_group_tags.push_back(group.tag);
             } else {
@@ -107,11 +114,38 @@ public:
         kvcm::ClientWrapper::ConfigMap client_config_map;
         try {
             if (!kv_cache_config_.kvcm_client_config.empty()) {
-                // Custom client JSON owns the serialized location specs, while
-                // the runtime policy still needs the same deterministic spec
-                // name-to-group/rank mapping for payload routing.
-                (void)genLocationSpecs();
+                auto [location_infos, location_groups] = genLocationSpecs();
                 autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
+                if (client_config_map.size() == 1 && !client_config_map.begin()->first.empty()) {
+                    auto config = client_config_map.begin()->second;
+                    client_config_map.clear();
+                    client_config_map.emplace("", std::move(config));
+                }
+                if (group_policy_->groups().size() != topology.groups().size()) {
+                    // Keep custom settings and aliases, but only advertise
+                    // payloads that the runtime can actually reuse and transfer.
+                    auto config = client_config_map.at("");
+                    auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::ToJson(config));
+                    kvcm::KVCMConfig::LocationSpecGroups custom_groups;
+                    if (autil::legacy::AnyCast<autil::legacy::json::JsonMap>(&fields.at("location_spec_groups"))) {
+                        autil::legacy::FromJson(custom_groups, fields.at("location_spec_groups"));
+                    }
+                    for (auto it = custom_groups.begin(); it != custom_groups.end();) {
+                        if (std::any_of(it->second.begin(), it->second.end(), [&](const auto& name) {
+                                return location_infos->count(name) == 0;
+                            })) {
+                            it = custom_groups.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    for (const auto& [name, specs] : *location_groups) {
+                        custom_groups[name] = specs;
+                    }
+                    fields["location_spec_infos"] = autil::legacy::ToJson(location_infos);
+                    fields["location_spec_groups"] = autil::legacy::ToJson(custom_groups);
+                    autil::legacy::FromJson(*config, fields);
+                }
             } else {
                 client_config_map = genClientConfig();
             }
@@ -120,6 +154,19 @@ public:
             return false;
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("initialize BlockTree KVCM client config failed: %s", error.what());
+            return false;
+        }
+        if (client_config_map.size() != 1 || client_config_map.count("") != 1 || !client_config_map.at("")) {
+            RTP_LLM_LOG_ERROR("BlockTree KVCM requires one default instance config");
+            return false;
+        }
+        const auto& config = client_config_map.at("");
+        // Use prefix queries for the instance; payload reuse is filtered locally.
+        config->set_default_query_type(default_query_type_);
+        if (kv_cache_config_.kvcm_min_replica_count < 0
+            || (kv_cache_config_.kvcm_read_backend_type != 0
+                && !isPayloadBackend(kv_cache_config_.kvcm_read_backend_type))) {
+            RTP_LLM_LOG_ERROR("invalid KVCM replica/backend config");
             return false;
         }
 
@@ -159,10 +206,38 @@ public:
             return {request.local_matched_blocks_num, nullptr};
         }
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
-        auto [success, locations] = client_wrapper_->match(
-            "", trace_id, kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, request.local_matched_blocks_num, {});
+        auto query_type = static_cast<kv_cache_manager::QueryType>(default_query_type_);
+        if (has_swa_) {
+            // Fetch the FULL prefix as well as SWA locations, then apply each
+            // group's model-defined reuse window locally.
+            query_type = kv_cache_manager::QueryType::QT_BATCH_GET;
+        }
+        bool success = false;
+        kv_cache_manager::Locations locations;
+        bool positional = query_type == kv_cache_manager::QueryType::QT_BATCH_GET;
+        if (kv_cache_config_.kvcm_read_backend_type != 0) {
+            auto result = client_wrapper_->getCacheLocationsByBackend(
+                "", trace_id, keys, {}, request.local_matched_blocks_num, {},
+                static_cast<kv_cache_manager::StorageType>(kv_cache_config_.kvcm_read_backend_type));
+            success = result.first;
+            if (success) {
+                locations = selectBackendLocations(result.second);
+            }
+            positional = true;
+        } else {
+            auto result = client_wrapper_->match(
+                "", trace_id, query_type, keys, request.local_matched_blocks_num, {});
+            success = result.first;
+            locations = std::move(result.second);
+        }
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
+        }
+        if (positional) {
+            auto meta = std::make_shared<KVCMMatchMeta>();
+            meta->locations = reusableLocations(request, std::move(locations));
+            meta->filtered = true;
+            return {request.local_matched_blocks_num + meta->locations.size(), std::move(meta)};
         }
         kvcm::LocationsView locations_view;
         if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
@@ -183,9 +258,18 @@ public:
         const auto meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
         kvcm::LocationsView locations_view;
-        RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->filterNeedLoadLocations(meta->locations, locations_view, /*block_mask=*/0),
-            "KVCM read location filtering failed");
+        if (meta->filtered) {
+            locations_view.resize(meta->locations.size());
+            for (size_t i = 0; i < meta->locations.size(); ++i) {
+                for (const auto& spec : meta->locations[i]) {
+                    locations_view[i].emplace_back(spec);
+                }
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(
+                group_policy_->filterNeedLoadLocations(meta->locations, locations_view, /*block_mask=*/0),
+                "KVCM read location filtering failed");
+        }
         const size_t remote_blocks = request.handles.size() - request.local_matched_blocks_num;
         RTP_LLM_CHECK_WITH_INFO(locations_view.size() == remote_blocks,
                                 "KVCM read shape mismatch: locations=%zu remote_blocks=%zu",
@@ -231,12 +315,9 @@ public:
                                 "KVCM write group selection failed");
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         auto [success, write_location] = client_wrapper_->getWriteLocation(
-            "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600);
+            "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600,
+            kv_cache_config_.kvcm_min_replica_count);
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
-        if (write_location.locations.empty()) {
-            return;
-        }
-
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
         try {
@@ -248,6 +329,25 @@ public:
                                     "KVCM write mask/location mismatch: keys=%zu locations=%zu",
                                     key_indices.size(),
                                     write_location.locations.size());
+            if (write_location.locations.empty()) {
+                if (!write_location.write_session_id.empty()) {
+                    // The server can create an empty, short-lived session when
+                    // every key already has enough replicas. Close it normally.
+                    finish_attempted = true;
+                    try {
+                        if (!client_wrapper_->finishWrite(
+                            "", nextTraceId("finish_write", finish_write_trace_sequence_),
+                            write_location.write_session_id, kv_cache_manager::BlockMaskOffset{0}, empty_locations)) {
+                            RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
+                                                write_location.write_session_id.c_str());
+                        }
+                    } catch (...) {
+                        RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
+                                            write_location.write_session_id.c_str());
+                    }
+                }
+                return;
+            }
             const auto& spec_info = group_policy_->spec_info_map();
             for (size_t location_idx = 0; location_idx < write_location.locations.size(); ++location_idx) {
                 const size_t key_idx = key_indices[location_idx];
@@ -273,8 +373,9 @@ public:
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
                 const auto& actual_uris = responses[rank].remote_response().actual_uris();
-                RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(actual_uris.size()) <= actual_uri_gather[rank].size(),
-                                        "KVCM write returned too many actual URIs for rank=%zu",
+                RTP_LLM_CHECK_WITH_INFO(actual_uris.empty()
+                                           || static_cast<size_t>(actual_uris.size()) == actual_uri_gather[rank].size(),
+                                        "KVCM write returned a partial actual URI vector for rank=%zu",
                                         rank);
                 for (int uri_idx = 0; uri_idx < actual_uris.size(); ++uri_idx) {
                     if (!actual_uris[uri_idx].empty()) {
@@ -313,6 +414,9 @@ public:
     }
 
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+        if (request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
+            return executeMetadata(request, response);
+        }
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
         const kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
@@ -335,6 +439,155 @@ public:
     }
 
 private:
+    int resolveQueryType(int query_type) const {
+        return query_type == 0 ? default_query_type_ : query_type;
+    }
+
+    static bool isPayloadBackend(int type) {
+        return type == 1 || type == 2 || type == 3 || type == 4 || type == 5;
+    }
+
+    kv_cache_manager::Locations selectBackendLocations(const kv_cache_manager::BackendLocations& result) const {
+        kv_cache_manager::Locations locations;
+        locations.reserve(result.size());
+        for (const auto& key_locations : result) {
+            RTP_LLM_CHECK_WITH_INFO(key_locations.size() <= 1, "KVCM returned multiple locations for one backend");
+            locations.push_back(key_locations.empty() ? kv_cache_manager::Location{} :
+                                                        key_locations.front().location_specs);
+        }
+        return locations;
+    }
+
+    kv_cache_manager::Locations reusableLocations(const StorageRequest& request,
+                                                   kv_cache_manager::Locations locations) const {
+        const size_t local = request.local_matched_blocks_num;
+        const size_t key_count = request.keys->size();
+        RTP_LLM_CHECK_WITH_INFO(locations.size() == key_count, "KVCM positional query shape mismatch");
+        const auto& infos = group_policy_->spec_info_map();
+        std::unordered_map<std::string, size_t> runs;
+        size_t matched = local;
+        for (size_t i = local; i < locations.size(); ++i) {
+            std::unordered_map<std::string, const kv_cache_manager::LocationSpecUnit*> present;
+            for (const auto& spec : locations[i]) {
+                RTP_LLM_CHECK_WITH_INFO(infos.count(spec.spec_name) != 0, "KVCM returned an unknown spec");
+                RTP_LLM_CHECK_WITH_INFO(present.emplace(spec.spec_name, &spec).second, "KVCM returned a duplicate spec");
+            }
+            bool complete = true;
+            for (const auto& [id, group] : group_policy_->groups()) {
+                (void)id;
+                bool available = true;
+                for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
+                    const auto name = kvcm::genLocationSpecName(rank, group.group_name);
+                    const auto found = present.find(name);
+                    available = available && found != present.end() && !found->second->uri.empty();
+                }
+                auto& run = runs[group.tag];
+                run = available ? run + 1 : 0;
+                const size_t required = std::min(i + 1 - local, topology_->group(group.tag).reuseBlockCount(i + 1));
+                complete = complete && run >= required;
+            }
+            if (complete) {
+                matched = i + 1;
+            }
+        }
+        locations.resize(matched);
+        for (size_t i = local; i < matched; ++i) {
+            auto& location = locations[i];
+            location.erase(std::remove_if(location.begin(), location.end(), [&](const auto& spec) {
+                const auto& group = topology_->group(infos.at(spec.spec_name).tag);
+                return matched - i > group.reuseBlockCount(matched) || spec.uri.empty();
+            }), location.end());
+        }
+        locations.erase(locations.begin(), locations.begin() + local);
+        return locations;
+    }
+
+    bool executeMetadata(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+        if (parallelism_config_.tp_rank != 0) {
+            RTP_LLM_LOG_WARNING("KVCM metadata operations require the TP rank 0 endpoint, got rank=%ld",
+                                parallelism_config_.tp_rank);
+            return false;
+        }
+        if (!request.has_metadata()) {
+            return false;
+        }
+        const auto& query = request.metadata();
+        const int type = resolveQueryType(query.query_type());
+        if (type < 1 || type > 2 || query.p2p_host_count() < 0) {
+            return false;
+        }
+        const std::vector<int64_t> keys(query.block_keys().begin(), query.block_keys().end());
+        const std::vector<int64_t> tokens(query.token_ids().begin(), query.token_ids().end());
+        const std::vector<std::string> names(query.location_spec_names().begin(), query.location_spec_names().end());
+        kv_cache_manager::BlockMask mask = kv_cache_manager::BlockMaskOffset{0};
+        if (query.block_mask().has_bool_masks()) {
+            mask = kv_cache_manager::BlockMaskVector(query.block_mask().bool_masks().values().begin(),
+                                                      query.block_mask().bool_masks().values().end());
+        } else if (query.block_mask().info_case() == RemoteBlockMaskPB::kOffset) {
+            if (query.block_mask().offset() < 0) {
+                return false;
+            }
+            mask = static_cast<size_t>(query.block_mask().offset());
+        }
+        const auto query_type = static_cast<kv_cache_manager::QueryType>(type);
+        auto appendLocation = [](const kv_cache_manager::Location& location, RemoteCacheLocationPB* output) {
+            for (const auto& spec : location) {
+                auto* item = output->add_specs();
+                item->set_name(spec.spec_name);
+                item->set_uri(spec.uri);
+            }
+        };
+        switch (request.op()) {
+            case REMOTE_OPERATION_REMOVE_CACHE:
+                return client_wrapper_->removeCache("", request.trace_id(), keys, tokens, mask);
+            case REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND: {
+                if (query.query_type() != 0 && query.query_type() != 1) {
+                    return false;
+                }
+                const int backend = query.backend_type() == 0 ? kv_cache_config_.kvcm_read_backend_type :
+                                                                query.backend_type();
+                if (!isPayloadBackend(backend)) {
+                    return false;
+                }
+                auto [success, locations] = client_wrapper_->getCacheLocationsByBackend(
+                    "", request.trace_id(), keys, tokens, mask, names, static_cast<kv_cache_manager::StorageType>(backend));
+                if (success) {
+                    for (const auto& key_locations : locations) {
+                        auto* output = response.add_backend_locations();
+                        for (const auto& location : key_locations) {
+                            auto* item = output->add_locations();
+                            item->set_backend_type(static_cast<int32_t>(location.type));
+                            item->set_spec_size(location.spec_size);
+                            appendLocation(location.location_specs, item);
+                        }
+                    }
+                }
+                return success;
+            }
+            case REMOTE_OPERATION_GET_HOST_CACHE_STATE: {
+                if (type != 2) {
+                    RTP_LLM_LOG_WARNING("KVCM host-state queries require prefix mode, got %d", type);
+                    return false;
+                }
+                const std::vector<std::string> medium(query.medium().begin(), query.medium().end());
+                auto [success, hosts] = client_wrapper_->getHostCacheState(
+                    "", request.trace_id(), query_type, keys, medium, query.p2p_host_count());
+                if (success) {
+                    for (const auto& host : hosts) {
+                        auto* output = response.add_hosts();
+                        output->set_host_ip_port(host.host_ip_port);
+                        output->set_local(host.local);
+                        output->set_p2p_1_fetch(host.p2p_1_fetch);
+                        output->set_p2p_1_total_match(host.p2p_1_total_match);
+                    }
+                }
+                return success;
+            }
+            default:
+                return false;
+        }
+    }
+
     std::pair<std::shared_ptr<kvcm::KVCMConfig::LocationSpecInfoMap>,
               std::shared_ptr<kvcm::KVCMConfig::LocationSpecGroups>>
     genLocationSpecs() {
@@ -364,7 +617,7 @@ private:
                                                             kv_cache_config_.kvcm_storage_queue_size,
                                                             kv_cache_config_.kvcm_put_timeout_ms,
                                                             kv_cache_config_.kvcm_get_timeout_ms);
-        autil::legacy::FromJsonString(sdk->sdk_backend_configs(), kv_cache_config_.kvcm_model_sdk_config);
+        sdk->parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
@@ -383,6 +636,8 @@ private:
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
+                 << ";location_spec_groups:" << autil::legacy::ToJsonString(location_groups, true)
+                 << ";default_query_type:" << default_query_type_
                  << ";draft_model_info:" << draft_info;
         std::string instance_id = kv_cache_config_.kvcm_instance_id_salt;
         if (!instance_id.empty()) {
@@ -590,6 +845,9 @@ private:
     std::atomic<uint64_t> write_trace_sequence_{1};
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
     const bool            sdk_check_enabled_;
+    const CacheTopology*  topology_ = nullptr;
+    bool                  has_swa_ = false;
+    const int32_t         default_query_type_ = static_cast<int32_t>(kv_cache_manager::QueryType::QT_PREFIX_MATCH);
 };
 
 KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cache_config,
