@@ -7,9 +7,11 @@ retained BF16 or intended-A8 stress numerical failures.
 """
 
 from contextlib import contextmanager
+from copy import copy
 import json
 import os
 from pathlib import Path
+import weakref
 
 import pytest
 import torch
@@ -167,3 +169,119 @@ def test_checkpoint_adapter_glue_eager_and_graph_bitexact(
     (root / f"glue_integration_a{int(amplitude)}_{dtype}.json").write_text(
         json.dumps(report, indent=2) + "\n"
     )
+
+
+@torch.no_grad()
+def test_checkpoint_eager_workspace_growth_preserves_graph(
+    checkpoint_case, monkeypatch
+):
+    from rtp_llm.models_py.modules.dsv41.moe import _sm90_flashinfer_moe as module
+
+    model = checkpoint_case.model
+    peer = copy(model)
+    peer._workspaces = {}
+    pool = {}
+    monkeypatch.setattr(module, "_EAGER_STREAM_WORKSPACES", pool)
+    live = _inputs(1.0, 0)
+    graph, graph_out = _capture(lambda: model.forward_local(*live))
+
+    # EP1 decode graph warmup must prepare a smaller shape than setup's max,
+    # even though ordinary eager prefill no longer populates graph workspaces.
+    from rtp_llm.models_py.modules.dsv41.moe.strategies.sm90_flashinfer import (
+        SM90FlashInferStrategy,
+    )
+
+    cfg = copy(model.cfg)
+    cfg.ep_size = 1
+    cfg.n_routed_experts = model.num_experts
+    cfg.n_activated_experts = 8
+    cfg.local_expert_start = 0
+    cfg.local_expert_end = model.num_experts
+    monkeypatch.setenv("DSV41_SM90_DECODE_GRAPH", "1")
+    monkeypatch.setenv("DSV41_SM90_DECODE_GRAPH_MAX_ROWS", "8")
+    strategy = SM90FlashInferStrategy(cfg)
+    strategy._local = model
+    small = tuple(t[:3].contiguous() for t in live)
+    small_graph, small_out = _capture(lambda: strategy(*small))
+    assert (3, 8) in model._workspaces
+    assert not pool
+    prepared = dict(model._workspaces)
+    graph_pool = dict(module._STREAM_WORKSPACES)
+
+    def unexpected_prepare(*args, **kwargs):
+        pytest.fail("dynamic eager shapes must not prepare or warm up synthetic inputs")
+
+    monkeypatch.setattr(model, "prepare", unexpected_prepare)
+    monkeypatch.setattr(peer, "prepare", unexpected_prepare)
+    operator = model._op
+    calls = []
+
+    def tracked_operator(**kwargs):
+        calls.append(kwargs["input"].shape[0])
+        return operator(**kwargs)
+
+    monkeypatch.setattr(model, "_op", tracked_operator)
+    monkeypatch.setattr(peer, "_op", tracked_operator)
+    key = (live[0].device.index, torch.cuda.current_stream().cuda_stream)
+    for iteration, rows in enumerate((3, 16, 5, 64, 8)):
+        inputs = tuple(
+            t.repeat((rows + 7) // 8, 1)[:rows].contiguous()
+            for t in _changed_inputs(1.0, iteration)
+        )
+        saved = tuple(_sha(t) for t in inputs)
+        required = model._workspace_nbytes(rows, 8)
+        # Independent exact-sized storage supplies the same real FI operation.
+        reference_scratch = torch.empty(
+            required, device=inputs[0].device, dtype=torch.uint8
+        )
+        expected = model.forward_local(*inputs, workspace=reference_scratch)
+        del reference_scratch
+        previous = weakref.ref(pool[key]) if key in pool else None
+        previous_size = pool[key].numel() if key in pool else 0
+        before = len(calls)
+        adapter = model if iteration % 2 == 0 else peer
+        actual = adapter._forward_into_buf(*inputs, 0, 48)
+        assert len(calls) == before + 1  # No synthetic warmup.
+        _bits(actual, expected)
+        assert saved == tuple(_sha(t) for t in inputs)
+        assert len(pool) == 1 and pool[key].numel() >= required
+        if previous is not None:
+            if required > previous_size:
+                assert previous() is None  # No per-layer stale strong reference.
+            else:
+                assert pool[key] is previous()
+        assert model._workspaces.keys() == prepared.keys()
+        assert all(model._workspaces[k] is v for k, v in prepared.items())
+        assert not peer._workspaces
+        assert module._STREAM_WORKSPACES.keys() == graph_pool.keys()
+        assert all(module._STREAM_WORKSPACES[k] is v for k, v in graph_pool.items())
+
+    # A second stream gets independent eager storage, with explicit ownership
+    # dependencies for inputs and outputs. It never borrows the first slot.
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        side_output = peer._forward_into_buf(*live, 0, 48)
+    torch.cuda.current_stream().wait_stream(side)
+    side_key = (live[0].device.index, side.cuda_stream)
+    assert len(pool) == 2
+    assert pool[side_key].data_ptr() != pool[key].data_ptr()
+    _bits(side_output, model.forward_local(*live))
+
+    for destination, source in zip(live, _changed_inputs(1.0, 4)):
+        destination.copy_(source)
+    graph.replay()
+    _bits(graph_out, model.forward_local(*live))
+    for destination, source in zip(small, live):
+        destination.copy_(source[:3])
+    small_graph.replay()
+    _bits(small_out, model.forward_local(*small))
+    assert all(model._workspaces[k] is v for k, v in prepared.items())
+
+    def unexpected_size_query(*args, **kwargs):
+        pytest.fail("zero-row eager input must not allocate workspace")
+
+    monkeypatch.setattr(peer, "_workspace_nbytes", unexpected_size_query)
+    empty = tuple(t[:0] for t in live)
+    assert peer._forward_into_buf(*empty, 0, 48).shape == (0, 5120)
+    assert len(pool) == 2

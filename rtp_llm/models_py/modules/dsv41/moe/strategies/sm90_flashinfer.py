@@ -113,7 +113,10 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
                     self._decode_graph_max_rows,
                     local_forward=_forward_flashinfer_local,
                 )
-            return self._local._forward_into_buf(
+            # EP1 also captures smaller batches than the setup maximum.
+            # Warm up their graph-owned scratch, separate from eager prefill.
+            return _forward_flashinfer_local(
+                self._local,
                 x,
                 weights,
                 indices,

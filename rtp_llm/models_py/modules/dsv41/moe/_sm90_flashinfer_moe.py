@@ -13,7 +13,7 @@ One instance/workspace belongs to one serialized CUDA stream execution context.
 """
 
 from contextlib import nullcontext
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch import nn
@@ -26,6 +26,26 @@ from ._sm90_flashinfer_glue import (
 # Forty layers execute serially on one stream; do not retain forty copies of
 # potentially large CUTLASS scratch. Never resize a buffer referenced by a graph.
 _STREAM_WORKSPACES = {}
+# Eager prefill sees route-dependent row counts at every layer. Keep only the
+# largest scratch per stream, separate from storage pinned by captured graphs.
+_EAGER_STREAM_WORKSPACES = {}
+
+
+def _eager_workspace(device, nbytes):
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("eager workspace cannot be acquired during graph capture")
+    key = (device.index, torch.cuda.current_stream(device).cuda_stream)
+    workspace = _EAGER_STREAM_WORKSPACES.get(key)
+    if workspace is not None and workspace.numel() >= nbytes:
+        return workspace
+    # No layer owns this tensor. Drop the old slot AND local reference before
+    # allocating its replacement, avoiding an old+new scratch peak. All uses
+    # are serialized on this same stream, so allocator reuse is stream ordered.
+    _EAGER_STREAM_WORKSPACES.pop(key, None)
+    del workspace
+    workspace = torch.empty(nbytes, device=device, dtype=torch.uint8)
+    _EAGER_STREAM_WORKSPACES[key] = workspace
+    return workspace
 
 
 def validate_lossless_mxfp4_scales(scales: torch.Tensor) -> None:
@@ -163,6 +183,23 @@ class Sm90FlashInferLocalExperts(nn.Module):
         for key in keys:
             layer_weights.pop(key)
 
+    def _workspace_nbytes(self, num_rows: int, topk: int) -> int:
+        return self._workspace_size(
+            num_rows,
+            self.hidden_size,
+            self.intermediate_size,
+            self.num_experts,
+            topk,
+            x_dtype=torch.bfloat16,
+            weight_dtype=self.fc1_weight.dtype,
+            output_dtype=torch.bfloat16,
+            activation_type=self._activation_type,
+            use_w4_group_scaling=True,
+            use_wfp4afp8_humming=True,
+            use_fused_finalize=True,
+            device=self.fc1_weight.device,
+        )
+
     def prepare(self, num_rows: int, topk: int, *, tune: bool = False) -> None:
         """Allocate scratch and warm up outside capture; optionally autotune.
 
@@ -181,21 +218,7 @@ class Sm90FlashInferLocalExperts(nn.Module):
         if key in self._workspaces:
             return
         device = self.fc1_weight.device
-        nbytes = self._workspace_size(
-            num_rows,
-            self.hidden_size,
-            self.intermediate_size,
-            self.num_experts,
-            topk,
-            x_dtype=torch.bfloat16,
-            weight_dtype=self.fc1_weight.dtype,
-            output_dtype=torch.bfloat16,
-            activation_type=self._activation_type,
-            use_w4_group_scaling=True,
-            use_wfp4afp8_humming=True,
-            use_fused_finalize=True,
-            device=device,
-        )
+        nbytes = self._workspace_nbytes(num_rows, topk)
         stream = torch.cuda.current_stream(device).cuda_stream
         workspace_key = (device.index, stream, nbytes)
         if workspace_key not in _STREAM_WORKSPACES:
@@ -229,6 +252,8 @@ class Sm90FlashInferLocalExperts(nn.Module):
         weights: torch.Tensor,
         indices: torch.Tensor,
         output_dtype: torch.dtype = torch.float32,
+        *,
+        workspace: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not self._ready:
             raise RuntimeError("setup_weights must precede forward_local")
@@ -255,10 +280,25 @@ class Sm90FlashInferLocalExperts(nn.Module):
                 raise ValueError("local expert inputs must be contiguous")
         if x.shape[0] == 0:
             return torch.empty(x.shape, device=x.device, dtype=output_dtype)
-        key = (x.shape[0], indices.shape[1])
-        if key not in self._workspaces:
-            raise RuntimeError(f"prepare{key} is required before forward/capture")
-        workspace = self._workspaces[key]
+        if workspace is None:
+            key = (x.shape[0], indices.shape[1])
+            if key not in self._workspaces:
+                raise RuntimeError(f"prepare{key} is required before forward/capture")
+            workspace = self._workspaces[key]
+        else:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("explicit eager workspace is not a graph workspace")
+            if (
+                workspace.device != x.device
+                or workspace.dtype != torch.uint8
+                or workspace.ndim != 1
+                or not workspace.is_contiguous()
+            ):
+                raise ValueError(
+                    "expected contiguous uint8 eager workspace on input device"
+                )
+            # The upstream op checks capacity against the actual shape before
+            # launching. A larger buffer is valid; it does not change tactics.
         # Framework side-stream warmup and capture may differ from the setup
         # stream. Their owner must establish stream dependencies and serialize
         # uses of this scratch, including replay: changing streams alone is not
@@ -304,11 +344,21 @@ class Sm90FlashInferLocalExperts(nn.Module):
         """Existing DeepEP local-compute ABI, without changing dispatch/combine."""
         if local_end - local_start != self.num_experts:
             raise ValueError("DeepEP local expert range does not match loaded weights")
-        if not torch.cuda.is_current_stream_capturing():
-            self.prepare(x.shape[0], indices.shape[1])
+        if not self._ready:
+            raise RuntimeError("setup_weights must precede forward")
         local_indices = torch.where(
             (indices >= local_start) & (indices < local_end),
             indices - local_start,
             -1,
         )
-        return self.forward_local(x, weights, local_indices)
+        if x.shape[0] == 0 or torch.cuda.is_current_stream_capturing():
+            return self.forward_local(x, weights, local_indices)
+        workspace = _eager_workspace(
+            x.device, self._workspace_nbytes(x.shape[0], indices.shape[1])
+        )
+        try:
+            # This actual eager invocation performs any lazy JIT initialization.
+            # Do not warm up synthetic inputs or retain route-dependent shapes.
+            return self.forward_local(x, weights, local_indices, workspace=workspace)
+        finally:
+            del workspace
