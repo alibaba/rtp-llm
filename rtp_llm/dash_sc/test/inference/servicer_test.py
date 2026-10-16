@@ -14,8 +14,10 @@ import json
 import logging
 import struct
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import requests
 import torch
 
 from rtp_llm.config.exceptions import (
@@ -60,6 +62,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     _finish_server_trace,
+    _prepare_v41_image_request,
     _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -401,6 +404,85 @@ class BuildThinkRuntimeTest(unittest.TestCase):
         runtime = build_think_runtime(tokenizer, None, None)
 
         self.assertEqual(runtime.eos_token_id, 0)
+
+
+class V41ImageDownloadTimingTest(unittest.TestCase):
+    def run_loader(self, statuses, *, repeats=1):
+        from rtp_llm.multimodal.multimodal_util import collect_download_timing
+
+        servicer = "rtp_llm.dash_sc.inference.servicer"
+        processor = (
+            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor"
+        )
+        clock = [100.0]
+        status_iter = iter(statuses)
+
+        def get_response(*args, **kwargs):
+            clock[0] += 0.125
+            status = next(status_iter)
+            if isinstance(status, Exception):
+                raise status
+            response = MagicMock(status_code=status)
+            response.__enter__.return_value = response
+            return response
+
+        def prepare(*args, url_loader, **kwargs):
+            return [
+                url_loader("https://example.invalid/image.png") for _ in range(repeats)
+            ]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        request = SimpleNamespace(id="download-timing-test")
+        with patch(servicer + ".time.monotonic", side_effect=lambda: clock[0]), patch(
+            servicer + ".time.sleep", side_effect=sleep
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.request_get", side_effect=get_response
+        ) as get, patch(
+            servicer + "._image_download_chunks", return_value=[b"image"]
+        ), patch(
+            processor + ".prepare_vl_inputs_from_token_ids", side_effect=prepare
+        ), patch(
+            "rtp_llm.multimodal.greennet_hook.greennet_enabled", return_value=False
+        ), collect_download_timing() as timing:
+            try:
+                result = _prepare_v41_image_request(request, [], object(), images=[{}])
+            except FtRuntimeException as error:
+                result = error
+        return result, timing.elapsed_ms, get.call_count
+
+    def test_actual_attempts_are_timed_without_retry_backoff_or_url_cache_hits(self):
+        result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
+        self.assertEqual(result, [b"image", b"image"])
+        self.assertEqual(requests, 2)
+        self.assertEqual(elapsed_ms, 250.0)
+
+    def test_exhausted_attempts_are_timed_and_preserve_download_error(self):
+        result, elapsed_ms, requests = self.run_loader([503, 503, 503])
+        self.assertIsInstance(result, FtRuntimeException)
+        self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertEqual(result.message, "Temporary multimodal download failure")
+        self.assertEqual(requests, 3)
+        self.assertEqual(elapsed_ms, 375.0)
+
+    def test_nonretryable_attempt_is_timed_and_preserves_invalid_params(self):
+        result, elapsed_ms, requests = self.run_loader([404])
+        self.assertIsInstance(result, FtRuntimeException)
+        self.assertEqual(result.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(result.message, "Failed to download multimodal content")
+        self.assertEqual(requests, 1)
+        self.assertEqual(elapsed_ms, 125.0)
+
+    def test_network_timeouts_keep_timeout_code_and_exclude_retry_backoff(self):
+        result, elapsed_ms, attempts = self.run_loader(
+            [requests.Timeout("download timeout") for _ in range(3)]
+        )
+        self.assertIsInstance(result, FtRuntimeException)
+        self.assertEqual(result.exception_type, ExceptionType.CONNECT_TIMEOUT)
+        self.assertEqual(result.message, "Temporary multimodal download failure")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(elapsed_ms, 375.0)
 
 
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):

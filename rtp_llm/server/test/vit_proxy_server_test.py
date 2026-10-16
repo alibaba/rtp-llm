@@ -23,6 +23,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
@@ -40,6 +42,7 @@ from rtp_llm.server.vit_proxy_server import (
     _resolve_rpc_timeout_seconds,
     resolve_default_rpc_timeout_seconds,
 )
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
@@ -1031,6 +1034,115 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
 
 class RuntimeExceptionStatusTest(TestCase):
+    def test_typed_worker_errors_are_reported_once_through_real_grpc_proxy(self):
+        class TypedFailingEngine:
+            report_vit_error = MMProcessEngine.report_vit_error
+
+            def mm_embedding_rpc(self, request, **kwargs):
+                error = self.error_type("embedding failed")
+                if self.report_before_raise:
+                    self.report_vit_error(error)
+                raise error
+
+        engine = TypedFailingEngine()
+        worker_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(
+            MultimodalRpcServer(engine), worker_server
+        )
+        worker_port = worker_server.add_insecure_port("127.0.0.1:0")
+        worker_server.start()
+        worker_address = f"127.0.0.1:{worker_port}"
+        worker_channel = grpc.insecure_channel(worker_address)
+        worker_stub = MultimodalRpcServiceStub(worker_channel)
+        connection_pool = MagicMock()
+        connection_pool.get_stub.return_value = worker_stub
+        proxy = VitProxyRpcServer(LoadBalancer([worker_address]), connection_pool)
+        proxy_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(proxy, proxy_server)
+        proxy_port = proxy_server.add_insecure_port("127.0.0.1:0")
+        proxy_server.start()
+        proxy_channel = grpc.insecure_channel(f"127.0.0.1:{proxy_port}")
+        proxy_stub = MultimodalRpcServiceStub(proxy_channel)
+        request = MultimodalInputsPB()
+        request.v41_inputs.schema_version = 1
+        cases = (
+            (
+                MMSchedulerOverloadError,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "[MM_PROCESS_ERROR] embedding failed",
+            ),
+            (
+                MMSchedulerTimeoutError,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "[MM_PROCESS_ERROR] embedding failed",
+            ),
+            (
+                MMSchedulerRequestTooLargeError,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "[MM_WRONG_FORMAT_ERROR] embedding failed",
+            ),
+            (
+                TimeoutError,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "[GENERATE_TIMEOUT] embedding failed",
+            ),
+            (
+                RuntimeError,
+                grpc.StatusCode.UNKNOWN,
+                "Exception calling application: embedding failed",
+            ),
+        )
+        try:
+            for error_type, status, details in cases:
+                for report_before_raise in (False, True):
+                    with self.subTest(
+                        error_type=error_type.__name__,
+                        report_before_raise=report_before_raise,
+                    ):
+                        engine.error_type = error_type
+                        engine.report_before_raise = report_before_raise
+                        with patch("rtp_llm.metrics.kmonitor.report") as report:
+                            with self.assertRaises(grpc.RpcError) as direct_error:
+                                worker_stub.RemoteMultimodalEmbedding(
+                                    request, timeout=5
+                                )
+                            self.assertEqual(direct_error.exception.code(), status)
+                            self.assertEqual(direct_error.exception.details(), details)
+                            self.assertIn(
+                                (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+                                direct_error.exception.trailing_metadata(),
+                            )
+                            self.assertEqual(
+                                [
+                                    call.args[1]
+                                    for call in report.call_args_list
+                                    if call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                                ],
+                                [1],
+                            )
+                            report.reset_mock()
+                            with self.assertRaises(grpc.RpcError) as proxy_error:
+                                proxy_stub.RemoteMultimodalEmbedding(request, timeout=5)
+                            self.assertEqual(proxy_error.exception.code(), status)
+                            self.assertEqual(proxy_error.exception.details(), details)
+                            self.assertEqual(
+                                [
+                                    call.args[1]
+                                    for call in report.call_args_list
+                                    if call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                                ],
+                                [1],
+                            )
+                            self.assertNotIn(
+                                (VIT_ERROR_REPORTED_METADATA_KEY, "1"),
+                                proxy_error.exception.trailing_metadata(),
+                            )
+        finally:
+            proxy_channel.close()
+            proxy_server.stop(0).wait()
+            worker_channel.close()
+            worker_server.stop(0).wait()
+
     def test_runtime_exception_mapping_is_applied_at_rpc_boundary(self):
         cases = (
             (ExceptionType.MM_WRONG_FORMAT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
