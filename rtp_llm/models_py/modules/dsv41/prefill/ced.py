@@ -140,6 +140,9 @@ class _RowExchange:
     candidate_rows_host: Optional[Tuple[int, ...]] = None
     projection_groups_host: Tuple = ()
     receive_is_identity: bool = False
+    # Keep the immutable pinned upload alive through this forward. Each layout
+    # owns fresh host/device storage, including when earlier H2D is pending.
+    _layout_host_buffer: Optional[torch.Tensor] = field(default=None, repr=False)
 
     def compact(self, value):
         send = value.index_select(0, self.send_indices).contiguous()
@@ -364,6 +367,42 @@ def _vectorized_query_layout_rows(
     chunks.extend(int(chunk) for chunk in chunks_t.tolist())
 
 
+def _upload_layout_arrays(arrays, device):
+    """Upload heterogeneous host metadata once, preserving exact integer types.
+
+    Packing uses NumPy views over a Torch-owned slab, avoiding per-array Torch
+    construction/copy dispatch. Typed device views share that one allocation;
+    all offsets are aligned, including empty and strided source arrays.
+    """
+    dtypes = {
+        np.dtype("int64"): torch.int64,
+        np.dtype("int32"): torch.int32,
+        np.dtype("bool"): torch.bool,
+    }
+    offsets, size = [], 0
+    for array in arrays:
+        # Match independently allocated tensors for downstream JIT alignment.
+        alignment = 16
+        size = (size + alignment - 1) // alignment * alignment
+        offsets.append(size)
+        size += array.nbytes
+    # Every dtype view spans the entire byte slab, so round its length too.
+    size = (size + 15) // 16 * 16
+    host = torch.empty(size, dtype=torch.uint8, pin_memory=device.type == "cuda")
+    raw = host.numpy()
+    for array, offset in zip(arrays, offsets):
+        raw[offset : offset + array.nbytes].view(array.dtype)[:] = array
+    packed = host.to(device, non_blocking=True)
+    typed = {dtype: packed.view(dtypes[dtype]) for dtype in {a.dtype for a in arrays}}
+    views = tuple(
+        typed[array.dtype].as_strided(
+            (array.size,), (1,), offset // array.dtype.itemsize
+        )
+        for array, offset in zip(arrays, offsets)
+    )
+    return views, host
+
+
 def _host_query_layout(original, selected, group, *, keep_candidate_rows):
     """Build only selected-row transport and this rank's compact CPU layout.
 
@@ -371,7 +410,7 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
     Validate that contract without constructing full-length long/bool tensors,
     then gather the *actual* inverse map only at selected padded positions.
     An arbitrary restore permutation is supported; unusual masks use fallback.
-    No CUDA operations or shape-specialized kernels are introduced here.
+    One pinned upload publishes the host plan; no GPU shape reads are needed.
     """
     lengths = original.input_lengths_global_host
     prefixes = original.prefix_lengths_host
@@ -426,20 +465,26 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
         or np.any(selected_np[1:] < selected_np[:-1])
     ):
         return None
-    mask_np, offset = mask.numpy(), 0
-    for length, chunk in zip(lengths, chunks):
-        padded = chunk * cp
-        if (
-            padded < length
-            or np.count_nonzero(mask_np[offset : offset + length]) != length
-            or np.count_nonzero(mask_np[offset + length : offset + padded])
-        ):
-            return None
-        offset += padded
-
     lengths_np = np.asarray(lengths, dtype=np.int64)
     prefixes_np = np.asarray(prefixes, dtype=np.int64)
     original_chunks = np.asarray(chunks, dtype=np.int64)
+    padded_lengths = original_chunks * cp
+    mask_np = mask.numpy()
+    if (
+        np.any(padded_lengths < lengths_np)
+        or np.count_nonzero(mask_np) != original.seq_len_full
+    ):
+        return None
+    padded_ends = np.cumsum(padded_lengths)
+    padded_starts = padded_ends - padded_lengths
+    padding = padded_lengths > lengths_np
+    # With exactly sum(lengths) nonzero entries, zero padding implies every
+    # real position is nonzero. Only nonempty padding intervals need separate
+    # validation, including ragged requests; there is no uniform-shape branch.
+    for start, stop in zip((padded_starts + lengths_np)[padding], padded_ends[padding]):
+        if np.count_nonzero(mask_np[start:stop]):
+            return None
+
     ends = np.cumsum(lengths_np)
     starts = ends - lengths_np
     lower = np.searchsorted(selected_np, starts)
@@ -461,45 +506,60 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
     positions[local[own]] = selected_np[own] - starts[request[own]]
     real = np.zeros(rows, dtype=np.bool_)
     real[local[own]] = True
-    padded_starts = (np.cumsum(original_chunks) - original_chunks) * cp
     source_positions = selected_np + padded_starts[request] - starts[request]
     source_flat = restore.numpy()[source_positions].astype(np.int64, copy=False)
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
 
-    device = original.global_positions.device
-
-    def upload(array):
-        tensor = torch.from_numpy(array)
-        # NumPy's empty advanced-indexing arrays can have stride 0; preserve
-        # the original Torch layout even on ranks with no outgoing rows.
-        if not array.size:
-            tensor = torch.empty(array.shape, dtype=tensor.dtype)
-        return tensor.to(device, non_blocking=True)
-
-    sends, receives, send_sizes, receive_sizes, groups = [], [], [], [], []
+    sends, receives, send_sizes, receive_sizes, group_arrays = [], [], [], [], []
     projection_groups = []
     for peer in range(cp):
         outgoing = (source_owners == rank) & (owners == peer)
         incoming = (source_owners == peer) & own
         send, receive = source_rows[outgoing], local[incoming]
+        source = source_rows[incoming]
         sends.append(send)
         receives.append(receive)
         send_sizes.append(send.size)
         receive_sizes.append(receive.size)
         if receive.size:
-            source = source_rows[incoming]
-            groups.append((upload(receive), upload(source)))
+            group_arrays.extend((receive, source))
             if keep_candidate_rows:
                 projection_groups.append(
                     (tuple(receive.tolist()), tuple(source.tolist()))
                 )
     receive_positions = np.concatenate(receives)
+    absolute = positions + prefixes_np[row_request]
+    arrays = (
+        np.concatenate(sends),
+        receive_positions,
+        positions + padded_starts[row_request],
+        absolute,
+        real,
+        owners * rows + local,
+        row_request.astype(np.int32),
+        selected_np,
+        *group_arrays,
+    )
+    (
+        send_device,
+        receive_device,
+        relative_device,
+        absolute_device,
+        real_device,
+        restore_device,
+        request_device,
+        selected_device,
+        *group_devices,
+    ), host_buffer = _upload_layout_arrays(arrays, original.global_positions.device)
+    # Keep peer arrays independently aligned even for odd ragged split sizes;
+    # downstream JIT kernels see the same alignment as separate allocations.
+    groups = tuple(zip(group_devices[::2], group_devices[1::2]))
     exchange = _RowExchange(
         original.chunk_length,
         rows,
-        upload(np.concatenate(sends)),
-        upload(receive_positions),
+        send_device,
+        receive_device,
         tuple(send_sizes),
         tuple(receive_sizes),
         group,
@@ -513,21 +573,21 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
             sum(receive_sizes) == rows
             and np.array_equal(receive_positions, np.arange(rows, dtype=np.int64))
         ),
+        _layout_host_buffer=host_buffer,
     )
-    absolute = positions + prefixes_np[row_request]
     context = replace(
         original,
         chunk_length=rows,
         padded_seq_len=rows * cp,
-        relative_positions=upload(positions + padded_starts[row_request]),
-        global_positions=upload(absolute),
+        relative_positions=relative_device,
+        global_positions=absolute_device,
         first_position_host=int(absolute[0]),
-        local_is_real=upload(real),
-        unpad_restore=upload(owners * rows + local),
+        local_is_real=real_device,
+        unpad_restore=restore_device,
         unpad_restore_is_prefix=False,
         chunk_lengths_per_req=tuple(compact_chunks.tolist()),
-        req_id_per_token=upload(row_request.astype(np.int32)),
-        gather_restore_positions=selected.to(device, non_blocking=True),
+        req_id_per_token=request_device,
+        gather_restore_positions=selected_device,
     )
     return context, exchange, tuple(groups)
 

@@ -3226,6 +3226,7 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         reuse_common_meta: Optional["PrefillMeta"] = None,
         reuse_freqs_meta: Optional["PrefillMeta"] = None,
+        reuse_query_meta: Optional[Tuple[int, Optional["PrefillMeta"]]] = None,
         reuse_swa_write_meta: Optional["SwaPrefillMeta"] = None,
         host_swa_table: Optional[torch.Tensor] = None,
         swa_write_only: bool = False,
@@ -3273,18 +3274,46 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        # Query geometry does not depend on the SWA pool region. The broadcast
+        # owns this source for one build only; never reuse slot mappings across
+        # regions or retain input identities beyond this invocation.
+        query_meta = reuse_common_meta
+        if query_meta is None and reuse_query_meta is not None:
+            source_window, source = reuse_query_meta
+            if (
+                source is not None
+                and source_window == win
+                and source.cp_ctx is cp_ctx
+                and source.seqlen == seqlen
+                and source.seqlen_full == seqlen_full
+                and source.device == device
+                and source.batch_size == batch_size
+                and source.sp_int == sp_int
+                and all(
+                    getattr(source, name) is value
+                    for name, value in (
+                        ("sp_per_req", sp_per_req),
+                        ("cu_seqlens", cu_seqlens),
+                        ("input_lengths", input_lengths),
+                        ("prefix_lengths", prefix_lengths),
+                        ("position_ids", position_ids),
+                        ("req_id_per_token", req_id_per_token),
+                    )
+                )
+            ):
+                query_meta = source
         can_reuse_freqs = (
             reuse_freqs_meta is not None
             and reuse_freqs_meta.freqs_cis_source_id == id(self.freqs_cis)
         )
         position_ids_eff: Optional[torch.Tensor] = None
-        if reuse_common_meta is None or not can_reuse_freqs:
+        if query_meta is None or not can_reuse_freqs:
             position_ids_eff = position_ids
             if cp_on:
                 position_ids_eff = _flat_1d(
                     cp_ctx.global_positions.to(device=device, dtype=torch.long)
                 )
-        if reuse_common_meta is None:
+        if query_meta is None:
             with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
                 freqs_cis = self.freqs_cis.index_select(
                     0,
@@ -3317,22 +3346,6 @@ class AttentionFP8(nn.Module):
                     if host_prefixes is not None
                     else bool((prefix_lengths > 0).any().item())
                 )
-            with record_function_range("dsv4.fp8.meta.swa_varlen"):
-                swa_meta = self._build_swa_prefill_meta_varlen(
-                    seqlen=seqlen,
-                    device=device,
-                    any_cont=any_cont,
-                    batch_size=batch_size,
-                    cu_seqlens=cu_seqlens,
-                    input_lengths=input_lengths,
-                    prefix_lengths=prefix_lengths,
-                    position_ids=position_ids,
-                    req_id_per_token=req_id_per_token,
-                    topk_length_kv_full=topk_length_kv_full,
-                    reuse_write_meta=reuse_swa_write_meta,
-                    host_swa_table=host_swa_table,
-                    write_only=swa_write_only,
-                )
             row_seqlens_full = torch.full(
                 (1,), seqlen_full, device=device, dtype=torch.long
             )
@@ -3347,9 +3360,31 @@ class AttentionFP8(nn.Module):
                             device=self.freqs_cis.device, dtype=torch.long
                         ),
                     )
-            topk_idxs = reuse_common_meta.topk_idxs
-            any_cont = reuse_common_meta.any_cont
-            row_seqlens_full = reuse_common_meta.row_seqlens_full
+            topk_idxs = query_meta.topk_idxs
+            any_cont = query_meta.any_cont
+            row_seqlens_full = query_meta.row_seqlens_full
+            topk_length_kv_full = query_meta.swa_meta.topk_length_kv_full
+        if reuse_common_meta is None:
+            with record_function_range("dsv4.fp8.meta.swa_varlen"):
+                swa_meta = self._build_swa_prefill_meta_varlen(
+                    seqlen=seqlen,
+                    device=device,
+                    any_cont=any_cont,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    topk_length_kv_full=topk_length_kv_full,
+                    reuse_write_meta=reuse_swa_write_meta,
+                    reuse_query_swa_meta=(
+                        query_meta.swa_meta if query_meta is not None else None
+                    ),
+                    host_swa_table=host_swa_table,
+                    write_only=swa_write_only,
+                )
+        else:
             source_swa = reuse_common_meta.swa_meta
             swa_meta = SwaPrefillMeta(
                 slot_mapping=source_swa.slot_mapping,
@@ -3980,6 +4015,7 @@ class AttentionFP8(nn.Module):
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
         reuse_write_meta: Optional[SwaPrefillMeta] = None,
+        reuse_query_swa_meta: Optional[SwaPrefillMeta] = None,
         host_swa_table: Optional[torch.Tensor] = None,
         write_only: bool = False,
     ) -> SwaPrefillMeta:
@@ -4047,19 +4083,28 @@ class AttentionFP8(nn.Module):
             and (cp_ctx.cu_seqlens_global is not None)
             and (cp_ctx.input_lengths_global is not None)
         )
-        query_start_loc = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
-        combined_seq_lens = (
-            prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
-        ).contiguous()
+        if (
+            reuse_query_swa_meta is not None
+            and reuse_query_swa_meta.query_start_loc is not None
+            and reuse_query_swa_meta.combined_seq_lens is not None
+        ):
+            query_start_loc = reuse_query_swa_meta.query_start_loc
+            combined_seq_lens = reuse_query_swa_meta.combined_seq_lens
+        else:
+            query_start_loc = cu_seqlens.to(
+                device=device, dtype=torch.int32
+            ).contiguous()
+            combined_seq_lens = (
+                prefix_lengths.to(torch.int32) + input_lengths.to(torch.int32)
+            ).contiguous()
         if cp_on_write:
             write_B = int(cp_ctx.input_lengths_global.numel())
             write_query_start_loc = _flat_1d(
                 cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
             ).contiguous()
-            write_combined_seq_lens = (
-                prefix_lengths.to(torch.int32)[:write_B]
-                + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
-            ).contiguous()
+            # A host-planned write consumes the existing prefix/length tensors
+            # directly. Build their sum only for GPU fallback or prefix reads.
+            write_combined_seq_lens = None
             write_num_tokens = cp_ctx.seq_len_full
         else:
             write_B = B
@@ -4086,6 +4131,11 @@ class AttentionFP8(nn.Module):
             if planned is not None:
                 slot_mapping, slot_compaction = planned
             else:
+                if write_combined_seq_lens is None:
+                    write_combined_seq_lens = (
+                        prefix_lengths.to(torch.int32)[:write_B]
+                        + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+                    ).contiguous()
                 slot_mapping = _swa_ops.compute_swa_slot_mapping(
                     block_table=bt_swa,
                     query_start_loc=write_query_start_loc,
@@ -4118,6 +4168,11 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 slot_compaction=slot_compaction,
             )
+        if write_combined_seq_lens is None:
+            write_combined_seq_lens = (
+                prefix_lengths.to(torch.int32)[:write_B]
+                + _flat_1d(cp_ctx.input_lengths_global.to(torch.int32))
+            ).contiguous()
         combined_gather_lens = _swa_ops.compute_prefill_gather_lens(
             seq_lens=write_combined_seq_lens,
             query_start_loc=write_query_start_loc,

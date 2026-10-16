@@ -27,7 +27,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    return None if t is None else t.reshape(-1).contiguous()
+    if t is None or (t.ndim == 1 and t.is_contiguous()):
+        return t
+    return t.reshape(-1).contiguous()
 
 
 class _SwaWriteSource(NamedTuple):
@@ -178,6 +180,7 @@ def build_and_propagate_prefill_meta_fp8(
 
     meta_by_ratio: Dict[tuple, "PrefillMeta"] = {}
     reusable_common: Dict[int, "PrefillMeta"] = {}
+    reusable_query: Dict[tuple, "PrefillMeta"] = {}
     reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
     write_by_region: Dict = {}
     # V4.1 buckets (ratios 0/2/1) build through ``AttentionV41FP8``'s SWA
@@ -209,6 +212,7 @@ def build_and_propagate_prefill_meta_fp8(
                     reuse_write = None
                     previous = (reuse_write_by_region or {}).get(swa_region)
                     cp = getattr(attn, "_cp_ctx", None)
+                    query_key = (attn.window_size, id(cp))
                     table = (block_tables_by_type or {}).get(swa_region)
                     if previous is not None and hasattr(attn, "swa_bounded_replay"):
                         old_cp = previous.cp_ctx
@@ -260,6 +264,10 @@ def build_and_propagate_prefill_meta_fp8(
                             req_id_per_token=req_id_per_token,
                             max_seqlen_q=max_seqlen_q,
                             reuse_common_meta=reusable_common.get(swa_region),
+                            reuse_query_meta=(
+                                attn.window_size,
+                                reusable_query.get(query_key),
+                            ),
                             reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
                                 compressed_rope
                             ),
@@ -278,6 +286,7 @@ def build_and_propagate_prefill_meta_fp8(
                         ),
                     )
                 reusable_common.setdefault(swa_region, meta_by_ratio[key])
+                reusable_query.setdefault(query_key, meta_by_ratio[key])
                 reusable_freqs_by_rope_kind.setdefault(
                     compressed_rope, meta_by_ratio[key]
                 )

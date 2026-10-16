@@ -36,6 +36,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (  # noqa: E402
     AttentionV41FP8,
 )
 from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
+    _flat_optional,
     build_and_propagate_prefill_meta_fp8,
     release_v41_prefill_shared,
 )
@@ -120,6 +121,80 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_flat_optional_preserves_identity_or_normalizes_strided_input(self):
+        source = torch.arange(17)
+        self.assertIsNone(_flat_optional(None))
+        self.assertIs(_flat_optional(source), source)
+        self.assertTrue(torch.equal(_flat_optional(source[::2]), source[::2]))
+        self.assertTrue(_flat_optional(source[::2]).is_contiguous())
+        self.assertTrue(torch.equal(_flat_optional(source.view(1, 17)), source))
+
+    def test_cross_region_query_reuse_checks_window_context_and_input_identity(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as swa_ops
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import SwaPrefillMeta
+
+        x, inputs = torch.zeros(8, 5120), _inputs()
+        owner = _make_attn(0, 0, {})
+        owner.rope_head_dim = 64
+        owner.freqs_cis = torch.arange(32 * 8).reshape(32, 8).float()
+
+        def swa(**kwargs):
+            values = dict.fromkeys(SwaPrefillMeta._fields)
+            values.update(
+                slot_mapping=torch.tensor([len(builds)]),
+                query_start_loc=kwargs["cu_seqlens"],
+                combined_seq_lens=kwargs["prefix_lengths"] + kwargs["input_lengths"],
+                topk_length_kv_full=kwargs["topk_length_kv_full"],
+                combined_gather_len_max=0,
+                M=0,
+                prefix_len_max=0,
+            )
+            builds.append(kwargs)
+            return SwaPrefillMeta(**values)
+
+        builds = []
+        with patch.object(
+            owner, "_build_swa_prefill_meta_varlen", side_effect=swa
+        ), patch.object(owner, "_ensure_freqs_cis_bound"), patch.object(
+            swa_ops,
+            "compute_window_topk_and_length_varlen",
+            return_value=(
+                torch.zeros(8, 128, dtype=torch.int32),
+                torch.ones(8, dtype=torch.int32),
+            ),
+        ) as topk:
+            source = AttentionFP8._build_shared_prefill_meta(owner, x, 0, **inputs)
+            reused = AttentionFP8._build_shared_prefill_meta(
+                owner,
+                x,
+                0,
+                **inputs,
+                reuse_query_meta=(128, source),
+                reuse_freqs_meta=source,
+            )
+            self.assertEqual(topk.call_count, 1)
+            self.assertIs(reused.topk_idxs, source.topk_idxs)
+            self.assertIs(reused.freqs_cis, source.freqs_cis)
+            self.assertIs(reused.row_seqlens_full, source.row_seqlens_full)
+            self.assertIsNot(reused.swa_meta.slot_mapping, source.swa_meta.slot_mapping)
+            self.assertIs(builds[-1]["reuse_query_swa_meta"], source.swa_meta)
+            for changed in (
+                dict(reuse_query_meta=(127, source)),
+                dict(reuse_query_meta=(128, source._replace(cp_ctx=object()))),
+                dict(
+                    reuse_query_meta=(
+                        128,
+                        source._replace(position_ids=inputs["position_ids"].clone()),
+                    )
+                ),
+            ):
+                before = topk.call_count
+                AttentionFP8._build_shared_prefill_meta(
+                    owner, x, 0, **inputs, **changed
+                )
+                self.assertEqual(topk.call_count, before + 1)
+                self.assertIsNone(builds[-1]["reuse_query_swa_meta"])
+
     def test_workspace_views_release_with_plan_and_at_forward_exit(self):
         workspace = PrefillWorkspace(
             torch.device("cpu"), q_rows=4, q_dim=8, reserve_cp=False, align_bytes=1
@@ -518,6 +593,8 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
         return layers, x, inputs, cache, tables, normal_count
 
     def test_actual_parent_cp4_broadcast_exact_region_rope_and_reentry(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as swa_ops
+
         for rank in range(4):
             for prefixes, bound, compressed_first in (
                 ((127, 0, 129), True, False),
@@ -554,11 +631,16 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
 
                     with patch.object(
                         AttentionFP8, "_build_swa_prefill_meta_varlen", counted
-                    ):
+                    ), patch.object(
+                        swa_ops,
+                        "compute_window_topk_and_length_varlen",
+                        wraps=swa_ops.compute_window_topk_and_length_varlen,
+                    ) as topk:
                         build_and_propagate_prefill_meta_fp8(
                             model, x, 0, cache, tables, workspace=workspace, **inputs
                         )
                     self.assertEqual(len(calls), 2 if bound else 1)
+                    self.assertEqual(topk.call_count, 1)
                     for a, want in zip(layers, expected):
                         got = a._prefill_meta_shared
                         for field in want._fields:
@@ -576,6 +658,13 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
                         other = layers[-1]._prefill_meta_shared.swa_meta
                         self.assertIsNot(other, source)
                         self.assertIs(layers[-2]._prefill_meta_shared.swa_meta, other)
+                        self.assertIsNot(other.slot_mapping, source.slot_mapping)
+                        self.assertIs(other.query_start_loc, source.query_start_loc)
+                        self.assertIs(other.combined_seq_lens, source.combined_seq_lens)
+                        self.assertIs(
+                            layers[-1]._prefill_meta_shared.topk_idxs,
+                            layers[0]._prefill_meta_shared.topk_idxs,
+                        )
                     # Full real parent must honor a different table identity even
                     # with an existing same-rope-kind cache entry and reuse source.
                     a = layers[1]
