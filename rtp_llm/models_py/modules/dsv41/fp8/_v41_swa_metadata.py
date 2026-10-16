@@ -124,6 +124,37 @@ def _planned_position_slots(
     )
 
 
+def _host_compact_table(
+    host_table, prefixes, lengths, columns, span, read, *, pin_memory=True
+):
+    """Build alias IDs from CPU page intervals without per-request Torch ops."""
+    host_rows = host_table.resolve_neg().numpy()
+    active = []
+    for req, (prefix, length) in enumerate(zip(prefixes, lengths)):
+        if not read and not length:
+            continue
+        start, end = (
+            (max(0, prefix - 127), prefix) if read else (prefix, prefix + length)
+        )
+        first = start // span
+        stop = min((end + span - 1) // span, columns)
+        for column, block in enumerate(host_rows[req, first:stop], first):
+            block = int(block)
+            if block > 0:
+                active.append((req, column, block))
+    unique = sorted({block for _, _, block in active})
+    indices = {block: i for i, block in enumerate(unique)}
+    mapping = torch.empty(
+        (len(lengths), columns), dtype=torch.int32, pin_memory=pin_memory
+    )
+    host_mapping = mapping.numpy()
+    host_mapping.fill(-1)
+    if active:
+        rows, selected_columns, blocks = zip(*active)
+        host_mapping[rows, selected_columns] = [indices[block] for block in blocks]
+    return unique, mapping
+
+
 def try_host_slot_metadata(
     table,
     host_table,
@@ -201,31 +232,11 @@ def try_host_slot_metadata(
             or tensor.dtype not in (torch.int32, torch.int64)
         ):
             return None
-    active = []
-    for req, (prefix, length) in enumerate(zip(prefixes, lengths)):
-        if not read and not length:
-            continue
-        start, end = (
-            (max(0, prefix - 127), prefix) if read else (prefix, prefix + length)
-        )
-        first = start // span
-        stop = min((end + span - 1) // span, table.shape[1])
-        # Long reused prefixes can leave hundreds of irrelevant padded columns.
-        # Inspect only the request interval; the host tensor never touches CUDA.
-        for column, block in enumerate(host_table[req, first:stop].tolist(), first):
-            block = int(block)
-            if block > 0:
-                active.append((req, column, block))
-    unique = sorted({block for _, _, block in active})
-    indices = {block: i for i, block in enumerate(unique)}
-    mapping = torch.full(table.shape, -1, dtype=torch.int32, pin_memory=True)
-    if active:
-        flat_rows = torch.tensor(
-            [req * table.shape[1] + column for req, column, _ in active]
-        )
-        mapping.view(-1)[flat_rows] = torch.tensor(
-            [indices[block] for _, _, block in active], dtype=torch.int32
-        )
+    # One CPU NumPy view avoids a Torch select/slice/tolist dispatch chain for
+    # every request. Physical/kernel table widths remain independently padded.
+    unique, mapping = _host_compact_table(
+        host_table, prefixes, lengths, table.shape[1], span, read
+    )
     gather = tuple(min(p, 127) for p in prefixes) if read else ()
     max_rows = max(gather) if read else max(lengths)
     shape = (
