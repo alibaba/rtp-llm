@@ -501,6 +501,8 @@ class Block(nn.Module):
         kv_cache=None,
         block_tables_by_type=None,
         routing_metadata: Optional[GateRoutingMetadata] = None,
+        _prepared_attn=None,
+        _defer_ffn_post: bool = False,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -516,9 +518,18 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
-        residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+        if _prepared_attn is not None:
+            residual, x_pre, post, comb = _prepared_attn
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        else:
+            residual = x
+            x_pre, post, comb = attn_hc_pre(x)
+        if _prepared_attn is None and self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
@@ -533,7 +544,7 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        else:
+        elif _prepared_attn is None:
             x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
             attn_out = self.attn(
                 x_pre,
@@ -560,6 +571,12 @@ class Block(nn.Module):
             if routing_metadata is None
             else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
         )
+        if _defer_ffn_post:
+            from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+                PendingDecodePost,
+            )
+
+            return PendingDecodePost(ffn_out, residual, post, comb, self.ffn_hc)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward_prefill_ced_l20(
