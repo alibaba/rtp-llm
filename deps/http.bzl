@@ -13,7 +13,7 @@ def http_deps():
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
-
+    http_archive(
         name = "nvcomp_cuda13_x86",
         urls = [
             "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
