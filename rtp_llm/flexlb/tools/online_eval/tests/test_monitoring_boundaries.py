@@ -456,3 +456,15 @@ def test_snapshot_rejects_stale_or_failed_target_before_reading_metrics(health, 
     with patch.object(client, 'query', return_value=health) as query, pytest.raises(RuntimeError, match=message):
         client.metric_snapshot(['mock/context_requests_total'], source='mock')
     assert query.call_count == 1
+
+
+def test_raw_chunks_apply_label_filter_and_keep_actual_scrape_times():
+    from monitoring.client import PrometheusClient
+    client = PrometheusClient('http://owned-tsdb', query_plan=load_plan('cache_scale_in.yaml'),
+                              target_kinds={'mock': 'mock'}, max_gap_s=5)
+    labels = dict(role='prefill', engine_name='p', engine_incarnation='one', engine_ip='ip', grpc_port='7')
+    with patch.object(client, 'query', return_value=[dict(metric=labels, values=[[10.25, '4']])]) as query:
+        chunks = list(client.metric_chunks('mock/context_requests_total', source='mock', start=10,
+            end=11, labels={'role': 'prefill'}))
+    assert query.call_args.args == ('mock_context_requests_total{job="mock",role="prefill"}[1000ms]', 11)
+    assert chunks[0][0]['values'] == [[10.25, '4']]

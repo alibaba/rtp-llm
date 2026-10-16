@@ -88,6 +88,7 @@ def observe(ctx, p, deadline):
         post_start=0,
         post_end=0,
         max_pacing_lag_ms=None,
+        capture_limits=observation["capture"],
     )
     from cases.cache_scale_in import analysis as cache_gate
     path = ctx.artifact_dir / "cache-gate-evidence.json"
@@ -231,6 +232,20 @@ def check_validate(params, plan):
 def check(ctx, p, deadline):
     evidence = ctx.resource(p["evidence"], "gate_evidence")
     flow = ctx.resource(p["flow"], "java_flow")
+    # Keep the original poll ledger for topology and latency diagnostics.
+    from cases.cache_scale_in.observation import measurement_samples
+    from file_digest import sha256_file
+    control_path = ctx.artifact_dir / "cache-control-evidence.json"
+    write_json(control_path, evidence)
+    evidence["control_evidence"] = dict(file=control_path.name, sha256=sha256_file(control_path))
+    try:
+        evidence["samples"] = measurement_samples(ctx.monitor, evidence, deadline,
+                                                 evidence["capture_limits"])
+        evidence["gate_sample_source"] = "prometheus_raw_scrape"
+    except TimeoutError:
+        raise
+    except (ValueError, RuntimeError, OSError) as exc:
+        evidence["errors"].append("raw measurement unavailable: " + str(exc))
     snapshot = flow.evidence_snapshot()
     # Terminal request failures do not decide whether survivor cache counters
     # are measurable. Issued sends still need complete accounting for QPS.
@@ -242,7 +257,6 @@ def check(ctx, p, deadline):
         except ValueError as exc:
             evidence["errors"].append(str(exc))
     attribute_client(evidence, snapshot)
-    from file_digest import sha256_file
     evidence["client_attribution"]["artifacts"] = [
         dict(path=str(path.resolve()), sha256=sha256_file(path))
         for path in (flow.directory / "client_lifecycle.jsonl", flow.directory / "control/status.json")
@@ -270,6 +284,7 @@ def check(ctx, p, deadline):
         artifacts=[
             str(ctx.artifact_dir / name)
             for name in (
+                "cache-control-evidence.json",
                 "cache-gate-evidence.json",
                 "cache-gate-result.json",
                 "cache-gate-manifest.json",

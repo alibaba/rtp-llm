@@ -40,14 +40,10 @@ class PrometheusClient:
             **({"deadline": deadline} if deadline is not None else {})
         )["result"]
 
-    def selector(self, name):
+    def selector(self, name, *, metric_names=None, labels=None):
         if name not in self.target_kinds:
             raise ValueError("unknown monitored source " + name)
-        return "{job=" + json.dumps(name) + "}"
-
-    def instant(self, name, timeout=5, *, metric_names=None, labels=None):
-        selector = self.selector(name)
-        matchers = [selector[1:-1]]
+        matchers = ["job=" + json.dumps(name)]
         if metric_names is not None:
             names = sorted(set(metric_names))
             if not names:
@@ -59,6 +55,11 @@ class PrometheusClient:
             if not isinstance(value, str):
                 raise ValueError("snapshot label value must be a string")
             matchers.append(key + "=" + json.dumps(value))
+        return "{" + ",".join(matchers) + "}"
+
+    def instant(self, name, timeout=5, *, metric_names=None, labels=None):
+        selector = self.selector(name)
+        selected = self.selector(name, metric_names=metric_names, labels=labels)
         now = time.time()
         window = f"[{round(self.max_gap * 1000)}ms]"
         # Health and values must come from the same actual scrape. An instant
@@ -69,7 +70,7 @@ class PrometheusClient:
         latest_scrape, up = health[0]["values"][-1]
         if up != "1":
             raise RuntimeError("Prometheus target unavailable: " + name)
-        rows = self.query("{" + ",".join(matchers) + "}" + window, latest_scrape, timeout)
+        rows = self.query(selected + window, latest_scrape, timeout)
         return [
             dict(metric=r["metric"], value=r["values"][-1])
             for r in rows
@@ -88,7 +89,7 @@ class PrometheusClient:
         return [row for chunk in self.metric_chunks(metric_id, source=source, start=start,
                                                    end=end, deadline=deadline) for row in chunk]
 
-    def metric_chunks(self, metric_id, *, source, start, end, deadline=None):
+    def metric_chunks(self, metric_id, *, source, start, end, deadline=None, labels=None):
         """Yield validated chunks so archives retain evidence if a later query fails."""
         definition = self.metric_definition(metric_id)
         if definition.get("mode") != "scrape":
@@ -97,7 +98,7 @@ class PrometheusClient:
             raise ValueError("metric source kind mismatch: " + metric_id)
         if not math.isfinite(start) or not math.isfinite(end) or start >= end:
             raise ValueError("invalid metric query window")
-        expression = definition["promql"].replace("${selector}", self.selector(source))
+        expression = definition["promql"].replace("${selector}", self.selector(source, labels=labels))
         cursor = start
         while cursor < end:
             if deadline is not None:

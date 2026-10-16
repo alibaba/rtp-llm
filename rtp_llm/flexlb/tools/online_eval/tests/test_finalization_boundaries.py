@@ -36,6 +36,7 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
     ctx = RuntimeContext({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
     if kind == "cache":
         e["client_attribution"] = {}
+        e["capture_limits"] = dict(max_samples=1000, max_bytes=1000000)
     f = ctx.register_resource("java_flow", flow)
     h = ctx.register_resource("gate_evidence", e)
     ctx.monitor = SimpleNamespace(archive=lambda: None)
@@ -43,7 +44,8 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
     with mock.patch("cases." + case + ".metrics.produce", side_effect=AssertionError("metric delivery")), \
          mock.patch("cases." + case + ".report.write_report", side_effect=AssertionError("HTML delivery")):
         if kind == "cache":
-            with mock.patch.object(module, "align_send_counters"), mock.patch.object(module, "attribute_client"):
+            with mock.patch.object(module, "align_send_counters"), mock.patch.object(module, "attribute_client"), \
+                 mock.patch("cases.cache_scale_in.observation.measurement_samples", return_value=e["samples"]):
                 output = module.check(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
         else:
             output = module.finish(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
