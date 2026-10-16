@@ -172,9 +172,9 @@ static GroupSetPtr makeDeviceHostGroup(size_t                                  g
                                        std::shared_ptr<HostBlockPool>          host_pool,
                                        std::vector<TestGroupConfig>            groups,
                                        std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = nullptr) {
-    auto                topology = makeTestTopology(std::move(groups));
-    auto                group_tags = topology->groupTags();
-    auto                group      = makeTestGroupSet(group_set_id,
+    auto topology   = makeTestTopology(std::move(groups));
+    auto group_tags = topology->groupTags();
+    auto group      = makeTestGroupSet(group_set_id,
                                   std::move(topology),
                                   std::move(group_tags),
                                   std::move(device_pools),
@@ -231,12 +231,17 @@ public:
 
 class BlockingStrategy: public DeviceHostCopyStrategy {
 public:
+    explicit BlockingStrategy(bool block_device_to_host_only = false):
+        block_device_to_host_only_(block_device_to_host_only) {}
+
     StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions&) override {
         std::unique_lock<std::mutex> lock(mutex_);
         directions_.push_back(plan.device_to_host);
         ++entered_count_;
         cv_.notify_all();
-        cv_.wait(lock, [this] { return released_; });
+        if (!block_device_to_host_only_ || plan.device_to_host) {
+            cv_.wait(lock, [this] { return released_; });
+        }
         return StrategyResult::done();
     }
 
@@ -260,6 +265,7 @@ private:
     std::vector<bool>       directions_;
     size_t                  entered_count_{0};
     bool                    released_{false};
+    bool                    block_device_to_host_only_{false};
 };
 
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
@@ -660,6 +666,7 @@ TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) 
         makeTransferTask({makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, second_host_block)}));
     auto queued_load = per_rank_transfer_engine_->execute(
         makeTransferTask({makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, load_host_block)}));
+    const bool load_started_while_background_blocked = blocker->waitUntilEntered(2, std::chrono::seconds(5));
 
     blocker->release();
     running_background->waitDone();
@@ -669,6 +676,7 @@ TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) 
     EXPECT_TRUE(running_background->success());
     EXPECT_TRUE(queued_background->success());
     EXPECT_TRUE(queued_load->success());
+    EXPECT_TRUE(load_started_while_background_blocked);
     EXPECT_EQ(blocker->directions(), (std::vector<bool>{true, false, true}));
 
     releasePoolBlock(*host_pool_, first_host_block);
@@ -676,7 +684,7 @@ TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) 
     releasePoolBlock(*host_pool_, load_host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsSharedAcrossDirections) {
+TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsPerDirection) {
     constexpr size_t kWorkerCount = 4;
     per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, kWorkerCount);
@@ -694,14 +702,60 @@ TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsSharedAcrossDirectio
             makeTransferTask({makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, /*host_block=*/1)})));
     }
 
-    ASSERT_TRUE(blocker->waitUntilEntered(kWorkerCount, std::chrono::seconds(5)));
-    EXPECT_FALSE(blocker->waitUntilEntered(kWorkerCount + 1, std::chrono::milliseconds(200)));
+    ASSERT_TRUE(blocker->waitUntilEntered(kWorkerCount * 2, std::chrono::seconds(5)));
+    EXPECT_FALSE(blocker->waitUntilEntered(kWorkerCount * 2 + 1, std::chrono::milliseconds(200)));
 
     blocker->release();
     for (const auto& context : contexts) {
         context->waitDone();
         EXPECT_TRUE(context->success());
     }
+}
+
+TEST_F(PerRankBlockTransferEngineTest, FourBlockedDeviceToHostWorkersDoNotDelayHostToDevice) {
+    constexpr size_t kWorkerCount = 4;
+    per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, kWorkerCount);
+
+    auto  blocking_strategy = std::make_unique<BlockingStrategy>(/*block_device_to_host_only=*/true);
+    auto* blocker           = blocking_strategy.get();
+    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [blocker](void*) { blocker->release(); });
+
+    std::vector<BlockIdxType>                          host_blocks;
+    std::vector<std::shared_ptr<TransferAsyncContext>> background_contexts;
+    for (size_t index = 0; index < kWorkerCount; ++index) {
+        const BlockIdxType host_block = poolMalloc(*host_pool_);
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+        host_blocks.push_back(host_block);
+        background_contexts.push_back(per_rank_transfer_engine_->execute(
+            makeTransferTask({makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block)})));
+    }
+    ASSERT_TRUE(blocker->waitUntilEntered(kWorkerCount, std::chrono::seconds(5)));
+
+    const BlockIdxType load_host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(load_host_block, NULL_BLOCK_IDX);
+    auto load_context = per_rank_transfer_engine_->execute(
+        makeTransferTask({makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, load_host_block)}));
+    const bool load_started_before_release = blocker->waitUntilEntered(kWorkerCount + 1, std::chrono::seconds(5));
+    if (load_started_before_release) {
+        load_context->waitDone();
+    }
+
+    blocker->release();
+    for (const auto& context : background_contexts) {
+        context->waitDone();
+        EXPECT_TRUE(context->success());
+    }
+    load_context->waitDone();
+    EXPECT_TRUE(load_started_before_release);
+    EXPECT_TRUE(load_context->success());
+
+    for (const auto host_block : host_blocks) {
+        releasePoolBlock(*host_pool_, host_block);
+    }
+    releasePoolBlock(*host_pool_, load_host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, BatchAllowsSharedReadEndpoint) {

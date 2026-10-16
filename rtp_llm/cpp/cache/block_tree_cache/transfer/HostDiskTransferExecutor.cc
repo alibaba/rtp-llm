@@ -9,8 +9,9 @@ namespace rtp_llm {
 
 HostDiskTransferExecutor::HostDiskTransferExecutor(BlockTreeTaskPool& transfer_task_pool,
                                                    size_t             max_descriptors_per_batch,
-                                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
-    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)) {}
+                                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                   BlockTreeTaskPool*                             load_task_pool):
+    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool) {}
 
 const char* HostDiskTransferExecutor::blockIOStatusName(BlockIOStatus status) {
     switch (status) {
