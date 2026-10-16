@@ -49,6 +49,10 @@ public:
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+    bool         supportsCoordinatedSchedule() const {
+        return !is_dspark_ && propose_step_ >= 1 && propose_step_ <= 4 && !useStreamAsync() && !useDropBroadSync()
+               && !useAsyncDeviceState() && !useDeviceInput();
+    }
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -116,9 +120,8 @@ protected:
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
     // row count"; target verify passes the explicit combo row count because a
     // graph replay does not advance the Python-side row counter.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                              ModelBase&       source,
-                                              int64_t          hidden_rows = 0);
+    void
+    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -219,26 +222,26 @@ protected:
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
+
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
-    std::unique_ptr<ModelBase>               model_;
-    std::unique_ptr<Sampler>                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
-    bool                                     enable_ffn_disaggregate_ = false;
-    bool                                     enable_detail_log_       = false;
-    int                                      tp_rank_                 = 0;
-    ParallelismConfig                        parallelism_config_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
+    int                                                                      tp_rank_                 = 0;
+    ParallelismConfig                                                        parallelism_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
     DataType data_type_;
@@ -265,6 +268,7 @@ private:
     TensorHolder buffer_holder_;
 
     bool     warm_up_;
+    bool     coordinated_schedule_ = false;
     RoleType role_type_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
@@ -295,8 +299,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

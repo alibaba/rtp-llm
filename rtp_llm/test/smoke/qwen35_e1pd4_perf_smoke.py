@@ -98,6 +98,23 @@ def add_arguments(parser):
 
 
 def configure(a, parser):
+    if (
+        getattr(a, "mixed_video", False)
+        or getattr(a, "omit_max_tokens", False)
+        or getattr(a, "preflight_only", False)
+        or getattr(a, "max_input_tokens", 32768) != 32768
+    ):
+        parser.error(
+            "the frozen reference fixes its single-video workload and capacity; use the generic smoke entry"
+        )
+    if os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0") != "0":
+        parser.error(
+            "the frozen performance preset disables adaptive cadence; use the generic smoke entry"
+        )
+    if getattr(a, "mtp_tokens", 0):
+        parser.error(
+            "the frozen performance preset disables MTP; use qwen35_epd_fusion_4gpu_smoke.py"
+        )
     for name, value in DEFAULTS.items():
         if getattr(a, name) != value:
             parser.error(

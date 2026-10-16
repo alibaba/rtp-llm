@@ -1,4 +1,4 @@
-"""Manual Qwen3.5 four-GPU PD / EPD fusion and E2PD4 smoke; default invocation is a dry run."""
+"""Manual Qwen3.5 E1PD2 / E1PD4 / E2PD4 smoke; default invocation is a dry run."""
 
 import argparse
 import concurrent.futures
@@ -19,6 +19,7 @@ from pathlib import Path
 
 TARGET = "//rtp_llm/test/smoke:qwen35_epd_fusion_4gpu_smoke"
 TEXT_TARGET = "//rtp_llm/test/smoke:qwen35_pd_fusion_4gpu_smoke"
+TWO_PD_TARGET = "//rtp_llm/test/smoke:qwen35_e1pd2_smoke"
 SINGLE_ENCODER_TARGET = "//rtp_llm/test/smoke:qwen35_e1pd4_smoke"
 ENCODER_TARGET = "//rtp_llm/test/smoke:qwen35_e2pd4_smoke"
 DEFAULT_MODEL = "/ssd/7/tuoyu.ty/workspace/model/Qwen3.5-397B-A17B-FP8"
@@ -37,6 +38,13 @@ def gpu_ids(value, count=4):
         or min(ids) < 0
     ):
         raise ValueError(f"expected {count or 'distinct'} non-negative GPU IDs")
+    return ids
+
+
+def pd_gpu_ids(value):
+    ids = gpu_ids(value, count=None)
+    if len(ids) not in (2, 4):
+        raise ValueError("expected two or four distinct PDFUSION GPUs")
     return ids
 
 
@@ -82,7 +90,7 @@ def server_config(
     native_fp8_attn=0,
     seq_size_per_block=0,
 ):
-    gpu_ids(gpus)
+    pd_count = len(pd_gpu_ids(gpus))
     if profile not in ("baseline", "fused", "flashinfer"):
         raise ValueError("unknown optimization profile: " + profile)
     if moe_strategy not in ("fp8_per_block_ep_normal", "mega_moe_fp8"):
@@ -102,10 +110,10 @@ def server_config(
         raise ValueError("Qwen3.5 FP8 KV shared pool requires seq_size_per_block=4096")
     env = {
         "CUDA_VISIBLE_DEVICES": gpus,
-        "WORLD_SIZE": "4",
+        "WORLD_SIZE": str(pd_count),
         "TP_SIZE": "1",
-        "DP_SIZE": "4",
-        "EP_SIZE": "4",
+        "DP_SIZE": str(pd_count),
+        "EP_SIZE": str(pd_count),
         "ROLE_TYPE": "PDFUSION",
         "VIT_SEPARATION": "0",
         "MOE_STRATEGY": "fp8_per_block_ep_normal",
@@ -127,7 +135,7 @@ def server_config(
     }
     args = (
         "--use_local 1 --role_type PDFUSION --vit_separation 0 "
-        "--world_size 4 --tp_size 1 --dp_size 4 --ep_size 4 "
+        f"--world_size {pd_count} --tp_size 1 --dp_size {pd_count} --ep_size {pd_count} "
         "--act_type BF16 --warm_up 0 --enable_cuda_graph 0 "
         "--moe_strategy fp8_per_block_ep_normal --use_deepep_moe 1 "
         "--use_deepep_low_latency 0 --use_deepep_internode 0 --use_all_gather 0 "
@@ -166,6 +174,161 @@ def server_config(
     return env, args
 
 
+def service_pythonpath_env(env, prefix):
+    """Prepend an explicit dependency directory only for spawned services."""
+    if not prefix:
+        return env
+    path = Path(prefix)
+    if not path.is_absolute() or not path.is_dir():
+        raise ValueError(
+            "service Python path prefix must be an existing absolute directory"
+        )
+    inherited = os.environ.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(path.resolve()) + (
+        os.pathsep + inherited if inherited else ""
+    )
+    return env
+
+
+def mtp_config(env, args, tokens, model_dir, coord_mode="off"):
+    """Enable the checkpoint's single-layer MTP only on the PD service."""
+    if tokens < 0:
+        raise ValueError("--mtp-tokens must be nonnegative (0 disables MTP)")
+    if not tokens:
+        return env, args
+    if coord_mode == "cadence":
+        if not 1 <= tokens <= 4:
+            raise ValueError("global cadence supports --mtp-tokens 1 through 4")
+        for name in (
+            "RTP_LLM_STREAM_ASYNC",
+            "RTP_LLM_DROP_BROAD_SYNC",
+            "RTP_LLM_MTP_ASYNC_DEVICE_STATE",
+            "RTP_LLM_DEVICE_INPUT",
+        ):
+            if str(env.get(name, os.environ.get(name, "0"))).lower() not in (
+                "",
+                "0",
+                "false",
+                "no",
+                "n",
+                "off",
+            ):
+                raise ValueError(
+                    "cadence MTP requires synchronous host dispatch: " + name
+                )
+    elif coord_mode != "off":
+        raise ValueError("unknown coordinator mode")
+    mixed = env.get(
+        "ENABLE_MIXED_CONTINUOUS_BATCHING",
+        os.environ.get("ENABLE_MIXED_CONTINUOUS_BATCHING", "0"),
+    )
+    words = shlex.split(args)
+    switch = "--enable_mixed_continuous_batching"
+    for index, word in enumerate(words):
+        if word == switch:
+            mixed = words[index + 1]
+        elif word.startswith(switch + "="):
+            mixed = word.split("=", 1)[1]
+    if str(mixed).lower() not in ("", "0", "false", "no", "n", "off"):
+        raise ValueError("MTP does not support mixed continuous batching")
+    env = dict(env, RTP_MEGAMOE_CHUNK_TOKENS="0", RTP_STEP_MEASUREMENT="1")
+    args += " " + shlex.join(
+        [
+            "--sp_model_type",
+            "qwen35_moe_mtp",
+            "--sp_type",
+            "eagle",
+            "--sp_checkpoint_path",
+            str(model_dir),
+            "--sp_act_type",
+            "bf16",
+            "--gen_num_per_cycle",
+            str(tokens),
+            "--enable_mixed_continuous_batching",
+            "0",
+            "--use_batch_decode_scheduler",
+            "0",
+        ]
+    )
+    return env, args
+
+
+def configure_mtp_services(configs, tokens, model_dir, coord_mode="off"):
+    """Keep speculative settings out of Encoder services, including inherited ones."""
+    if not tokens:
+        return configs
+    configured = []
+    for config in configs:
+        env, args = config["env"], config["args"]
+        if config["name"] == "fusion":
+            env, args = mtp_config(env, args, tokens, model_dir, coord_mode)
+        else:
+            env = dict(env, SP_TYPE="")
+        configured.append(dict(config, env=env, args=args))
+    return configured
+
+
+CADENCE_ENV = {
+    "PDFUSION_CADENCE_ADAPTIVE": 0,
+    "PDFUSION_CADENCE_DECODE_WINDOW": 64,
+    "PDFUSION_CADENCE_LOW_WATER_PCT": 50,
+    "PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS": 0,
+    "PDFUSION_CADENCE_MIN_DECODE_SHARE_PCT": 25,
+}
+
+
+def cadence_env(source, coord_mode):
+    """Forward explicit policy settings through Bazel to PD services only."""
+    if coord_mode not in ("off", "cadence"):
+        raise ValueError("unknown coordinator mode")
+    values = {name: str(source[name]) for name in CADENCE_ENV if name in source}
+    flag = values.get("PDFUSION_CADENCE_ADAPTIVE", "0")
+    if flag not in ("0", "1"):
+        raise ValueError("PDFUSION_CADENCE_ADAPTIVE must be 0 or 1")
+    if flag == "1":
+        limits = (
+            ("PDFUSION_CADENCE_DECODE_WINDOW", 1000000),
+            ("PDFUSION_CADENCE_LOW_WATER_PCT", 100),
+        )
+        for name, maximum in limits:
+            value = values.get(name, str(CADENCE_ENV[name]))
+            if not re.fullmatch(r"[0-9]+", value) or not 1 <= int(value) <= maximum:
+                raise ValueError("invalid " + name)
+        name = "PDFUSION_CADENCE_MIN_DECODE_SHARE_PCT"
+        value = values.get(name, str(CADENCE_ENV[name]))
+        if not re.fullmatch(r"[0-9]+", value) or not 0 <= int(value) <= 99:
+            raise ValueError("invalid " + name)
+        name = "PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS"
+        value = values.get(name, str(CADENCE_ENV[name]))
+        if not re.fullmatch(r"[0-9]+", value) or not 0 <= int(value) <= 600000:
+            raise ValueError("invalid " + name)
+    return values
+
+
+def effective_coord_mode(source, coord_mode):
+    values = cadence_env(source, coord_mode)
+    return (
+        "cadence" if values.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1" else coord_mode
+    )
+
+
+def encoder_cadence_env(env):
+    env = dict(env)
+    enabled = (
+        env.get(
+            "PDFUSION_CADENCE_ADAPTIVE",
+            os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0"),
+        )
+        == "1"
+    )
+    for name in CADENCE_ENV:
+        env.pop(name, None)
+    env.pop("PDFUSION_CADENCE_DRAIN_FILE", None)
+    if enabled:
+        env["PDFUSION_CADENCE_ADAPTIVE"] = "0"
+    return env
+
+
 def throughput_config(
     env,
     args,
@@ -175,17 +338,20 @@ def throughput_config(
     trace_run_id="unset",
     coord_mode="off",
 ):
+    values = cadence_env(dict(os.environ, **env), coord_mode)
+    adaptive = values.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1"
+    coord_mode = "cadence" if adaptive else coord_mode
     if policy not in ("fifo", "prefill-first"):
         raise ValueError("unknown scheduler policy")
-    if policy == "prefill-first":
+    if not adaptive and policy == "prefill-first":
         if not re.fullmatch(r"(?:0|[1-9][0-9]*|1/[1-9][0-9]*)", ratio):
             raise ValueError("invalid decode/prefill ratio")
         args += f" --pdfusion_scheduler_mode ratio --decode_prefill_ratio {ratio}"
-    elif ratio != "0":
+    elif not adaptive and ratio != "0":
         raise ValueError("ratio requires the ratio scheduler")
     if schedule_trace:
         if (
-            policy != "prefill-first"
+            (not adaptive and policy != "prefill-first")
             or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", trace_run_id)
             or trace_run_id == "unset"
         ):
@@ -197,15 +363,21 @@ def throughput_config(
         raise ValueError("unknown coordinator mode")
     if coord_mode == "cadence":
         if (
-            policy != "prefill-first"
-            or not schedule_trace
+            not schedule_trace
             or len(trace_run_id) > 63
-            or not ratio.isdigit()
-            or not 1 <= int(ratio) <= 1000000
+            or (
+                not adaptive
+                and (
+                    policy != "prefill-first"
+                    or not ratio.isdigit()
+                    or not 1 <= int(ratio) <= 1000000
+                )
+            )
         ):
             raise ValueError(
-                "global cadence requires trace, a unique <=63-character run ID and integer ratio >=1"
+                "global cadence requires trace and a unique <=63-character run ID; legacy mode also requires integer ratio >=1"
             )
+    env = dict(env, **values)
     args += f" --pdfusion_coord_mode {coord_mode}"
     # concurrency_limit=4 also sets max_generate_batch_size in engine_config.
     return env, args
@@ -316,10 +488,44 @@ def capacity_summary(report, evidence):
     )
 
 
-def steady_window_summary(rows, start, end):
+def output_only_validation_failure(row):
+    """Identify completed model output failures without hiding transport/protocol errors."""
+    errors = row.get("validation_errors", [])
+    output_errors = {
+        "incomplete, empty, or truncated generation",
+        "incomplete, empty, or truncated choice",
+        "invalid requested visual-event JSON",
+        "missing requested video description sections",
+        "missing requested visual subject sections",
+    }
+    return bool(
+        not row.get("ok")
+        and errors
+        and row.get("http_status") == 200
+        and not row.get("error")
+        and row.get("finish_reason") in ("stop", "length")
+        and row.get("usage", {}).get("completion_tokens", 0) > 0
+        and (row.get("content") or row.get("reasoning_content"))
+        and all(
+            e in output_errors or e.startswith("degenerate generation:") for e in errors
+        )
+    )
+
+
+def steady_response_requires_abort(row):
+    return not row["ok"] and not (
+        CLIENT_OPTIONS.get("continue_output_errors", False)
+        and output_only_validation_failure(row)
+    )
+
+
+def steady_window_summary(rows, start, end, rank_count=4):
     """Completion-time cohorts: exclude warmup/drain, include boundary carry-in."""
     completed = [r for r in rows if start <= r["completed_s"] < end]
     valid = [r for r in completed if r["ok"]]
+    model_completed = [
+        r for r in completed if r["ok"] or output_only_validation_failure(r)
+    ]
     duration = end - start
     result = dict(
         start_s=start,
@@ -329,6 +535,12 @@ def steady_window_summary(rows, start, end):
         successful=len(valid),
         errors=len(completed) - len(valid),
         qps=len(valid) / duration,
+        model_completed_requests=len(model_completed),
+        model_completed_qps=len(model_completed) / duration,
+        output_quality_errors=sum(output_only_validation_failure(r) for r in completed),
+        backend_length_completions=sum(
+            r.get("finish_reason") == "length" for r in model_completed
+        ),
         completed_output_tokens_per_s=sum(
             r.get("usage", {}).get("completion_tokens", 0) for r in valid
         )
@@ -342,7 +554,8 @@ def steady_window_summary(rows, start, end):
             {r.get("usage", {}).get("completion_tokens", 0) for r in valid}
         ),
         completed_by_rank={
-            str(rank): sum(r["client_rank"] == rank for r in valid) for rank in range(4)
+            str(rank): sum(r["client_rank"] == rank for r in valid)
+            for rank in range(rank_count)
         },
     )
     for key in ("ttft_s", "e2e_s", "tpot_ms"):
@@ -357,7 +570,7 @@ def steady_window_summary(rows, start, end):
     return result
 
 
-def steady_summary(rows, warmup_s, window_s, windows):
+def steady_summary(rows, warmup_s, window_s, windows, rank_count=4):
     end = warmup_s + window_s * windows
     result = dict(
         warmup_s=warmup_s,
@@ -365,15 +578,16 @@ def steady_summary(rows, warmup_s, window_s, windows):
         windows=windows,
         total_requests=len(rows),
         all_valid=all(r["ok"] for r in rows),
-        measurement=steady_window_summary(rows, warmup_s, end),
+        rank_count=rank_count,
+        measurement=steady_window_summary(rows, warmup_s, end, rank_count),
         rounds=[
             steady_window_summary(
-                rows, warmup_s + i * window_s, warmup_s + (i + 1) * window_s
+                rows, warmup_s + i * window_s, warmup_s + (i + 1) * window_s, rank_count
             )
             for i in range(windows)
         ],
         minute_bins=[
-            steady_window_summary(rows, begin, min(begin + 60, end))
+            steady_window_summary(rows, begin, min(begin + 60, end), rank_count)
             for begin in range(warmup_s, end, 60)
         ],
         warmup_completions=sum(r["completed_s"] < warmup_s for r in rows),
@@ -413,7 +627,7 @@ def run_steady_load_legacy(
     with (out / (phase + "-requests.jsonl")).open("w") as journal:
 
         def lane(worker):
-            rank = worker % 4
+            rank = worker % CLIENT_OPTIONS.get("rank_count", 4)
             url = f"http://127.0.0.1:{manager.port + rank*MIN_WORKER_INFO_PORT_NUM}/v1/chat/completions"
             barrier.wait(timeout=60)
             while not abort.is_set():
@@ -482,7 +696,9 @@ def run_steady_load_legacy(
                 time.sleep(5)
             for future in futures:
                 future.result()
-    result = steady_summary(rows, warmup_s, window_s, windows)
+    result = steady_summary(
+        rows, warmup_s, window_s, windows, CLIENT_OPTIONS.get("rank_count", 4)
+    )
     result.update(
         concurrency=concurrency,
         started_at=origin["wall"],
@@ -581,7 +797,9 @@ def _run_steady_load_single(
     writer_thread.start()
 
     def lane(worker):
-        rank = (worker + CLIENT_OPTIONS.get("lane_offset", 0)) % 4
+        rank = (worker + CLIENT_OPTIONS.get("lane_offset", 0)) % CLIENT_OPTIONS.get(
+            "rank_count", 4
+        )
         url = f"http://127.0.0.1:{manager.port+rank*MIN_WORKER_INFO_PORT_NUM}/v1/chat/completions"
         barrier.wait(timeout=60)
         last_completed = None
@@ -617,8 +835,7 @@ def _run_steady_load_single(
                 journal_enqueued_monotonic=time.monotonic(),
             )
             n = row.get("usage", {}).get("completion_tokens", 0)
-            if n > 1 and "ttft_s" in row:
-                row["tpot_ms"] = 1000 * (row["e2e_s"] - row["ttft_s"]) / (n - 1)
+            record_output_timing(row)
             lock_begin = time.monotonic()
             with lock:
                 row["completion_lock_wait_s"] = time.monotonic() - lock_begin
@@ -627,7 +844,8 @@ def _run_steady_load_single(
                 state["in_flight"] -= 1
                 if not row["ok"]:
                     state["errors"] += 1
-                    abort.set()
+                    if steady_response_requires_abort(row):
+                        abort.set()
             row["journal_enqueued_monotonic"] = time.monotonic()
             pending.put(row)
             last_completed = completed
@@ -647,6 +865,10 @@ def _run_steady_load_single(
                                 wall=time.time(),
                                 journal_pending=pending.qsize(),
                                 phase=phase,
+                            )
+                        if CLIENT_OPTIONS.get("cadence_drain_owner", True):
+                            signal_cadence_drain(
+                                out, phase, live["elapsed_s"], duration
                             )
                         usage = resource.getrusage(resource.RUSAGE_SELF)
                         live.update(
@@ -677,7 +899,9 @@ def _run_steady_load_single(
         writer_thread.join()
     if writer_errors:
         raise RuntimeError("measurement journal failed") from writer_errors[0]
-    result = steady_summary(rows, warmup_s, window_s, windows)
+    result = steady_summary(
+        rows, warmup_s, window_s, windows, CLIENT_OPTIONS.get("rank_count", 4)
+    )
     result.update(
         concurrency=concurrency,
         started_at=origin["wall"],
@@ -694,6 +918,33 @@ def _run_steady_load_single(
 CLIENT_PROCESS_BARRIER = None
 CLIENT_PROCESS_ORIGIN = None
 CLIENT_ABORT_EVENT = None
+
+
+def signal_cadence_drain(out, phase, elapsed_s, load_end_s):
+    """Publish a run-bound tail signal only after the shared submission deadline."""
+    path = CLIENT_OPTIONS.get("cadence_drain_file")
+    if not path or elapsed_s < load_end_s:
+        return False
+    marker = Path(path)
+    token = CLIENT_OPTIONS["cadence_run_id"]
+    if marker.exists():
+        if marker.read_text() != token + "\n":
+            raise RuntimeError("foreign cadence drain marker")
+        return False
+    temporary = marker.with_name(marker.name + ".tmp")
+    temporary.write_text(token + "\n")
+    temporary.replace(marker)
+    save(
+        out / (phase + "-drain.json"),
+        dict(
+            run_id=token,
+            wall=time.time(),
+            elapsed_s=elapsed_s,
+            load_end_s=load_end_s,
+            marker=str(marker),
+        ),
+    )
+    return True
 
 
 def _set_client_clock(origin):
@@ -800,6 +1051,7 @@ def run_steady_load(
                 index_offset=index,
                 profile_dir=str(directory / "client-profiles"),
                 record_host_cpu=False,
+                cadence_drain_owner=False,
             )
             process = ctx.Process(
                 target=_client_process_entry,
@@ -847,6 +1099,9 @@ def run_steady_load(
                         wall=time.time(),
                         client_processes=processes,
                         target_concurrency=concurrency,
+                    )
+                    signal_cadence_drain(
+                        out, phase, live["elapsed_s"], warmup_s + window_s * windows
                     )
                     for key in (
                         "started",
@@ -915,7 +1170,9 @@ def run_steady_load(
         in_flight += delta
         peak = max(peak, in_flight)
     assert in_flight == 0
-    result = steady_summary(rows, warmup_s, window_s, windows)
+    result = steady_summary(
+        rows, warmup_s, window_s, windows, CLIENT_OPTIONS.get("rank_count", 4)
+    )
     result.update(
         concurrency=concurrency,
         started_at=origin[1],
@@ -955,13 +1212,13 @@ def throughput_plan(repeats):
     return plan
 
 
-def run_throughput_batch(manager, payload, expected, concurrency, count):
+def run_throughput_batch(manager, payload, expected, concurrency, count, rank_count=4):
     from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 
     barrier = threading.Barrier(concurrency)
 
     def lane(worker):
-        rank = worker % 4
+        rank = worker % rank_count
         target = f"http://127.0.0.1:{manager.port + rank * MIN_WORKER_INFO_PORT_NUM}/v1/chat/completions"
         barrier.wait(timeout=60)
         rows = []
@@ -983,8 +1240,10 @@ def encoder_gpu_ids(value):
 
 
 def selected_gpus(pd_gpus, encoder_gpus=""):
-    pd = gpu_ids(pd_gpus)
+    pd = pd_gpu_ids(pd_gpus)
     enc = encoder_gpu_ids(encoder_gpus) if encoder_gpus else []
+    if len(pd) == 2 and len(enc) != 1:
+        raise ValueError("two PD ranks require exactly one Encoder GPU")
     if set(pd) & set(enc):
         raise ValueError("Encoder and PDFUSION GPUs must not overlap")
     return ",".join(map(str, enc + pd))
@@ -1002,8 +1261,9 @@ def separated_service_configs(
     native_fp8_attn=0,
     seq_size_per_block=0,
 ):
-    """One or two independent one-GPU encoders; one TP1/DP4/EP4 service."""
+    """Independent one-GPU encoders and a TP1/DPn/EPn service."""
     selected_gpus(pd_gpus, encoder_gpus)
+    pd_count = len(pd_gpu_ids(pd_gpus))
     if not encoder_gpus:
         raise ValueError("one or two encoder GPUs are required")
 
@@ -1011,7 +1271,7 @@ def separated_service_configs(
         return dict(type="Vipserver", address=address, protocol="http", path="/")
 
     route = dict(
-        service_id=f"qwen35_e{len(encoder_gpu_ids(encoder_gpus))}pd4",
+        service_id=f"qwen35_e{len(encoder_gpu_ids(encoder_gpus))}pd{pd_count}",
         use_local=True,
         role_endpoints=[
             dict(
@@ -1025,7 +1285,7 @@ def separated_service_configs(
                 pd_fusion_endpoint=endpoint(
                     ",".join(
                         f"127.0.0.1:{ports['fusion'] + i * worker_stride}"
-                        for i in range(4)
+                        for i in range(pd_count)
                     )
                 ),
             )
@@ -1041,7 +1301,9 @@ def separated_service_configs(
         seq_size_per_block,
     )
     env.update(
-        VIT_SEPARATION="2", GPU_COUNT="4", MODEL_SERVICE_CONFIG=json.dumps(route)
+        VIT_SEPARATION="2",
+        GPU_COUNT=str(pd_count),
+        MODEL_SERVICE_CONFIG=json.dumps(route),
     )
     args = args.replace("--vit_separation 0", "--vit_separation 2")
     configs = []
@@ -1066,11 +1328,19 @@ def separated_service_configs(
             "--reuse_cache 0 --mm_cache_item_num 0 --url_cache_item_num 0"
         )
         name = f"encoder_{i}"
-        configs.append(dict(name=name, gpus=[gpu], env=e, args=eargs, port=ports[name]))
+        configs.append(
+            dict(
+                name=name,
+                gpus=[gpu],
+                env=encoder_cadence_env(e),
+                args=eargs,
+                port=ports[name],
+            )
+        )
     configs.append(
         dict(
             name="fusion",
-            gpus=gpu_ids(pd_gpus),
+            gpus=pd_gpu_ids(pd_gpus),
             env=env,
             args=args,
             port=ports["fusion"],
@@ -1098,6 +1368,7 @@ def dp2_service_configs(
 ):
     """One ViT proxy and one or two independent single-GPU workers."""
     selected_gpus(pd_gpus, encoder_gpus)
+    pd_count = len(pd_gpu_ids(pd_gpus))
     if encoder_rdma_pool_bytes <= 0:
         raise ValueError("Encoder RDMA pool bytes must be positive")
     worker_count = len(encoder_gpu_ids(encoder_gpus))
@@ -1107,7 +1378,7 @@ def dp2_service_configs(
         return dict(type="Vipserver", address=address, protocol="http", path="/")
 
     route = dict(
-        service_id=f"qwen35_encoder_dp{worker_count}_pd4",
+        service_id=f"qwen35_encoder_dp{worker_count}_pd{pd_count}",
         use_local=True,
         role_endpoints=[
             dict(
@@ -1115,7 +1386,8 @@ def dp2_service_configs(
                 vit_endpoint=endpoint(f"127.0.0.1:{ports['encoder_0']}"),
                 pd_fusion_endpoint=endpoint(
                     ",".join(
-                        f"127.0.0.1:{ports['fusion']+i*worker_stride}" for i in range(4)
+                        f"127.0.0.1:{ports['fusion']+i*worker_stride}"
+                        for i in range(pd_count)
                     )
                 ),
             )
@@ -1129,7 +1401,7 @@ def dp2_service_configs(
         MM_HASH_KEY_CACHE_MAX_BYTES="1073741824",
     )
     env = dict(pd_env, **shared)
-    env.update(VIT_SEPARATION="2", GPU_COUNT="4")
+    env.update(VIT_SEPARATION="2", GPU_COUNT=str(pd_count))
     args = pd_args.replace("--vit_separation 0", "--vit_separation 2")
     args += " --mm_transport_mode rdma --mm_cache_cpu_max_bytes 0 --mm_cache_gpu_max_bytes 0"
     e = dict(
@@ -1175,13 +1447,13 @@ def dp2_service_configs(
         dict(
             name=f"encoder_dp{worker_count}",
             gpus=encoder_gpu_ids(encoder_gpus),
-            env=e,
+            env=encoder_cadence_env(e),
             args=eargs,
             port=ports["encoder_0"],
         ),
         dict(
             name="fusion",
-            gpus=gpu_ids(pd_gpus),
+            gpus=pd_gpu_ids(pd_gpus),
             env=env,
             args=args,
             port=ports["fusion"],
@@ -1394,6 +1666,42 @@ def text_payload_and_tokens(model, target_tokens=24601):
     return payload, expected
 
 
+def input_capacity_config(args, capacity):
+    if capacity not in (32768, 65536):
+        raise ValueError("unsupported input capacity")
+    for name in (
+        "max_seq_len",
+        "max_batch_tokens_size",
+        "max_batch_tokens_without_cache",
+    ):
+        args = args.replace(f"--{name} 32768", f"--{name} {capacity}")
+    return args
+
+
+def record_output_timing(row):
+    """Do not label a completed nonstream response as client TTFT."""
+    aux = row.get("aux_info") or {}
+    first, total = aux.get("first_token_cost_time"), aux.get("cost_time")
+    if isinstance(first, (int, float)) and first >= 0:
+        row["server_ttft_s"] = first / 1000
+    if row.get("response_stream", True) is False and "server_ttft_s" in row:
+        row["ttft_s"] = row["server_ttft_s"]
+        row["ttft_source"] = "server_aux_first_token_cost_time"
+    n = (row.get("usage") or {}).get("completion_tokens", 0)
+    if n > 1 and "ttft_s" in row:
+        if row.get("response_stream", True) is False:
+            if (
+                isinstance(total, (int, float))
+                and isinstance(first, (int, float))
+                and total >= first
+            ):
+                row["tpot_ms"] = (total - first) / (n - 1)
+                row["tpot_source"] = "server_aux_average_output_interval"
+        else:
+            row["tpot_ms"] = 1000 * (row["e2e_s"] - row["ttft_s"]) / (n - 1)
+            row["tpot_source"] = "client_average_output_interval"
+
+
 def validate_response(result, expected):
     errors = []
     if result.get("http_status") != 200:
@@ -1436,6 +1744,14 @@ def validate_response(result, expected):
         errors.append("missing/invalid PDFUSION evidence")
     if aux.get("reuse_len") != 0:
         errors.append("missing/invalid cache evidence")
+    if expected.get("fixture_id") in (1, 2, 3, 4):
+        from qwen35_mixed_video import validate_content
+
+        errors.extend(
+            validate_content(result.get("content") or "", expected["fixture_id"])
+        )
+    if result.get("response_stream", True) is False and "server_ttft_s" not in result:
+        errors.append("missing nonstream server first-token timing")
     if result.get("error"):
         errors.append(result["error"])
     return errors
@@ -1444,6 +1760,13 @@ def validate_response(result, expected):
 def request(url, payload, index, expected):
     import requests
 
+    fixture_id = None
+    if isinstance(payload, list):
+        from qwen35_mixed_video import select_request
+
+        selected = select_request(payload, index, CLIENT_OPTIONS.get("mixed_seed", 0))
+        fixture_id, payload = selected["id"], selected["payload"]
+        expected = expected["by_fixture"][str(fixture_id)]
     begin = time.monotonic()
     cpu_begin = time.thread_time()
     profiler = None
@@ -1456,11 +1779,15 @@ def request(url, payload, index, expected):
         "index": index,
         "request_id": str(uuid.uuid4()),
         "content": "",
+        "reasoning_content": "",
+        "response_stream": payload.get("stream", True),
         "usage": {},
         "aux_info": {},
         "choices": {},
         "expected_choices": payload.get("n", 1),
     }
+    if fixture_id is not None:
+        result["fixture_id"] = fixture_id
     result.update(
         client_begin_wall=time.time(),
         sse_events=0,
@@ -1476,64 +1803,99 @@ def request(url, payload, index, expected):
             json=payload,
             headers={"X-Request-ID": result["request_id"]},
             stream=True,
-            timeout=(10, 1200),
+            timeout=(10, CLIENT_OPTIONS.get("read_timeout_seconds", 1200)),
         ) as response:
             result["http_status"] = response.status_code
+            if payload.get("stream") is False and response.status_code != 200:
+                result["raw_response"] = response.text
             response.raise_for_status()
             result["headers_s"] = time.monotonic() - begin
             read_begin, read_cpu = time.monotonic(), time.thread_time()
-            for line in response.iter_lines(chunk_size=CLIENT_OPTIONS["chunk_size"]):
-                received = time.monotonic()
-                result["read_wall_s"] += received - read_begin
-                result["read_cpu_s"] += time.thread_time() - read_cpu
-                result["sse_line_bytes"] += len(line)
-                read_begin, read_cpu = time.monotonic(), time.thread_time()
-                if time.monotonic() - begin > 1200:
-                    raise TimeoutError("request exceeded 1200 seconds")
-                if not line.startswith(b"data:"):
-                    continue
-                body = line[5:].strip()
-                if body == b"[DONE]":
-                    result["done"] = True
-                    break
-                parse_begin, parse_cpu = time.monotonic(), time.thread_time()
-                obj = json.loads(body)
-                result["sse_events"] += 1
-                if isinstance(obj.get("debug_info"), dict):
-                    result["generation_debug"] = {
-                        key: value
-                        for key, value in obj["debug_info"].items()
-                        if key
-                        in (
-                            "generate_config",
-                            "eos_token_id",
-                            "stop_word_ids_list",
-                            "stop_words_list",
-                        )
-                    }
+            if payload.get("stream") is False:
+                result["raw_response"] = response.text
+                obj = json.loads(result["raw_response"])
+                result["usage"] = obj.get("usage") or {}
+                result["aux_info"] = obj.get("aux_info") or {}
                 if obj.get("error"):
                     raise RuntimeError(str(obj["error"]))
-                if obj.get("usage"):
-                    result["usage"] = obj["usage"]
-                    result["last_usage_received_s"] = received - begin
-                if obj.get("aux_info"):
-                    result["aux_info"].update(obj["aux_info"])
                 for choice in obj.get("choices", []):
-                    content = choice.get("delta", {}).get("content") or ""
-                    if content and "ttft_s" not in result:
-                        result["ttft_s"] = time.monotonic() - begin
+                    content = choice.get("message", {}).get("content") or ""
+                    reasoning = choice.get("message", {}).get("reasoning_content") or ""
+                    result["reasoning_content"] += reasoning
                     result["content"] += content
-                    choice_result = result["choices"].setdefault(
-                        str(choice.get("index", 0)), {"content": ""}
+                    result["choices"][str(choice.get("index", 0))] = dict(
+                        content=content,
+                        reasoning_content=reasoning,
+                        finish_reason=choice.get("finish_reason"),
                     )
-                    choice_result["content"] += content
-                    if choice.get("finish_reason"):
-                        result["finish_reason"] = choice["finish_reason"]
-                        choice_result["finish_reason"] = choice["finish_reason"]
-                        result["finish_received_s"] = received - begin
-                result["parse_cpu_s"] += time.thread_time() - parse_cpu
-                result["parse_wall_s"] += time.monotonic() - parse_begin
-                read_begin, read_cpu = time.monotonic(), time.thread_time()
+                    result["finish_reason"] = choice.get("finish_reason")
+            else:
+                for line in response.iter_lines(
+                    chunk_size=CLIENT_OPTIONS["chunk_size"]
+                ):
+                    received = time.monotonic()
+                    result["read_wall_s"] += received - read_begin
+                    result["read_cpu_s"] += time.thread_time() - read_cpu
+                    result["sse_line_bytes"] += len(line)
+                    read_begin, read_cpu = time.monotonic(), time.thread_time()
+                    if time.monotonic() - begin > 1200:
+                        raise TimeoutError("request exceeded 1200 seconds")
+                    if not line.startswith(b"data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == b"[DONE]":
+                        result["done"] = True
+                        break
+                    parse_begin, parse_cpu = time.monotonic(), time.thread_time()
+                    obj = json.loads(body)
+                    result["sse_events"] += 1
+                    if isinstance(obj.get("debug_info"), dict):
+                        result["generation_debug"] = {
+                            key: value
+                            for key, value in obj["debug_info"].items()
+                            if key
+                            in (
+                                "generate_config",
+                                "eos_token_id",
+                                "stop_word_ids_list",
+                                "stop_words_list",
+                            )
+                        }
+                    if obj.get("error"):
+                        raise RuntimeError(str(obj["error"]))
+                    if obj.get("usage"):
+                        result["usage"] = obj["usage"]
+                        result["last_usage_received_s"] = received - begin
+                    if obj.get("aux_info"):
+                        result["aux_info"].update(obj["aux_info"])
+                    for choice in obj.get("choices", []):
+                        content = choice.get("delta", {}).get("content") or ""
+                        reasoning = (
+                            choice.get("delta", {}).get("reasoning_content") or ""
+                        )
+                        if (content or reasoning) and "ttft_s" not in result:
+                            result["ttft_s"] = received - begin
+                            result["ttft_source"] = "client_first_reasoning_or_content"
+                        if content and "first_content_s" not in result:
+                            result["first_content_s"] = received - begin
+                        if reasoning and "first_reasoning_s" not in result:
+                            result["first_reasoning_s"] = received - begin
+                        result["reasoning_content"] += reasoning
+                        result["content"] += content
+                        choice_result = result["choices"].setdefault(
+                            str(choice.get("index", 0)), {"content": ""}
+                        )
+                        choice_result["content"] += content
+                        choice_result["reasoning_content"] = (
+                            choice_result.get("reasoning_content", "") + reasoning
+                        )
+                        if choice.get("finish_reason"):
+                            result["finish_reason"] = choice["finish_reason"]
+                            choice_result["finish_reason"] = choice["finish_reason"]
+                            result["finish_received_s"] = received - begin
+                    result["parse_cpu_s"] += time.thread_time() - parse_cpu
+                    result["parse_wall_s"] += time.monotonic() - parse_begin
+                    read_begin, read_cpu = time.monotonic(), time.thread_time()
     except Exception as error:
         result["error"] = repr(error)
     result["e2e_s"] = time.monotonic() - begin
@@ -1546,6 +1908,10 @@ def request(url, payload, index, expected):
                 Path(CLIENT_OPTIONS["profile_dir"]) / (result["request_id"] + ".pstats")
             )
         )
+    result["thinking_observed"] = bool(
+        result["reasoning_content"].strip() or "</think>" in result["content"]
+    )
+    record_output_timing(result)
     result["validation_errors"] = validate_response(result, expected)
     result["ok"] = not result["validation_errors"]
     return result
@@ -1584,19 +1950,23 @@ def performance_summary(report):
     return summary
 
 
-def execution_evidence(out):
+def execution_evidence(out, rank_count=4):
     ranks = {
         str(i): {
             "capture": False,
             "prefill": False,
             "decode": False,
+            "logical_decode": False,
+            "verify_replay": False,
+            "draft_commit_replay": False,
             "replay": False,
             "padding3": False,
             "mega_moe": False,
         }
-        for i in range(4)
+        for i in range(rank_count)
     }
     records = []
+    logical_decode_witnesses = {}
     mega = False
     rank_by_pid = {}
     mega_pids = set()
@@ -1611,6 +1981,23 @@ def execution_evidence(out):
             continue
         with path.open(errors="replace") as stream:
             for line in stream:
+                measure = re.search(
+                    r"MEASURE_STEP rank=(\d+) .*? prefill=(\d+) decode=(\d+) .*? output_tokens=(\d+) ok=(\d+)",
+                    line,
+                )
+                if measure and measure[1] in ranks:
+                    rank, prefill, decode, output, ok = measure.groups()
+                    if int(decode) > 0 and int(output) > 0 and ok == "1":
+                        ranks[rank]["logical_decode"] = True
+                        logical_decode_witnesses.setdefault(
+                            rank,
+                            dict(
+                                prefill=int(prefill),
+                                decode=int(decode),
+                                output_tokens=int(output),
+                                ok=True,
+                            ),
+                        )
                 pid = re.search(r"\[process-(\d+)\]", line)
                 rank_match = re.search(
                     r"\[rank: (\d+)\] initialize process_group", line
@@ -1651,6 +2038,22 @@ def execution_evidence(out):
                         graph_bs=int(graph_bs),
                         count=int(count),
                     )
+                    phase = re.search(
+                        r"real=(\d+) model_id=(\d+) target_verify=(\d+) draft_commit=(\d+)",
+                        line,
+                    )
+                    if phase:
+                        row.update(
+                            zip(
+                                ("real", "model_id", "target_verify", "draft_commit"),
+                                map(int, phase.groups()),
+                            )
+                        )
+                        if mode == "graph" and row["real"] == 1:
+                            if row["model_id"] == 0 and row["target_verify"]:
+                                ranks[rank]["verify_replay"] = True
+                            if row["model_id"] > 0 and row["draft_commit"]:
+                                ranks[rank]["draft_commit_replay"] = True
                     records.append(row)
                     ranks[rank]["prefill" if prefill == "1" else "decode"] = True
                     if mode == "graph" and prefill == "0":
@@ -1661,7 +2064,9 @@ def execution_evidence(out):
         rank = rank_by_pid.get(pid)
         if rank in ranks:
             ranks[rank]["mega_moe"] = True
-    native_ranks = {str(i): {"prefill": False, "decode": False} for i in range(4)}
+    native_ranks = {
+        str(i): {"prefill": False, "decode": False} for i in range(rank_count)
+    }
     for pid, phase in fp8_calls:
         if rank_by_pid.get(pid) in native_ranks:
             native_ranks[rank_by_pid[pid]][phase] = True
@@ -1671,25 +2076,45 @@ def execution_evidence(out):
         records=records,
         fallbacks=fallbacks[-100:],
         native_fp8=native_ranks,
+        logical_decode_witnesses=logical_decode_witnesses,
     )
 
 
-def validate_execution_evidence(evidence, decode_graph, edge_cases):
+def validate_execution_evidence(evidence, decode_graph, edge_cases, mtp_tokens=0):
     errors = []
+    decode_field = "logical_decode" if mtp_tokens else "decode"
     if not evidence["mega_moe"]:
         errors.append("missing MegaMoE weight initialization evidence")
+    graph_fields = (
+        ["verify_replay", "draft_commit_replay"] if mtp_tokens else ["replay"]
+    )
     for rank, values in evidence["ranks"].items():
         for field in (
-            ["mega_moe", "prefill", "decode", "capture", "replay"]
+            ["mega_moe", "prefill", decode_field, "capture"] + graph_fields
             if decode_graph
-            else ["mega_moe", "prefill", "decode"]
+            else ["mega_moe", "prefill", decode_field]
         ):
             if not values[field]:
                 errors.append(f"rank {rank}: missing {field} evidence")
-    if any(r["mode"] == "graph" and r["prefill"] for r in evidence["records"]):
+
+    def mtp_decode_stage(row):
+        return (
+            mtp_tokens
+            and row.get("real") == 1
+            and (
+                (row.get("model_id") == 0 and row.get("target_verify"))
+                or (row.get("model_id", 0) > 0 and row.get("draft_commit"))
+            )
+        )
+
+    if any(
+        r["mode"] == "graph" and r["prefill"] and not mtp_decode_stage(r)
+        for r in evidence["records"]
+    ):
         errors.append("Prefill unexpectedly used graph execution")
     if decode_graph and any(
-        r["mode"] == "eager" and not r["prefill"] for r in evidence["records"]
+        r["mode"] == "eager" and (not r["prefill"] or mtp_decode_stage(r))
+        for r in evidence["records"]
     ):
         errors.append("Decode silently used eager execution in graph validation")
     if (
@@ -1699,6 +2124,36 @@ def validate_execution_evidence(evidence, decode_graph, edge_cases):
     ):
         errors.append("missing actual batch-3 to graph-4 replay")
     return errors
+
+
+def speculative_summary(rows, tokens):
+    """Require actual per-request draft rounds, with bounded acceptance counters."""
+    rounds = 0
+    accepted = [0] * tokens
+    for row in rows:
+        aux = row.get("aux_info", {})
+        count = aux.get("speculative_draft_rounds")
+        positions = aux.get("speculative_accepted_tokens_per_pos")
+        if type(count) is not int or count < 0 or not isinstance(positions, list):
+            raise RuntimeError("missing or invalid speculative request counters")
+        if len(positions) > tokens or any(
+            type(n) is not int or n < 0 or n > count for n in positions
+        ):
+            raise RuntimeError("speculative acceptance counters exceed draft rounds")
+        if any(a < b for a, b in zip(positions, positions[1:])):
+            raise RuntimeError("speculative acceptance positions must be nonincreasing")
+        rounds += count
+        for i, value in enumerate(positions):
+            accepted[i] += value
+    if not rounds:
+        raise RuntimeError("no real speculative draft rounds were observed")
+    return dict(
+        requests=len(rows),
+        draft_rounds=rounds,
+        accepted_tokens_per_pos=accepted,
+        accepted_draft_tokens=sum(accepted),
+        accepted_draft_per_round=sum(accepted) / rounds,
+    )
 
 
 def validate_coordinator_boundary(records, batch, decode_graph):
@@ -1923,7 +2378,140 @@ def run_coordinator_checks(manager, model, out, decode_graph, fault="none"):
     return saved
 
 
-def run_quality_probe(manager, model, out, label):
+def cadence_trace_evidence(out, run_id, rank_count, ratio):
+    from pdfusion_schedule_trace import align, summarize, validate_cadence
+
+    log = out / "fusion_logs/process.log"
+    for attempt in range(20):
+        try:
+            with log.open(errors="strict") as stream:
+                steps, metadata = align(stream, run_id, ranks=rank_count)
+            break
+        except ValueError as error:
+            if attempt == 19 or "incomplete cross-rank" not in str(error):
+                raise
+            time.sleep(0.25)
+    policy_evidence = validate_cadence(steps, ratio)
+    phases = policy_evidence["phases"]
+    if not all(phases.values()):
+        raise RuntimeError("cadence needs actual Prefill and MTP Decode epochs")
+    result = dict(
+        metadata,
+        completed_steps=len(steps),
+        **policy_evidence,
+        rank_count=rank_count,
+        decode_rounds_per_prefill=(
+            int(ratio) if policy_evidence["policy"] == "ratio" else None
+        ),
+        all=summarize(steps),
+    )
+    save(out / "cadence-evidence.json", result)
+    return result
+
+
+def image_probe_cases(model, out):
+    """Known-color fixtures with independent HF image-grid token accounting."""
+    import base64
+
+    from PIL import Image
+    from transformers import AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model, local_files_only=True)
+    cases = []
+    for color in ("red", "green", "blue"):
+        image = Image.new("RGB", (512, 512), color)
+        path = out / f"image-{color}.png"
+        image.save(path)
+        url = "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+        prompt = "What is the solid background color? Answer only red, green, or blue."
+        content = [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": prompt},
+        ]
+        messages = [{"role": "user", "content": content}]
+        rendered = processor.tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "image", "image": url}, content[1]],
+                }
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            add_vision_id=False,
+            tools=[],
+            enable_thinking=False,
+        )
+        ids = processor.tokenizer.encode(rendered)
+        placeholder = processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        if ids.count(placeholder) != 1:
+            raise ValueError("expected exactly one image placeholder")
+        grid = processor.image_processor(images=[image], return_tensors="pt")[
+            "image_grid_thw"
+        ]
+        visual = int(grid.prod()) // processor.image_processor.merge_size**2
+        payload = dict(
+            model="qwen35",
+            messages=messages,
+            max_tokens=32,
+            temperature=0,
+            top_p=1,
+            top_k=1,
+            stream=True,
+            enable_thinking=False,
+            chat_template_kwargs={"enable_thinking": False},
+            stream_options={"include_usage": True},
+        )
+        cases.append(
+            dict(
+                name=color,
+                payload=payload,
+                expected=dict(prompt_tokens=len(ids) - 1 + visual, video_tokens=0),
+                grid=grid.tolist(),
+                visual_tokens=visual,
+                fixture_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        )
+    return cases
+
+
+def run_image_probe(manager, model, out, label, rank_count=4, mtp_tokens=0):
+    """Exercise image embedding, natural stop and uneven frontend traffic."""
+    saved = dict(cases=image_probe_cases(model, out), requests=[], all_passed=False)
+    for case in saved["cases"]:
+        # Rank zero receives two lanes; every other frontend receives one.
+        count = rank_count + 1
+        rows = run_throughput_batch(
+            manager, case["payload"], case["expected"], count, count, rank_count
+        )
+        for row in rows:
+            answer = re.sub(r"\s+", "", row.get("content", "")).lower().strip(".。")
+            visual = row.get("aux_info", {}).get("multimodal_lengths", {}).get("1", 0)
+            completion = row.get("usage", {}).get("completion_tokens", 0)
+            row.update(
+                image_case=case["name"],
+                image_pass=answer == case["name"]
+                and visual == case["visual_tokens"]
+                and 0 < completion <= 32
+                and row.get("aux_info", {}).get("output_len") == completion,
+            )
+        saved["requests"].extend(rows)
+        save(out / f"image-{label}.json", saved)
+        if not all(row["ok"] and row["image_pass"] for row in rows):
+            raise RuntimeError(f"image sanity check failed: {label}/{case['name']}")
+    if mtp_tokens:
+        saved["speculative"] = speculative_summary(saved["requests"], mtp_tokens)
+    saved["all_passed"] = True
+    save(out / f"image-{label}.json", saved)
+    return dict(
+        all_passed=True,
+        requests=len(saved["requests"]),
+        speculative=saved.get("speculative"),
+        scope="Synthetic image sanity and uneven frontend traffic; not a quality benchmark.",
+    )
+
+
+def run_quality_probe(manager, model, out, label, rank_count=4):
     """Small natural-stop sanity suite; separate from fixed-output performance."""
     from transformers import AutoTokenizer
 
@@ -1973,7 +2561,7 @@ def run_quality_probe(manager, model, out, label):
         saved["cases"].append(
             dict(name=name, payload=payload, expected=expected, answer=answer)
         )
-        rows = run_throughput_batch(manager, payload, expected, 4, 4)
+        rows = run_throughput_batch(manager, payload, expected, 4, 4, rank_count)
         for row in rows:
             normalized = re.sub(r"\s+", "", row.get("content", "")).lower().strip(".。")
             row.update(
@@ -2002,12 +2590,17 @@ def run_worker(a):
         processes=getattr(a, "client_processes", 1),
         chunk_size=getattr(a, "sse_chunk_size", 1),
         profile_requests=getattr(a, "client_profile_requests", 0),
+        read_timeout_seconds=getattr(a, "client_read_timeout_seconds", 1200),
+        continue_output_errors=bool(getattr(a, "steady_continue_output_errors", 0)),
         profile_dir=str(out / "client-profiles"),
+        mixed_seed=getattr(a, "mixed_seed", 0),
     )
     (out / "client-profiles").mkdir(exist_ok=True)
     os.environ["TEST_UNDECLARED_OUTPUTS_DIR"] = str(out)
     # gpu_lock owns the selection; never expand its assigned visible device set.
     gpus = a.gpus
+    pd_count = len(pd_gpu_ids(gpus))
+    CLIENT_OPTIONS["rank_count"] = pd_count
     encoder_gpus = getattr(a, "encoder_gpus", "")
     selected = selected_gpus(gpus, encoder_gpus)
     assigned = os.environ.get("CUDA_VISIBLE_DEVICES", selected)
@@ -2034,6 +2627,7 @@ def run_worker(a):
         native_fp8_attn,
         seq_size_per_block,
     )
+    args = input_capacity_config(args, getattr(a, "max_input_tokens", 32768))
     policy = getattr(a, "scheduler_policy", "fifo")
     throughput = getattr(a, "throughput_sweep", 0)
     env, args = throughput_config(
@@ -2047,6 +2641,17 @@ def run_worker(a):
     )
     capacity_batches = getattr(a, "capacity_batches", "")
     steady_concurrency = getattr(a, "steady_concurrency", "")
+    drain_file = ""
+    if getattr(a, "cadence_drain", 0):
+        drain_file = str(out / "cadence-drain")
+        if Path(drain_file).exists():
+            raise RuntimeError(
+                "existing cadence drain marker; use a fresh output directory"
+            )
+        CLIENT_OPTIONS.update(
+            cadence_drain_file=drain_file, cadence_run_id=a.trace_run_id
+        )
+        env["PDFUSION_CADENCE_DRAIN_FILE"] = drain_file
     env, args = capacity_config(
         env,
         args,
@@ -2076,7 +2681,10 @@ def run_worker(a):
         fp8_kv_cache=fp8_kv_cache,
         native_fp8_attn=native_fp8_attn,
         seq_size_per_block=seq_size_per_block,
-        scheduler_policy=policy,
+        mtp_tokens=getattr(a, "mtp_tokens", 0),
+        scheduler_policy=(
+            "adaptive" if env.get("PDFUSION_CADENCE_ADAPTIVE") == "1" else policy
+        ),
         throughput_sweep=throughput,
         rank_concurrency=getattr(a, "rank_concurrency", 4),
         runtime_reserve_mb=getattr(a, "runtime_reserve_mb", 24576),
@@ -2118,7 +2726,7 @@ def run_worker(a):
                     f.flush()
                 except Exception as error:
                     f.write(json.dumps({"error": repr(error)}) + "\n")
-                stop.wait(10)
+                stop.wait(1 if steady_concurrency else 10)
 
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
@@ -2129,7 +2737,19 @@ def run_worker(a):
         report["gpu_before_model"] = check_gpu_idle(selected)
         report["phase"] = "fixture"
         data = Path(a.data_dir).resolve()
-        if workload == "video":
+        if getattr(a, "mixed_video", False):
+            from qwen35_mixed_video import expected_inputs, load_workload
+
+            payload, fixture = load_workload(
+                data,
+                omit_max_tokens=getattr(a, "omit_max_tokens", False),
+                enable_thinking=bool(getattr(a, "mixed_thinking", 1)),
+            )
+            expected = {
+                "by_fixture": expected_inputs(a.model_dir, payload, a.max_input_tokens)
+            }
+            save(out / "fixture-manifest.json", fixture)
+        elif workload == "video":
             validate_fixture(data)
             payload = payload_for(data)
             report["phase"] = "dependency_and_input_validation"
@@ -2211,7 +2831,37 @@ def run_worker(a):
                     decode_graph,
                     getattr(a, "runtime_reserve_mb", 24576),
                 )
+            configs = configure_mtp_services(
+                configs,
+                getattr(a, "mtp_tokens", 0),
+                a.model_dir,
+                getattr(a, "coord_mode", "off"),
+            )
             for config in configs:
+                if drain_file and not config["name"].startswith("encoder"):
+                    config["env"]["PDFUSION_CADENCE_DRAIN_FILE"] = drain_file
+                config["args"] = input_capacity_config(
+                    config["args"], getattr(a, "max_input_tokens", 32768)
+                )
+                if getattr(a, "mixed_video", False) and config["name"].startswith(
+                    "encoder_dp"
+                ):
+                    from qwen35_mixed_video import (
+                        ENCODER_VIDEO_TOTAL_MAX_PIXELS,
+                        ENCODER_VIDEO_TOTAL_MIN_PIXELS,
+                    )
+
+                    config["env"].update(
+                        MM_VIDEO_TOTAL_MIN_PIXELS=str(ENCODER_VIDEO_TOTAL_MIN_PIXELS),
+                        MM_VIDEO_TOTAL_MAX_PIXELS=str(ENCODER_VIDEO_TOTAL_MAX_PIXELS),
+                    )
+                    config["args"] += (
+                        f" --mm_video_total_min_pixels {ENCODER_VIDEO_TOTAL_MIN_PIXELS}"
+                        f" --mm_video_total_max_pixels {ENCODER_VIDEO_TOTAL_MAX_PIXELS}"
+                    )
+                service_pythonpath_env(
+                    config["env"], getattr(a, "service_pythonpath_prefix", "")
+                )
                 if config["name"].startswith("encoder_dp"):
                     config["env"]["RTP_MM_METRICS_JSONL_DIR"] = str(
                         out / "encoder-metrics"
@@ -2231,24 +2881,36 @@ def run_worker(a):
             report.update(
                 configs=configs,
                 encoder_worker_count=len(encoder_gpu_ids(encoder_gpus)),
+                pd_rank_count=pd_count,
                 topology=(
-                    f"ENCODER_DP{len(encoder_gpu_ids(encoder_gpus))}+PDFUSION4"
+                    f"ENCODER_DP{len(encoder_gpu_ids(encoder_gpus))}+PDFUSION{pd_count}"
                     if getattr(a, "encoder_dp2", 0)
-                    else f"E{len(encoder_gpu_ids(encoder_gpus))}+PDFUSION4"
+                    else f"E{len(encoder_gpu_ids(encoder_gpus))}+PDFUSION{pd_count}"
                 ),
                 env=configs[-1]["env"],
                 args=configs[-1]["args"],
             )
         else:
+            env, args = mtp_config(
+                env,
+                args,
+                getattr(a, "mtp_tokens", 0),
+                a.model_dir,
+                getattr(a, "coord_mode", "off"),
+            )
+            service_pythonpath_env(env, getattr(a, "service_pythonpath_prefix", ""))
+            report.update(env=env, args=args)
             manager = MagaServerManager(
                 env_args=env,
-                device_ids=gpu_ids(gpus),
+                device_ids=pd_gpu_ids(gpus),
                 role_name="fusion",
                 smoke_args_str=args,
             )
             managers.append(("fusion", manager))
             report["topology"] = (
-                "PDFUSION4_TEXT" if workload == "text" else "EPDFUSION4"
+                f"PDFUSION{pd_count}_TEXT"
+                if workload == "text"
+                else f"EPDFUSION{pd_count}"
             )
         report.update(port=manager.port, phase="model_initialization")
         save(out / "result.json", report)
@@ -2287,14 +2949,14 @@ def run_worker(a):
                 getattr(a, "coord_fault", "none"),
             )
         url = f"http://127.0.0.1:{manager.port}/v1/chat/completions"
-        phases = [(f"single_{workload}", 1), (f"concurrent_{workload}", 4)]
+        phases = [(f"single_{workload}", 1), (f"concurrent_{workload}", pd_count)]
         if repeats:
-            phases = [("warmup", 4)] + [
+            phases = [("warmup", pd_count)] + [
                 (f"{name}_{i + 1}", count)
                 for i in range(repeats)
                 for name, count in (
                     (f"single_{workload}", 1),
-                    (f"concurrent_{workload}", 4),
+                    (f"concurrent_{workload}", pd_count),
                 )
             ]
         if getattr(a, "graph_edge_cases", 0):
@@ -2318,18 +2980,50 @@ def run_worker(a):
             ]
         if getattr(a, "quality_probe", 0):
             report["quality_before"] = run_quality_probe(
-                manager, a.model_dir, out, "before"
+                manager, a.model_dir, out, "before", pd_count
+            )
+        if getattr(a, "image_probe", 0):
+            report["image_before"] = run_image_probe(
+                manager,
+                a.model_dir,
+                out,
+                "before",
+                pd_count,
+                getattr(a, "mtp_tokens", 0),
             )
         if steady_concurrency and expected.get("fixed_output_tokens"):
             probe_payload = dict(payload, debug_info=True)
-            probes = run_throughput_batch(manager, probe_payload, expected, 4, 4)
+            probes = run_throughput_batch(
+                manager, probe_payload, expected, 4, 4, pd_count
+            )
             save(out / "fixed-length-preflight.json", probes)
             if not all(row["ok"] for row in probes):
                 raise RuntimeError(
                     "fixed-length preflight failed; no throughput measurement started"
                 )
         if steady_concurrency and encoder_gpus:
-            warmup = run_throughput_batch(manager, payload, expected, 4, 4)
+            if isinstance(payload, list):
+                from qwen35_mixed_video import preflight
+
+                report["phase"] = "mixed_video_preflight"
+                save(out / "result.json", report)
+                warmup = preflight(manager, payload, expected, out, request, save)
+                report["mixed_preflight"] = warmup
+                if any(
+                    not any(
+                        r.get("thinking_observed")
+                        for r in warmup
+                        if r["fixture_id"] == i
+                    )
+                    for i in range(1, 5)
+                ) and getattr(a, "mixed_thinking", 1):
+                    raise RuntimeError(
+                        "thinking was not observed for every video fixture"
+                    )
+            else:
+                warmup = run_throughput_batch(
+                    manager, payload, expected, 4, 4, pd_count
+                )
             save(out / "encoder-preflight.json", warmup)
             if not all(row["ok"] for row in warmup):
                 raise RuntimeError("encoder video preflight failed")
@@ -2339,6 +3033,9 @@ def run_worker(a):
                 raise RuntimeError(
                     "all configured Encoder workers must complete preflight"
                 )
+        if getattr(a, "preflight_only", False):
+            report["preflight_only"] = True
+            phases = []
         capacity_refined = False
         encoder_warmup_batches = 0
         while phases:
@@ -2362,11 +3059,33 @@ def run_worker(a):
                     phase,
                 )
                 count = len(results)
+                if isinstance(payload, list):
+                    from qwen35_mixed_video import summarize
+
+                    steady["by_fixture"] = summarize(
+                        results,
+                        a.steady_warmup_seconds,
+                        a.steady_window_seconds,
+                        a.steady_windows,
+                        steady_summary,
+                    )
+                    steady["ttft_source"] = "server_aux_first_token_cost_time"
+                    steady["selection"] = {
+                        "method": "uniform-by-logical-index-sha256",
+                        "seed": a.mixed_seed,
+                    }
+                    if any(
+                        v["measurement"]["successful"] == 0
+                        for v in steady["by_fixture"].values()
+                    ):
+                        raise RuntimeError(
+                            "mixed workload lacks measured coverage of every fixture"
+                        )
                 report["steady"][phase] = steady
                 save(out / "steady-summary.json", report["steady"])
             elif throughput or capacity_batches:
                 results = run_throughput_batch(
-                    manager, payload, expected, concurrency, count
+                    manager, payload, expected, concurrency, count, pd_count
                 )
             else:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
@@ -2395,10 +3114,7 @@ def run_worker(a):
             for result in results:
                 result["phase"] = phase
                 n = result.get("usage", {}).get("completion_tokens", 0)
-                if n > 1 and "ttft_s" in result:
-                    result["tpot_ms"] = (
-                        1000 * (result["e2e_s"] - result["ttft_s"]) / (n - 1)
-                    )
+                record_output_timing(result)
             report["requests"].extend(results)
             report["batches"].append(
                 {
@@ -2417,7 +3133,7 @@ def run_worker(a):
             save(out / "result.json", report)
             save(out / (phase + ".json"), results)
             if throughput or capacity_batches or steady_concurrency:
-                observed = execution_evidence(out)
+                observed = execution_evidence(out, pd_count)
                 save(out / (phase + "-execution.json"), observed)
                 if capacity_batches:
                     report["capacity"] = capacity_summary(report, observed)
@@ -2448,11 +3164,20 @@ def run_worker(a):
                             "all configured Encoders must complete warmup before performance measurement"
                         )
                     phases.insert(
-                        0, (f"warmup_encoder_{encoder_warmup_batches + 1}", 4)
+                        0, (f"warmup_encoder_{encoder_warmup_batches + 1}", pd_count)
                     )
         if getattr(a, "quality_probe", 0):
             report["quality_after"] = run_quality_probe(
-                manager, a.model_dir, out, "after"
+                manager, a.model_dir, out, "after", pd_count
+            )
+        if getattr(a, "image_probe", 0):
+            report["image_after"] = run_image_probe(
+                manager,
+                a.model_dir,
+                out,
+                "after",
+                pd_count,
+                getattr(a, "mtp_tokens", 0),
             )
         if encoder_gpus:
             report["phase"] = "encoder_evidence"
@@ -2468,11 +3193,15 @@ def run_worker(a):
                     "all configured Encoder services must process video successfully"
                 )
         if moe_strategy == "mega_moe_fp8":
-            evidence = execution_evidence(out)
+            report["phase"] = "execution_evidence"
+            evidence = execution_evidence(out, pd_count)
             report["execution_evidence"] = evidence
             save(out / "execution-evidence.json", evidence)
             errors = validate_execution_evidence(
-                evidence, decode_graph, getattr(a, "graph_edge_cases", 0)
+                evidence,
+                decode_graph,
+                getattr(a, "graph_edge_cases", 0),
+                mtp_tokens=getattr(a, "mtp_tokens", 0),
             )
             if native_fp8_attn:
                 for rank, phases in evidence["native_fp8"].items():
@@ -2482,6 +3211,14 @@ def run_worker(a):
                         )
             if errors:
                 raise RuntimeError("; ".join(errors))
+        if getattr(a, "mtp_tokens", 0):
+            report["speculative"] = speculative_summary(
+                report["requests"], a.mtp_tokens
+            )
+        if getattr(a, "coord_mode", "off") == "cadence":
+            report["cadence"] = cadence_trace_evidence(
+                out, a.trace_run_id, pd_count, a.decode_prefill_ratio
+            )
         report["performance"] = performance_summary(report)
         save(out / "performance.json", report["performance"])
         report["status"] = "PASSED"
@@ -2492,7 +3229,7 @@ def run_worker(a):
     finally:
         if moe_strategy == "mega_moe_fp8":
             try:
-                report["execution_evidence"] = execution_evidence(out)
+                report["execution_evidence"] = execution_evidence(out, pd_count)
                 save(out / "execution-evidence.json", report["execution_evidence"])
             except Exception as error:
                 report["evidence_error"] = repr(error)
@@ -2514,7 +3251,7 @@ def run_worker(a):
 
 
 def bazel_command(a):
-    gpus = ",".join(map(str, gpu_ids(a.gpus)))
+    gpus = ",".join(map(str, pd_gpu_ids(a.gpus)))
     encoder_gpus = getattr(a, "encoder_gpus", "")
     selected = selected_gpus(gpus, encoder_gpus)
     count = len(gpu_ids(selected, count=None))
@@ -2526,9 +3263,13 @@ def bazel_command(a):
         getattr(a, "bazel_target", None)
         or (
             (
-                SINGLE_ENCODER_TARGET
-                if len(encoder_gpu_ids(encoder_gpus)) == 1
-                else ENCODER_TARGET
+                TWO_PD_TARGET
+                if len(pd_gpu_ids(gpus)) == 2
+                else (
+                    SINGLE_ENCODER_TARGET
+                    if len(encoder_gpu_ids(encoder_gpus)) == 1
+                    else ENCODER_TARGET
+                )
             )
             if encoder_gpus
             else (TEXT_TARGET if getattr(a, "workload", "video") == "text" else TARGET)
@@ -2552,21 +3293,32 @@ def bazel_command(a):
         "--test_env=RTP_GPU_QUERY_TIMEOUT=60",
         "--test_env=RTP_GPU_PASSIVE_LOCK=1",
     ]
+    cadence_values = cadence_env(os.environ, getattr(a, "coord_mode", "off"))
+    adaptive = cadence_values.get("PDFUSION_CADENCE_ADAPTIVE", "0") == "1"
+    command += [f"--test_env={name}={value}" for name, value in cadence_values.items()]
+    for name in ("mixed_video", "omit_max_tokens", "preflight_only"):
+        if getattr(a, name, False):
+            command.append("--test_arg=--" + name.replace("_", "-"))
     command += a.bazel_option
     command += ["--test_arg=" + value for value in getattr(a, "extra_test_args", ())]
     for name, value in (
         ("encoder-dp2", getattr(a, "encoder_dp2", 0)),
         ("encoder-profile", getattr(a, "encoder_profile", "candidate-a")),
         ("encoder-rdma-pool-bytes", getattr(a, "encoder_rdma_pool_bytes", 17179869184)),
+        ("service-pythonpath-prefix", getattr(a, "service_pythonpath_prefix", "")),
         ("model-dir", a.model_dir),
         ("data-dir", a.data_dir),
         ("output", str(Path(a.output).resolve() / "smoke")),
         ("gpus", gpus),
         ("profile", a.profile),
         ("workload", getattr(a, "workload", "video")),
+        ("mixed-thinking", getattr(a, "mixed_thinking", 1)),
+        ("mixed-seed", getattr(a, "mixed_seed", 0)),
+        ("max-input-tokens", getattr(a, "max_input_tokens", 32768)),
         ("perf-repeats", a.perf_repeats),
         ("encoder-gpus", encoder_gpus),
         ("moe-strategy", getattr(a, "moe_strategy", "fp8_per_block_ep_normal")),
+        ("mtp-tokens", getattr(a, "mtp_tokens", 0)),
         ("decode-graph", getattr(a, "decode_graph", 0)),
         ("fp8-kv-cache", getattr(a, "fp8_kv_cache", 0)),
         ("native-fp8-attn", getattr(a, "native_fp8_attn", 0)),
@@ -2576,7 +3328,11 @@ def bazel_command(a):
         ("decode-prefill-ratio", getattr(a, "decode_prefill_ratio", "0")),
         ("schedule-trace", getattr(a, "schedule_trace", 0)),
         ("trace-run-id", getattr(a, "trace_run_id", "unset")),
-        ("coord-mode", getattr(a, "coord_mode", "off")),
+        (
+            "coord-mode",
+            effective_coord_mode(os.environ, getattr(a, "coord_mode", "off")),
+        ),
+        ("cadence-drain", getattr(a, "cadence_drain", 0)),
         ("coord-checks", getattr(a, "coord_checks", 0)),
         ("coord-fault", getattr(a, "coord_fault", "none")),
         ("throughput-sweep", getattr(a, "throughput_sweep", 0)),
@@ -2594,12 +3350,23 @@ def bazel_command(a):
         ("client-mode", getattr(a, "client_mode", "legacy")),
         ("client-processes", getattr(a, "client_processes", 1)),
         ("quality-probe", getattr(a, "quality_probe", 0)),
+        ("image-probe", getattr(a, "image_probe", 0)),
         ("sse-chunk-size", getattr(a, "sse_chunk_size", 1)),
         ("client-profile-requests", getattr(a, "client_profile_requests", 0)),
+        (
+            "client-read-timeout-seconds",
+            getattr(a, "client_read_timeout_seconds", 1200),
+        ),
+        (
+            "steady-continue-output-errors",
+            getattr(a, "steady_continue_output_errors", 0),
+        ),
         ("fixed-output-tokens", getattr(a, "fixed_output_tokens", 0)),
         ("startup-timeout", getattr(a, "startup_timeout", 1600)),
         ("test-timeout-seconds", getattr(a, "test_timeout_seconds", 7200)),
     ):
+        if adaptive and name in ("scheduler-policy", "decode-prefill-ratio"):
+            continue
         command.append("--test_arg=--" + name + "=" + str(value))
     return command
 
@@ -2624,7 +3391,15 @@ def run_launcher(a):
     print(shlex.join(public), flush=True)
     if not a.execute:
         return 0
-    if a.workload == "video":
+    if getattr(a, "mixed_video", False):
+        from qwen35_mixed_video import load_workload
+
+        load_workload(
+            Path(a.data_dir),
+            omit_max_tokens=a.omit_max_tokens,
+            enable_thinking=bool(a.mixed_thinking),
+        )
+    elif a.workload == "video":
         validate_fixture(Path(a.data_dir))
     if not Path(a.model_dir).is_dir():
         raise ValueError("model directory does not exist")
@@ -2637,30 +3412,44 @@ def run_launcher(a):
     snapshot.mkdir()
     fingerprints = {}
     for relative in (
-        "rtp_llm/start_server.py",
-        "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke.bzl",
-        "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke.py",
-        "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke_test.py",
-        "rtp_llm/cpp/config/ConfigModules.h",
-        "rtp_llm/cpp/config/ConfigModules.cc",
-        "rtp_llm/cpp/pybind/ConfigInit.cc",
-        "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.cc",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.cc",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionScheduleCoordinator.h",
-        "rtp_llm/cpp/engine_base/schedulers/PDFusionScheduleCoordinator.cc",
-        "rtp_llm/cpp/normal_engine/NormalExecutor.h",
-        "rtp_llm/test/smoke/pdfusion_schedule_trace.py",
-        "rtp_llm/multimodal/multimodal_mixins/qwen3_5_moe/gpu_video.py",
-        "rtp_llm/cpp/normal_engine/NormalEngine.h",
-        "rtp_llm/cpp/normal_engine/NormalEngine.cc",
-        "rtp_llm/server/server_args/fifo_scheduler_group_args.py",
-        "rtp_llm/cpp/models/PyWrappedModel.cc",
-        "rtp_llm/cpp/models/PyWrappedModel.h",
-        "rtp_llm/models_py/modules/factory/attention/cuda_impl/trtllm_gen.py",
-    ) + tuple(getattr(a, "snapshot_files", ())):
+        (
+            "rtp_llm/start_server.py",
+            "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke.bzl",
+            "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke.py",
+            "rtp_llm/test/smoke/qwen35_epd_fusion_4gpu_smoke_test.py",
+            "rtp_llm/cpp/config/ConfigModules.h",
+            "rtp_llm/cpp/config/ConfigModules.cc",
+            "rtp_llm/cpp/pybind/ConfigInit.cc",
+            "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.cc",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.cc",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionScheduleCoordinator.h",
+            "rtp_llm/cpp/engine_base/schedulers/PDFusionScheduleCoordinator.cc",
+            "rtp_llm/cpp/normal_engine/NormalExecutor.h",
+            "rtp_llm/test/smoke/pdfusion_schedule_trace.py",
+            "rtp_llm/multimodal/multimodal_mixins/qwen3_5_moe/gpu_video.py",
+            "rtp_llm/cpp/normal_engine/NormalEngine.h",
+            "rtp_llm/cpp/normal_engine/NormalEngine.cc",
+            "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.cc",
+            "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h",
+            "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.cc",
+            "rtp_llm/models/qwen3_next/qwen3_next_mtp.py",
+            "rtp_llm/models_py/model_desc/qwen3_next_mtp.py",
+            "rtp_llm/models_py/model_desc/qwen3_next_mtp_multimodal.py",
+            "rtp_llm/server/server_args/fifo_scheduler_group_args.py",
+            "rtp_llm/cpp/models/PyWrappedModel.cc",
+            "rtp_llm/cpp/models/PyWrappedModel.h",
+            "rtp_llm/models_py/modules/factory/attention/cuda_impl/trtllm_gen.py",
+        )
+        + (
+            ("rtp_llm/test/smoke/qwen35_mixed_video.py",)
+            if getattr(a, "mixed_video", False)
+            else ()
+        )
+        + tuple(getattr(a, "snapshot_files", ()))
+    ):
         data = (repo / relative).read_bytes()
         target = snapshot / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2737,12 +3526,46 @@ def main(argv=None, preset=None):
     p.add_argument("--client-mode", choices=("legacy", "measured"), default="legacy")
     p.add_argument("--client-processes", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--quality-probe", type=int, choices=(0, 1), default=0)
+    p.add_argument("--image-probe", type=int, choices=(0, 1), default=0)
     p.add_argument("--sse-chunk-size", type=int, default=1)
     p.add_argument("--client-profile-requests", type=int, default=0)
+    p.add_argument(
+        "--client-read-timeout-seconds",
+        type=int,
+        default=1200,
+        help="HTTP read timeout per request; does not limit output tokens",
+    )
+    p.add_argument(
+        "--steady-continue-output-errors",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Keep measured refill after output-only errors; retain failed validation and test status",
+    )
     p.add_argument("--fixed-output-tokens", type=int, default=0)
+    p.add_argument(
+        "--service-pythonpath-prefix",
+        default="",
+        help="Explicit dependency directory prepended to spawned service PYTHONPATH",
+    )
     p.add_argument("--model-dir", default=DEFAULT_MODEL)
-    p.add_argument("--gpus", default="0,1,2,3", help="four PDFUSION GPUs")
+    p.add_argument("--gpus", default="0,1,2,3", help="two or four PDFUSION GPUs")
     p.add_argument("--workload", choices=("video", "text"), default="video")
+    p.add_argument("--mixed-video", action="store_true")
+    p.add_argument("--omit-max-tokens", action="store_true")
+    p.add_argument("--mixed-thinking", type=int, choices=(0, 1), default=1)
+    p.add_argument("--mixed-seed", type=int, default=0)
+    p.add_argument(
+        "--cadence-drain",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Signal the cadence group when measured steady submissions end",
+    )
+    p.add_argument(
+        "--max-input-tokens", type=int, choices=(32768, 65536), default=32768
+    )
+    p.add_argument("--preflight-only", action="store_true")
     p.add_argument(
         "--encoder-dp2",
         "--encoder-proxy",
@@ -2786,6 +3609,12 @@ def main(argv=None, preset=None):
         "--moe-strategy",
         choices=("fp8_per_block_ep_normal", "mega_moe_fp8"),
         default="fp8_per_block_ep_normal",
+    )
+    p.add_argument(
+        "--mtp-tokens",
+        type=int,
+        default=0,
+        help="PD-only Qwen3.5 MTP draft tokens; 0 disables MTP, cadence supports 1 through 4",
     )
     p.add_argument("--decode-graph", type=int, choices=(0, 1), default=0)
     p.add_argument("--fp8-kv-cache", type=int, choices=(0, 1), default=0)
@@ -2850,8 +3679,45 @@ def main(argv=None, preset=None):
     a = p.parse_args(argv)
     if preset is not None:
         preset.configure(a, p)
+    a.coord_mode = effective_coord_mode(os.environ, a.coord_mode)
+    if a.preflight_only and not a.mixed_video:
+        p.error("--preflight-only requires --mixed-video")
+    if a.cadence_drain and (
+        a.coord_mode != "cadence"
+        or a.client_mode != "measured"
+        or not a.steady_concurrency
+        or len(positive_sizes(a.steady_concurrency)) != 1
+    ):
+        p.error(
+            "cadence drain requires cadence and one measured steady concurrency level"
+        )
+    if a.omit_max_tokens and not a.mixed_video:
+        p.error(
+            "--omit-max-tokens is only supported for the four original video templates"
+        )
+    if a.mixed_video and (
+        a.workload != "video"
+        or not a.encoder_gpus
+        or not a.encoder_dp2
+        or len(pd_gpu_ids(a.gpus)) != 4
+        or a.client_mode != "measured"
+        or not a.steady_concurrency
+        or a.fixed_output_tokens
+        or a.max_input_tokens != 65536
+    ):
+        p.error(
+            "mixed videos require four PD ranks, measured Encoder proxy steady load, natural output and capacity 65536"
+        )
+    if a.image_probe and (not a.encoder_gpus or a.workload == "text"):
+        p.error("image probes require a separate Encoder and the video workload")
     if not 3600 <= a.test_timeout_seconds <= 21600:
         p.error("test timeout must be between 3600 and 21600 seconds")
+    if not 0 < a.client_read_timeout_seconds <= a.test_timeout_seconds:
+        p.error("client read timeout must be positive and fit the test budget")
+    if a.steady_continue_output_errors and (
+        a.client_mode != "measured" or not a.steady_concurrency
+    ):
+        p.error("continuing output errors requires measured steady load")
     if a.client_processes > 1 and (
         a.client_mode != "measured" or not a.steady_concurrency
     ):
@@ -2863,6 +3729,14 @@ def main(argv=None, preset=None):
     for field in ("model_dir", "data_dir", "output", "cache_root"):
         setattr(a, field, str(Path(getattr(a, field)).resolve()))
     selected_gpus(a.gpus, a.encoder_gpus)
+    service_pythonpath_env({}, a.service_pythonpath_prefix)
+    if len(pd_gpu_ids(a.gpus)) == 2 and (
+        a.coord_checks or a.graph_edge_cases or a.capacity_batches or a.throughput_sweep
+    ):
+        p.error(
+            "two PD ranks support correctness and steady load; four-rank-only suite requested"
+        )
+    mtp_config({}, "", a.mtp_tokens, a.model_dir, a.coord_mode)
     env, args = server_config(
         a.gpus,
         a.profile,
@@ -2883,9 +3757,10 @@ def main(argv=None, preset=None):
     )
     if a.steady_concurrency:
         levels = positive_sizes(a.steady_concurrency)
-        if any(n % 4 or n > 4 * a.rank_concurrency for n in levels):
+        rank_count = len(pd_gpu_ids(a.gpus))
+        if any(n % rank_count or n > rank_count * a.rank_concurrency for n in levels):
             p.error(
-                "steady concurrency must be divisible by four and fit configured client/rank limits"
+                "steady concurrency must be divisible by the PD rank count and fit configured client/rank limits"
             )
         if (
             not (

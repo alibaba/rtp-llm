@@ -23,6 +23,928 @@ import qwen35_epd_fusion_4gpu_smoke as smoke
 
 
 class FusionSmokeTest(unittest.TestCase):
+    def test_output_failure_continuation_preserves_strict_validation_and_protocol_failures(
+        self,
+    ):
+        row = dict(
+            ok=False,
+            http_status=200,
+            finish_reason="length",
+            reasoning_content="still thinking",
+            content="",
+            usage=dict(completion_tokens=32000),
+            validation_errors=[
+                "incomplete, empty, or truncated generation",
+                "incomplete, empty, or truncated choice",
+                "invalid requested visual-event JSON",
+            ],
+        )
+        with mock.patch.dict(smoke.CLIENT_OPTIONS, continue_output_errors=False):
+            self.assertTrue(smoke.steady_response_requires_abort(row))
+        with mock.patch.dict(smoke.CLIENT_OPTIONS, continue_output_errors=True):
+            self.assertFalse(smoke.steady_response_requires_abort(row))
+            self.assertFalse(row["ok"])
+            self.assertEqual(len(row["validation_errors"]), 3)
+            for extra in [
+                "prompt token mismatch",
+                "HTTP status",
+                "missing/invalid PDFUSION evidence",
+                "ReadTimeout()",
+            ]:
+                failed = dict(row, validation_errors=row["validation_errors"] + [extra])
+                self.assertTrue(smoke.steady_response_requires_abort(failed))
+            self.assertTrue(
+                smoke.steady_response_requires_abort(
+                    dict(row, error="connection reset")
+                )
+            )
+
+    def test_quality_failures_are_not_counted_as_valid_answer_throughput(self):
+        good = dict(
+            ok=True,
+            started_s=0,
+            completed_s=0.5,
+            client_rank=0,
+            usage=dict(completion_tokens=10),
+        )
+        output = dict(
+            good,
+            ok=False,
+            completed_s=0.6,
+            http_status=200,
+            finish_reason="length",
+            content="",
+            reasoning_content="thinking",
+            validation_errors=["incomplete, empty, or truncated generation"],
+        )
+        transport = dict(output, completed_s=0.7, error="connection reset")
+        summary = smoke.steady_summary([good, output, transport], 0, 1, 1)
+        self.assertFalse(summary["all_valid"])
+        window = summary["measurement"]
+        self.assertEqual(window["qps"], 1)
+        self.assertEqual(window["model_completed_qps"], 2)
+        self.assertEqual(window["errors"], 2)
+        self.assertEqual(window["output_quality_errors"], 1)
+
+    def test_output_continuation_cli_requires_measured_steady_load(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            smoke.main(
+                [
+                    "--output",
+                    "/quality-accounting",
+                    "--steady-continue-output-errors",
+                    "1",
+                ]
+            )
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(
+                [
+                    "--output",
+                    "/quality-accounting",
+                    "--workload",
+                    "text",
+                    "--client-mode",
+                    "measured",
+                    "--steady-concurrency",
+                    "4",
+                    "--steady-continue-output-errors",
+                    "1",
+                ]
+            )
+        self.assertIn("--test_arg=--steady-continue-output-errors=1", command)
+
+    def test_untimed_default_and_explicit_legacy_timeout(self):
+        self.assertEqual(smoke.CADENCE_ENV["PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS"], 0)
+        for value in ("0", "1000"):
+            result = smoke.cadence_env(
+                dict(
+                    PDFUSION_CADENCE_ADAPTIVE="1",
+                    PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS=value,
+                ),
+                "cadence",
+            )
+            self.assertEqual(result["PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS"], value)
+        with self.assertRaises(ValueError):
+            smoke.cadence_env(
+                dict(
+                    PDFUSION_CADENCE_ADAPTIVE="1",
+                    PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS="-1",
+                ),
+                "cadence",
+            )
+
+    def test_drain_marker_never_precedes_submission_end_and_is_run_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            marker = out / "cadence-drain"
+            with mock.patch.dict(
+                smoke.CLIENT_OPTIONS,
+                dict(cadence_drain_file=str(marker), cadence_run_id="this-run"),
+            ):
+                self.assertFalse(
+                    smoke.signal_cadence_drain(out, "steady", 1499.999, 1500)
+                )
+                self.assertFalse(marker.exists())
+                self.assertTrue(smoke.signal_cadence_drain(out, "steady", 1500, 1500))
+                self.assertEqual(marker.read_text(), "this-run\n")
+                self.assertFalse(smoke.signal_cadence_drain(out, "steady", 1501, 1500))
+                self.assertEqual(
+                    json.loads((out / "steady-drain.json").read_text())["elapsed_s"],
+                    1500,
+                )
+                marker.write_text("foreign-run\n")
+                with self.assertRaisesRegex(RuntimeError, "foreign"):
+                    smoke.signal_cadence_drain(out, "steady", 1502, 1500)
+
+    def test_encoder_does_not_inherit_cadence_drain_control(self):
+        env = smoke.encoder_cadence_env(
+            dict(
+                PDFUSION_CADENCE_ADAPTIVE="1",
+                PDFUSION_CADENCE_DRAIN_FILE="/tmp/test-drain",
+            )
+        )
+        self.assertNotIn("PDFUSION_CADENCE_DRAIN_FILE", env)
+        self.assertEqual(env["PDFUSION_CADENCE_ADAPTIVE"], "0")
+
+    def four_video_fixture(self, directory):
+        import hashlib
+
+        directory = Path(directory)
+        entries = []
+        for i in range(1, 5):
+            video = directory / f"video{i}.mp4"
+            video.write_bytes(f"video {i}".encode())
+            body = dict(
+                model="qwen35_moe",
+                stream=False,
+                max_tokens=8192,
+                temperature=0,
+                messages=[
+                    dict(
+                        role="user",
+                        content=[
+                            dict(
+                                type="video_url",
+                                video_url=dict(url=f"https://fixture/{i}.mp4"),
+                            )
+                        ],
+                    )
+                ],
+            )
+            template = directory / f"request{i}.json"
+            template.write_text(json.dumps(body))
+            entries.append(
+                dict(
+                    id=i,
+                    video=video.name,
+                    template=template.name,
+                    video_url=f"https://fixture/{i}.mp4",
+                    video_sha256=hashlib.sha256(video.read_bytes()).hexdigest(),
+                    request_sha256=hashlib.sha256(template.read_bytes()).hexdigest(),
+                )
+            )
+        (directory / "manifest.json").write_text(json.dumps(dict(requests=entries)))
+
+    def test_four_video_omits_request_cap_and_explicitly_enables_thinking(self):
+        from qwen35_mixed_video import load_workload, output_token_budget
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.four_video_fixture(directory)
+            rows, _ = load_workload(
+                directory, omit_max_tokens=True, enable_thinking=True
+            )
+            for row in rows:
+                body = row["payload"]
+                self.assertNotIn("max_tokens", body)
+                self.assertNotIn("extra_configs", body)
+                self.assertFalse(body["stream"])
+                self.assertTrue(body["enable_thinking"])
+                self.assertTrue(body["chat_template_kwargs"]["enable_thinking"])
+                self.assertTrue(
+                    Path(
+                        body["messages"][0]["content"][0]["video_url"]["url"]
+                    ).is_file()
+                )
+            original, _ = load_workload(directory)
+            self.assertTrue(all(r["payload"]["max_tokens"] == 8192 for r in original))
+        self.assertEqual(output_token_budget({}, 24599, 65536, 32000), 32000)
+        self.assertEqual(output_token_budget({}, 40642, 65536, 32000), 24894)
+
+    def test_four_video_checksum_and_path_escape_are_rejected(self):
+        from qwen35_mixed_video import load_workload
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.four_video_fixture(directory)
+            p = Path(directory)
+            (p / "video1.mp4").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                load_workload(directory)
+            self.four_video_fixture(directory)
+            m = json.loads((p / "manifest.json").read_text())
+            m["requests"][0]["video"] = "../outside.mp4"
+            (p / "manifest.json").write_text(json.dumps(m))
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                load_workload(directory)
+
+    def test_seeded_four_video_selection_replays_across_process_strides(self):
+        from collections import Counter
+
+        from qwen35_mixed_video import select_request
+
+        workload = [dict(id=i) for i in range(1, 5)]
+        serial = [select_request(workload, i, 20261016)["id"] for i in range(1000)]
+        replay = {}
+        for worker in range(4):
+            for i in reversed(range(worker, 1000, 4)):
+                replay[i] = select_request(workload, i, 20261016)["id"]
+        self.assertEqual(serial, [replay[i] for i in range(1000)])
+        self.assertTrue(all(200 < n < 300 for n in Counter(serial).values()))
+        self.assertNotEqual(
+            serial, [select_request(workload, i, 1)["id"] for i in range(1000)]
+        )
+
+    def test_nonstream_thinking_uses_server_ttft_and_keeps_reasoning(self):
+        body = dict(
+            choices=[
+                dict(
+                    index=0,
+                    message=dict(content="answer", reasoning_content="consider video"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=dict(
+                prompt_tokens=100,
+                completion_tokens=11,
+                prompt_tokens_details=dict(video_tokens=80),
+            ),
+            aux_info=dict(
+                pd_sep=False, reuse_len=0, first_token_cost_time=250, cost_time=1250
+            ),
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status_code = 200
+        response.text = json.dumps(body)
+        payload = dict(
+            stream=False,
+            enable_thinking=True,
+            chat_template_kwargs=dict(enable_thinking=True),
+        )
+        with mock.patch("requests.post", return_value=response) as post:
+            row = smoke.request(
+                "http://test", payload, 0, dict(prompt_tokens=100, video_tokens=80)
+            )
+        self.assertTrue(row["ok"], row)
+        self.assertTrue(row["thinking_observed"])
+        self.assertEqual(row["reasoning_content"], "consider video")
+        self.assertEqual(row["ttft_s"], 0.25)
+        self.assertEqual(row["tpot_ms"], 100)
+        self.assertEqual(row["ttft_source"], "server_aux_first_token_cost_time")
+        self.assertNotIn("first_content_s", row)
+        self.assertNotIn("max_tokens", post.call_args.kwargs["json"])
+
+    def test_nonstream_missing_first_token_timing_is_not_faked_from_completion(self):
+        row = dict(
+            http_status=200,
+            content="answer",
+            finish_reason="stop",
+            response_stream=False,
+            usage=dict(prompt_tokens=100),
+            aux_info=dict(pd_sep=False, reuse_len=0),
+            e2e_s=9,
+        )
+        smoke.record_output_timing(row)
+        self.assertNotIn("ttft_s", row)
+        self.assertIn(
+            "missing nonstream server first-token timing",
+            smoke.validate_response(row, dict(prompt_tokens=100, video_tokens=0)),
+        )
+
+    def test_long_thinking_read_timeout_is_forwarded_without_an_output_cap(self):
+        response = mock.MagicMock(status_code=200)
+        response.__enter__.return_value = response
+        response.text = json.dumps(
+            dict(
+                choices=[
+                    dict(index=0, message=dict(content="answer"), finish_reason="stop")
+                ],
+                usage=dict(prompt_tokens=100, completion_tokens=2),
+                aux_info=dict(
+                    pd_sep=False, reuse_len=0, first_token_cost_time=1, cost_time=2
+                ),
+            )
+        )
+        with mock.patch.dict(
+            smoke.CLIENT_OPTIONS, read_timeout_seconds=3600
+        ), mock.patch("requests.post", return_value=response) as post:
+            row = smoke.request(
+                "http://test",
+                dict(stream=False, enable_thinking=True),
+                0,
+                dict(prompt_tokens=100, video_tokens=0),
+            )
+        self.assertTrue(row["ok"], row)
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, 3600))
+        self.assertNotIn("max_tokens", post.call_args.kwargs["json"])
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(
+                ["--output", "/long-thinking", "--client-read-timeout-seconds", "3600"]
+            )
+        self.assertIn("--test_arg=--client-read-timeout-seconds=3600", command)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            smoke.main(
+                ["--output", "/long-thinking", "--client-read-timeout-seconds", "0"]
+            )
+
+    def test_thinking_stream_ttft_precedes_first_visible_content(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            b"data: " + json.dumps(x).encode()
+            for x in [
+                dict(choices=[dict(index=0, delta=dict(reasoning_content="consider"))]),
+                dict(
+                    choices=[
+                        dict(
+                            index=0, delta=dict(content="answer"), finish_reason="stop"
+                        )
+                    ]
+                ),
+                dict(
+                    usage=dict(prompt_tokens=100, completion_tokens=3),
+                    aux_info=dict(pd_sep=False, reuse_len=0),
+                ),
+            ]
+        ]
+        with mock.patch("requests.post", return_value=response):
+            row = smoke.request(
+                "http://test",
+                dict(stream=True),
+                0,
+                dict(prompt_tokens=100, video_tokens=0),
+            )
+        self.assertTrue(row["ok"], row)
+        self.assertEqual(row["ttft_s"], row["first_reasoning_s"])
+        self.assertLessEqual(row["first_reasoning_s"], row["first_content_s"])
+        self.assertEqual(row["reasoning_content"], "consider")
+
+    def test_mixed_cli_preserves_uncapped_thinking_and_capacity_in_worker_arguments(
+        self,
+    ):
+        args = [
+            "--output",
+            "/mixed-test",
+            "--encoder-gpus",
+            "0",
+            "--gpus",
+            "4,5,6,7",
+            "--encoder-proxy",
+            "1",
+            "--mixed-video",
+            "--omit-max-tokens",
+            "--mixed-thinking",
+            "1",
+            "--max-input-tokens",
+            "65536",
+            "--client-mode",
+            "measured",
+            "--steady-concurrency",
+            "512",
+            "--rank-concurrency",
+            "256",
+            "--mixed-seed",
+            "20261016",
+        ]
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(args)
+        for field in [
+            "--mixed-video",
+            "--omit-max-tokens",
+            "--mixed-thinking=1",
+            "--max-input-tokens=65536",
+            "--mixed-seed=20261016",
+        ]:
+            self.assertIn("--test_arg=" + field, command)
+        _, original = smoke.server_config("4,5,6,7")
+        larger = smoke.input_capacity_config(original, 65536)
+        for name in [
+            "max_seq_len",
+            "max_batch_tokens_size",
+            "max_batch_tokens_without_cache",
+        ]:
+            self.assertIn("--" + name + " 65536", larger)
+        self.assertEqual(smoke.input_capacity_config(original, 32768), original)
+
+    def test_adaptive_environment_validation_and_pd_forwarding(self):
+        settings = dict(
+            PDFUSION_CADENCE_ADAPTIVE="1",
+            PDFUSION_CADENCE_DECODE_WINDOW="32",
+            PDFUSION_CADENCE_LOW_WATER_PCT="60",
+            PDFUSION_CADENCE_PREFILL_MAX_WAIT_MS="500",
+            PDFUSION_CADENCE_MIN_DECODE_SHARE_PCT="30",
+        )
+        with mock.patch.dict(os.environ, settings, clear=True):
+            env, args = smoke.server_config("2,3", "baseline", "mega_moe_fp8", 0)
+            env, args = smoke.throughput_config(
+                env, args, "prefill-first", "7", 1, "adaptive", "cadence"
+            )
+            self.assertEqual({k: env[k] for k in settings}, settings)
+            configs = smoke.dp2_service_configs(
+                "2,3",
+                "1",
+                env,
+                args,
+                dict(encoder_0=20000, encoder_1=21000, fusion=22000),
+                9,
+                "candidate-a",
+            )
+            for config in configs:
+                if config["name"] == "fusion":
+                    self.assertEqual(config["env"]["PDFUSION_CADENCE_ADAPTIVE"], "1")
+                else:
+                    self.assertEqual(config["env"]["PDFUSION_CADENCE_ADAPTIVE"], "0")
+                    self.assertFalse(
+                        (set(settings) - {"PDFUSION_CADENCE_ADAPTIVE"})
+                        & config["env"].keys()
+                    )
+            with mock.patch.object(
+                smoke, "run_launcher", side_effect=smoke.bazel_command
+            ):
+                command = smoke.main(
+                    [
+                        "--output",
+                        "/new-run",
+                        "--coord-mode",
+                        "cadence",
+                        "--scheduler-policy",
+                        "prefill-first",
+                        "--decode-prefill-ratio",
+                        "7",
+                        "--schedule-trace",
+                        "1",
+                        "--trace-run-id",
+                        "adaptive",
+                    ]
+                )
+            for name, value in settings.items():
+                self.assertIn(f"--test_env={name}={value}", command)
+        self.assertEqual(smoke.cadence_env({}, "off"), {})
+        for settings in (
+            dict(PDFUSION_CADENCE_ADAPTIVE="2"),
+            dict(PDFUSION_CADENCE_ADAPTIVE="1", PDFUSION_CADENCE_LOW_WATER_PCT="0"),
+            dict(PDFUSION_CADENCE_ADAPTIVE="1", PDFUSION_CADENCE_DECODE_WINDOW="-1"),
+            dict(
+                PDFUSION_CADENCE_ADAPTIVE="1",
+                PDFUSION_CADENCE_MIN_DECODE_SHARE_PCT="100",
+            ),
+            dict(
+                PDFUSION_CADENCE_ADAPTIVE="1",
+                PDFUSION_CADENCE_MIN_DECODE_SHARE_PCT="-1",
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                smoke.cadence_env(settings, "cadence")
+        self.assertEqual(
+            smoke.effective_coord_mode(dict(PDFUSION_CADENCE_ADAPTIVE="1"), "off"),
+            "cadence",
+        )
+
+    def test_adaptive_auto_selection_omits_legacy_scheduler_and_ratio_arguments(self):
+        with mock.patch.dict(os.environ, PDFUSION_CADENCE_ADAPTIVE="1", clear=True):
+            for ratio in ("0", "7", "1/7", "invalid"):
+                env, args = smoke.throughput_config(
+                    {}, "", "fifo", ratio, 1, "automatic-adaptive", "off"
+                )
+                self.assertEqual(env["PDFUSION_CADENCE_ADAPTIVE"], "1")
+                self.assertIn("--pdfusion_coord_mode cadence", args)
+                self.assertNotIn("--pdfusion_scheduler_mode", args)
+                self.assertNotIn("--decode_prefill_ratio", args)
+            with mock.patch.object(
+                smoke, "run_launcher", side_effect=smoke.bazel_command
+            ):
+                command = smoke.main(
+                    [
+                        "--output",
+                        "/automatic-adaptive",
+                        "--workload",
+                        "text",
+                        "--schedule-trace",
+                        "1",
+                        "--trace-run-id",
+                        "automatic-adaptive",
+                    ]
+                )
+            self.assertIn("--test_env=PDFUSION_CADENCE_ADAPTIVE=1", command)
+            self.assertIn("--test_arg=--coord-mode=cadence", command)
+            self.assertFalse(
+                any(
+                    arg.startswith(
+                        (
+                            "--test_arg=--scheduler-policy=",
+                            "--test_arg=--decode-prefill-ratio=",
+                        )
+                    )
+                    for arg in command
+                )
+            )
+
+    def test_adaptive_auto_selection_retains_trace_and_mtp_safety_checks(self):
+        with mock.patch.dict(os.environ, PDFUSION_CADENCE_ADAPTIVE="1", clear=True):
+            for trace, run_id in ((0, "automatic"), (1, "unset"), (1, "x" * 64)):
+                with self.assertRaises(ValueError):
+                    smoke.throughput_config({}, "", "fifo", "0", trace, run_id)
+            with mock.patch.object(
+                smoke, "run_launcher", side_effect=smoke.bazel_command
+            ):
+                command = smoke.main(
+                    [
+                        "--output",
+                        "/automatic-mtp",
+                        "--gpus",
+                        "1,2",
+                        "--encoder-gpus",
+                        "0",
+                        "--encoder-proxy",
+                        "1",
+                        "--mtp-tokens",
+                        "1",
+                        "--schedule-trace",
+                        "1",
+                        "--trace-run-id",
+                        "automatic-mtp",
+                    ]
+                )
+            self.assertIn("--test_arg=--coord-mode=cadence", command)
+            with mock.patch.dict(os.environ, RTP_LLM_STREAM_ASYNC="1"):
+                with self.assertRaisesRegex(ValueError, "synchronous host dispatch"):
+                    smoke.main(
+                        [
+                            "--output",
+                            "/automatic-mtp",
+                            "--workload",
+                            "text",
+                            "--mtp-tokens",
+                            "1",
+                            "--schedule-trace",
+                            "1",
+                            "--trace-run-id",
+                            "automatic-mtp",
+                        ]
+                    )
+
+    def test_disabled_adaptive_retains_legacy_arguments_and_ratio_validation(self):
+        with mock.patch.dict(os.environ, PDFUSION_CADENCE_ADAPTIVE="0", clear=True):
+            _, fifo = smoke.throughput_config({}, "", "fifo")
+            self.assertEqual(fifo, " --pdfusion_coord_mode off")
+            _, args = smoke.throughput_config(
+                {}, "", "prefill-first", "7", 1, "legacy", "cadence"
+            )
+            self.assertIn(
+                "--pdfusion_scheduler_mode ratio --decode_prefill_ratio 7", args
+            )
+            with self.assertRaises(ValueError):
+                smoke.throughput_config({}, "", "fifo", "0", 1, "legacy", "cadence")
+            with self.assertRaises(ValueError):
+                smoke.throughput_config(
+                    {}, "", "prefill-first", "1/7", 1, "legacy", "cadence"
+                )
+
+    def test_cadence_mtp1_forwards_only_pd_with_synchronous_dispatch(self):
+        env, args = smoke.server_config("2,3", "baseline", "mega_moe_fp8", 0)
+        env, args = smoke.throughput_config(
+            env, args, "prefill-first", "7", 1, "mtp-cadence", "cadence"
+        )
+        configs = smoke.dp2_service_configs(
+            "2,3",
+            "1",
+            env,
+            args,
+            dict(encoder_0=20000, encoder_1=21000, fusion=22000),
+            9,
+            "candidate-a",
+        )
+        encoder, pd = smoke.configure_mtp_services(configs, 1, "/model", "cadence")
+        self.assertEqual(encoder["env"]["SP_TYPE"], "")
+        self.assertNotIn("--sp_type", encoder["args"])
+        self.assertIn("--sp_type eagle", pd["args"])
+        self.assertIn("--pdfusion_coord_mode cadence", pd["args"])
+        self.assertEqual(pd["env"]["RTP_MEGAMOE_CHUNK_TOKENS"], "0")
+
+    def test_cadence_mtp_rejects_async_dispatch_and_width_above_four(self):
+        for name in (
+            "RTP_LLM_STREAM_ASYNC",
+            "RTP_LLM_DROP_BROAD_SYNC",
+            "RTP_LLM_MTP_ASYNC_DEVICE_STATE",
+            "RTP_LLM_DEVICE_INPUT",
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError, "synchronous host"
+            ):
+                smoke.mtp_config({name: "1"}, "", 1, "/model", "cadence")
+        with self.assertRaisesRegex(ValueError, "1 through 4"):
+            smoke.mtp_config({}, "", 5, "/model", "cadence")
+        for width in (1, 2, 3, 4):
+            env, args = smoke.mtp_config({}, "", width, "/model", "cadence")
+            self.assertIn(f"--gen_num_per_cycle {width}", args)
+
+    def test_two_pd_cadence_mtp1_cli_is_allowed_with_explicit_trace(self):
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(
+                [
+                    "--output",
+                    "/new-run",
+                    "--gpus",
+                    "2,3",
+                    "--encoder-gpus",
+                    "1",
+                    "--encoder-proxy",
+                    "1",
+                    "--mtp-tokens",
+                    "1",
+                    "--coord-mode",
+                    "cadence",
+                    "--scheduler-policy",
+                    "prefill-first",
+                    "--decode-prefill-ratio",
+                    "7",
+                    "--schedule-trace",
+                    "1",
+                    "--trace-run-id",
+                    "cadence-mtp1-test",
+                ]
+            )
+        self.assertIn("--test_arg=--coord-mode=cadence", command)
+        self.assertIn("--test_arg=--mtp-tokens=1", command)
+        self.assertIn("--test_env=GPU_COUNT=3", command)
+
+    def test_image_probe_checks_answers_embeddings_and_uneven_rank_load(self):
+        from collections import Counter
+
+        cases = [
+            dict(name=color, payload={}, expected={}, visual_tokens=256)
+            for color in ("red", "green", "blue")
+        ]
+
+        def batch(manager, payload, expected, concurrency, count, rank_count):
+            self.assertEqual((concurrency, count, rank_count), (3, 3, 2))
+            color = cases[batch.calls]["name"]
+            batch.calls += 1
+            return [
+                dict(
+                    ok=True,
+                    content=color + ".",
+                    client_rank=i % rank_count,
+                    usage=dict(completion_tokens=2),
+                    aux_info=dict(
+                        multimodal_lengths={"1": 256},
+                        output_len=2,
+                        speculative_draft_rounds=1,
+                        speculative_accepted_tokens_per_pos=[1],
+                    ),
+                )
+                for i in range(count)
+            ]
+
+        batch.calls = 0
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            smoke, "image_probe_cases", return_value=cases
+        ), mock.patch.object(smoke, "run_throughput_batch", side_effect=batch):
+            result = smoke.run_image_probe(
+                None, "/model", Path(directory), "before", 2, 1
+            )
+            saved = json.loads((Path(directory) / "image-before.json").read_text())
+        self.assertTrue(result["all_passed"])
+        self.assertEqual(result["requests"], 9)
+        self.assertEqual(result["speculative"]["draft_rounds"], 9)
+        self.assertEqual(
+            Counter(r["client_rank"] for r in saved["requests"]), {0: 6, 1: 3}
+        )
+
+    def test_image_probe_rejects_wrong_answers_missing_embeddings_and_bad_http(self):
+        case = dict(name="red", payload={}, expected={}, visual_tokens=256)
+        valid = dict(
+            ok=True,
+            content="red",
+            usage=dict(completion_tokens=2),
+            aux_info=dict(multimodal_lengths={"1": 256}, output_len=2),
+        )
+        for patch in [
+            dict(content="blue"),
+            dict(aux_info={}),
+            dict(ok=False),
+            dict(usage=dict(completion_tokens=33)),
+        ]:
+            with self.subTest(
+                patch=patch
+            ), tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                smoke, "image_probe_cases", return_value=[case]
+            ), mock.patch.object(
+                smoke, "run_throughput_batch", return_value=[dict(valid, **patch)]
+            ):
+                with self.assertRaisesRegex(RuntimeError, "image sanity check failed"):
+                    smoke.run_image_probe(None, "/model", Path(directory), "before", 2)
+                saved = json.loads((Path(directory) / "image-before.json").read_text())
+                self.assertFalse(saved["all_passed"])
+
+    def test_image_probe_cli_reaches_worker_and_defaults_off(self):
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(
+                [
+                    "--image-probe",
+                    "1",
+                    "--output",
+                    "/new-run",
+                    "--gpus",
+                    "2,3",
+                    "--encoder-gpus",
+                    "1",
+                ]
+            )
+            default = smoke.main(["--output", "/new-run", "--gpus", "4,5,6,7"])
+        self.assertIn("--test_arg=--image-probe=1", command)
+        self.assertIn("--test_arg=--image-probe=0", default)
+
+    def test_image_probe_requires_encoder(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            smoke.main(
+                ["--image-probe", "1", "--output", "/new-run", "--gpus", "4,5,6,7"]
+            )
+
+    def test_mtp_disabled_preserves_existing_configuration(self):
+        env, args = smoke.server_config("4,5,6,7", "baseline", "mega_moe_fp8", 1)
+        actual_env, actual_args = smoke.mtp_config(env, args, 0, "/model", "cadence")
+        self.assertIs(actual_env, env)
+        self.assertEqual(actual_args, args)
+        configs = smoke.separated_service_configs(
+            "4,5,6,7",
+            "0",
+            "baseline",
+            dict(encoder_0=20000, encoder_1=21000, fusion=22000),
+            9,
+        )
+        self.assertIs(smoke.configure_mtp_services(configs, 0, "/model"), configs)
+
+    def test_mtp_services_enable_only_pd_and_keep_checkpoint_path_intact(self):
+        import shlex
+
+        for proxy in (0, 1):
+            for tokens in (1, 4):
+                with self.subTest(proxy=proxy, tokens=tokens):
+                    env, args = smoke.server_config(
+                        "4,5,6,7", "baseline", "mega_moe_fp8", 0, 1, 1, 4096
+                    )
+                    env, args = smoke.throughput_config(
+                        env, args, "prefill-first", "7", coord_mode="off"
+                    )
+                    ports = dict(encoder_0=20000, encoder_1=21000, fusion=22000)
+                    if proxy:
+                        configs = smoke.dp2_service_configs(
+                            "4,5,6,7", "0", env, args, ports, 9, "candidate-a"
+                        )
+                    else:
+                        configs = smoke.separated_service_configs(
+                            "4,5,6,7",
+                            "0",
+                            "baseline",
+                            ports,
+                            9,
+                            "mega_moe_fp8",
+                            0,
+                            1,
+                            1,
+                            4096,
+                        )
+                    original_encoder_args = configs[0]["args"]
+                    actual = smoke.configure_mtp_services(
+                        configs, tokens, "/model with spaces", "off"
+                    )
+                    self.assertEqual(actual[0]["args"], original_encoder_args)
+                    self.assertEqual(actual[0]["env"]["SP_TYPE"], "")
+                    self.assertNotIn("qwen35_moe_mtp", actual[0]["args"])
+                    pd = actual[-1]
+                    words = shlex.split(pd["args"])
+                    for name, value in (
+                        ("sp_model_type", "qwen35_moe_mtp"),
+                        ("sp_type", "eagle"),
+                        ("sp_checkpoint_path", "/model with spaces"),
+                        ("sp_act_type", "bf16"),
+                        ("gen_num_per_cycle", str(tokens)),
+                        ("enable_mixed_continuous_batching", "0"),
+                        ("use_batch_decode_scheduler", "0"),
+                    ):
+                        self.assertEqual(words[words.index("--" + name) + 1], value)
+                    self.assertEqual(pd["env"]["RTP_MEGAMOE_CHUNK_TOKENS"], "0")
+                    self.assertIn("--fp8_kv_cache 1", pd["args"])
+                    self.assertEqual(pd["env"]["RTP_QWEN35_NATIVE_FP8_ATTN"], "1")
+                    self.assertNotIn("SP_TYPE", configs[0]["env"])
+
+    def test_mtp_rejects_negative_tokens_cadence_and_mixed_batching(self):
+        for tokens, coord, env, args in (
+            (-1, "off", {}, ""),
+            (5, "cadence", {}, ""),
+            (4, "off", {"ENABLE_MIXED_CONTINUOUS_BATCHING": "1"}, ""),
+            (1, "off", {}, "--enable_mixed_continuous_batching 1"),
+            (1, "off", {}, "--enable_mixed_continuous_batching=true"),
+        ):
+            with self.subTest(tokens=tokens, coord=coord, env=env, args=args):
+                with self.assertRaises(ValueError):
+                    smoke.mtp_config(env, args, tokens, "/model", coord)
+        with mock.patch.dict(os.environ, ENABLE_MIXED_CONTINUOUS_BATCHING="1"):
+            with self.assertRaisesRegex(ValueError, "mixed continuous"):
+                smoke.mtp_config({}, "", 1, "/model")
+            # Explicit server arguments have the same precedence as server startup.
+            smoke.mtp_config({}, "--enable_mixed_continuous_batching 0", 1, "/model")
+
+    def test_mtp_cli_reaches_worker_and_dry_run_has_no_side_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "new-run")
+            argv = [
+                "--output",
+                output,
+                "--gpus",
+                "4,5,6,7",
+                "--encoder-gpus",
+                "0",
+                "--encoder-proxy",
+                "1",
+                "--mtp-tokens",
+                "4",
+                "--coord-mode",
+                "off",
+            ]
+            with mock.patch.object(
+                smoke, "run_launcher", side_effect=smoke.bazel_command
+            ):
+                command = smoke.main(argv)
+            self.assertIn("--test_arg=--mtp-tokens=4", command)
+            self.assertIn("--test_env=GPU_COUNT=5", command)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(smoke.main(argv), 0)
+            self.assertIn("--test_arg=--mtp-tokens=4", stdout.getvalue())
+            self.assertFalse(Path(output).exists())
+            for extra in (
+                ["--mtp-tokens=-1"],
+                ["--mtp-tokens=5", "--coord-mode=cadence"],
+            ):
+                with self.assertRaises(ValueError):
+                    smoke.main(argv + extra)
+
+    def test_mtp_worker_passes_pd_settings_to_real_manager_boundary(self):
+        from types import ModuleType
+
+        module = ModuleType("rtp_llm.test.utils.maga_server_manager")
+        config_module = ModuleType("rtp_llm.config.py_config_modules")
+        config_module.MIN_WORKER_INFO_PORT_NUM = 9
+        managers = [mock.Mock(port=20000 + i * 1000, exit_code=None) for i in range(2)]
+        for manager in managers:
+            manager.start_server.return_value = False
+        module.MagaServerManager = mock.Mock(side_effect=managers)
+        module.MagaServerManager.get_free_port.side_effect = [20000, 21000, 22000]
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                output=directory,
+                gpus="4,5,6,7",
+                encoder_gpus="0",
+                data_dir=str(PATH.parent / "qwen35_e2p4d2_data"),
+                model_dir=directory,
+                mtp_tokens=4,
+                coord_mode="off",
+                encoder_dp2=1,
+            )
+            with mock.patch.dict(
+                os.environ, CUDA_VISIBLE_DEVICES="0,4,5,6,7"
+            ), mock.patch.dict(
+                sys.modules,
+                {module.__name__: module, config_module.__name__: config_module},
+            ), mock.patch.object(
+                smoke, "check_gpu_idle", return_value={}
+            ), mock.patch.object(
+                smoke, "expected_tokens", return_value={}
+            ), mock.patch.object(
+                smoke.threading.Thread, "start"
+            ), mock.patch.object(
+                smoke.threading.Thread, "join"
+            ), mock.patch.object(
+                smoke.concurrent.futures, "ThreadPoolExecutor"
+            ) as pool:
+                pool.return_value.__enter__.return_value.map.side_effect = (
+                    lambda fn, items: list(map(fn, items))
+                )
+                self.assertEqual(smoke.run_worker(args), 1)
+            calls = module.MagaServerManager.call_args_list
+            self.assertEqual(calls[0].kwargs["env_args"]["SP_TYPE"], "")
+            self.assertIn("--gen_num_per_cycle 4", calls[1].kwargs["smoke_args_str"])
+            self.assertEqual(
+                calls[1].kwargs["env_args"]["RTP_MEGAMOE_CHUNK_TOKENS"], "0"
+            )
+            report = json.loads(Path(directory, "result.json").read_text())
+            self.assertEqual(report["mtp_tokens"], 4)
+            self.assertIn("--sp_model_type qwen35_moe_mtp", report["args"])
+            for manager in managers:
+                manager.stop_server.assert_called_once()
+
     def test_coordinator_graph_oracle_uses_observed_execution_rank(self):
         row = dict(rank=1, prefill=0, batch=63, mode="graph", graph_bs=64)
         self.assertEqual(smoke.validate_coordinator_boundary([row], 63, 1), [row])
@@ -936,8 +1858,8 @@ class MeasurementTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             smoke.fixed_output_payload({}, expected, 9000)
 
-    def test_measured_lanes_drain_journal_without_losing_rows(self):
-        smoke.CLIENT_OPTIONS["mode"] = "measured"
+    def test_measured_two_rank_lanes_drain_journal_without_losing_rows(self):
+        smoke.CLIENT_OPTIONS.update(mode="measured", rank_count=2)
 
         def response(url, payload, index, expected):
             time.sleep(0.01)
@@ -969,9 +1891,56 @@ class MeasurementTest(unittest.TestCase):
             self.assertEqual(len(rows), len(saved))
             self.assertEqual({r["index"] for r in rows}, {r["index"] for r in saved})
             self.assertEqual(summary["peak_in_flight"], 4)
+            self.assertEqual(
+                set(summary["measurement"]["completed_by_rank"]), {"0", "1"}
+            )
+            self.assertEqual({r["client_rank"] for r in rows}, {0, 1})
             self.assertTrue(all(r["started_s"] < 1 for r in saved))
             self.assertGreater(summary["drain_completions"], 0)
             self.assertTrue(all("journal_queue_s" in r for r in saved))
+
+    def test_measured_output_failure_keeps_refilling_without_changing_failed_row(self):
+        smoke.CLIENT_OPTIONS.update(
+            mode="measured", rank_count=2, continue_output_errors=True
+        )
+
+        def response(url, payload, index, expected):
+            time.sleep(0.01)
+            row = dict(
+                index=index,
+                ok=True,
+                http_status=200,
+                finish_reason="stop",
+                content="answer",
+                usage=dict(completion_tokens=10),
+                e2e_s=0.01,
+            )
+            if index == 0:
+                row.update(
+                    ok=False,
+                    content="",
+                    reasoning_content="thinking",
+                    finish_reason="length",
+                    validation_errors=["incomplete, empty, or truncated generation"],
+                )
+            return row
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.config.py_config_modules": SimpleNamespace(
+                    MIN_WORKER_INFO_PORT_NUM=9
+                )
+            },
+        ), mock.patch.object(smoke, "request", side_effect=response):
+            rows, summary = smoke.run_steady_load(
+                SimpleNamespace(port=20000), {}, {}, 4, 0, 1, 1, Path(directory), "test"
+            )
+        self.assertGreater(len(rows), 4)
+        self.assertFalse(summary["aborted"])
+        self.assertFalse(summary["all_valid"])
+        self.assertEqual(summary["measurement"]["output_quality_errors"], 1)
+        self.assertFalse(next(r for r in rows if r["index"] == 0)["ok"])
 
     def test_journal_failure_is_fatal(self):
         smoke.CLIENT_OPTIONS["mode"] = "measured"
@@ -1069,10 +2038,11 @@ class ProcessLoadTest(unittest.TestCase):
         for thread in cls.threads:
             thread.join()
 
-    def run_load(self, out):
+    def run_load(self, out, rank_count=4):
         smoke.CLIENT_OPTIONS.update(
             mode="measured",
-            processes=4,
+            rank_count=rank_count,
+            processes=rank_count,
             worker_stride=1,
             chunk_size=4096,
             profile_requests=0,
@@ -1119,6 +2089,19 @@ class ProcessLoadTest(unittest.TestCase):
             for pid in summary["client_pids"]:
                 with self.assertRaises(ProcessLookupError):
                     os.kill(pid, 0)
+
+    def test_two_rank_processes_use_only_two_ports_and_preserve_concurrency(self):
+        Handler.fail = False
+        with tempfile.TemporaryDirectory() as directory:
+            rows, summary = self.run_load(Path(directory), rank_count=2)
+            self.assertTrue(summary["all_valid"])
+            self.assertEqual(summary["client_processes"], 2)
+            self.assertEqual(summary["peak_in_flight"], 8)
+            self.assertEqual(
+                set(summary["measurement"]["completed_by_rank"]), {"0", "1"}
+            )
+            self.assertEqual({r["client_lane"] for r in rows}, set(range(8)))
+            self.assertTrue(all(r["client_rank"] == r["client_lane"] % 2 for r in rows))
 
     def test_response_error_aborts_all_processes_and_preserves_rows(self):
         Handler.fail = True
@@ -1518,6 +2501,408 @@ class EncoderTopologyTest(unittest.TestCase):
                     [c.kwargs["args"][5] for c in calls[:-1]],
                     [22000 + i for i in range(count)],
                 )
+
+
+class TwoPdTopologyTest(unittest.TestCase):
+    def cli(self):
+        return [
+            "--output",
+            "/tmp/not-launched-e1pd2",
+            "--gpus",
+            "2,3",
+            "--encoder-gpus",
+            "1",
+            "--encoder-proxy",
+            "1",
+            "--mtp-tokens",
+            "1",
+            "--coord-mode",
+            "off",
+        ]
+
+    def test_three_gpu_target_lock_and_worker_arguments(self):
+        with mock.patch.object(smoke, "run_launcher", side_effect=smoke.bazel_command):
+            command = smoke.main(self.cli())
+        for expected in (
+            smoke.TWO_PD_TARGET,
+            "--test_env=GPU_COUNT=3",
+            "--test_env=WORLD_SIZE=3",
+            "--test_env=CUDA_VISIBLE_DEVICES=1,2,3",
+            "--test_arg=--gpus=2,3",
+            "--test_arg=--encoder-gpus=1",
+            "--test_arg=--mtp-tokens=1",
+            "--run_under=//rtp_llm/test/utils:gpu_lock",
+        ):
+            self.assertIn(expected, command)
+        targets = []
+        scope = dict(
+            load=lambda *a: None,
+            SMOKE_FRAMEWORK_DEPS=[],
+            native=SimpleNamespace(py_test=lambda **kw: targets.append(kw)),
+        )
+        exec(PATH.with_suffix(".bzl").read_text(), scope)
+        scope["qwen35_epd_fusion_4gpu_suite"]()
+        target = next(t for t in targets if t["name"] == "qwen35_e1pd2_smoke")
+        self.assertEqual(target["exec_properties"]["gpu_count"], "3")
+        self.assertEqual(target["env"]["GPU_COUNT"], "3")
+        self.assertEqual(target["env"]["WORLD_SIZE"], "3")
+
+    def test_two_pd_routes_and_encoder_mtp_isolation(self):
+        import shlex
+
+        env, args = smoke.server_config(
+            "2,3", "baseline", "mega_moe_fp8", 0, 1, 1, 4096
+        )
+        ports = dict(encoder_0=20000, encoder_1=21000, fusion=22000)
+        for proxy in (False, True):
+            with self.subTest(proxy=proxy):
+                configs = (
+                    smoke.dp2_service_configs(
+                        "2,3", "1", env, args, ports, 9, "candidate-a"
+                    )
+                    if proxy
+                    else smoke.separated_service_configs(
+                        "2,3", "1", "baseline", ports, 9
+                    )
+                )
+                encoder, pd = smoke.configure_mtp_services(configs, 1, "/model")
+                self.assertEqual(encoder["gpus"], [1])
+                self.assertEqual(encoder["env"]["SP_TYPE"], "")
+                self.assertNotIn("--sp_type", encoder["args"])
+                self.assertEqual(pd["gpus"], [2, 3])
+                argv = shlex.split(pd["args"])
+                for flag, value in (
+                    ("--world_size", "2"),
+                    ("--tp_size", "1"),
+                    ("--dp_size", "2"),
+                    ("--ep_size", "2"),
+                ):
+                    self.assertEqual(argv[argv.index(flag) + 1], value)
+                self.assertEqual(pd["env"]["RTP_MEGAMOE_CHUNK_TOKENS"], "0")
+                route = json.loads(pd["env"]["MODEL_SERVICE_CONFIG"])["role_endpoints"][
+                    0
+                ]
+                self.assertEqual(
+                    route["pd_fusion_endpoint"]["address"],
+                    "127.0.0.1:22000,127.0.0.1:22009",
+                )
+
+    def test_request_batch_only_contacts_existing_two_rank_ports(self):
+        urls = []
+        modules = {
+            "rtp_llm.config.py_config_modules": SimpleNamespace(
+                MIN_WORKER_INFO_PORT_NUM=9
+            )
+        }
+
+        def response(url, payload, index, expected):
+            urls.append(url)
+            return dict(ok=True, index=index)
+
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(
+            smoke, "request", side_effect=response
+        ):
+            rows = smoke.run_throughput_batch(
+                SimpleNamespace(port=22000), {}, {}, 4, 4, 2
+            )
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({r["client_rank"] for r in rows}, {0, 1})
+        self.assertEqual(
+            set(urls),
+            {
+                "http://127.0.0.1:22000/v1/chat/completions",
+                "http://127.0.0.1:22009/v1/chat/completions",
+            },
+        )
+
+    def test_execution_evidence_only_requires_configured_ranks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = smoke.execution_evidence(Path(directory), 2)
+        self.assertEqual(set(evidence["ranks"]), {"0", "1"})
+        self.assertEqual(set(evidence["native_fp8"]), {"0", "1"})
+
+    def test_two_rank_cli_rejects_four_rank_suites_before_launch(self):
+        for extra in (
+            ["--coord-checks", "1"],
+            ["--graph-edge-cases", "1"],
+            ["--throughput-sweep", "2"],
+            ["--capacity-batches", "1,2"],
+        ):
+            with self.subTest(extra=extra), mock.patch.object(
+                smoke, "run_launcher"
+            ) as launch:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ):
+                    smoke.main(self.cli() + extra)
+                launch.assert_not_called()
+
+    def test_rejects_invalid_pd_count_and_encoder_allocations(self):
+        for ids in ("2", "1,2,3", "2,2", "-1,2"):
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                smoke.pd_gpu_ids(ids)
+        for enc in ("", "0,1", "2"):
+            with self.subTest(enc=enc), self.assertRaises(ValueError):
+                smoke.selected_gpus("2,3", enc)
+
+    def test_two_rank_cadence_graph_steady_cli_all_mtp_widths(self):
+        for width in range(5):
+            argv = self.cli() + [
+                "--mtp-tokens",
+                str(width),
+                "--coord-mode",
+                "cadence",
+                "--scheduler-policy",
+                "prefill-first",
+                "--decode-prefill-ratio",
+                "7",
+                "--schedule-trace",
+                "1",
+                "--trace-run-id",
+                "two-rank-steady",
+                "--steady-concurrency",
+                "8",
+                "--rank-concurrency",
+                "4",
+                "--decode-graph",
+                "1",
+                "--graph-batches",
+                "1,2,4",
+                "--moe-strategy",
+                "mega_moe_fp8",
+                "--client-mode",
+                "measured",
+                "--client-processes",
+                "2",
+            ]
+            with self.subTest(width=width), mock.patch.object(
+                smoke, "run_launcher", side_effect=smoke.bazel_command
+            ):
+                command = smoke.main(argv)
+                self.assertIn("--test_arg=--steady-concurrency=8", command)
+                self.assertIn(f"--test_arg=--mtp-tokens={width}", command)
+            for bad in ("3", "10"):
+                with mock.patch.object(smoke, "run_launcher") as launch:
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                        SystemExit
+                    ):
+                        smoke.main(argv + ["--steady-concurrency", bad])
+                    launch.assert_not_called()
+
+
+class ServicePythonPathTest(unittest.TestCase):
+    def test_prefix_wins_real_child_import_without_replacing_other_environment(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix, inherited = root / "prefix", root / "inherited"
+            prefix.mkdir()
+            inherited.mkdir()
+            (prefix / "service_import_fixture.py").write_text("version = 'fixed'\n")
+            (inherited / "service_import_fixture.py").write_text("version = 'shadow'\n")
+            env = {"CUDA_VISIBLE_DEVICES": "2,3", "DP_SIZE": "2"}
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(inherited)}):
+                smoke.service_pythonpath_env(env, str(prefix))
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import service_import_fixture as m; print(m.version)",
+                    ],
+                    env=dict(os.environ, **env),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            self.assertEqual(result.stdout.strip(), "fixed")
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "2,3")
+            self.assertEqual(env["DP_SIZE"], "2")
+
+    def test_disabled_preserves_environment_and_rejects_invalid_directories(self):
+        env = {"PYTHONPATH": "/original"}
+        self.assertIs(smoke.service_pythonpath_env(env, ""), env)
+        self.assertEqual(env, {"PYTHONPATH": "/original"})
+        for path in ("relative/path", str(PATH)):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                smoke.service_pythonpath_env({}, path)
+
+    def test_prefix_reaches_worker_arguments(self):
+        with tempfile.TemporaryDirectory() as prefix, mock.patch.object(
+            smoke, "run_launcher", side_effect=smoke.bazel_command
+        ):
+            command = smoke.main(
+                [
+                    "--output",
+                    "/tmp/service-prefix-not-launched",
+                    "--service-pythonpath-prefix",
+                    prefix,
+                ]
+            )
+        self.assertIn("--test_arg=--service-pythonpath-prefix=" + prefix, command)
+
+
+class MtpEvidenceTest(unittest.TestCase):
+    def graph_evidence(self, directory, real=1):
+        self.evidence(directory, {0: [(1, 2, 1)], 1: [(1, 2, 1)]})
+        path = Path(directory) / "fusion_logs/process.log"
+        lines = [path.read_text()]
+        for rank in range(2):
+            lines += [
+                f"GRAPH_CAPTURE_READY rank={rank}",
+                f"MODEL_EXECUTION rank={rank} mode=graph prefill=1 batch=2 graph_bs=2 count=1 real={real} model_id=0 target_verify=1 draft_commit=0",
+                f"MODEL_EXECUTION rank={rank} mode=graph prefill=1 batch=2 graph_bs=1 count=1 real={real} model_id=1 target_verify=0 draft_commit=1",
+            ]
+        path.write_text("\n".join(lines))
+        return smoke.execution_evidence(Path(directory), 2)
+
+    def test_mtp_graph_requires_real_verify_and_commit_on_every_rank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.graph_evidence(directory)
+        self.assertEqual(smoke.validate_execution_evidence(evidence, 1, 0, 1), [])
+        evidence["ranks"]["1"]["draft_commit_replay"] = False
+        self.assertEqual(
+            smoke.validate_execution_evidence(evidence, 1, 0, 1),
+            ["rank 1: missing draft_commit_replay evidence"],
+        )
+
+    def test_mtp_graph_does_not_accept_fake_replays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.graph_evidence(directory, real=0)
+        errors = smoke.validate_execution_evidence(evidence, 1, 0, 1)
+        self.assertTrue(any("missing verify_replay" in e for e in errors))
+        self.assertTrue(any("missing draft_commit_replay" in e for e in errors))
+
+    def test_mtp_graph_still_rejects_ordinary_prompt_prefill_graph(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.graph_evidence(directory)
+        evidence["records"].append(
+            dict(
+                rank=0,
+                mode="graph",
+                prefill=1,
+                batch=1,
+                graph_bs=1,
+                real=1,
+                model_id=0,
+                target_verify=0,
+                draft_commit=0,
+            )
+        )
+        self.assertIn(
+            "Prefill unexpectedly used graph execution",
+            smoke.validate_execution_evidence(evidence, 1, 0, 1),
+        )
+
+    def test_mtp_graph_rejects_silent_eager_verify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.graph_evidence(directory)
+        evidence["records"].append(
+            dict(
+                rank=0,
+                mode="eager",
+                prefill=1,
+                batch=2,
+                graph_bs=0,
+                real=1,
+                model_id=0,
+                target_verify=1,
+                draft_commit=0,
+            )
+        )
+        self.assertIn(
+            "Decode silently used eager execution in graph validation",
+            smoke.validate_execution_evidence(evidence, 1, 0, 1),
+        )
+
+    def evidence(self, directory, witnesses):
+        root = Path(directory)
+        logs = root / "fusion_logs"
+        logs.mkdir(exist_ok=True)
+        lines = []
+        for rank in range(2):
+            pid = 200 + rank
+            lines += [
+                f"[process-{pid}] [rank: {rank}] initialize process_group",
+                f"[process-{pid}] MegaMoE FP8 weights prepared during model construction",
+                f"MODEL_EXECUTION rank={rank} mode=eager prefill=1 batch=1 graph_bs=0 count=1",
+            ]
+            lines += [
+                f"MEASURE_STEP rank={rank} start_us=1 execute_start_us=2 end_us=3 prefill=0 decode={decode} fake=1 input_tokens=0 output_tokens={output} ok={ok}"
+                for decode, output, ok in witnesses.get(rank, [])
+            ]
+        (logs / "process.log").write_text("\n".join(lines))
+        return smoke.execution_evidence(root, 2)
+
+    def test_mtp_verify_uses_logical_decode_and_preserves_non_mtp_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.evidence(directory, {0: [(1, 2, 1)], 1: [(1, 1, 1)]})
+        self.assertFalse(any(r["decode"] for r in evidence["ranks"].values()))
+        self.assertEqual(
+            smoke.validate_execution_evidence(evidence, 0, 0, mtp_tokens=1), []
+        )
+        self.assertEqual(len(smoke.validate_execution_evidence(evidence, 0, 0)), 2)
+
+    def test_fake_zero_output_or_failed_steps_are_not_real_decode_evidence(self):
+        for witness in ((0, 2, 1), (1, 0, 1), (1, 2, 0)):
+            with self.subTest(
+                witness=witness
+            ), tempfile.TemporaryDirectory() as directory:
+                evidence = self.evidence(directory, {0: [witness], 1: [witness]})
+                errors = smoke.validate_execution_evidence(evidence, 0, 0, mtp_tokens=1)
+                self.assertEqual(len(errors), 2)
+                self.assertTrue(all("logical_decode" in e for e in errors))
+
+    def test_every_rank_needs_its_own_real_decode_witness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.evidence(directory, {0: [(1, 2, 1)]})
+        self.assertEqual(
+            smoke.validate_execution_evidence(evidence, 0, 0, mtp_tokens=1),
+            ["rank 1: missing logical_decode evidence"],
+        )
+
+    def test_acceptance_summary_uses_real_request_counters(self):
+        rows = [
+            {
+                "aux_info": {
+                    "speculative_draft_rounds": 69,
+                    "speculative_accepted_tokens_per_pos": [58],
+                }
+            }
+            for _ in range(3)
+        ]
+        result = smoke.speculative_summary(rows, 1)
+        self.assertEqual(result["draft_rounds"], 207)
+        self.assertEqual(result["accepted_draft_tokens"], 174)
+        self.assertAlmostEqual(result["accepted_draft_per_round"], 58 / 69)
+
+    def test_missing_or_impossible_acceptance_is_rejected(self):
+        for aux in (
+            {},
+            {"speculative_draft_rounds": 0, "speculative_accepted_tokens_per_pos": []},
+            {"speculative_draft_rounds": 2, "speculative_accepted_tokens_per_pos": [3]},
+            {
+                "speculative_draft_rounds": 3,
+                "speculative_accepted_tokens_per_pos": [1, 2],
+            },
+        ):
+            with self.subTest(aux=aux), self.assertRaises(RuntimeError):
+                smoke.speculative_summary([{"aux_info": aux}], 4)
+
+    def test_all_rejected_or_short_proposals_are_valid_if_draft_rounds_exist(self):
+        result = smoke.speculative_summary(
+            [
+                {
+                    "aux_info": {
+                        "speculative_draft_rounds": 3,
+                        "speculative_accepted_tokens_per_pos": [],
+                    }
+                }
+            ],
+            4,
+        )
+        self.assertEqual(result["accepted_tokens_per_pos"], [0, 0, 0, 0])
+        self.assertEqual(result["accepted_draft_tokens"], 0)
 
 
 if __name__ == "__main__":

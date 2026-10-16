@@ -130,6 +130,7 @@ class PerformancePresetTest(unittest.TestCase):
         for option in (
             "--steady-concurrency=256",
             "--coord-mode=off",
+            "--mtp-tokens=1",
             "--encoder-profile=baseline",
             "--encoder-gpus=0,1",
             "--bazel-option=--test_env=DG_MEGA_MOE_FP8_GRID_SYNC_DIAG=1",

@@ -105,6 +105,7 @@ py_test(
     srcs = [
         "qwen35_epd_fusion_4gpu_smoke.py",
         "qwen35_epd_fusion_4gpu_smoke_test.py",
+        "qwen35_mixed_video.py",
     ],
     main = "qwen35_epd_fusion_4gpu_smoke_test.py",
     data = [

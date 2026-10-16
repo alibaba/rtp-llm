@@ -218,31 +218,36 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
-    const auto& fifo = runtime_config.fifo_scheduler_config;
-    RTP_LLM_CHECK_WITH_INFO(fifo.pdfusion_coord_mode == "off" || fifo.pdfusion_coord_mode == "cadence",
-                            "unknown pdfusion_coord_mode [%s]",
-                            fifo.pdfusion_coord_mode.c_str());
-    if (fifo.pdfusion_coord_mode == "cadence") {
+    const auto& fifo           = runtime_config.fifo_scheduler_config;
+    const auto  cadence_config = PDFusionCadenceConfig::fromEnv();
+    if (cadence_config.usesCoordinator(fifo.pdfusion_coord_mode, fifo.pdfusion_scheduler_mode)) {
         RTP_LLM_CHECK_WITH_INFO(
             pd_sep_config.role_type == RoleType::PDFUSION && parallelism_config.tp_size == 1
-                && parallelism_config.dp_size == 4 && parallelism_config.ep_size == 4 && parallelism_config.pp_size == 1
-                && parallelism_config.world_size == 4 && parallelism_config.local_world_size == 4
-                && !parallelism_config.prefill_cp_config.is_enabled() && !propose_params_
+                && (parallelism_config.dp_size == 2 || parallelism_config.dp_size == 4)
+                && parallelism_config.ep_size == parallelism_config.dp_size && parallelism_config.pp_size == 1
+                && parallelism_config.world_size == parallelism_config.dp_size
+                && parallelism_config.local_world_size == parallelism_config.dp_size
+                && !parallelism_config.prefill_cp_config.is_enabled()
+                && (!propose_params_ || (isMTPEagle() && !isDSpark()))
                 && !ffn_disaggregate_config.enable_ffn_disaggregate && !runtime_config.use_batch_decode_scheduler
-                && fifo.pdfusion_scheduler_mode == "ratio" && !fifo.enable_mixed_continuous_batching
-                && !deviceInputEnabled(),
-            "global cadence supports only single-host synchronous TP1/DP4/EP4 non-MTP PDFUSION ratio mode");
+                && !fifo.enable_mixed_continuous_batching && !deviceInputEnabled(),
+            "global cadence requires single-host synchronous TP1/DP2/EP2 or TP1/DP4/EP4 PDFUSION");
         auto* normal = dynamic_cast<NormalExecutor*>(executor_.get());
-        RTP_LLM_CHECK_WITH_INFO(normal && normal->supportsCoordinatedSchedule(),
-                                "global cadence does not support async stream dispatch");
+        auto* mtp    = dynamic_cast<MtpExecutor*>(executor_.get());
+        RTP_LLM_CHECK_WITH_INFO(
+            (normal && normal->supportsCoordinatedSchedule()) || (mtp && mtp->supportsCoordinatedSchedule()),
+            "global cadence requires synchronous host dispatch; MTP supports one through four draft tokens");
         RTP_LLM_CHECK_WITH_INFO(fifo.pdfusion_trace_run_id != "unset", "global cadence requires a unique run id");
-        scheduler_.reset(new PDFusionCoordinatedScheduler(runtime_config,
-                                                          model_config_,
-                                                          pd_sep_config,
-                                                          parallelism_config,
-                                                          model_specific_config,
-                                                          resource_context_.cache_manager,
-                                                          metrics_reporter_));
+        scheduler_.reset(
+            new PDFusionCoordinatedScheduler(runtime_config,
+                                             model_config_,
+                                             pd_sep_config,
+                                             parallelism_config,
+                                             model_specific_config,
+                                             resource_context_.cache_manager,
+                                             metrics_reporter_,
+                                             propose_params_ ? static_cast<int>(sp_config.gen_num_per_cycle) : 0,
+                                             cadence_config));
         RTP_LLM_LOG_INFO("create global PDFUSION cadence scheduler, run=%s", fifo.pdfusion_trace_run_id.c_str());
         return;
     }
@@ -663,7 +668,8 @@ absl::Status NormalEngine::step() try {
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            mayAddFakeStream(streams, coordinated && coordinated->plan() == PDFusionPlan::PREFILL);
+            mayAddFakeStream(
+                streams, coordinated && coordinated->plan() == PDFusionPlan::PREFILL, coordinated != nullptr);
         }
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
@@ -716,7 +722,13 @@ absl::Status NormalEngine::step() try {
                          "waiting_after=%ld loading_after=%ld oldest_waiting_us=%ld "
                          "prefill=%d decode=%d fake=%d input_tokens=%ld graph_batch=-1 "
                          "ready_prefill=%ld ready_decode=%ld oldest_ready_us=%ld decode_unserved_us=%ld "
-                         "ready_mask=%ld commit_mask=%ld prepare_us=%ld control_us=%ld commit_us=%ld",
+                         "ready_mask=%ld commit_mask=%ld prepare_us=%ld control_us=%ld commit_us=%ld "
+                         "cadence_adaptive=%ld cadence_reason=%s decode_peak=%ld low_decode_mask=%ld "
+                         "decode_window=%ld low_water_pct=%ld prefill_max_wait_ms=%ld "
+                         "min_decode_share_pct=%ld prefill_admit_allowed=%d last_model_us=%ld decode_debt_us=%ld "
+                         "debt_before_scaled=%ld debt_after_scaled=%ld charged_plan=%ld admit_before=%ld "
+                         "admit_credit_before_scaled=%ld admit_credit_after_scaled=%ld "
+                         "local_draining=%ld drain_mask=%ld",
                          runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
                          parallelism_config.dp_rank,
                          control_epoch,
@@ -754,7 +766,26 @@ absl::Status NormalEngine::step() try {
                          coordinated ? coordinated->committedMask() : 0L,
                          coordinated ? coordinated->prepareUs() : 0L,
                          coordinated ? coordinated->controlUs() : 0L,
-                         coordinated ? coordinated->commitUs() : 0L);
+                         coordinated ? coordinated->commitUs() : 0L,
+                         coordinated ? coordinated->cadenceConfig().adaptive : 0L,
+                         coordinated ? coordinated->cadenceDecision().reason : "local",
+                         coordinated ? coordinated->cadenceDecision().decode_peak[parallelism_config.dp_rank] : 0L,
+                         coordinated ? coordinated->cadenceDecision().low_decode_mask : 0L,
+                         coordinated ? coordinated->cadenceConfig().decode_window : 64L,
+                         coordinated ? coordinated->cadenceConfig().low_water_pct : 50L,
+                         coordinated ? coordinated->cadenceConfig().prefill_max_wait_ms : 0L,
+                         coordinated ? coordinated->cadenceConfig().min_decode_share_pct : 25L,
+                         coordinated ? static_cast<int>(coordinated->prefillAdmissionAllowed()) : 1,
+                         coordinated ? coordinated->lastPrepared().last_model_us : 0L,
+                         coordinated ? coordinated->cadenceDecision().decode_debt_us : 0L,
+                         coordinated ? coordinated->cadenceDecision().debt_before_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().debt_after_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().charged_plan : 0L,
+                         coordinated ? coordinated->cadenceDecision().admit_before : 1L,
+                         coordinated ? coordinated->cadenceDecision().admit_credit_before_scaled : 0L,
+                         coordinated ? coordinated->cadenceDecision().admit_credit_after_scaled : 0L,
+                         coordinated ? coordinated->lastPrepared().draining : 0L,
+                         coordinated ? coordinated->cadenceDecision().drain_mask : 0L);
     }
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
@@ -877,7 +908,7 @@ bool NormalEngine::isDSpark() {
     return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill) {
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool global_prefill, bool coordinated) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
@@ -904,6 +935,20 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool 
                     } else {
                         has_decode = true;
                     }
+                }
+                if (coordinated) {
+                    // Every EP rank has the same global phase. Populate only that phase;
+                    // an opposite-phase fake would add unnecessary model collectives.
+                    RTP_LLM_CHECK_WITH_INFO(!(global_prefill ? has_decode : has_prefill),
+                                            "MTP real streams violate the coordinated phase");
+                    if (global_prefill && !has_prefill) {
+                        streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
+                            1, model_config_, runtime_config, resource_context_));
+                    } else if (!global_prefill && !has_decode) {
+                        streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
+                            propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                    }
+                    break;
                 }
                 if (!has_prefill && !runtime_config.use_batch_decode_scheduler) {
                     streams.emplace_back(

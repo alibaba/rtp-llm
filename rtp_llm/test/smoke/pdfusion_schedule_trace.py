@@ -108,8 +108,8 @@ def align(lines, run_id, ranks=4, allow_drain_tail=False):
                 real = begin["prefill"] + begin["decode"]
                 bit = 1 << begin["rank"]
                 if (
-                    not 0 <= begin["ready_mask"] <= 15
-                    or not 1 <= begin["commit_mask"] <= 15
+                    not 0 <= begin["ready_mask"] <= (1 << ranks) - 1
+                    or not 1 <= begin["commit_mask"] <= (1 << ranks) - 1
                 ):
                     raise ValueError("invalid global masks")
                 if bool(begin["ready_mask"] & bit) != bool(begin["ready_prefill"]):
@@ -154,6 +154,201 @@ def align(lines, run_id, ranks=4, allow_drain_tail=False):
             raise ValueError(f"step {step}: no overlapping execution interval")
         complete.append(rows)
     return complete, dict(rank_begin_counts=counts, excluded_drain_tail=tail)
+
+
+def validate_admission_pacing(rows, share, previous):
+    fields = (
+        "debt_before_scaled",
+        "debt_after_scaled",
+        "charged_plan",
+        "admit_before",
+        "decode_debt_us",
+    )
+    for key in fields:
+        if any(key not in row for row in rows) or len({row[key] for row in rows}) != 1:
+            raise ValueError("cross-rank admission budget mismatch")
+    before, after, charged, admit, debt_us = (rows[0][key] for key in fields)
+    credit_fields = ("admit_credit_before_scaled", "admit_credit_after_scaled")
+    has_credit = any(key in row for row in rows for key in credit_fields)
+    before_credit = after_credit = 0
+    if has_credit:
+        for key in credit_fields:
+            if (
+                any(key not in row for row in rows)
+                or len({row[key] for row in rows}) != 1
+            ):
+                raise ValueError("cross-rank admission lookahead mismatch")
+        before_credit, after_credit = (rows[0][key] for key in credit_fields)
+        if min(before_credit, after_credit) < 0:
+            raise ValueError("invalid admission lookahead credit")
+    costs = [row.get("last_model_us", -1) for row in rows]
+    if any(not 0 <= cost <= 600000000 for cost in costs) or charged not in (0, 1, 2):
+        raise ValueError("invalid completed model cost")
+    cost = max(costs)
+    expected_admit = 0 if charged == 1 else int(before <= before_credit)
+    if admit != expected_admit or any(
+        row.get("prefill_admit_allowed") != int(admit or not row["ready_decode"])
+        for row in rows
+    ):
+        raise ValueError("admission gate disagrees with Decode budget")
+    expected = before
+    if charged == 1:
+        expected += cost * share
+    elif charged == 2:
+        credit = cost * (100 - share)
+        expected = max(expected - credit, -credit)
+    if not any(row["ready_decode"] for row in rows):
+        expected = 0
+    expected_credit = (
+        cost * (100 - share)
+        if charged == 2 and any(row["ready_decode"] for row in rows)
+        else 0
+    )
+    if has_credit and after_credit != expected_credit:
+        raise ValueError("admission lookahead exceeds completed Decode quantum")
+    if after != expected or debt_us != max(0, after) // (100 - share):
+        raise ValueError("admission budget cost accounting mismatch")
+    epoch = rows[0]["control_epoch"]
+    gap = previous is not None and epoch != previous[0] + 1
+    if previous is not None and has_credit != previous[4]:
+        raise ValueError("admission lookahead schema changed during run")
+    if previous is not None and not gap:
+        if before != previous[1] or charged != previous[2]:
+            raise ValueError("admission budget changed between consecutive epochs")
+        expected_before_credit = 0 if charged == 1 else previous[3]
+        if before_credit != expected_before_credit:
+            raise ValueError("admission lookahead changed between consecutive epochs")
+    # IDLE/cancelled zero-work control epochs have no model begin/end. Their
+    # explicit epoch gaps are counted; each visible transition is still checked.
+    real = any(row.get("prefill", 0) + row["decode"] for row in rows)
+    completed = {"prefill": 1, "decode": 2}[rows[0]["global_plan"]] if real else 0
+    return (epoch, after, completed, after_credit, has_credit), int(gap)
+
+
+def validate_cadence(steps, ratio):
+    """Replay either policy from reservations and completed real Decode batches."""
+    history = collections.deque()
+    config = None
+    since = None
+    phases = {"prefill": 0, "decode": 0}
+    reasons = collections.Counter()
+    budget_previous, budget_gaps = None, 0
+    draining_seen_mask = 0
+    for rows in steps:
+        configs = {
+            (
+                r.get("cadence_adaptive", 0),
+                r.get("decode_window", 64),
+                r.get("low_water_pct", 50),
+                r.get("prefill_max_wait_ms", 1000),
+                r.get("min_decode_share_pct", 0),
+            )
+            for r in rows
+        }
+        if len(configs) != 1:
+            raise ValueError("cross-rank cadence configuration mismatch")
+        current = configs.pop()
+        if config is not None and config != current:
+            raise ValueError("cadence configuration changed during run")
+        config = current
+        adaptive, window, pct, wait_ms, share = config
+        if (
+            adaptive not in (0, 1)
+            or not 1 <= window <= 1000000
+            or not 1 <= pct <= 100
+            or not 0 <= wait_ms <= 600000
+            or not 0 <= share <= 99
+        ):
+            raise ValueError("invalid cadence configuration")
+        prefill = any(r["ready_prefill"] for r in rows)
+        decode = any(r["ready_decode"] for r in rows)
+        if adaptive:
+            if any("local_draining" in r or "drain_mask" in r for r in rows):
+                if any(
+                    r.get("local_draining") not in (0, 1) or "drain_mask" not in r
+                    for r in rows
+                ):
+                    raise ValueError("invalid or missing drain evidence")
+                drain_mask = sum(1 << r["rank"] for r in rows if r["local_draining"])
+                if any(r["drain_mask"] != drain_mask for r in rows):
+                    raise ValueError("cross-rank drain mask mismatch")
+            else:
+                drain_mask = 0
+            if drain_mask & draining_seen_mask != draining_seen_mask:
+                raise ValueError("drain signal regressed")
+            draining_seen_mask |= drain_mask
+            if share:
+                budget_previous, gap = validate_admission_pacing(
+                    rows, share, budget_previous
+                )
+                budget_gaps += gap
+            peaks = [
+                max((sample[i] for sample in history), default=r["ready_decode"])
+                for i, r in enumerate(rows)
+            ]
+            low_mask = sum(
+                1 << r["rank"]
+                for i, r in enumerate(rows)
+                if not r["ready_decode"] or r["ready_decode"] * 100 <= peaks[i] * pct
+            )
+            if all(r["ready_prefill"] for r in rows):
+                expected, reason = "prefill", "all_ready"
+            elif prefill and low_mask:
+                expected, reason = "prefill", "decode_low"
+            elif prefill and drain_mask:
+                expected, reason = "prefill", "drain"
+            elif (
+                prefill
+                and wait_ms > 0
+                and max(r["oldest_ready_us"] for r in rows if r["ready_prefill"])
+                >= wait_ms * 1000
+            ):
+                expected, reason = "prefill", "prefill_timeout"
+            else:
+                expected = "decode" if decode else "idle"
+                reason = (
+                    ("accumulate" if prefill else "decode_only") if decode else "idle"
+                )
+            for i, r in enumerate(rows):
+                if (
+                    r.get("decode_peak") != peaks[i]
+                    or r.get("low_decode_mask") != low_mask
+                    or r.get("cadence_reason") != reason
+                ):
+                    raise ValueError("adaptive cadence evidence disagrees with replay")
+        else:
+            if since is None:
+                since = int(ratio)
+            expected = (
+                "prefill"
+                if prefill and (not decode or since >= int(ratio))
+                else "decode"
+            )
+            reason = "ratio"
+        plan = rows[0]["global_plan"]
+        if any(
+            r["epoch_scope"] != "global_control" or r["global_plan"] != expected
+            for r in rows
+        ):
+            raise ValueError("cadence trace violates scheduling policy")
+        phases[plan] += 1
+        reasons[reason] += 1
+        if not adaptive:
+            since = 0 if plan == "prefill" else min(since + 1, int(ratio))
+        if adaptive and plan == "decode" and any(r["decode"] for r in rows):
+            history.append(tuple(r["decode"] for r in rows))
+            while len(history) > window:
+                history.popleft()
+    return dict(
+        phases=phases,
+        reasons=dict(reasons),
+        policy="adaptive" if config and config[0] else "ratio",
+        decode_window=config[1] if config else 64,
+        low_water_pct=config[2] if config else 50,
+        prefill_max_wait_ms=config[3] if config else 1000,
+        min_decode_share_pct=config[4] if config else 0,
+        budget_continuity_gaps=budget_gaps,
+    )
 
 
 def summarize(steps, lo_us=0, hi_us=float("inf")):
@@ -229,6 +424,15 @@ def summarize(steps, lo_us=0, hi_us=float("inf")):
                 (r.get("decode_unserved_us", 0) for rows, _ in entries for r in rows),
                 default=0,
             ),
+            admission_throttled_snapshots=sum(
+                r.get("prefill_admit_allowed", 1) == 0
+                for rows, _ in entries
+                for r in rows
+            ),
+            decode_debt_max_us=max(
+                (r.get("decode_debt_us", 0) for rows, _ in entries for r in rows),
+                default=0,
+            ),
         )
     return result
 
@@ -238,12 +442,21 @@ def main():
     parser.add_argument("log", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--ranks", type=int, choices=(2, 4), default=4)
     parser.add_argument("--steady-summary", type=Path)
     parser.add_argument("--allow-drain-tail", action="store_true")
+    parser.add_argument(
+        "--cadence-ratio",
+        type=int,
+        help="Replay global cadence policy (ratio ignored by adaptive mode)",
+    )
     args = parser.parse_args()
     with args.log.open(errors="strict") as stream:
         steps, metadata = align(
-            stream, args.run_id, allow_drain_tail=args.allow_drain_tail
+            stream,
+            args.run_id,
+            ranks=args.ranks,
+            allow_drain_tail=args.allow_drain_tail,
         )
     result = dict(
         metadata,
@@ -262,6 +475,8 @@ def main():
             )
             for name, s in json.loads(args.steady_summary.read_text()).items()
         }
+    if args.cadence_ratio is not None:
+        result["cadence"] = validate_cadence(steps, args.cadence_ratio)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 

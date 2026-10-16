@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionCoordinatedScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -22,6 +23,89 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+namespace {
+class AdaptiveEnvScope {
+public:
+    AdaptiveEnvScope():
+        present_(std::getenv("PDFUSION_CADENCE_ADAPTIVE") != nullptr),
+        value_(present_ ? std::getenv("PDFUSION_CADENCE_ADAPTIVE") : "") {
+        ::setenv("PDFUSION_CADENCE_ADAPTIVE", "0", 1);
+    }
+    ~AdaptiveEnvScope() {
+        if (present_)
+            ::setenv("PDFUSION_CADENCE_ADAPTIVE", value_.c_str(), 1);
+        else
+            ::unsetenv("PDFUSION_CADENCE_ADAPTIVE");
+    }
+
+private:
+    bool        present_;
+    std::string value_;
+};
+}  // namespace
+
+TEST_F(NormalEngineTest, testAdaptiveAutomaticallySelectsCoordinatorWithoutLegacyConfiguration) {
+    AdaptiveEnvScope scope;
+    auto             engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    ::setenv("PDFUSION_CADENCE_ADAPTIVE", "1", 1);
+    engine->pd_sep_config.role_type = RoleType::PDFUSION;
+    auto& parallel                  = engine->parallelism_config;
+    parallel.tp_size                = 1;
+    parallel.pp_size                = 1;
+    auto& fifo                      = engine->runtime_config.fifo_scheduler_config;
+    fifo.max_context_batch_size     = 1;
+    fifo.pdfusion_schedule_trace    = true;
+    fifo.pdfusion_trace_run_id      = "adaptive-selection-unit-test";
+    fifo.pdfusion_coord_mode        = "off";
+    fifo.pdfusion_scheduler_mode    = "";
+    for (int ranks : {2, 4}) {
+        parallel.dp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = ranks;
+        for (const auto& ratio : {"", "0", "7", "1/7", "invalid"}) {
+            fifo.decode_prefill_ratio = ratio;
+            engine->initScheduler();
+            auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(engine->scheduler_.get());
+            ASSERT_NE(coordinated, nullptr);
+            EXPECT_EQ(coordinated->cadenceConfig().adaptive, 1);
+            EXPECT_EQ(coordinated->decode_steps_, 1);
+            EXPECT_EQ(fifo.pdfusion_coord_mode, "off");
+            EXPECT_EQ(fifo.pdfusion_scheduler_mode, "");
+            EXPECT_EQ(fifo.decode_prefill_ratio, ratio);
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testDisabledAdaptivePreservesFifoRatioAndExplicitCadenceSelection) {
+    AdaptiveEnvScope scope;
+    auto             engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->pd_sep_config.role_type = RoleType::PDFUSION;
+    auto& fifo                      = engine->runtime_config.fifo_scheduler_config;
+    fifo.pdfusion_coord_mode        = "off";
+    fifo.pdfusion_scheduler_mode    = "";
+    engine->initScheduler();
+    EXPECT_NE(dynamic_cast<FIFOScheduler*>(engine->scheduler_.get()), nullptr);
+    fifo.pdfusion_scheduler_mode = "ratio";
+    fifo.decode_prefill_ratio    = "7";
+    engine->initScheduler();
+    auto* ratio = dynamic_cast<PDFusionRatioScheduler*>(engine->scheduler_.get());
+    ASSERT_NE(ratio, nullptr);
+    EXPECT_EQ(dynamic_cast<PDFusionCoordinatedScheduler*>(ratio), nullptr);
+    EXPECT_EQ(ratio->decode_prefill_step_, 7);
+    auto& parallel   = engine->parallelism_config;
+    parallel.tp_size = parallel.pp_size = 1;
+    parallel.dp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = 4;
+    fifo.max_context_batch_size                                                           = 1;
+    fifo.pdfusion_schedule_trace                                                          = true;
+    fifo.pdfusion_trace_run_id = "legacy-selection-unit-test";
+    fifo.pdfusion_coord_mode   = "cadence";
+    engine->initScheduler();
+    auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(engine->scheduler_.get());
+    ASSERT_NE(coordinated, nullptr);
+    EXPECT_EQ(coordinated->cadenceConfig().adaptive, 0);
+    EXPECT_EQ(coordinated->decode_steps_, 7);
+}
 
 TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
     EXPECT_EQ(NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
