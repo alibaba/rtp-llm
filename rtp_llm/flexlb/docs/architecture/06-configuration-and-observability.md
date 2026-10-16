@@ -70,6 +70,11 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 仍会校验失败并保留当前快照。切换模式需要重启 Master，并在启动文档中配置完整的目标分支。
 其余业务组件每次读取快照的参数可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
 
+`router.roles.decode.availability.maxEngineRequests` 和 `maxKvUsagePercent` 随配置快照更新。
+新请求进入 Master 时保存当前配置，Decode 选路、排队重试和派发都沿用该请求的快照。
+请求数上限、KV 百分比预算和请求 KV 需求保持到预留与派发；已派发的请求继续执行。
+环境变量来源只在启动时读取配置。
+
 旧的字段级行为变量 `BLOCK_HASH_STRATEGY`、`FLEXLB_LOG_LEVEL`、
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。

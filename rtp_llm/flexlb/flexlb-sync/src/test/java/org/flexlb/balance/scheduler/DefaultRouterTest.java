@@ -40,6 +40,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -474,6 +475,68 @@ class DefaultRouterTest {
             verify(decode, never()).reserve(any(), anyString(), anyLong(), anyLong(), anyInt());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+    }
+
+    @Test
+    void configReplacementAppliesDecodeRequestLimitOnlyToNewRequests() {
+        FlexlbConfig initial = SchedulingTestConfig.newConfig();
+        initial.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        BalanceContext waiting = RequestLifecycleTestSupport.context(current.get(), 701L);
+        var usage = new DecodeEndpoint.CapacityUsage(2L, 1_000L, 1_000L, 0L, 0L);
+        DecodeBinding firstAttempt = DecodeBinding.capture(waiting);
+        assertFalse(firstAttempt.capacity().evaluate(usage, 10L, 10L).fits());
+
+        FlexlbConfig increased = SchedulingTestConfig.newConfig();
+        increased.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(4L);
+        current.set(increased);
+        DecodeBinding retried = DecodeBinding.capture(waiting);
+        DecodeBinding newRequest = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 702L));
+        assertEquals(1L, firstAttempt.capacity().maxEngineRequests());
+        assertEquals(1L, retried.capacity().maxEngineRequests());
+        assertFalse(retried.capacity().evaluate(usage, 10L, 10L).fits());
+        assertEquals(4L, newRequest.capacity().maxEngineRequests());
+        assertTrue(newRequest.capacity().evaluate(usage, 10L, 10L).fits());
+
+        FlexlbConfig reduced = SchedulingTestConfig.newConfig();
+        reduced.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
+        current.set(reduced);
+        assertEquals(1L, DecodeBinding.capture(waiting).capacity().maxEngineRequests());
+        assertEquals(4L, newRequest.capacity().maxEngineRequests());
+        DecodeBinding nextAttempt = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 703L));
+        assertEquals(2L, nextAttempt.capacity().maxEngineRequests());
+        assertFalse(nextAttempt.capacity().evaluate(usage, 10L, 10L).fits());
+    }
+
+    @Test
+    void configReplacementAppliesDecodeKvPercentageOnlyToNewRequests() {
+        FlexlbConfig initial = SchedulingTestConfig.newConfig();
+        initial.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(90L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        BalanceContext waiting = RequestLifecycleTestSupport.context(current.get(), 704L);
+        waiting.getRequest().setSeqLen(10L);
+        waiting.getRequest().setMaxNewTokens(20);
+        var usage = new DecodeEndpoint.CapacityUsage(0L, 1_000L, 120L, 0L, 880L);
+        DecodeBinding firstAttempt = DecodeBinding.capture(waiting);
+        assertFalse(firstAttempt.capacity().evaluate(usage, 10L, 30L).fits());
+
+        FlexlbConfig increased = SchedulingTestConfig.newConfig();
+        increased.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(95L);
+        current.set(increased);
+        DecodeBinding retried = DecodeBinding.capture(waiting);
+        DecodeBinding newRequest = DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 705L));
+        assertEquals(90L, retried.capacity().maxKvUsagePercent());
+        assertFalse(retried.capacity().evaluate(usage, 10L, 30L).fits());
+        assertEquals(95L, newRequest.capacity().maxKvUsagePercent());
+        assertTrue(newRequest.capacity().evaluate(usage, 10L, 30L).fits());
+
+        FlexlbConfig reduced = SchedulingTestConfig.newConfig();
+        reduced.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(80L);
+        current.set(reduced);
+        assertEquals(90L, DecodeBinding.capture(waiting).capacity().maxKvUsagePercent());
+        assertEquals(95L, newRequest.capacity().maxKvUsagePercent());
+        assertEquals(80L, DecodeBinding.capture(RequestLifecycleTestSupport.context(current.get(), 706L))
+                .capacity().maxKvUsagePercent());
     }
 
     private static void stubPrefillCommit(PrefillEndpoint prefill) {

@@ -314,6 +314,10 @@ inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 
 be in `[1, 100]`; zero and negative values are rejected during configuration validation.
 `maxEngineRequests`, when configured, covers the ownership scope of the current admission stage,
 including dispatch shadows and permits; it is not the Engine's physical RUNNING concurrency.
+With Nacos or UniConfig, changes to `maxEngineRequests` and `maxKvUsagePercent` apply to new
+requests. Each request keeps the configuration captured when it entered the Master, including
+when it waits in the queue and retries Decode placement. The Decode limits and request KV demand
+are fixed through reservation and dispatch. `FLEXLB_CONFIG` from the environment is read at startup.
 
 See [FlexLB scheduling and configuration](docs/priority-scheduler-delivery-modes.md)
 for lifecycle behavior, capacity accounting, configuration defaults, and the mode matrix.

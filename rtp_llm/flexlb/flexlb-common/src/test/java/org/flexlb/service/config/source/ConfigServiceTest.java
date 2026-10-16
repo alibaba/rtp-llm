@@ -225,6 +225,30 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdateReplacesDecodeLimitsWithoutChangingExistingSnapshot() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "router":{"roles":{"decode":{"availability":{"maxEngineRequests":128,"maxKvUsagePercent":90}}}}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        FlexlbConfig initial = service.loadBalanceConfig();
+
+        source.emit("""
+                {"schemaVersion":3,"router":{"roles":{"decode":{"availability":{
+                    "maxEngineRequests":256,"maxKvUsagePercent":95}}}}}
+                """);
+        FlexlbConfig updated = service.loadBalanceConfig();
+        assertThat(updated).isNotSameAs(initial);
+        assertThat(initial.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests()).isEqualTo(128L);
+        assertThat(updated.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests()).isEqualTo(256L);
+        assertThat(initial.getRouter().getRoles().getDecode().getAvailability().getMaxKvUsagePercent()).isEqualTo(90);
+        assertThat(updated.getRouter().getRoles().getDecode().getAvailability().getMaxKvUsagePercent()).isEqualTo(95);
+
+        source.emit("{\"schemaVersion\":3,\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":0}}}}}");
+        assertThat(service.loadBalanceConfig()).isSameAs(updated);
+    }
+
+    @Test
     void runtimeUpdateChangesHighPriorityThreshold() {
         FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
