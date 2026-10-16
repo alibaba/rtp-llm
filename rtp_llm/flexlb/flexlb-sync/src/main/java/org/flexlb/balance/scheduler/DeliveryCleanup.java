@@ -1,8 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import com.google.common.collect.MapMaker;
-import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.util.Logger;
 
 import java.util.Objects;
@@ -19,7 +18,7 @@ final class DeliveryCleanup {
     private static final int MAX_ATTEMPTS = 8;
     private final ConcurrentMap<DeliveryClaim, CompletableFuture<Void>> sessions = new MapMaker().weakKeys().makeMap();
 
-    CompletableFuture<Void> start(DeliveryClaim claim, EngineCancelChannel channel, SchedulerRuntime runtime) {
+    CompletableFuture<Void> start(DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime) {
         var found = sessions.get(claim);
         if (found != null) { return found; }
         var finished = new CompletableFuture<Void>();
@@ -28,7 +27,7 @@ final class DeliveryCleanup {
         var settled = runtime.signals().delivery(claim).toCompletableFuture();
         settled.whenComplete((ignored, failure) -> sessions.remove(claim, finished));
         if (settled.isDone()) { finished.complete(null); return finished; }
-        var session = new Session(claim, channel, runtime, settled, finished);
+        var session = new Session(claim, client, runtime, settled, finished);
         try { runtime.deliveryCleanupExecutor.execute(session); }
         catch (RuntimeException | Error rejected) {
             if (settled.isDone()) { finished.complete(null); }
@@ -40,17 +39,17 @@ final class DeliveryCleanup {
     private record Facts(CancelReason reason, boolean needsRemote, boolean remoteSettled) { }
     private static final class Session implements Runnable {
         private final DeliveryClaim claim;
-        private final EngineCancelChannel channel;
+        private final EngineGrpcClient client;
         private final SchedulerRuntime runtime;
         private final CompletableFuture<Void> settled;
         private final CompletableFuture<Void> finished;
         private final CompletableFuture<Void> unsupported = new CompletableFuture<>();
         private long deadline;
 
-        Session(DeliveryClaim claim, EngineCancelChannel channel, SchedulerRuntime runtime,
+        Session(DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime,
                 CompletableFuture<Void> settled, CompletableFuture<Void> finished) {
             this.claim = claim;
-            this.channel = channel;
+            this.client = client;
             this.runtime = runtime;
             this.settled = settled;
             this.finished = finished;
@@ -66,7 +65,7 @@ final class DeliveryCleanup {
                         settled.get(remaining(), TimeUnit.NANOSECONDS);
                         break;
                     }
-                    EngineCancelChannel.CancelAck reply = null;
+                    EngineGrpcClient.CancelReply reply = null;
                     Throwable lastFailure = null;
                     try { reply = requestProof(evidence.reason()); }
                     catch (ExecutionException | TimeoutException | RuntimeException failed) { lastFailure = failed; }
@@ -89,11 +88,11 @@ final class DeliveryCleanup {
             }
         }
 
-        private EngineCancelChannel.CancelAck requestProof(CancelReason reason) throws Exception {
-            var remote = Objects.requireNonNull(channel.cancel(
-                    new CancelTarget(claim.item().prefillEp().getIp(), claim.item().prefillEp().getGrpcPort()),
-                    claim.item().requestId(), reason, ACK_TIMEOUT_MS), "cancel future");
-            var applied = new CompletableFuture<EngineCancelChannel.CancelAck>();
+        private EngineGrpcClient.CancelReply requestProof(CancelReason reason) throws Exception {
+            var remote = Objects.requireNonNull(client.cancelAsync(
+                    claim.item().prefillEp().getIp(), claim.item().prefillEp().getGrpcPort(),
+                    reason.toRequest(claim.item().requestId()), ACK_TIMEOUT_MS), "cancel future");
+            var applied = new CompletableFuture<EngineGrpcClient.CancelReply>();
             remote.whenComplete((reply, failure) -> {
                 if (failure != null) { applied.completeExceptionally(failure); }
                 else if (reply == null) { applied.complete(null); }
@@ -106,7 +105,7 @@ final class DeliveryCleanup {
         }
 
         /** Late replies retain their own accepted request-work owner after this session stops retrying. */
-        private void apply(EngineCancelChannel.CancelAck reply, CompletableFuture<EngineCancelChannel.CancelAck> applied) {
+        private void apply(EngineGrpcClient.CancelReply reply, CompletableFuture<EngineGrpcClient.CancelReply> applied) {
             var accepted = runtime.tryRegisterRequestWork(claim.owner());
             if (accepted == null) { applied.complete(reply); return; }
             try (accepted) {
@@ -121,7 +120,7 @@ final class DeliveryCleanup {
                                     case NOT_FOUND -> ContextResult.CancelEvidenceKind.NOT_FOUND;
                                     case UNSUPPORTED -> ContextResult.CancelEvidenceKind.UNSUPPORTED;
                                 }, System.currentTimeMillis()));
-                        if (reply == EngineCancelChannel.CancelAck.UNSUPPORTED && unsupported.complete(null)) {
+                        if (reply == EngineGrpcClient.CancelReply.UNSUPPORTED && unsupported.complete(null)) {
                             try { Logger.warn("[delivery-cleanup] remote cancellation unsupported: request_id={}, worker={}:{}; "
                                             + "active cancellation retries stopped; waiting for Worker completion or retirement",
                                     claim.item().requestId(), claim.item().prefillEp().getIp(), claim.item().prefillEp().getGrpcPort()); }

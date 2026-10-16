@@ -1,18 +1,18 @@
 package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
-import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler;
+import org.flexlb.balance.scheduler.AdmissionHandle;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestTaskScheduler;
 import org.flexlb.config.ConfigService;
@@ -20,17 +20,17 @@ import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.DecodeTaskPhase;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
 import org.flexlb.service.monitor.RequestSchedulerReporter.EvictionEvent;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -40,9 +40,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import javax.annotation.PreDestroy;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -98,7 +98,7 @@ public class DecodeCapacityAcquirer {
 
     private final RequestSchedulerReporter reporter;
     private volatile boolean shutdown;
-    private final EngineCancelChannel cancelChannel;
+    private final EngineGrpcClient engineClient;
     private final RequestRepository requests;
     private final RequestTaskScheduler runtime;
     private final AtomicLong tokenSequence = new AtomicLong(1);
@@ -107,11 +107,11 @@ public class DecodeCapacityAcquirer {
     private final PreemptionConfig preemption;
 
     @Autowired
-    public DecodeCapacityAcquirer(EngineCancelChannel cancelChannel, RequestRepository requests,
+    public DecodeCapacityAcquirer(EngineGrpcClient engineClient, RequestRepository requests,
                                   RequestTaskScheduler runtime, RequestSchedulerReporter reporter,
                                   ConfigService configService, AdmissionCapacity capacity) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
+        this.engineClient = Objects.requireNonNull(engineClient, "engineClient");
         this.requests = Objects.requireNonNull(requests, "requests");
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.capacity = Objects.requireNonNull(capacity, "capacity");
@@ -189,7 +189,7 @@ public class DecodeCapacityAcquirer {
             for (ClaimedVictim owned : capability.claims) {
                 owned.acknowledgement = capability.outboundStarted(owned)
                         ? cancel(owned, command.cancelAckTimeoutMs())
-                        : CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.FAILED);
+                        : CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED);
             }
 
             CompletableFuture<PreemptionResult> protocol = CompletableFuture.allOf(
@@ -226,7 +226,7 @@ public class DecodeCapacityAcquirer {
             if (owned.requestResolved()) {
                 continue;
             }
-            EngineCancelChannel.CancelAck outcome = owned.acknowledgement.join();
+            EngineGrpcClient.CancelReply outcome = owned.acknowledgement.join();
             switch (outcome) {
                 case ACCEPTED, REQUEST_FENCED -> {
                     boolean transitioned =
@@ -289,24 +289,27 @@ public class DecodeCapacityAcquirer {
                 work -> runtime.executeRequestWork(context, work));
     }
 
-    private CompletableFuture<EngineCancelChannel.CancelAck> cancel(
+    private CompletableFuture<EngineGrpcClient.CancelReply> cancel(
             ClaimedVictim victim,
             long timeoutMs) {
         try {
-            CompletableFuture<EngineCancelChannel.CancelAck> stage =
-                    cancelChannel.cancel(victim.claim.cancelTarget(), victim.requestId(), CancelReason.PRIORITY_PREEMPTED, timeoutMs);
+            var target = victim.claim.cancelTarget();
+            if (target == null) { return CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED); }
+            CompletableFuture<EngineGrpcClient.CancelReply> stage = engineClient.cancelAsync(
+                    target.prefillIp(), target.prefillGrpcPort(),
+                    CancelReason.PRIORITY_PREEMPTED.toRequest(victim.requestId()), timeoutMs);
             if (stage == null) {
                 return CompletableFuture.completedFuture(
-                        EngineCancelChannel.CancelAck.FAILED);
+                        EngineGrpcClient.CancelReply.FAILED);
             }
             return stage.handle((outcome, failure) -> failure == null
                             && outcome != null
-                    ? outcome : EngineCancelChannel.CancelAck.FAILED);
+                    ? outcome : EngineGrpcClient.CancelReply.FAILED);
         } catch (RuntimeException | Error failure) {
             // The capability marked this victim OUTBOUND before invocation,
             // so close conservatively transfers its exact claims to UNKNOWN.
             return CompletableFuture.completedFuture(
-                    EngineCancelChannel.CancelAck.FAILED);
+                    EngineGrpcClient.CancelReply.FAILED);
         }
     }
 
@@ -330,7 +333,7 @@ public class DecodeCapacityAcquirer {
     private final class ClaimedVictim {
         private final DecodeResources.ReservationHandle reservation;
         private final PreemptionRegistration claim;
-        private CompletableFuture<EngineCancelChannel.CancelAck> acknowledgement;
+        private CompletableFuture<EngineGrpcClient.CancelReply> acknowledgement;
         private volatile ClaimDisposition disposition =
                 ClaimDisposition.RELEASABLE;
 

@@ -3,9 +3,7 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import static org.flexlb.balance.scheduler.ContextResult.*;
 import org.flexlb.balance.endpoint.*;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
@@ -29,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
+import static org.flexlb.balance.scheduler.ContextResult.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -378,7 +377,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         var service = SchedulingTestConfig.configService(config);
         dispatcher = new DeliveryDispatcher(grpc, service, null, reporter, null);
         runtime = spy(new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), reporter,
-                mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineCancelChannel.class)));
+                mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineGrpcClient.class)));
         var execution = spy(runtime.deliveries());
         ReflectionTestUtils.setField(runtime, "deliveries", execution);
         doReturn(701L).when(execution).nextBatchId();

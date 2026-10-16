@@ -17,6 +17,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -58,7 +60,7 @@ class RequestConfirmationTimeoutTest {
                 mock(RecentCacheKeyTraceReporter.class));
         var projector = requests;
         var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())), new PlacementAvailability());
-        var runtime = new SchedulerRuntime(SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+        var runtime = new SchedulerRuntime(SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(EngineGrpcClient.class));
         DecodeEndpoint decode = null;
         try {
             WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");
@@ -119,10 +121,9 @@ class RequestConfirmationTimeoutTest {
                 requests.onDeliveryEvidence(claim, new ContextResult.Prediction(claim, org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 0L, 30_000L, System.currentTimeMillis()), System.currentTimeMillis()));
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
-                org.mockito.Mockito.when(SchedulerTestSupport.cancelChannel(requests).cancel(
-                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.Mockito.when(SchedulerTestSupport.engineClient(requests).cancelAsync(org.mockito.ArgumentMatchers.any(), anyInt(),
                         org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
-                        .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
+                        .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.REQUEST_CLEANED));
                 assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
                 requests.onDeliveryEvidence(claim, new ContextResult.TransportResult(claim, DeliveryResult.uncertain(new IllegalStateException("reply was lost")), System.currentTimeMillis()));
             }

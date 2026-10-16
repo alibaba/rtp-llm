@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -17,6 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -68,7 +68,7 @@ class QueuedDecodeWithdrawalTest {
         registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class), mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
         queue = (QueuedRequestScheduler) registry;
-        eviction = new DecodeCapacityAcquirer(mock(EngineCancelChannel.class), SchedulerTestSupport.repository(registry),
+        eviction = new DecodeCapacityAcquirer(mock(EngineGrpcClient.class), SchedulerTestSupport.repository(registry),
                 SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), service,
                 registry.decodeAdmissionCapacity);
         org.mockito.Mockito.doReturn(true).when(queue).requeue(any());
@@ -167,7 +167,7 @@ class QueuedDecodeWithdrawalTest {
             return true;
         }).when(queue).requeue(victim);
         when(prefill.offerPinned(eq(pin), any(), org.mockito.ArgumentMatchers.any())).thenReturn(accepted);
-        var manager = new DecodeCapacityAcquirer(mock(EngineCancelChannel.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry), org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config));
+        var manager = new DecodeCapacityAcquirer(mock(EngineGrpcClient.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry), org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config));
         try (var handle = registry.claimAdmissionHandle(100, future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(handle);
              var plan = RequestProtocolTestSupport.plan(context, RequestRoute.prepare(context,
                 List.of(selection, WorkerAssignment.decode(decode.tryPinGeneration(), decodeStatus, decode.placementVersion()))))) {

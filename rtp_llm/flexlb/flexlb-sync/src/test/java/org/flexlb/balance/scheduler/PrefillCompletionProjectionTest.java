@@ -1,16 +1,15 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import static org.flexlb.balance.scheduler.ContextResult.*;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
@@ -19,6 +18,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.balance.scheduler.ContextResult.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -54,7 +55,7 @@ class PrefillCompletionProjectionTest {
                 mock(RecentCacheKeyTraceReporter.class));
         var projector = requests;
         var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())), new PlacementAvailability());
-        var runtime = new SchedulerRuntime(SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+        var runtime = new SchedulerRuntime(SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(EngineGrpcClient.class));
         try {
             WorkerStatus worker = WorkerStatus.createDiscovered(
                     RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");

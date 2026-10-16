@@ -2,11 +2,11 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -136,7 +136,7 @@ class SchedulerRuntimeTest {
         var dispatcher = SchedulerTestSupport.dispatcher();
         var runtime = org.mockito.Mockito.spy(new SchedulerRuntime(new RequestRepository(), endpoints,
                 mock(DeliveryMetricsReporter.class), mock(RequestSchedulerReporter.class), dispatcher,
-                service, mock(EngineCancelChannel.class)));
+                service, mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
         var expected = new IllegalStateException("placement close failed");
         doThrow(expected).when(scheduler).closePlacement();
@@ -242,7 +242,7 @@ class SchedulerRuntimeTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         var endpoints = mock(EndpointRegistry.class);
         var runtime = org.mockito.Mockito.spy(new SchedulerRuntime(new RequestRepository(), endpoints, mock(DeliveryMetricsReporter.class),
-                mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineCancelChannel.class)));
+                mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineGrpcClient.class)));
         try {
             var owner = spy(new DirectRequestScheduler(mock(RequestWorkerSelector.class), runtime, config,
                     SchedulingTestConfig.capacity(config), mock(RecentCacheKeyTraceReporter.class)));
@@ -360,7 +360,7 @@ class SchedulerRuntimeTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             runtime = new SchedulerRuntime(new RequestRepository(), endpoints, reporter,
-                    mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineCancelChannel.class));
+                    mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineGrpcClient.class));
             runtime.registerScheduler(PlacementConfiguration.create(runtime, config,
                     mock(RequestWorkerSelector.class), reporter, mock(DecodeCapacityAcquirer.class), new PlacementAvailability(), SchedulingTestConfig.capacity(config), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class)));
         }

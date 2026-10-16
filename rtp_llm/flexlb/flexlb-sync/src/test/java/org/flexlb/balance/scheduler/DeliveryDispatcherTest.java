@@ -10,7 +10,6 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DeliveryExecution.DeliveryPermit;
-import static org.flexlb.balance.scheduler.ContextResult.*;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -37,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
+import static org.flexlb.balance.scheduler.ContextResult.*;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,6 +47,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1100,11 +1101,12 @@ class DeliveryDispatcherTest {
         var items = new java.util.ArrayList<RequestRoute>();
         for (int index = 0; index < 6; index++) {
             RequestRoute original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
-            original.prefill().setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
+            ServerStatus prefill = original.prefill();
+            prefill.setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
             if (index == 4) {
-                original.prefill().setServerIp("10.0.1.2");
-                original.prefill().setHttpPort(8301);
-                original.prefill().setGrpcPort(8401);
+                prefill.setServerIp("10.0.1.2");
+                prefill.setHttpPort(8301);
+                prefill.setGrpcPort(8401);
             }
             ServerStatus decode = null;
             if (index != 1) {
@@ -1115,7 +1117,7 @@ class DeliveryDispatcherTest {
                 decode.setGrpcPort(index >= 4 ? 8201 : 8200);
             }
             items.add(SchedulingTestConfig.createRoute(original.ctx(), null,
-                    original.prefill(), decode, endpoint, null, null, original.enqueuedAtMs()));
+                    prefill, decode, endpoint, null, null, original.enqueuedAtMs()));
         }
         CompletableFuture<EngineRpcService.EnqueueBatchRequestPB> sent = new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
@@ -1198,7 +1200,7 @@ class DeliveryDispatcherTest {
         runtime = new SchedulerRuntime(new RequestRepository(), mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 mock(org.flexlb.service.monitor.RequestSchedulerReporter.class), delivery, service,
-                mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+                mock(EngineGrpcClient.class));
         if (meters != null) { runtime.deliveries().configureDeliveryMetrics(meters); }
         return delivery;
     }
@@ -1226,7 +1228,7 @@ class DeliveryDispatcherTest {
                 var failed = (PreparationFailure) call.getArgument(1);
                 observer.accept(item, DeliveryResult.notSent(failed.cause())); return null;
             }).when(item.ctx().data().getScheduler()).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
-                    org.mockito.ArgumentMatchers.argThat(e -> e instanceof PreparationFailure failed && failed.route() == item));
+                    argThat(e -> e instanceof PreparationFailure failed && failed.route() == item));
         }
         DeliveryDispatcher.Batch batch;
         try {

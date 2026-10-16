@@ -3,11 +3,11 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -117,7 +117,7 @@ class QueueRegistrationCancellationTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             var batches = mock(DeliveryMetricsReporter.class);
             runtime = new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), batches,
-                    mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineCancelChannel.class));
+                    mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineGrpcClient.class));
             queue = new QueuedRequestScheduler(config, router, batches, mock(DecodeCapacityAcquirer.class),
                     runtime, new PlacementAvailability(), SchedulingTestConfig.capacity(config), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
             runtime.registerScheduler(queue);

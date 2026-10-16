@@ -2,9 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -189,8 +189,8 @@ public final class SchedulerTestSupport {
     }
 
     public static SchedulerRuntime runtime(RequestScheduler owner) { return ((AbstractRequestScheduler) owner).runtime; }
-    static EngineCancelChannel cancelChannel(RequestScheduler owner) {
-        return (EngineCancelChannel) ReflectionTestUtils.getField(runtime(owner), "cancelChannel");
+    static EngineGrpcClient engineClient(RequestScheduler owner) {
+        return (EngineGrpcClient) ReflectionTestUtils.getField(runtime(owner), "engineClient");
     }
     static Throwable failure(RequestScheduler owner) {
         return (Throwable) ReflectionTestUtils.getField(runtime(owner), "failure");
@@ -202,7 +202,7 @@ public final class SchedulerTestSupport {
     public static AbstractRequestScheduler create(ConfigService config, DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests, RecentCacheKeyTraceReporter trace) {
         var runtime = spy(new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), batches, requests,
-                SchedulerTestSupport.dispatcher(), config, mock(EngineCancelChannel.class)));
+                SchedulerTestSupport.dispatcher(), config, mock(EngineGrpcClient.class)));
         var snapshot = config.loadBalanceConfig();
         AbstractRequestScheduler owner = snapshot.isQueue()
                 ? mock(QueuedRequestScheduler.class, withSettings().useConstructor(snapshot, mock(RequestWorkerSelector.class), batches, mock(DecodeCapacityAcquirer.class), runtime, new PlacementAvailability(), new PlacementConfiguration().decodeAdmissionCapacity(config), trace).defaultAnswer(CALLS_REAL_METHODS))
@@ -239,7 +239,7 @@ public final class SchedulerTestSupport {
         return owner;
     }
 
-    static DeliveryDispatcher createDispatcher(org.flexlb.engine.grpc.EngineGrpcClient client,
+    static DeliveryDispatcher createDispatcher(EngineGrpcClient client,
                                                    org.flexlb.config.ConfigService service,
                                                    int threads, int queueCapacity) {
         var config = org.mockito.Mockito.spy(service.loadBalanceConfig());

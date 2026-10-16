@@ -36,8 +36,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -46,6 +46,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -219,11 +220,12 @@ class QueuedBatchDeliveryTest {
         assertOccupancy(1, 1);
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);
-        var cleanupProof = new java.util.concurrent.CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
-        org.mockito.Mockito.when(SchedulerTestSupport.cancelChannel(registry).cancel(any(), org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(cleanupProof);
+        var cleanupProof = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
+        org.mockito.Mockito.when(SchedulerTestSupport.engineClient(registry).cancelAsync(any(), anyInt(),
+                any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(cleanupProof);
         RequestProtocolTestSupport.expireInactiveRequest(registry, requestContext, handoff + TIMEOUT_MS);
         assertOccupancy(1, 1);
-        cleanupProof.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+        cleanupProof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         if (!ack) { reply.complete(ack(1L)); }
         registry.runtime.signals().delivery(requestContext.snapshot().delivery().identity()).toCompletableFuture().get(2, TimeUnit.SECONDS);
         RequestProtocolTestSupport.awaitCondition(() ->
@@ -239,8 +241,8 @@ class QueuedBatchDeliveryTest {
         RequestContext context = item.ctx();
         CountDownLatch rpcEntered = new CountDownLatch(1);
         CountDownLatch releaseRpc = new CountDownLatch(1);
-        var cleanupProof = new CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
-        when(SchedulerTestSupport.cancelChannel(registry).cancel(any(), anyLong(), any(), anyLong())).thenReturn(cleanupProof);
+        var cleanupProof = new CompletableFuture<EngineGrpcClient.CancelReply>();
+        when(SchedulerTestSupport.engineClient(registry).cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanupProof);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
             assertFalse(Thread.holdsLock(context));
             assertFalse(ledger.prefill.lock.isHeldByCurrentThread());
@@ -262,7 +264,7 @@ class QueuedBatchDeliveryTest {
                     finally { ledger.prefill.lock.unlock(); }
                     registry.cancel(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
                 }).get(2, TimeUnit.SECONDS);
-                cleanupProof.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+                cleanupProof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
                 SchedulerTestSupport.awaitRequestWork(registry.runtime);
                 assertOccupancy(1, 1); // sender has not yet returned, even with remote proof
             } finally { releaseRpc.countDown(); }
@@ -290,7 +292,7 @@ class QueuedBatchDeliveryTest {
         }).when(worker).commitSelection(any());
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(item)));
         verify(registry).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
-                org.mockito.ArgumentMatchers.argThat(e -> e instanceof ContextResult.PreparationFailure failed
+                argThat(e -> e instanceof ContextResult.PreparationFailure failed
                         && failed.route() == item && failed.cause() == failure));
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
@@ -417,7 +419,7 @@ class QueuedBatchDeliveryTest {
             call.callRealMethod();
             callbackExited.countDown();
             throw observerFailure;
-        }).when(registry).onDeliveryEvidence(any(), org.mockito.ArgumentMatchers.argThat(e ->
+        }).when(registry).onDeliveryEvidence(any(), argThat(e ->
                 e instanceof ContextResult.TransportResult result
                         && result.delivery().item() == first));
         submit(List.of(first, second));

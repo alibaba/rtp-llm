@@ -2,9 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -18,6 +18,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -42,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -388,7 +390,7 @@ class RequestResourceAccountingTest {
         final AdmissionHandle admission;
         final DecodeResources.AdmissionCapacity capacity = new DecodeResources.AdmissionCapacity(1, 90);
         long version = 1;
-        final java.util.concurrent.CompletableFuture<org.flexlb.balance.eviction.EngineCancelChannel.CancelAck> cleanup = new java.util.concurrent.CompletableFuture<>();
+        final java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply> cleanup = new java.util.concurrent.CompletableFuture<>();
 
         Fixture() { this(false); }
 
@@ -403,9 +405,9 @@ class RequestResourceAccountingTest {
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = SchedulerTestSupport.create(service, reporter, requestReporter,
                 mock(RecentCacheKeyTraceReporter.class));
-            var channel = mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-            when(channel.cancel(any(), anyLong(), any(), anyLong())).thenReturn(cleanup);
-            org.springframework.test.util.ReflectionTestUtils.setField(requests.runtime, "cancelChannel", channel);
+            var channel = mock(EngineGrpcClient.class);
+            when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
+            org.springframework.test.util.ReflectionTestUtils.setField(requests.runtime, "engineClient", channel);
             var projector = requests;
             var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())), new PlacementAvailability());
             runtime = requests.runtime;
@@ -513,7 +515,7 @@ class RequestResourceAccountingTest {
         }
 
         void proveCleanup() throws Exception {
-            cleanup.complete(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+            cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             requests.runtime.signals().delivery(item.ctx().snapshot().delivery().identity()).toCompletableFuture().get(2, TimeUnit.SECONDS);
             SchedulerTestSupport.awaitRequestWork(requests.runtime);
         }

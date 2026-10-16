@@ -9,6 +9,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -19,6 +20,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import static org.flexlb.balance.scheduler.ContextResult.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
 
 /** A failed physical reconciliation must give back its exact state-only operation token. */
@@ -59,9 +61,9 @@ class RequestReconciliationFailureOwnershipTest {
         var transientFailure = new IllegalStateException("transient Decode reconciliation failure");
         when(decode.updatePreemption(4L, proof)).thenThrow(transientFailure).thenReturn(DecodeResources.ResourceChange.of(matchingDecodeTerminal
                 ? DecodeResources.MutationStatus.STALE : DecodeResources.MutationStatus.APPLIED, false));
-        when(SchedulerTestSupport.cancelChannel(owner).cancel(any(), anyLong(), any(), anyLong()))
+        when(SchedulerTestSupport.engineClient(owner).cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
-                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
+                        EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var failed = new PrefillState.PrefillRequestStatus(route, PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
         try {
             RequestProtocolTestSupport.applyPrefillStatus(owner, context, prefill, RoleType.PREFILL, failed);

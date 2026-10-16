@@ -8,6 +8,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -59,7 +60,7 @@ class PlacementConfigurationTest {
             spring.registerBean(DeliveryMetricsReporter.class, () -> mock(DeliveryMetricsReporter.class));
             spring.registerBean(RequestSchedulerReporter.class, () -> mock(RequestSchedulerReporter.class));
             spring.registerBean(RecentCacheKeyTraceReporter.class, () -> mock(RecentCacheKeyTraceReporter.class));
-            spring.registerBean(org.flexlb.balance.eviction.EngineCancelChannel.class, () -> mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+            spring.registerBean(EngineGrpcClient.class, () -> mock(EngineGrpcClient.class));
             spring.registerBean(DeliveryDispatcher.class, () -> batchDispatcher);
             spring.register(PlacementAvailability.class, RequestRepository.class, PlacementConfiguration.class, SchedulerRuntime.class);
             spring.refresh();
