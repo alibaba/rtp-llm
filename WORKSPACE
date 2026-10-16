@@ -90,6 +90,11 @@ pip_cpu_torch_install_deps()
 load("@pip_arm_torch//:requirements.bzl", pip_arm_torch_install_deps = "install_deps")
 pip_arm_torch_install_deps()
 
+# Routed via @rtp_deps: internal builds install their PPU wheel hub; the
+# open-source copy of this file is a no-op.
+load("@rtp_deps//:pip_ppu_install.bzl", "pip_ppu_install_deps")
+pip_ppu_install_deps()
+
 load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
 pip_gpu_cuda12_torch_install_deps()
 
