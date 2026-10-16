@@ -139,11 +139,26 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_length: Optional[torch.Tensor] = None,
         return_lse: bool = False,
     ) -> torch.Tensor:
+        if kv_cache.shape[-1] == 528 and torch.cuda.get_device_capability(q.device) == (
+            9,
+            0,
+        ):
+            raise ValueError(
+                "SM90 V4.1 decode requires V4 planar 584B KV pools on both P and D; "
+                "528B/288B caches cannot be consumed by the Hopper decode kernel"
+            )
         from rtp_llm.models_py.modules.dsv41.flash_mla import (
             flash_mla_with_kvcache,  # type: ignore[import-not-found]
         )
 
         B, q_len, H, D = q.shape
+        if sched_meta is None:
+            # Component callers may not have an owning model metadata object.
+            # A fresh planner here also captures its GPU initialization during
+            # CUDA Graph capture instead of freezing warmup length values.
+            from flash_mla import get_mla_metadata
+
+            sched_meta, _ = get_mla_metadata()
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
         # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
         # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.

@@ -1,5 +1,6 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+import os
 import weakref
 
 import torch
@@ -28,6 +29,26 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         self.weight = weight
         self.N, self.K = weight.shape
+        self._sm90_linear = None
+        if weight.is_cuda and torch.cuda.get_device_capability(weight.device) == (9, 0):
+            # Bounded Round8 candidate: only the two measured shared-expert
+            # projection shapes. Keep opt-in until whole-model acceptance and
+            # clean performance have been revalidated; no SM100 behavior change.
+            if (
+                os.environ.get("DSV41_SM90_NATIVE_A8", "0") != "1"
+                and os.environ.get("DSV41_SM90_DENSE_G32_SELECTED", "0") == "1"
+                and (self.N, self.K) in ((4608, 5120), (5120, 2304))
+            ):
+                from rtp_llm.models_py.modules.dsv41.sm90_dense_selected import (
+                    Sm90SelectedG32Linear,
+                )
+
+                self._sm90_linear = Sm90SelectedG32Linear(weight, scales)
+                return
+            from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
+
+            self._sm90_linear = Sm90MXFP8Linear(weight, scales)
+            return
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
@@ -63,6 +84,8 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if getattr(self, "_sm90_linear", None) is not None:
+            return self._sm90_linear.forward_quantized(x_q, x_s, out=out)
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -84,6 +107,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        adapter = getattr(self, "_sm90_linear", None)
+        if (
+            adapter is not None
+            and hasattr(adapter, "forward_bf16")
+            and x.dtype == torch.bfloat16
+            and x.numel() // self.K <= 16
+        ):
+            return adapter.forward_bf16(x, out=out)
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 

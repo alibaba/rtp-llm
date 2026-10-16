@@ -260,6 +260,28 @@ def select_strategy(
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
 
+    # V4.1 Hopper cannot consume Mega / grouped FP4's SM100 instructions.
+    # Select its native packed-weight adapter before the SM100-only EP policy.
+    # Explicit requests for another strategy still fail rather than silently
+    # overriding an operator's backend selection.
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9:
+        from .sm90_humming import SM90HummingStrategy
+
+        if forced == "sm90_flashinfer":
+            from .sm90_flashinfer import SM90FlashInferStrategy
+
+            if SM90FlashInferStrategy.can_handle(cfg):
+                return SM90FlashInferStrategy
+            raise RuntimeError("SM90 FlashInfer cannot handle the V4.1 MoE shape/topology")
+        if forced is None or forced == "sm90_humming" or not strict:
+            if SM90HummingStrategy.can_handle(cfg):
+                return SM90HummingStrategy
+            raise RuntimeError("SM90 Humming cannot handle the V4.1 MoE shape/topology")
+        raise RuntimeError(
+            "V4.1 SM90 requires sm90_humming or explicit sm90_flashinfer; "
+            f"requested strategy {forced!r}"
+        )
+
     # Latest upstream Mega's shared path uses block-128 FP8 weights. V4.1
     # checkpoint weights have block-32 MXFP8 scales: run the exact private
     # shared-expert path independently, without requantizing the checkpoint.

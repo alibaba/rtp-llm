@@ -139,13 +139,22 @@ void direct_cluster_kernel(const __grid_constant__ Params params) {
         return;
     }
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
+    const auto cluster = cooperative_groups::this_cluster();
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+    // Hopper uses the upstream INDICES-mode sink: each CTA writes its disjoint
+    // prefix directly to global output. Cross-CTA shared-output staging lost
+    // non-primary above-threshold entries in the SM90 eager/graph regression.
+    // Keep the exact selection/prefix algorithm and the Blackwell sink intact.
+    ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+    cluster.sync();
+#else
     __shared__ int32_t indices[kMaxTopK];
     auto* destination = problem.out;
-    const auto cluster = cooperative_groups::this_cluster();
     problem.out = cluster.map_shared_rank(indices, worker_rank);
     ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
     cluster.sync();
     if (blockIdx.y == worker_rank) copy_output(problem, destination);
+#endif
 }
 
 template <typename ClusterImpl, bool kAlignedInput>
@@ -162,10 +171,16 @@ void persistent_cluster_kernel(const __grid_constant__ Params params) {
         if (problem.seq_len <= problem.topk) {
             if (blockIdx.y == worker_rank) trivial(problem);
         } else {
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+            // Match the direct Hopper cluster's global-output sink.
+            ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+            cluster.sync();
+#else
             problem.out = cluster.map_shared_rank(indices, worker_rank);
             ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
             cluster.sync();
             if (blockIdx.y == worker_rank) copy_output(problem, destination);
+#endif
         }
         cluster.sync();
     }

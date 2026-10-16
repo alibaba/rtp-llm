@@ -55,6 +55,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.stack.enter_context(
             mock.patch.object(warmup, "_DECODE_QUERY_WARMED", set())
         )
+        self.stack.enter_context(
+            mock.patch.object(torch.cuda, "get_device_capability", return_value=(10, 0))
+        )
         # Fail immediately if this test accidentally touches the CUDA runtime.
         for name in ("_lazy_init", "init", "synchronize", "current_device"):
             self.stack.enter_context(
@@ -122,6 +125,19 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(result, (1, 2, 3, 4))
         self.assertEqual(grid.call_args.kwargs["kind"], "v41_fp8_batched")
         self.assertEqual(grid.call_args.kwargs["num_groups"], 8)
+
+    def test_sm90_grid_covers_quantizer_without_sm100_layout_scan(self):
+        with mock.patch.object(
+            warmup.common,
+            "_generate_dense_gemm_warmup_m_grid",
+            side_effect=AssertionError("SM100 layout scan on Hopper"),
+        ):
+            self.assertEqual(
+                warmup._sm90_dense_m_grid(1000, 5120),
+                (1, 2, 3, 4, 16, 17, 511, 512, 819, 820, 1000),
+            )
+            self.assertEqual(warmup._sm90_dense_m_grid(3, 5120), (1, 2, 3))
+            self.assertEqual(warmup._sm90_dense_m_grid(0, 5120), ())
 
     def test_v41_single_accumulator_allows_n256_without_changing_v4(self):
         kwargs = dict(m_value=1024, n_value=32768, k_value=1536, num_sms=152)
@@ -215,6 +231,67 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
 
+    def test_sm90_dense_warms_production_adapter_without_deepgemm(self):
+        operation = self.dense_fixture()
+        operation._sm90_linear = object()
+        self.stack.enter_context(
+            mock.patch.object(torch.cuda, "get_device_capability", return_value=(9, 0))
+        )
+        for name in (
+            "_get_deep_gemm_num_sms",
+            "_generate_dense_gemm_warmup_m_grid",
+            "_run_deepgemm_warmup_launch_with_retry",
+            "_run_deepgemm_warmup_launches_serialized",
+        ):
+            self.stack.enter_context(
+                mock.patch.object(
+                    warmup.common, name, side_effect=AssertionError("DeepGEMM on SM90")
+                )
+            )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup.common,
+                "_run_triton_warmup_launch_with_retry",
+                side_effect=lambda label, desc, launch, **kwargs: launch(),
+            )
+        )
+        with mock.patch.object(
+            warmup,
+            "_run_sm90_dense_warmup_serialized",
+            side_effect=lambda launch: launch(),
+        ):
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+            self.assertEqual(operation.call_count, 4)
+            # The same shape under another loaded SM90 adapter requires its
+            # own warmup even if the environment is no longer set to opt-in.
+            operation._sm90_linear = type("SelectedG32Adapter", (), {})()
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertEqual(
+            [call.args[0].shape[0] for call in operation.call_args_list],
+            [1, 2, 3, 4, 1, 2, 3, 4],
+        )
+
+    def test_sm90_rejects_missing_output_projection_backend(self):
+        _, attn = self.output_fixture()
+        with mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no Humming fallback"):
+                warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertFalse(warmup._DENSE_WARMED)
+
+    def test_sm90_rejects_missing_dense_adapter(self):
+        operation = self.dense_fixture()
+        operation._sm90_linear = None
+        with mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no Humming adapter"):
+                warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
+        self.assertFalse(warmup._DENSE_WARMED)
+
     def output_fixture(self):
         self.dense_fixture()
         output = sys.modules[
@@ -272,6 +349,124 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertEqual(output.warmup_quantized_output.call_count, 2)
         self.assertEqual(output.grouped_output_projection.call_count, 2)
+
+    def sm90_grouped_output_fixture(self):
+        output, attn = self.output_fixture()
+        operation = mock.Mock()
+        attn._sm90_wo_a = operation
+        attn._wo_a_groups_v41 = []
+        self.stack.enter_context(
+            mock.patch.object(torch.cuda, "get_device_capability", return_value=(9, 0))
+        )
+        # Keep large quantizer-boundary shapes as metadata-only CPU fixtures.
+        for name in ("zeros", "ones"):
+            self.stack.enter_context(
+                mock.patch.object(
+                    warmup.torch,
+                    name,
+                    side_effect=lambda size, **kw: torch.empty(
+                        size, dtype=kw["dtype"], device="meta"
+                    ),
+                )
+            )
+        for name in (
+            "_get_deep_gemm_num_sms",
+            "_generate_dense_gemm_warmup_m_grid",
+            "_run_deepgemm_warmup_launch_with_retry",
+            "_run_deepgemm_warmup_launches_serialized",
+        ):
+            self.stack.enter_context(
+                mock.patch.object(
+                    warmup.common, name, side_effect=AssertionError("DeepGEMM on SM90")
+                )
+            )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup,
+                "_run_sm90_dense_warmup_serialized",
+                side_effect=lambda launch: launch(),
+            )
+        )
+        self.stack.enter_context(
+            mock.patch.object(
+                warmup.common,
+                "_run_triton_warmup_launch_with_retry",
+                side_effect=lambda label, desc, launch, **kwargs: launch(),
+            )
+        )
+        return output, attn, operation
+
+    def test_sm90_grouped_wo_a_warms_actual_grid_without_per_group_linears(self):
+        output, attn, operation = self.sm90_grouped_output_fixture()
+        with mock.patch.object(
+            warmup, "_sm90_dense_m_grid", wraps=warmup._sm90_dense_m_grid
+        ) as grid:
+            warmup.warmup_v41_dense_jit(object(), max_m=1025, device="cuda:0")
+            warmup.warmup_v41_dense_jit(object(), max_m=1025, device="cuda:0")
+        grid.assert_called_once_with(1025, 4096)
+        expected_m = [1, 2, 3, 4, 16, 17, 511, 512, 1023, 1024, 1025]
+        self.assertEqual(
+            [call.args[0].shape[0] for call in operation.call_args_list], expected_m
+        )
+        for m, call in zip(expected_m, operation.call_args_list):
+            x, freqs = call.args
+            self.assertEqual(tuple(x.shape), (m, attn.n_heads, attn.head_dim))
+            self.assertEqual(x.dtype, torch.bfloat16)
+            self.assertEqual(tuple(freqs.shape), (m, attn.rope_head_dim // 2))
+            self.assertEqual(freqs.dtype, torch.complex64)
+        self.assertEqual(attn._wo_a_groups_v41, [])
+        self.assertEqual(len(warmup._DENSE_WARMED), 1)
+        output.warmup_quantized_output.assert_not_called()
+        output.grouped_output_projection.assert_not_called()
+        output.is_supported.assert_not_called()
+
+    def test_sm90_grouped_wo_a_memoization_tracks_adapter_and_quantizer(self):
+        _, attn, operation = self.sm90_grouped_output_fixture()
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(operation.call_count, 3)
+
+        class ReplacementGroupedAdapter:
+            def __init__(self):
+                self.calls = mock.Mock()
+
+            def __call__(self, *args, **kwargs):
+                return self.calls(*args, **kwargs)
+
+        replacement = ReplacementGroupedAdapter()
+        attn._sm90_wo_a = replacement
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(replacement.calls.call_count, 3)
+        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
+            warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+            warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(replacement.calls.call_count, 6)
+        self.assertEqual(len(warmup._DENSE_WARMED), 3)
+
+    def test_sm90_grouped_wo_a_compile_failure_does_not_poison_retry(self):
+        output, _, operation = self.sm90_grouped_output_fixture()
+        operation.side_effect = RuntimeError("grouped compile failed")
+        with self.assertRaisesRegex(RuntimeError, "grouped compile failed"):
+            warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertFalse(warmup._DENSE_WARMED)
+        operation.side_effect = None
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(operation.call_count, 4)
+        self.assertEqual(len(warmup._DENSE_WARMED), 1)
+        output.warmup_quantized_output.assert_not_called()
+
+    def test_sm90_grouped_wo_a_sync_failure_does_not_poison_retry(self):
+        _, _, operation = self.sm90_grouped_output_fixture()
+        with mock.patch.object(
+            warmup.common, "_sync_cuda", side_effect=RuntimeError("grouped sync failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "grouped sync failed"):
+                warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertFalse(warmup._DENSE_WARMED)
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(operation.call_count, 6)
+        self.assertEqual(len(warmup._DENSE_WARMED), 1)
 
     def prefill_fixture(self):
         calls = {}
@@ -363,6 +558,21 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(
             calls["warmup_dense_gemm_jit"].call_args.kwargs["max_m"], 131080
         )
+
+    def test_sm90_prefill_rejects_legacy_kernels_instead_of_skipping_them(self):
+        model, calls = self.prefill_fixture()
+        with mock.patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "legacy DeepGEMM"):
+                warmup.warmup_v41_prefill_jit(model, device="cuda:0")
+            calls["warmup_dense_gemm_jit"].assert_not_called()
+            calls["warmup_v41_dense_jit"].assert_not_called()
+            warmup.common._collect_dsv4_dense_gemm_shapes.return_value = {}
+            warmup.warmup_v41_prefill_jit(model, device="cuda:0")
+            calls["warmup_dense_gemm_jit"].assert_not_called()
+            calls["warmup_v41_dense_jit"].assert_called_once()
+            calls["attention"].assert_called_once()
 
     def test_prefill_row_limit_tracks_scheduler_tokens_cp_and_concurrency(self):
         model, _ = self.prefill_fixture()
@@ -560,6 +770,17 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             mock.patch.object(warmup, "warmup_v41_decode_query_jit")
         )
         return model, calls
+
+    def test_sm90_shared_expert_keeps_fp32_routed_accumulator_contract(self):
+        model, _, combine = self.shared_fixture()
+        model.moe._strategy = types.SimpleNamespace(name="sm90_humming")
+        signatures = warmup._shared_expert_signatures(model)
+        self.assertEqual(set(signatures), {(8, 12, 7.0, torch.float32, (8, 1))})
+        warmup.warmup_v41_shared_expert_jit(model, max_m=4, device="cuda:0")
+        routed, shared, output_dtype = combine.call_args.args
+        self.assertEqual(routed.dtype, torch.float32)
+        self.assertEqual(shared.dtype, torch.bfloat16)
+        self.assertEqual(output_dtype, torch.bfloat16)
 
     def test_decode_row_bound_covers_target_verify_and_draft(self):
         model, _ = self.decode_fixture()

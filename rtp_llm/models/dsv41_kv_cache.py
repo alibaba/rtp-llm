@@ -30,6 +30,7 @@ def build_v41_kv_cache_spec_descs(
     bounded_replay=False,
     draft=False,
     fixed_pool_use_host_memory=False,
+    v4_kv_layout=False,
 ):
     """Declare byte-exact FP4 global/indexer and FP8 sliding-window pools.
 
@@ -37,29 +38,31 @@ def build_v41_kv_cache_spec_descs(
     kernel's payload/scale planes (ratio two fills the first half). CP sizing
     and placement are delegated to the descriptor's generic policies.
     """
+    global_bytes = 584 if v4_kv_layout else 288
+    swa_bytes = 584 if v4_kv_layout else 528
     global_pools = {
         ratio: _make_dsv4_desc(
-            f"global_kv_{ratio}", "compressed_kv", 288, DataType.TYPE_UINT8, ratio
+            f"global_kv_{ratio}", "compressed_kv", global_bytes, DataType.TYPE_UINT8, ratio
         )
         for ratio in (1, 2)
     }
     for desc in global_pools.values():
-        desc.block_stride_bytes_alignment = 4608  # lcm(512, 288)
+        desc.block_stride_bytes_alignment = 576 if v4_kv_layout else 4608
     indexer = _make_dsv4_desc("indexer_kv", "compressed_kv", 68, DataType.TYPE_UINT8, 1)
     state = _make_dsv4_desc(
         "csa_state", "fixed_state", 2 * head_dim, DataType.TYPE_FP32
     )
     state.compression_ratio = 2
     state.state_ring_overlap = 0
-    swa = _make_dsv4_desc("swa_kv", "sliding_window_kv", 528, DataType.TYPE_UINT8)
+    swa = _make_dsv4_desc("swa_kv", "sliding_window_kv", swa_bytes, DataType.TYPE_UINT8)
     # Native TMA needs whole token rows as well as the allocator alignment.
     # Main combines this with CP divisibility before slicing the block.
-    swa.block_stride_bytes_alignment = 16896  # lcm(512, 528)
+    swa.block_stride_bytes_alignment = 576 if v4_kv_layout else 16896
     decoder_swa = _make_dsv4_desc(
-        "swa_kv", "sliding_window_kv", 528, DataType.TYPE_UINT8
+        "swa_kv", "sliding_window_kv", swa_bytes, DataType.TYPE_UINT8
     )
     decoder_swa.tag = "decoder_swa_kv"
-    decoder_swa.block_stride_bytes_alignment = 16896
+    decoder_swa.block_stride_bytes_alignment = swa.block_stride_bytes_alignment
     reuse = CacheReusePolicyDesc()
     reuse.enable_prefix_reuse = False
     decoder_swa.reuse = reuse
@@ -88,6 +91,7 @@ def build_v41_kv_cache_spec_descs(
 
 def configure_v41_kv_cache(model_config, kv_cache_config=None):
     from rtp_llm.models_py.modules.dsv41.bounded_replay import enabled
+    from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
 
     attn = model_config.attn_config
     promoted = resolve_dsv4_tokens_per_block(int(attn.tokens_per_block))
@@ -96,6 +100,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
             attn.kernel_tokens_per_block = promoted
         attn.tokens_per_block = promoted
     bounded = enabled()
+    v4_layout = use_v4_kv_cache()
     draft = bool(model_config.is_mtp)
     model_config.hybrid_attention_config.hybrid_attention_types = [
         HybridAttentionType.NONE
@@ -110,6 +115,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         fixed_pool_use_host_memory=bool(
             kv_cache_config and kv_cache_config.dsv4_fixed_pool_use_memory
         ),
+        v4_kv_layout=v4_layout,
     )
     fixed_blocks = (
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0
@@ -122,5 +128,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
     # Token-interleaved FlashMLA bytes must never alias the old planar format.
     # Full and bounded replay also need independent encoder checkpoint keys.
     model_config.cache_key_hash_seed = (
-        0x4453563431494231 if bounded else 0x4453563431494631
+        (0x4453563431504231 if bounded else 0x4453563431504631)
+        if v4_layout
+        else (0x4453563431494231 if bounded else 0x4453563431494631)
     )

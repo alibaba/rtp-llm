@@ -1669,6 +1669,73 @@ class TestOfflineBenchMain(unittest.TestCase):
         )
 
 
+class TestRunnerProfilerLog(unittest.TestCase):
+    """Exercise real runner constructors; mocking them hid kwargs drift."""
+
+    def test_grid_phases_forward_log_and_advance_flush_offset(self):
+        from rtp_llm.test.perf_test.grid_runner import GridRunner
+
+        for is_decode in (False, True):
+            with self.subTest(is_decode=is_decode), patch(
+                "rtp_llm.test.perf_test.grid_runner.BatchPerfImpl"
+            ) as impl_cls, patch(
+                "rtp_llm.test.perf_test.grid_runner.create_metrics_table"
+            ):
+                instances = [MagicMock() for _ in range(3)]
+                instances[1].log_flush_offset = 123
+                instances[2].log_flush_offset = 456
+                impl_cls.side_effect = instances
+                runner = GridRunner(
+                    8000,
+                    1,
+                    [1],
+                    [128, 256],
+                    {128: "a", 256: "b"},
+                    is_decode=is_decode,
+                    log_path="/tmp/server.log",
+                )
+                runner.run()
+                self.assertEqual(impl_cls.call_count, 3)
+                for call in impl_cls.call_args_list:
+                    self.assertEqual(call.kwargs["log_path"], "/tmp/server.log")
+                    self.assertEqual(call.args[4], is_decode)
+                self.assertEqual(
+                    impl_cls.call_args_list[1].kwargs["log_flush_offset"], 0
+                )
+                self.assertEqual(
+                    impl_cls.call_args_list[2].kwargs["log_flush_offset"], 123
+                )
+                self.assertEqual(runner._log_flush_offset, 456)
+
+    @patch(
+        "rtp_llm.test.perf_test.distribution_runner.create_distribution_metrics_table"
+    )
+    @patch("rtp_llm.test.perf_test.distribution_runner.BatchPerfImpl")
+    def test_distribution_forwards_log_and_advances_flush_offset(
+        self, impl_cls, _table
+    ):
+        from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
+
+        instances = [MagicMock() for _ in range(3)]
+        instances[1].log_flush_offset = 123
+        instances[2].log_flush_offset = 456
+        impl_cls.side_effect = instances
+        runner = DistributionRunner(
+            8000,
+            1,
+            {"batch_seq_len_map": {"1": [128], "2": [128, 256]}},
+            {128: "a", 256: "b"},
+            log_path="/tmp/server.log",
+        )
+        runner.run()
+        self.assertEqual(impl_cls.call_count, 3)
+        for call in impl_cls.call_args_list:
+            self.assertEqual(call.kwargs["log_path"], "/tmp/server.log")
+        self.assertEqual(impl_cls.call_args_list[1].kwargs["log_flush_offset"], 0)
+        self.assertEqual(impl_cls.call_args_list[2].kwargs["log_flush_offset"], 123)
+        self.assertEqual(runner._log_flush_offset, 456)
+
+
 class TestEngineServerLifecycle(unittest.TestCase):
     @patch("rtp_llm.test.perf_test.server.MagaServerManager")
     def test_failed_start_stops_partial_server(self, MockMagaServerManager):

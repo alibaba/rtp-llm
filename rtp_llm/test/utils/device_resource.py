@@ -502,6 +502,10 @@ def main():
         os.environ["HIP_VISIBLE_DEVICES"] = ""
         return _run_test_command()
 
+    from jit_sys_path_setup import setup_nvidia_wheel_library_path
+
+    setup_nvidia_wheel_library_path()
+
     cuda_info = get_cuda_info()
     if not cuda_info:
         logging.info("no gpu, continue")

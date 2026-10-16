@@ -419,7 +419,16 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                               maga_init_params.parallelism_config.dp_rank,
                                               maga_init_params.parallelism_config.world_rank);
         }
-        if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
+        // The dedicated batch-decode benchmark allocates synthetic prompt KV
+        // locally and accepts ordinary GenerateStreamCall requests. Keep the
+        // engine's DECODE role (including decode-only model/graph setup), but
+        // do not require the production P/D handoff RPC for this test mode.
+        const bool synthetic_decode_benchmark =
+            role_type == RoleType::DECODE && maga_init_params.runtime_config.use_batch_decode_scheduler;
+        if (synthetic_decode_benchmark) {
+            RTP_LLM_LOG_INFO("Synthetic decode benchmark: local generation RPC, DECODE engine role; no P/D handoff");
+        }
+        if ((role_type == RoleType::PREFILL || role_type == RoleType::DECODE) && !synthetic_decode_benchmark) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());

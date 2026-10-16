@@ -30,6 +30,10 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    _fake_quantize_global_fp4_values,
+    _store_v4_row,
+)
 
 
 @triton.jit
@@ -101,6 +105,7 @@ def _compress_norm_main_store_kernel(
     MAIN_BLOCKS: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
     TRAP: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
 ):
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
@@ -160,6 +165,15 @@ def _compress_norm_main_store_kernel(
             if block >= MAIN_BLOCKS:
                 _trap()
         rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
+        if V4_CACHE:
+            _store_v4_row(
+                _fake_quantize_global_fp4_values(rotated),
+                main_cache,
+                block * MAIN_EB + offset,
+                MAIN_CACHE_STRIDE,
+                MAIN_EB,
+            )
+            return
         # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
         # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
         grouped = tl.reshape(rotated.to(tl.float32), (32, 16))
@@ -296,7 +310,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     cp = attn._cp_ctx
     if cp is not None and cp.cp_size > 1:
         return False
-    if torch.cuda.get_device_capability(x.device)[0] != 10:
+    if torch.cuda.get_device_capability(x.device)[0] not in (9, 10):
         return False
     for metadata, size in (
         (positions, x.shape[0] * x.shape[1]),
@@ -373,7 +387,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             pool.dtype != torch.uint8
             or pool.ndim != 3
             or (region == INDEXER_KV and not pool.is_contiguous())
-            or pool.shape[2] != (68 if region == INDEXER_KV else 288)
+            or pool.shape[2] not in ((68,) if region == INDEXER_KV else (288, 584))
             or pool.stride(2) != 1
             or pool.stride(1) != pool.shape[2]
             or pool.stride(0) < pool.shape[1] * pool.shape[2]
@@ -447,6 +461,7 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         MAIN_TABLE_STRIDE=main_table.stride(0),
         MAIN_CACHE_STRIDE=main.stride(0),
         MAIN_BLOCKS=main.shape[0],
+        V4_CACHE=main.shape[-1] == 584,
         **state_geometry,
         num_warps=4,
         enable_fp_fusion=False,

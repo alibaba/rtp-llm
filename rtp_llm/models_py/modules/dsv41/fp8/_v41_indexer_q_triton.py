@@ -22,7 +22,7 @@ from ._v41_fp4_triton import _pack_e2m1_payload, _round_power_of_two_scale
 
 
 @triton.jit
-def _indexer_rope_bf16(q, frequencies, position):
+def _indexer_rope_bf16(q, frequencies, position, HOPPER: tl.constexpr = False):
     columns = tl.arange(0, 128)
     values = q.to(tl.float32)
     real = tl.gather(values, columns & ~1, axis=0)
@@ -33,7 +33,9 @@ def _indexer_rope_bf16(q, frequencies, position):
     sine = tl.load(frequencies + position * 64 + angle * 2 + 1, rotary, other=0)
     even = columns % 2 == 0
     product = tl.where(even, imag, real) * sine
-    # PyTorch c10 complex multiplication: fma(a,c,-b*d), fma(b,c,a*d).
+    # Preserve the established SM100 FMA schedule below. On SM90, eager
+    # complex multiplication contracts the imaginary term in the other order;
+    # one FP32 ULP at a BF16 midpoint can change the later FP4 nibble.
     # Triton unary minus can lower to 0-product, losing the negative zero
     # required by FP4's sign bit. Flip the bit instead of subtracting from 0.
     product_bits = product.to(tl.uint32, bitcast=True)
@@ -41,6 +43,10 @@ def _indexer_rope_bf16(q, frequencies, position):
         tl.float32, bitcast=True
     )
     rotated = tl.fma(tl.where(even, real, imag), cosine, signed_product)
+    if HOPPER:
+        # Independently verified on SM90 against eager complex64 -> BF16 and
+        # CPU FP64 two-schedule diagnostics, without changing SM100 arithmetic.
+        rotated = tl.where(even, rotated, tl.fma(real, sine, imag * cosine))
     return tl.where(rotary, rotated, values).to(tl.bfloat16)
 
 
@@ -54,6 +60,7 @@ def _fused_indexer_q_rope_fp4_kernel(
     sf_ptr,
     weights_out_ptr,
     MAX_POSITION: tl.constexpr,
+    HOPPER: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     token = row // 32
@@ -69,7 +76,7 @@ def _fused_indexer_q_rope_fp4_kernel(
     q = tl.load(q_ptr + row * 128 + tl.arange(0, 128))
     # This helper matches eager CUDA complex multiplication, including the
     # explicit FMA and the BF16 rounding before the FP4 block reduction.
-    rotated = _indexer_rope_bf16(q, frequencies_ptr, position).to(tl.float32)
+    rotated = _indexer_rope_bf16(q, frequencies_ptr, position, HOPPER).to(tl.float32)
     groups = rotated.reshape((4, 32))
     maximum = tl.maximum(tl.max(tl.abs(groups), axis=1), 6.0 * (2.0**-126))
     scale, scale_bytes = _round_power_of_two_scale(maximum, 1.0 / 6.0)
@@ -119,7 +126,7 @@ def is_supported(
         value.requires_grad for value in (q, weights, freqs_cis)
     ):
         return False
-    return torch.cuda.get_device_capability(q.device)[0] == 10
+    return torch.cuda.get_device_capability(q.device)[0] in (9, 10)
 
 
 def try_fused_indexer_q(
@@ -149,6 +156,7 @@ def try_fused_indexer_q(
         sf,
         scaled_weights,
         freqs_cis.shape[0],
+        HOPPER=torch.cuda.get_device_capability(q.device)[0] == 9,
         num_warps=4,
         enable_fp_fusion=False,
     )

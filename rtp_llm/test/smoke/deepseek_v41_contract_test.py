@@ -26,6 +26,11 @@ class DeepSeekV41ContractTest(unittest.TestCase):
     graph_is_prefill = 0
     require_generation_scores = True
     compare_generation_logits = False
+    require_graph_capture = True
+    moe_strategy = "mega"
+    extra_server_env = {}
+    max_new_tokens = 24
+    prefix_reuse_min_tokens = 768
 
     def setUp(self):
         self.model_path = os.environ.get(
@@ -59,7 +64,8 @@ class DeepSeekV41ContractTest(unittest.TestCase):
         self.log_offset = Path(self.graph_server.log_file_path).stat().st_size
         startup = Path(self.graph_server.log_file_path).read_text(errors="replace")
         self.assertIn("DeepSeek V4.1 Engram initialized on layers", startup)
-        self.assertIn("capture success for batch size", startup)
+        if self.require_graph_capture:
+            self.assertIn("capture success for batch size", startup)
         self.observed = []
 
     def start_servers(self):
@@ -69,11 +75,12 @@ class DeepSeekV41ContractTest(unittest.TestCase):
                 "LOG_LEVEL": "DEBUG",
                 "FT_SERVER_TEST": "1",
                 "ROLE_TYPE": "PDFUSION",
-                "DSV4_MOE_STRATEGY": "mega",
+                "DSV4_MOE_STRATEGY": self.moe_strategy,
                 "DSV4_USE_MEGA_MOE_SE": "0",
                 "DSV4_USE_MEGA_MOE_FUSED": "0",
                 "DSV41_SWA_BOUNDED_REPLAY": "0",
                 "DSV41_CED": "0",
+                **self.extra_server_env,
             },
             role_name="deepseek_v41_contract",
             smoke_args_str=self.server_args(),
@@ -93,7 +100,7 @@ class DeepSeekV41ContractTest(unittest.TestCase):
         query = {
             "prompt": prompt,
             "generate_config": {
-                "max_new_tokens": 24,
+                "max_new_tokens": self.max_new_tokens,
                 "top_k": 1,
                 "top_p": 1.0,
                 "random_seed": 42,
@@ -125,7 +132,7 @@ class DeepSeekV41ContractTest(unittest.TestCase):
         self.assertTrue(actual["response"].strip(), label)
         tokens = actual["output_ids"]
         self.assertEqual(len(tokens), 1)
-        self.assertTrue(0 < len(tokens[0]) <= 24)
+        self.assertTrue(0 < len(tokens[0]) <= self.max_new_tokens)
         self.assertTrue(
             all(type(t) is int and 0 <= t < self.vocab_size for t in tokens[0])
         )
@@ -224,7 +231,7 @@ class DeepSeekV41ContractTest(unittest.TestCase):
                 f"Notebook entry {i}: the archive stores books, maps, and letters.\n"
             )
             prefix = "The following notebook records a journey.\n" + "".join(records)
-            if len(self.tokenizer.encode(prefix)) >= 768:
+            if len(self.tokenizer.encode(prefix)) >= self.prefix_reuse_min_tokens:
                 break
         prompt = prefix + "\nIn a few words, the journey was"
         self.assertLess(len(self.tokenizer.encode(prompt)) + 24, 4096)

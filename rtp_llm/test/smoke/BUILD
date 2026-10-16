@@ -188,6 +188,65 @@ custom_smoke_test(
 )
 
 custom_smoke_test(
+    name = "deepseek_v41_flash_tp8_ep8_sm90",
+    main = "deepseek_v41_sm90_contract_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Mirror SM100's graph/cache/concurrency/reserve contract. Hopper uses
+    # TP8/EP8, Humming and scratch loading: its fastsafetensors shared staging
+    # registration is a separate unsupported path on the current test driver.
+    smoke_args = "--tp_size 8 --ep_size 8 --dp_size 1 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config 1,2,4 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 32768 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_flash_cp8_ep8_graph_sm90",
+    main = "deepseek_v41_sm90_contract_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Hopper long-context baseline: CP8 prefill, TP8/EP8 decode with Graph.
+    # Keep the SM100 golden/cache assertions; scratch is an explicit loader
+    # difference, not a runtime fallback after failed host registration.
+    smoke_args = "--tp_size 8 --ep_size 8 --dp_size 1 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config 1,2,4 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 32768 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0 --cp_rotate_method ALL_GATHER",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_flash_ced_bounded_pd_cp4_dp4_sm90",
+    main = "deepseek_v41_sm90_pd_contract_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Eight reserved cards, split into two independent four-card replicas.
+    # Explicit small KV budget is for the short correctness contract only.
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 1 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 8192 --kv_cache_mem_mb 1024 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 4 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract", "pd_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+    ],
+)
+
+custom_smoke_test(
     name = "deepseek_v41_flash_ced_bounded_pd_cp2_tp2_sm100_arm",
     main = "deepseek_v41_pd_contract_test.py",
     smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",

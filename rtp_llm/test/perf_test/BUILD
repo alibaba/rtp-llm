@@ -1,5 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
+# Manual adapter: external engines keep their official benchmark and lifecycle.
+# Supply a reviewed invocation script; the standard run_under GPU lock owns GPUs.
+sh_test(
+    name = "upstream_serving_perf_test",
+    srcs = ["upstream_serving_perf_test.sh"],
+    timeout = "eternal",
+    tags = ["manual", "local", "no-sandbox"],
+)
+
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
 # across packages.

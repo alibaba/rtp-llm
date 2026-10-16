@@ -109,6 +109,8 @@ def is_supported(
         or block_size not in (64, 128)
     ):
         return False
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        return True
     from ._indexer_score import has_fp8_fp4_paged_mqa_logits
 
     if not has_fp8_fp4_paged_mqa_logits():
@@ -178,6 +180,7 @@ def score_decode_indexer(
     rope_head_dim: int = 64,
     logical_entries_per_block: int | None = None,
     positions: torch.Tensor | None = None,
+    candidate_blocks: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Return FP32 [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -212,14 +215,43 @@ def score_decode_indexer(
     )
     if not is_supported(q.device, block_size, h, d):
         return None
-    from ._indexer_score import fp8_fp4_paged_indexer_score
-
     if positions is None:
         q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
     else:
         q_payload, q_sf, weights = prepare_indexer_q_and_weights(
             q, weights, freqs_cis, positions, rope_head_dim
         )
+    if torch.cuda.get_device_capability(q.device) == (9, 0):
+        from ._v41_sm90_indexer import paged_score
+
+        if candidate_blocks is not None:
+            from ._v41_sm90_decode_candidate import try_score
+
+            candidate_logits = try_score(
+                q_payload,
+                q_sf,
+                pool,
+                weights,
+                block_table,
+                context_lens.reshape(-1),
+                candidate_blocks,
+                capacity=max_ctx_len,
+                logical_entries=logical_entries,
+            )
+            if candidate_logits is not None:
+                return candidate_logits
+        return paged_score(
+            q_payload,
+            q_sf,
+            pool,
+            weights,
+            block_table,
+            context_lens,
+            max_ctx_len,
+            logical_entries,
+        )
+    from ._indexer_score import fp8_fp4_paged_indexer_score
+
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)
     safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=q.device)

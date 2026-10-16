@@ -1,4 +1,5 @@
 load("@arch_config//:arch_select.bzl", "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_requirement = "requirement")
 
 py_library(
     name = "utils",
@@ -121,7 +122,10 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep,
+        "@//:using_cuda13_x86": flashinfer + deep + [
+            cuda13_requirement("humming-kernels"),  # Dense W8A8 still uses this.
+            "@flashinfer_opensource_sidecar//:pkg",  # Separate SM90 W4A8 MoE namespace.
+        ],
         "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
@@ -189,6 +193,23 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
+    ]),
+    data = glob([
+        "kernels/cuda/sm90_moe_align/*.cu",
+        "kernels/cuda/sm90_moe_align/*.cpp",
+        "kernels/cuda/sm90_moe_align/*.h",
+        "kernels/cuda/sm90_moe_align/*.cuh",
+        "kernels/cuda/sm90_moe_align/*.LICENSE",
+        "kernels/cuda/sm90_moe_align/LICENSE",
+        "kernels/cuda/sm90_dense_deepgemm/**/*.cu",
+        "kernels/cuda/sm90_dense_deepgemm/**/*.cpp",
+        "kernels/cuda/sm90_dense_deepgemm/**/*.h",
+        "kernels/cuda/sm90_dense_deepgemm/**/*.hpp",
+        "kernels/cuda/sm90_dense_deepgemm/**/*.cuh",
+        "kernels/cuda/sm90_dense_deepgemm/LICENSE",
+        "kernels/cuda/sm90_dense_deepgemm/*.md",
+        "kernels/cuda/sm90_dense_triton/LICENSE",
+        "kernels/cuda/sm90_dense_triton/*.md",
     ]),
 )
 

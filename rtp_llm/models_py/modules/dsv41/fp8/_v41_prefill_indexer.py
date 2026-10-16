@@ -40,6 +40,8 @@ def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
         or head_dim != 128
     ):
         return False
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        return True
     try:
         from ._indexer_score import has_fp8_fp4_mqa_logits
     except ImportError:
@@ -215,8 +217,6 @@ def score_indexer_chunk(
     q_payload, q_sf, k_payload, k_sf, weights, visible, *, bounds=None
 ):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
-    from ._indexer_score import fp8_fp4_mqa_indexer_score
-
     count = k_payload.shape[0]
     if q_payload.shape[0] == 0 or count == 0:
         return torch.empty(
@@ -229,6 +229,12 @@ def score_indexer_chunk(
         # Forward-local prefill metadata already clamps in int64 before
         # narrowing. Reuse the exact same device bounds for scoring and TopK.
         starts, ends = bounds
+    if torch.cuda.get_device_capability(q_payload.device) == (9, 0):
+        from ._v41_sm90_indexer import dense_score
+
+        return dense_score(q_payload, q_sf, k_payload, k_sf, weights, starts, ends)
+    from ._indexer_score import fp8_fp4_mqa_indexer_score
+
     # The scheduler skips future K tiles. Its SM100 cleaner writes every
     # logical output element, including rows with no completed ratio-2 pair.
     logits = fp8_fp4_mqa_indexer_score(

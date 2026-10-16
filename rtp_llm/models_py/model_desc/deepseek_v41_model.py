@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -48,6 +49,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._engram_hash_state = None
         self._engram_layers = ()
         self._image_plan = None
+        self._engram_prefetch = None
+        self._engram_prefetch_max_rows = 0
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
@@ -78,6 +81,24 @@ class DeepSeekV41Model(DeepSeekV4Model):
             )
             modules.append((layer_id, layout.layer_ids.index(layer_id)))
         self._engram_layers = tuple(modules)
+        # Preserve other architectures' current execution order. CPU lookup is
+        # an explicitly selected diagnostic backend, never a UVA failure fallback.
+        if (
+            device.type == "cuda"
+            and torch.cuda.get_device_capability(device) == (9, 0)
+            and os.environ.get("DSV41_ENGRAM_PREFETCH", "1") == "1"
+            and all(self.v4.layers[i].engram.embed_tokens._uva is not None for i, _ in modules)
+        ):
+            from rtp_llm.models_py.modules.dsv41.engram import UvaEngramPrefetch
+
+            self._engram_prefetch_max_rows = int(
+                os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS", "256")
+            )
+            if self._engram_prefetch_max_rows <= 0:
+                raise ValueError("DSV41_ENGRAM_PREFETCH_MAX_ROWS must be positive")
+            self._engram_prefetch = UvaEngramPrefetch(device, [i for i, _ in modules])
+            logging.info("SM90 Engram UVA prefetch enabled: decode_only=1 max_rows=%d",
+                         self._engram_prefetch_max_rows)
         logging.info(
             "DeepSeek V4.1 Engram initialized on layers %s",
             [layer_id for layer_id, _ in modules],
@@ -98,6 +119,19 @@ class DeepSeekV41Model(DeepSeekV4Model):
             layer = self.v4.layers[layer_id]
             layer.engram_hashes = hashes[:, hash_index].contiguous()
             layer.engram_token_mask = token_mask
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        if (
+            self._engram_prefetch is not None
+            and not attn.is_prefill
+            and 0 < windows.shape[0] <= self._engram_prefetch_max_rows
+        ):
+            self._engram_prefetch.begin(
+                (layer_id, self.v4.layers[layer_id].engram.embed_tokens,
+                 self.v4.layers[layer_id].engram_hashes)
+                for layer_id, _ in self._engram_layers
+            )
+            for layer_id, _ in self._engram_layers:
+                self.v4.layers[layer_id].engram_prefetch = self._engram_prefetch
 
     def _prepare_image_features(self, inputs) -> None:
         """Stash the gathered ViT features and their batch locations for the
@@ -200,18 +234,25 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
-        if self.kv_cache is not None:
-            self._prepare_engram(inputs)
-        self._prepare_image_features(inputs)
         try:
+            if self.kv_cache is not None:
+                self._prepare_engram(inputs)
+            self._prepare_image_features(inputs)
             return super().forward(inputs, fmha_impl)
         finally:
-            # Request-local lookup rows must not keep whole prompt tensors live.
-            for layer_id, _ in self._engram_layers:
-                layer = self.v4.layers[layer_id]
-                layer.engram_hashes = None
-                layer.engram_token_mask = None
-            self._image_plan = None
+            # A captured side stream must rejoin the originating stream even
+            # if image preparation or a layer fails before consuming its rows.
+            try:
+                if self._engram_prefetch is not None:
+                    self._engram_prefetch.finish()
+            finally:
+                # Request-local lookup rows must not keep whole prompt tensors live.
+                for layer_id, _ in self._engram_layers:
+                    layer = self.v4.layers[layer_id]
+                    layer.engram_hashes = None
+                    layer.engram_token_mask = None
+                    layer.engram_prefetch = None
+                self._image_plan = None
 
 
 __all__ = ["DeepSeekV41Model"]

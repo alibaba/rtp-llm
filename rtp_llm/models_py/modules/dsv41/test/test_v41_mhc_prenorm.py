@@ -2,6 +2,7 @@
 
 import json
 import os
+import statistics
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -113,8 +114,8 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
 class V41MHCPreNormCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability()[0] != 10:
-            raise unittest.SkipTest("V4.1 prenorm fast path requires SM100")
+        if torch.cuda.get_device_capability()[0] not in (9, 10):
+            raise unittest.SkipTest("V4.1 prenorm fast path requires SM90 or SM100")
 
     def setUp(self):
         torch.manual_seed(41)
@@ -293,7 +294,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             return_value=False,
         ):
             self.assertIsNone(prenorm(residual, fn, _EPS))
-        with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
+        with patch("torch.cuda.get_device_capability", return_value=(8, 0)):
             self.assertFalse(is_supported(residual, fn))
         with torch.enable_grad():
             self.assertFalse(is_supported(residual, fn.clone().requires_grad_()))
@@ -371,6 +372,70 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                         _split_mixes(old, base.reshape(24), scale.reshape(3)),
                     ):
                         torch.testing.assert_close(got, ref, rtol=2e-4, atol=1e-5)
+
+    @unittest.skipUnless(os.environ.get("PERF_JSON"), "optional prenorm benchmark")
+    @torch.inference_mode()
+    def test_verified_prenorm_benchmark(self):
+        # Reuse the existing CUDA-event / Chrome kernel-sum harness. This is
+        # component latency, not serving TPOT; compilation and input allocation
+        # stay outside measurement. Cold samples evict 256 MiB before each call.
+        from rtp_llm.models_py.modules.dsv41.test.test_sm90_dense_deepgemm import _measure
+
+        directory = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]) / "prenorm_benchmark"
+        directory.mkdir(exist_ok=False)
+        flush = torch.empty(256 * 1024**2, device="cuda", dtype=torch.uint8)
+        records = []
+        payload = dict(
+            device=torch.cuda.get_device_name(),
+            capability=torch.cuda.get_device_capability(),
+            shape="A[M,20480] BF16; W[24,20480] pre-rounded TF32; output FP32",
+            scope="prenorm projection + RMS reduction; cached weight preparation",
+            compile_in_timing=False,
+            cold_flush_bytes=flush.numel(),
+            results=records,
+        )
+        for tokens in (1, 4, 31, 64):
+            residual, fn, _, _ = self._inputs(tokens)
+            self._assert_mixes_close(prenorm(residual, fn, _EPS), _old_mixes(residual, fn))
+            arms = [
+                ("tilelang", lambda: _old_mixes(residual, fn)),
+                ("deepgemm", lambda: prenorm(residual, fn, _EPS)),
+            ]
+            for _, call in arms:
+                for _ in range(30):
+                    call()
+            for mode in ("hot", "cold"):
+                samples = {name: [] for name, _ in arms}
+                for repeat in range(3):
+                    for name, call in (arms if repeat % 2 == 0 else arms[::-1]):
+                        result = _measure(
+                            call, flush if mode == "cold" else None,
+                            directory / f"m{tokens}_{name}_{mode}_{repeat}.json",
+                            prepared=False,
+                        )
+                        kernels = result["profile"]["kernels"]
+                        # Old public wrapper rounds FP32 weights on every
+                        # invocation (integer add), then projection + RMS.
+                        # Candidate caches rounded weights before measurement.
+                        self.assertEqual(
+                            result["profile"]["pure_kernel_launch_count"],
+                            2 if name == "deepgemm" else 3,
+                        )
+                        names = " ".join(kernel["name"] for kernel in kernels)
+                        if name == "deepgemm":
+                            self.assertIn("hc_prenorm", names)
+                            self.assertIn("_reduce_prenorm_kernel", names)
+                        else:
+                            self.assertIn("mhc_pre_norm", names)
+                            self.assertIn("CUDAFunctorOnSelf_add<int>", names)
+                        samples[name].append(result)
+                record = dict(m=tokens, cache=mode, path_names_and_counts="PASS", samples=samples)
+                record["kernel_sum_us_per_iter"] = {
+                    name: statistics.median(s["profile"]["kernel_sum_us_per_iter"] for s in values)
+                    for name, values in samples.items()
+                }
+                records.append(record)
+                Path(os.environ["PERF_JSON"]).write_text(json.dumps(payload, indent=2))
 
 
 if __name__ == "__main__":

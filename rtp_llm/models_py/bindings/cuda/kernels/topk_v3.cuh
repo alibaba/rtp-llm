@@ -68,6 +68,10 @@ struct MaxSmem {
 
 SGL_DEVICE uint32_t extract_exact_bin(float x) {
     uint32_t bits = __float_as_uint(x);
+    // IEEE +/-0 compare equal. Keep their ordered keys equal too, so the
+    // coarse interval [0, upper) and exact-prefix scan cannot disagree.
+    if ((bits & 0x7fffffffu) == 0)
+        bits = 0;
     if ((bits & 0x7fffffffu) > 0x7f800000u)
         return 0xffffffffu;
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
@@ -81,7 +85,10 @@ template<uint32_t kBits>
 SGL_DEVICE uint32_t extract_coarse_bin(float x) {
     static_assert(0 < kBits && kBits < 15);
     const auto     hx   = cast<fp16_t>(x);
-    const uint16_t bits = *reinterpret_cast<const uint16_t*>(&hx);
+    // Normalize only an actual FP32 zero, not a nonzero negative value that
+    // rounds to FP16 -0. The latter must remain in the negative coarse bin.
+    const uint16_t bits = (__float_as_uint(x) & 0x7fffffffu) == 0
+                              ? 0u : *reinterpret_cast<const uint16_t*>(&hx);
     if ((bits & 0x7fffu) > 0x7c00u)
         return (1u << kBits) - 1u;
     const uint16_t key = (bits & 0x8000) ? ~bits : bits | 0x8000;
@@ -277,8 +284,66 @@ struct TopKConfig {
     /// coarse value interval and skip any FP32 key bytes shared by both interval
     /// endpoints. Values above the interval have already been emitted.
     SGL_DEVICE static void exact_boundary_scan_topk(
-        const TopKProblem& problem, TieHandleSmem* smem, float v_lo, float v_hi, uint32_t output_base) {
+        const TopKProblem& problem, TieHandleSmem* smem, float v_lo, float v_hi, uint32_t output_base,
+        bool full_key_range = false, bool try_uniform_boundary = true) {
         const uint32_t tx = threadIdx.x;
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+        if (try_uniform_boundary) {
+            // Exact data-dependent shortcut for an overflowing coarse bin whose
+            // FULL set of FP32 ordered keys is equal. A sampled/truncated tie
+            // buffer cannot prove this condition. Values above this interval were
+            // already emitted by the caller and remain at [0, output_base).
+            uint32_t local_min = 0xffffffffu;
+            uint32_t local_max = 0u;
+            uint32_t candidate_count = 0u;
+            for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
+                const float value = problem.in[idx];
+                if (full_key_range || (value >= v_lo && value < v_hi)) {
+                    const uint32_t key = extract_exact_bin(value);
+                    local_min = min(local_min, key);
+                    local_max = max(local_max, key);
+                    ++candidate_count;
+                }
+            }
+            const uint32_t warp_min = __reduce_min_sync(0xffffffffu, local_min);
+            const uint32_t warp_max = __reduce_max_sync(0xffffffffu, local_max);
+            if (tx % kWarpSize == 0) {
+                smem->histogram[0][tx / kWarpSize] = warp_min;
+                smem->histogram[1][tx / kWarpSize] = warp_max;
+            }
+            __syncthreads();
+            if (tx < kWarpSize) {
+                const uint32_t all_min = __reduce_min_sync(0xffffffffu, smem->histogram[0][tx]);
+                const uint32_t all_max = __reduce_max_sync(0xffffffffu, smem->histogram[1][tx]);
+                if (tx == 0) {
+                    smem->match.equal_count = all_min == all_max;
+                }
+            }
+            __syncthreads();
+            if (smem->match.equal_count) {
+                // Same thread-order exclusive prefix and per-thread scan order as
+                // the exact radix emitter below: repeatability and boundary tie
+                // membership are unchanged, not just the selected value multiset.
+                const uint32_t base = block_exclusive_prefix(
+                    candidate_count, smem->warp_sum, &smem->total_scratch[1]);
+                uint32_t emitted = 0u;
+                for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
+                    const float value = problem.in[idx];
+                    if (full_key_range || (value >= v_lo && value < v_hi)) {
+                        const uint32_t pos = output_base + base + emitted++;
+                        if (pos < problem.topk) {
+                            problem.emit(pos, idx);
+                        }
+                    }
+                }
+                __syncthreads();
+                return;
+            }
+            // A nonuniform boundary keeps the original exact radix path. No key
+            // truncation, approximate threshold, or alternative tie order follows.
+            __syncthreads();
+        }
+#endif
         if (tx == 0) {
             const uint32_t lo_key      = extract_exact_bin(v_lo);
             const uint32_t hi_key      = extract_exact_bin(nextafterf(v_hi, -FLT_MAX));
@@ -286,6 +351,8 @@ struct TopKConfig {
             uint32_t       first_round = 0;
 #pragma unroll
             for (uint32_t round = 0; round < 4; ++round) {
+                if (full_key_range)
+                    break;
                 const uint32_t shift   = 24u - round * 8u;
                 const uint32_t lo_byte = (lo_key >> shift) & 0xffu;
                 const uint32_t hi_byte = (hi_key >> shift) & 0xffu;
@@ -312,7 +379,7 @@ struct TopKConfig {
             for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
                 const float    value = problem.in[idx];
                 const uint32_t key   = extract_exact_bin(value);
-                if (value >= v_lo && value < v_hi && (key & mask) == prefix) {
+                if ((full_key_range || (value >= v_lo && value < v_hi)) && (key & mask) == prefix) {
                     atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
                 }
             }
@@ -358,7 +425,7 @@ struct TopKConfig {
         uint32_t my_above = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if ((full_key_range || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
                 ++my_above;
             }
         }
@@ -367,7 +434,7 @@ struct TopKConfig {
         uint32_t       run_above  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if ((full_key_range || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
                 problem.emit(output_base + base_above + run_above++, idx);
             }
         }
@@ -378,7 +445,7 @@ struct TopKConfig {
         uint32_t my_eq = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if ((full_key_range || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
                 ++my_eq;
             }
         }
@@ -387,7 +454,7 @@ struct TopKConfig {
         uint32_t       run_eq  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if ((full_key_range || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
                 const uint32_t pos = output_base + smem->total_scratch[0] + base_eq + run_eq++;
                 if (pos < problem.topk) {
                     problem.emit(pos, idx);
@@ -812,6 +879,14 @@ struct TopKRegister: TopKRadixBase<12> {
         // Phase 2: Find the threshold bin
         find_threshold(problem.topk, problem.seq_len, smem);
 
+        // Floating interval comparisons cannot distinguish a NaN threshold
+        // from +Inf at saturated coarse-bin boundaries. Select over the full
+        // existing ordered-key domain (NaN > +Inf), without truncating ties.
+        if (smem->threshold_bin >= (0xFC00u >> (16 - kHistBits))) {
+            exact_boundary_scan_topk(problem, &smem->tie.handle, 0.0f, 0.0f, 0u, true);
+            return;
+        }
+
         // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
         const auto topk          = problem.topk;
         const auto threshold_bin = smem->threshold_bin;
@@ -931,6 +1006,11 @@ public:
 
         // Phase 2: Find the threshold bin
         find_threshold(problem.topk, problem.seq_len, smem);
+
+        if (smem->threshold_bin >= (0xFC00u >> (16 - kHistBits))) {
+            exact_boundary_scan_topk(problem, &smem->tie.handle, 0.0f, 0.0f, 0u, true);
+            return;
+        }
 
         // Phase 3: Collect candidates and sort. Classify by two fp32 boundaries derived
         // from the threshold bin instead of recomputing the fp16 bin per element: an
@@ -1074,6 +1154,16 @@ private:
         // Phase 2: Find the threshold bin (uses global seq_len)
         find_threshold(problem.topk, problem.seq_len, smem);
 
+        if (smem->threshold_bin >= (0xFC00u >> (16 - kHistBits))) {
+            // Rank 0's input still addresses the full row. All peers have
+            // finished the histogram reduction; the caller's trailing cluster
+            // barrier keeps their shared memory alive until selection finishes.
+            if (is_primary) {
+                exact_boundary_scan_topk(problem, &smem->tie.handle, 0.0f, 0.0f, 0u, true);
+            }
+            return;
+        }
+
         // Phase 3: Collect candidates over this rank's chunk; convert local indices
         // back to global by adding chunk_start. Classify by two fp32 boundaries derived
         // from the (global) threshold bin instead of recomputing the fp16 bin per
@@ -1188,7 +1278,23 @@ private:
             const auto equal_count = smem->count_eq;
             if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
                 if (above_count < topk) {
-                    exact_boundary_scan_topk(problem, &smem->tie.handle, v_lo, v_hi, above_count);
+                    bool try_uniform_boundary = true;
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+                    // Overflow guarantees that the first 256 staged boundary
+                    // ties are valid. Different FULL keys disprove uniformity;
+                    // equal sampled keys NEVER prove it. Avoid a full-row
+                    // min/max scan for the common nonuniform overflow case.
+                    // The block reduction also completes every tie.values read
+                    // before exact fallback reuses the union as tie.handle.
+                    bool different = false;
+                    if (tx < 256u) {
+                        different = extract_exact_bin(smem->tie.values[tx].value)
+                                    != extract_exact_bin(smem->tie.values[0].value);
+                    }
+                    try_uniform_boundary = !__syncthreads_or(different);
+#endif
+                    exact_boundary_scan_topk(
+                        problem, &smem->tie.handle, v_lo, v_hi, above_count, false, try_uniform_boundary);
                 }
             } else {
                 const auto remain_topk = above_count < topk ? topk - above_count : 0;

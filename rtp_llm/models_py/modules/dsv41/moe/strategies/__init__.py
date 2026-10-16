@@ -36,6 +36,8 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .sm90_humming import SM90HummingStrategy  # noqa: F401  explicit SM90 selection
+from .sm90_flashinfer import SM90FlashInferStrategy  # noqa: F401  explicit candidate only
 
 __all__ = [
     "MoeCfg",

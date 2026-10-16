@@ -458,12 +458,66 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
 
     name = "mxfp8"
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._stream: torch.cuda.Stream | None = None
+        self._active_stream: torch.cuda.Stream | None = None
+        self._input: torch.Tensor | None = None
+
+    def prepare(self, shared_experts: nn.Module) -> None:
+        # Native G32 has per-linear weights/locks, not the globally shared
+        # block128 workspace. Create the auxiliary stream before capture.
+        # Keep Blackwell and explicit sequential execution unchanged.
+        mode = os.environ.get("DSV4_SHARED_EXPERT_MODE", "auto").strip().lower()
+        if mode not in ("auto", "sequential", "overlap"):
+            raise ValueError(f"invalid DSV4_SHARED_EXPERT_MODE={mode!r}")
+        device = _find_module_cuda_device(shared_experts)
+        if (
+            mode != "sequential"
+            and device is not None
+            and torch.cuda.get_device_capability(device) == (9, 0)
+        ):
+            self._stream = _ensure_shared_expert_stream(device)
+
     def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
+        self._active_stream = None
+        self._input = None
         if x.shape[0] == 0:
             self._out = torch.empty_like(x, dtype=torch.float32)
             return
+        # Bounded decode schedule. Fork and join are both inside the graph;
+        # replay therefore retains the input/output dependency edges. Larger
+        # batches remain sequential to avoid shared/routed GEMM contention.
+        if (
+            self._stream is not None
+            and x.is_cuda
+            and x.device == self._stream.device
+            and x.shape[0] <= 32
+            and os.environ.get("MOEDBG", "0") == "0"
+        ):
+            stream = self._stream
+            stream.wait_stream(torch.cuda.current_stream(x.device))
+            self._active_stream = stream
+            self._input = x
+            with torch.cuda.stream(stream):
+                with record_function_range("dsv41.moe.shared_expert"):
+                    self._out = shared_experts(x)
+            return
         with record_function_range("dsv41.moe.shared_expert"):
             self._out = shared_experts(x)
+
+    def finish(self) -> torch.Tensor:
+        out = self._out
+        if self._active_stream is not None:
+            current = torch.cuda.current_stream(out.device)
+            current.wait_stream(self._active_stream)
+            # Output was allocated on the auxiliary stream but is consumed
+            # on current. Its allocator lifetime must include that consumer.
+            out.record_stream(current)
+        self._active_stream = None
+        self._input = None
+        self._out = None
+        return out
 
 
 class OverlapSharedExpertExecutor(SharedExpertExecutor):

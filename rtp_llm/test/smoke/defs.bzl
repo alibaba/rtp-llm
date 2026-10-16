@@ -112,7 +112,7 @@ def _require_single_gpu_type(macro_name, name, gpu_type):
         fail("%s %s: gpu_type must contain exactly one hardware tag, got %s" % (macro_name, name, gpu_type))
     return gpu_type[0]
 
-def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[], target_compatible_with=[]):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
@@ -127,6 +127,7 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
         args = args,
         timeout = "eternal",
         deps = SMOKE_FRAMEWORK_DEPS + deps,
+        target_compatible_with = target_compatible_with,
         data = data,
         env = {
             "GPU_COUNT": str(gpu_count),

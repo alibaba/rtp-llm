@@ -41,7 +41,7 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     ):
         return False
     return (
-        torch.cuda.get_device_capability(residual.device)[0] == 10
+        torch.cuda.get_device_capability(residual.device)[0] in (9, 10)
         and _has_prenorm_gemm()
     )
 

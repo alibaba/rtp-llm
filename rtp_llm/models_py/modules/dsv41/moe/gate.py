@@ -212,22 +212,35 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
+        use_fused = (
+            not self.hash
+            and self.bias is not None
+            and not getattr(self, "_has_visual_tokens", False)
+            and _use_fused_gate(self.score_func, x.size(0))
+        )
         if os.environ.get("DSV4_GATE_FP32", "0") == "1":
             scores = self._project_scores(x.float(), self.weight.float())
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-            scores = self._project_scores(x_bf16, self._weight_bf16()).float()
+            scores = self._project_scores(x_bf16, self._weight_bf16())
+            # The fused epilogue converts loads to FP32 itself. On Hopper
+            # decode, avoid materializing the identical FP32 score tensor.
+            if not (
+                use_fused
+                and scores.dtype == torch.bfloat16
+                and x.is_cuda
+                and x.size(0) <= 32
+                and not torch.is_grad_enabled()
+                and not _rt.ENABLED
+                and torch.cuda.get_device_capability(x.device) == (9, 0)
+            ):
+                scores = scores.float()
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 
         # P2 fast path: fuse softplus+sqrt+bias+topk+normalize for the
         # default V4 score_func='sqrtsoftplus' + non-hash routing.
-        if (
-            not self.hash
-            and self.bias is not None
-            and not getattr(self, "_has_visual_tokens", False)
-            and _use_fused_gate(self.score_func, x.size(0))
-        ):
+        if use_fused:
             return fused_sqrtsoftplus_gate(
                 scores.contiguous(),
                 self.bias.contiguous(),

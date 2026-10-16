@@ -350,6 +350,63 @@ class _CudaArrayView:
         }
 
 
+def _register_shared_host_memory(runtime, pointer, nbytes):
+    """Bound concurrent large host registrations across local model ranks.
+
+    On H20/CUDA13, concurrent registration of two full Engram tables by
+    eight ranks has failed with cudaErrorInvalidValue. Serialization bounds
+    registration concurrency but does not guarantee success: later full-table
+    probes still failed on some ranks while registering the second table.
+    The creation lock is per table and cannot protect overlapping calls
+    for different layers. This lock covers registration only, never lookup.
+    """
+    path = Path("/tmp") / f"rtp_llm_engram_{os.getuid()}_cuda_register.lock"
+    with open(path, "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return runtime.cudaHostRegister(pointer, nbytes, 3)  # Portable | Mapped
+
+
+def _register_shared_host_ranges(runtime, pointer, nbytes, chunk_bytes):
+    """Register bounded ranges while retaining a contiguous device view.
+
+    Only the last range may end within a host page. No table bytes move.
+    A failed call rolls back all successful ranges; never fall back to CPU.
+    The caller must keep the host storage alive until every range is released.
+    """
+    if nbytes <= 0 or pointer % mmap.PAGESIZE:
+        raise ValueError("Engram registration needs nonempty page-aligned storage")
+    if chunk_bytes < 0 or chunk_bytes % mmap.PAGESIZE:
+        raise ValueError("Engram registration chunk must be a nonnegative page multiple")
+    registered = []
+    device_base = None
+    try:
+        for offset in range(0, nbytes, chunk_bytes or nbytes):
+            address = pointer + offset
+            size = min(chunk_bytes or nbytes, nbytes - offset)
+            (result,) = _register_shared_host_memory(runtime, address, size)
+            if int(result) != 0:
+                _, name = runtime.cudaGetErrorName(result)
+                raise RuntimeError(
+                    f"Engram cudaHostRegister failed: {result} ({name}); "
+                    f"offset={offset}, bytes={size}, total_bytes={nbytes}"
+                )
+            registered.append(address)
+            result, device_pointer = runtime.cudaHostGetDevicePointer(address, 0)
+            if int(result) != 0:
+                raise RuntimeError(f"Engram chunk device pointer failed: {result}")
+            if device_base is None:
+                device_base = device_pointer
+            if device_pointer != device_base + offset:
+                raise RuntimeError("Engram registered ranges have noncontiguous device addresses")
+        return tuple(registered)
+    except BaseException:
+        for address in reversed(registered):
+            (result,) = runtime.cudaHostUnregister(address)
+            if int(result) != 0:
+                logger.error("Engram registration rollback failed: ptr=%#x error=%s", address, result)
+        raise
+
+
 class _PinnedSharedTable:
     """One physical tmpfs allocation shared by independent prefill/decode groups.
 
@@ -360,7 +417,7 @@ class _PinnedSharedTable:
     exits; stale leases from SIGKILL are pruned on the next access.
     """
 
-    def __init__(self, weight, scales, source_identity, device):
+    def __init__(self, weight, scales, source_identity, device, *, register=True):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
         lock_path = Path("/tmp") / (data_path.name + ".lock")
@@ -427,36 +484,72 @@ class _PinnedSharedTable:
             self, _release_shared_table, str(data_path), str(lock_path), str(lease_path)
         )
         self.device = torch.device(device)
+        self.registered = False
+        if not register:
+            logger.warning(
+                "Engram shared CPU lookup enabled for %s on %s; "
+                "no CUDA host registration, eager-only with host transfers",
+                data_path,
+                self.device,
+            )
+            return
         from cuda.bindings import runtime
 
         with torch.cuda.device(self.device):
-            (result,) = runtime.cudaHostRegister(
-                self.storage.data_ptr(), total_bytes, 3  # Portable | Mapped
+            # Limit per-call pinning metadata on Hopper hosts. A 94 GiB single
+            # range can require large GUP/VMA arrays on older Linux kernels.
+            # Other architectures retain the original one-range policy.
+            chunk_mb = int(os.environ.get(
+                "DSV41_ENGRAM_REGISTER_CHUNK_MB",
+                "256" if torch.cuda.get_device_capability(self.device) == (9, 0) else "0",
+            ))
+            if chunk_mb < 0:
+                raise ValueError("DSV41_ENGRAM_REGISTER_CHUNK_MB must be nonnegative")
+            (prior_error,) = runtime.cudaPeekAtLastError()
+            logger.info(
+                "Engram register path=%s device=%s ptr=%#x bytes=%d prior_error=%s chunk_mb=%d",
+                data_path,
+                self.device,
+                self.storage.data_ptr(),
+                total_bytes,
+                prior_error,
+                chunk_mb,
             )
-            if int(result) != 0:
+            try:
+                registered_ranges = _register_shared_host_ranges(
+                    runtime, self.storage.data_ptr(), total_bytes, chunk_mb * 1024**2
+                )
+            except BaseException:
                 self._lease_finalizer()
-                raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+                raise
         self._registration_finalizer = weakref.finalize(
-            self, self._unregister, runtime, self.storage
+            self, self._unregister, runtime, self.storage, registered_ranges
         )
         if not self.storage.is_pinned():
             self._registration_finalizer()
             self._lease_finalizer()
             raise RuntimeError("CUDA did not recognize the Engram shared pinned pages")
         self.runtime = runtime
+        self.registered = True
         logger.info(
-            "Engram CUDA-registered %.2f GiB shared pinned host RAM on %s",
+            "Engram CUDA-registered %.2f GiB shared pinned host RAM on %s (%d ranges)",
             total_bytes / 1024**3,
             self.device,
+            len(registered_ranges),
         )
 
     @staticmethod
-    def _unregister(runtime, storage):
-        (result,) = runtime.cudaHostUnregister(storage.data_ptr())
-        if int(result) != 0:
-            logger.warning("Engram cudaHostUnregister failed: %s", result)
+    def _unregister(runtime, storage, registered_ranges):
+        # storage is intentionally retained by the finalizer until all ranges
+        # are unregistered, including when the owning module is collected.
+        for address in reversed(registered_ranges):
+            (result,) = runtime.cudaHostUnregister(address)
+            if int(result) != 0:
+                logger.warning("Engram cudaHostUnregister failed: ptr=%#x error=%s", address, result)
 
     def cuda_view(self, tensor):
+        if not self.registered:
+            raise RuntimeError("Engram CPU lookup table has no registered CUDA view")
         with torch.cuda.device(self.device):
             result, pointer = self.runtime.cudaHostGetDevicePointer(
                 tensor.data_ptr(), 0
@@ -492,19 +585,32 @@ class HostEngramEmbedding:
         self._pinned = pinned
         self._uva = None
         if pinned is not None:
-            self._uva = (pinned.cuda_view(self.weight), pinned.cuda_view(self.scales))
+            # Startup warmup also uses the device geometry for CPU lookup.
             self._num_sms = torch.cuda.get_device_properties(
                 pinned.device
             ).multi_processor_count
+            if pinned.registered:
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    pinned.cuda_view(self.scales),
+                )
 
-    def __call__(self, indices: torch.Tensor, device) -> torch.Tensor:
-        if indices.is_cuda:
+    def __call__(self, indices: torch.Tensor, device, *, out=None) -> torch.Tensor:
+        if indices.is_cuda and self._uva is not None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-            return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
+            return _engram_triton.lookup_host_rows(
+                *self._uva, indices, self._num_sms, out=out
+            )
+        if out is not None:
+            raise RuntimeError("Preallocated Engram lookup requires the CUDA UVA path")
+        if indices.is_cuda and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "Engram CPU lookup requires eager execution, not CUDA Graph"
+            )
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
-        valid = indices >= 0
-        flat = indices.clamp_min(0).flatten()
+        valid = (indices >= 0) & (indices < self.weight.shape[0])
+        flat = indices.masked_fill(~valid, 0).flatten()
         if self.weight.element_size() == 1:
             rows = (
                 self.weight.view(torch.uint8)
@@ -518,6 +624,94 @@ class HostEngramEmbedding:
         rows = rows.to(torch.bfloat16).view(*indices.shape, self.weight.shape[1])
         rows.masked_fill_(~valid[..., None], 0)
         return rows.to(device=device)
+
+
+class UvaEngramPrefetch:
+    """Bounded all-layer lookup on a graph-capturable auxiliary stream.
+
+    Construct before capture. ``begin`` forks from the calling stream after
+    hashes are ready; each consumer waits its own ready event. ``finish`` must
+    run in a finally block on that same calling stream, including failures.
+    Eager record_stream plus the final join protect allocation lifetime; graph
+    capture retains fixed tensor addresses through its private allocation pool.
+    This object is request-local in use, not safe for concurrent forwards.
+    """
+
+    def __init__(self, device, layer_ids):
+        self.device = torch.device(device)
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Create UVA prefetch streams before graph capture")
+        self.stream = torch.cuda.Stream(device=self.device)
+        self.fork = torch.cuda.Event()
+        self.done = torch.cuda.Event()
+        self.ready = {layer_id: torch.cuda.Event() for layer_id in layer_ids}
+        self.rows = {}
+        self._hashes = ()
+        self._origin = None
+
+    def begin(self, lookups):
+        if self._origin is not None:
+            raise RuntimeError("Previous UVA Engram prefetch has not been joined")
+        lookups = tuple(lookups)
+        if not lookups:
+            return
+        # Validate and allocate on the consumer stream before the fork. No
+        # large embedding table is copied; only this bounded batch's rows.
+        for layer_id, embedding, indices in lookups:
+            if layer_id not in self.ready or embedding._uva is None:
+                raise RuntimeError("UVA Engram prefetch requires registered layer tables")
+            if not indices.is_cuda or indices.device != self.device:
+                raise ValueError("UVA Engram prefetch hashes must reside on its CUDA device")
+        self.rows = {
+            layer_id: torch.empty(
+                (*indices.shape, embedding.weight.shape[1]),
+                dtype=torch.bfloat16, device=self.device,
+            )
+            for layer_id, embedding, indices in lookups
+        }
+        self._hashes = tuple(indices for _, _, indices in lookups)
+        origin = torch.cuda.current_stream(self.device)
+        capturing = torch.cuda.is_current_stream_capturing()
+        self._origin = origin
+        try:
+            self.fork.record(origin)
+            self.stream.wait_event(self.fork)
+            with torch.cuda.stream(self.stream):
+                try:
+                    for layer_id, embedding, indices in lookups:
+                        if not capturing:
+                            indices.record_stream(self.stream)
+                        embedding(indices, self.device, out=self.rows[layer_id])
+                        self.ready[layer_id].record(self.stream)
+                finally:
+                    # Join all enqueued side work even if a later lookup fails.
+                    self.done.record(self.stream)
+        except BaseException:
+            self.finish()
+            raise
+
+    def wait(self, layer_id):
+        if self._origin is None or layer_id not in self.rows:
+            raise RuntimeError("No active UVA Engram prefetch for this layer")
+        current = torch.cuda.current_stream(self.device)
+        current.wait_event(self.ready[layer_id])
+        rows = self.rows[layer_id]
+        if not torch.cuda.is_current_stream_capturing():
+            rows.record_stream(current)
+        return rows
+
+    def finish(self):
+        if self._origin is None:
+            return
+        try:
+            current = torch.cuda.current_stream(self.device)
+            if current != self._origin:
+                raise RuntimeError("Join UVA Engram prefetch on its originating stream")
+            current.wait_event(self.done)
+        finally:
+            self.rows = {}
+            self._hashes = ()
+            self._origin = None
 
 
 def dequantize_block_weight(
@@ -696,7 +890,16 @@ class Engram(nn.Module):
                 identity.extend(
                     [str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)]
                 )
-            pinned = _PinnedSharedTable(table, scales, "|".join(identity), device)
+            host_lookup = os.environ.get("DSV41_ENGRAM_HOST_LOOKUP", "uva")
+            if host_lookup not in ("uva", "cpu"):
+                raise ValueError("DSV41_ENGRAM_HOST_LOOKUP must be uva or cpu")
+            pinned = _PinnedSharedTable(
+                table,
+                scales,
+                "|".join(identity),
+                device,
+                register=host_lookup == "uva",
+            )
             table, scales = pinned.weight, pinned.scales
             projection = V41MXFP8Linear(
                 load("wkv.weight").to(device), load("wkv.scale").to(device)
@@ -717,7 +920,14 @@ class Engram(nn.Module):
             float(_config_value(config, "rms_norm_eps")),
         )
 
-    def forward(self, hidden, hash_ids, token_mask=None):
+    def forward(self, hidden, hash_ids, token_mask=None, *, embedding_rows=None):
+        if embedding_rows is not None and (
+            embedding_rows.shape != (hidden.shape[0], self.layout.n_hash_cols, self.layout.head_dim)
+            or embedding_rows.dtype != torch.bfloat16
+            or embedding_rows.device != hidden.device
+            or not embedding_rows.is_contiguous()
+        ):
+            raise ValueError("Prefetched Engram rows must be contiguous same-device BF16 [T,H,D]")
         if hidden.shape[0] == 0:
             return hidden
         # Engram is token-local after hashing. Bound lookup/projection/gate
@@ -739,14 +949,19 @@ class Engram(nn.Module):
                     hash_ids[begin:end],
                     None if token_mask is None else token_mask[begin:end],
                     out=output[begin:end],
+                    embedding_rows=None if embedding_rows is None else embedding_rows[begin:end],
                 )
             return output
         return self._forward_rows(
-            hidden, hash_ids, token_mask, out=hidden if inplace else None
+            hidden, hash_ids, token_mask, out=hidden if inplace else None,
+            embedding_rows=embedding_rows,
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
+    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, embedding_rows=None):
+        rows = (
+            self.embed_tokens(hash_ids, hidden.device)
+            if embedding_rows is None else embedding_rows
+        ).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
