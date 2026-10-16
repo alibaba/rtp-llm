@@ -3,6 +3,24 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_fastsafetensors_memory",
+    srcs = ["test_fastsafetensors_memory.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_fastsafetensors_reserve_wiring",
+    srcs = ["test_fastsafetensors_reserve_wiring.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:async_model",
+        "//rtp_llm:sdk",
+        "//rtp_llm:models",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

@@ -303,22 +303,13 @@ class EnvArgumentParser(argparse.ArgumentParser):
             cli_args = args if args is not None else sys.argv[1:]
             provided_args = set()
             for arg in cli_args:
-                if not isinstance(arg, str) or not arg.startswith("--"):
-                    continue
-                option = arg.split("=", 1)[0]
-                action = self._option_string_actions.get(option)
-                if action is not None:
-                    provided_args.add(action.dest)
-                    continue
-                if self.allow_abbrev:
-                    matched_dests = {
-                        candidate.dest
-                        for option_string, candidate in self._option_string_actions.items()
-                        if option_string.startswith("--")
-                        and option_string.startswith(option)
-                    }
-                    if len(matched_dests) == 1:
-                        provided_args.update(matched_dests)
+                if arg == "--":
+                    break
+                # Match the same aliases, abbreviations and inline values that
+                # argparse accepted above, instead of reimplementing its rules.
+                option = self._parse_optional(arg)
+                if option is not None and option[0] is not None:
+                    provided_args.add(option[0].dest)
 
             self._cli_provided_args = set(provided_args)
 

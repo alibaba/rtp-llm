@@ -92,6 +92,12 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_cuda12_9_x86": [
+            "torch@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "torchvision@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "fast-safetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.4.dev0%2Btorch2.8.0.cu129.aone68234507-cp310-cp310-linux_x86_64.whl",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.3.4.dev20260904%2Bali.fuseshm.gf2e21da-cp310-cp310-linux_x86_64.whl",
+        ],
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
@@ -104,8 +110,8 @@ def whl_deps():
             "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
             "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
             "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_x86_64.whl",
-            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
-            "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+            "fast-safetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_x86_64.whl",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.3.4.dev20260904%2Bali.fuseshm.gf2e21da-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
         ],
@@ -119,8 +125,8 @@ def whl_deps():
             "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
             "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
             "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_aarch64.whl",
-            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
-            "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fastsafetensors-0.3.4.dev20260907%2Bali.fuseshm.g959cb06b.aone69568696-cp310-cp310-linux_aarch64.whl#sha256=64fe2a543c29d58a23d27f04fddfe25c0e0dd7093cf25ce93825e70920d76380",
             "tilelang@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl",
             "apache-tvm-ffi==0.1.12",
         ],

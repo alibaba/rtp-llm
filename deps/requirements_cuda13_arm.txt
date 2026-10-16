@@ -23,8 +23,8 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-c
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_aarch64.whl
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl
-https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fastsafetensors-0.3.4.dev20260907%2Bali.fuseshm.g959cb06b.aone69568696-cp310-cp310-linux_aarch64.whl#sha256=64fe2a543c29d58a23d27f04fddfe25c0e0dd7093cf25ce93825e70920d76380
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_aarch64.whl
 
 # TileLang 0.1.15 requires the TVM FFI 0.1.11/0.1.12 ABI.
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl
