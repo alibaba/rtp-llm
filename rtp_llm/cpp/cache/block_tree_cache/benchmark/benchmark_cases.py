@@ -145,7 +145,7 @@ PROFILE_CASES = [
         expected_process_timeout_seconds=180,
     ),
     # --- host pair: Device <-> Host, mixed d2h+h2d in one case, one case per
-    # Device<->Host copy strategy (CUDA batch copy vs staged SM) for direct
+    # Device<->Host copy strategy (CUDA 1D/3D batch vs staged SM) for direct
     # comparison. Both variants use descriptor batches at the transfer-engine
     # API boundary.
     _transfer_case(
@@ -165,6 +165,25 @@ PROFILE_CASES = [
         min_bytes=16 * _GIB,
         is_perf_rep=True,
         copy_strategy="batch",
+        descriptor_batch_size=8,
+    ),
+    _transfer_case(
+        "transfer_device_host_full_context_cuda_3d_batch",
+        "d2h,h2d",
+        "full_context",
+        8,
+        min_bytes=16 * _GIB,
+        is_perf_rep=True,
+        copy_strategy="cuda-3d-batch",
+    ),
+    _transfer_case(
+        "transfer_device_host_full_context_cuda_3d_batch_c64_b8_w8",
+        "d2h,h2d",
+        "full_context",
+        64,
+        min_bytes=16 * _GIB,
+        is_perf_rep=True,
+        copy_strategy="cuda-3d-batch",
         descriptor_batch_size=8,
     ),
     _transfer_case(
@@ -201,6 +220,23 @@ PROFILE_CASES = [
         64,
         min_bytes=16 * _GIB,
         copy_strategy="batch",
+        descriptor_batch_size=8,
+    ),
+    _transfer_case(
+        "transfer_device_host_swa_cuda_3d_batch",
+        "d2h,h2d",
+        "swa",
+        8,
+        min_bytes=16 * _GIB,
+        copy_strategy="cuda-3d-batch",
+    ),
+    _transfer_case(
+        "transfer_device_host_swa_cuda_3d_batch_c64_b8_w8",
+        "d2h,h2d",
+        "swa",
+        64,
+        min_bytes=16 * _GIB,
+        copy_strategy="cuda-3d-batch",
         descriptor_batch_size=8,
     ),
     _transfer_case(
@@ -305,7 +341,11 @@ def _batch_api_matrix_cases():
         ("C", 1, 640),
         ("D", 8, 80),
     )
-    strategies = (("cuda_batch", "batch"), ("staged_sm", "staged-sm"))
+    strategies = (
+        ("cuda_batch", "batch"),
+        ("cuda_3d_batch", "cuda-3d-batch"),
+        ("staged_sm", "staged-sm"),
+    )
     for strategy_name, copy_strategy in strategies:
         for group_set in ("full_context", "swa"):
             for direction in ("d2h", "h2d"):
@@ -331,8 +371,16 @@ PROFILE_CASES.extend(_batch_api_matrix_cases())
 def _e2e_business_cases():
     cases = []
     direction_strategies = {
-        "d2h": (("cuda_batch", "batch"), ("staged_sm", "staged-sm")),
-        "h2d": (("cuda_batch", "batch"), ("staged_sm", "staged-sm")),
+        "d2h": (
+            ("cuda_batch", "batch"),
+            ("cuda_3d_batch", "cuda-3d-batch"),
+            ("staged_sm", "staged-sm"),
+        ),
+        "h2d": (
+            ("cuda_batch", "batch"),
+            ("cuda_3d_batch", "cuda-3d-batch"),
+            ("staged_sm", "staged-sm"),
+        ),
         "h2disk": (("direct", None),),
         "disk2h": (("direct", None),),
     }

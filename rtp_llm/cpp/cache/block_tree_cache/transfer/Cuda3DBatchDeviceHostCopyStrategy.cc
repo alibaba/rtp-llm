@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -25,8 +26,8 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
         return StrategyResult::notApplicable();
     }
 
-    const bool d2h = descriptors.front().target_tier != Tier::DEVICE;
-    int device_index = -1;
+    const bool                       d2h          = descriptors.front().target_tier != Tier::DEVICE;
+    int                              device_index = -1;
     std::vector<cudaMemcpy3DBatchOp> ops;
     for (size_t i = 0; i < descriptors.size(); ++i) {
         const auto& group     = *group_sets[i];
@@ -41,7 +42,7 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
             return StrategyResult::failed(hosts[i].base == nullptr ? TransferStatus::DEVICE_IO_ERROR :
                                                                      TransferStatus::INVALID_ARGS);
         }
-        const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
+        const auto& blocks             = descriptors[i].blocksAt(Tier::DEVICE);
         const int   group_device_index = pools.front()->deviceIndex();
         if (device_index >= 0 && device_index != group_device_index) {
             return StrategyResult::notApplicable();
@@ -71,8 +72,10 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
 
     c10::cuda::CUDAGuard guard(device_index);
     // Per-thread CUDA stream avoids sharing a copy stream across concurrent executor workers.
-    auto       stream = cudaStreamPerThread;
-    const auto submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    auto                         stream = cudaStreamPerThread;
+    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(device_index));
+    const auto                   submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    submit_lock.unlock();
     // Drain even a failed submission: a prefix may already be in flight.
     const auto completion = cudaStreamSynchronize(stream);
     RTP_LLM_CHECK_WITH_INFO(completion == cudaSuccess,
