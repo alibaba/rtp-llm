@@ -9,6 +9,9 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -241,6 +244,14 @@ protected:
         handler.meta_                     = meta;
         handler.propose_maga_init_params_ = nullptr;
         prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+        if (kind == Handler::PREFILL) {
+            P2PConnectorConfig config;
+            config.role_type = RoleType::PREFILL;
+            auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+            connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+            connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 1000);
+            engine->getCacheManager()->p2p_connector_ = connector;
+        }
         auto request = lifecycleRequest();
         request.mutable_generate_config()->set_can_use_pd_separation(kind == Handler::PREFILL);
         request.mutable_generate_config()->set_unique_key("lifecycle-p2p");
@@ -265,14 +276,10 @@ protected:
         }
         EXPECT_TRUE(reached_output);
         EXPECT_TRUE(returned) << "handler waited for scheduler completion";
-        if (action == OutputAction::THROW) {
-            EXPECT_THROW(call.get(), std::runtime_error);
-        } else {
-            auto status = call.get();
-            EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
-            if (action != OutputAction::COMPLETE) {
-                EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
-            }
+        auto status = call.get();
+        EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
+        if (action != OutputAction::COMPLETE) {
+            EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
         }
         EXPECT_EQ(response_call.get().ok(), action == OutputAction::COMPLETE);
         ASSERT_TRUE(reached_output);
