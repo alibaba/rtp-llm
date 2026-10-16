@@ -1,0 +1,51 @@
+case_schema_version: 2
+case: cache_sync_recovery
+program: default
+metadata:
+  kind: functional
+  description: 大缓存全量同步、小幅 diff 和部分存活 Worker 撤出恢复，验证健康 Worker 不受连带影响。
+  category: status
+  tags: [cache, lifecycle]
+profiles:
+- single-nonbatch
+- batch-window
+environment:
+  backend: java_mock
+  discovery: discovery_file
+  n_prefill: 96
+  n_decode: 32
+  config_overrides:
+    status_rpc_ms: 5000
+    cache_min_refresh_ms: 4800
+    cache_max_refresh_ms: 4800
+  master_jvm_heap: 64g
+  mock_heap: 32g
+  master_sync_log: true
+execution:
+  timeout_s: 1500
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+  collection: diagnostic
+parameters:
+  procedure:
+    setup_timeout_s: 300
+    warmup_timeout_s: 300
+    stable_s: 15
+    churn_s: 60
+    withdraw_s: 20
+    recovery_timeout_s: 180
+    seed_interval_s: 1
+    # Ring: two adjacent shared segments, plus private keys; cardinality remains fixed.
+    unique_keys: 296000
+    shared_keys: 5000
+    delta_keys: 117
+    # Sensitivity setting, not measured production changed-version frequency.
+    change_every_responses: 10
+    expired_workers: 12
+  observation:
+    sample_s: 1
+    max_gap_s: 5
+    converged_samples: 5
+  checks:
+    max_status_age_ms: 10000
+    min_cache_responses_per_s: 15

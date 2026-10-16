@@ -1,3 +1,13 @@
 run/
 __pycache__/
+.pytest_cache/
 *.pyc
+*.canvas.tsx
+*.log
+*.zip
+results/
+reports/
+/artifacts/
+
+.ruff_cache/
+.import_linter_cache/

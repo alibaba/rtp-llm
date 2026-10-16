@@ -28,9 +28,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
-import java.net.InetAddress;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
@@ -104,11 +102,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     private void initializeIpAndPort() {
-        try {
-            localIp = InetAddress.getLocalHost().getHostAddress();
-        } catch (UnknownHostException e) {
-            throw new RuntimeException("Failed to retrieve local host address", e);
-        }
+        localIp = MasterHost.resolve(environment);
         // Read from Spring Environment to respect --server.port= CLI args;
         // fall back to JVM system property.
         String portStr = environment.getProperty("server.port");

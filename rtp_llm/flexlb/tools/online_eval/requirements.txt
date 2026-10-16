@@ -1,0 +1,5 @@
+PyYAML
+grpcio
+grpcio-tools
+protobuf
+prometheus-client==0.23.1

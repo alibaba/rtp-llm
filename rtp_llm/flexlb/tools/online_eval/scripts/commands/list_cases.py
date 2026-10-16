@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Configure Python cases from YAML and execute them inside a parent-owned port lane."""
+
+import argparse
+import hashlib
+import json
+import signal
+import sys
+import threading
+from pathlib import Path
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+from scenario import (
+    ScenarioError,
+    compile_scenarios,
+    load_scenarios,
+)
+from scenario.suites import classify, preselect_documents, exact_documents
+from scenario.selection_cli import add_selection_arguments, resolve_selection
+from scenario.catalog import handlers
+from scenario.compiler import plan_counts
+from scenario.lease import validate_lease
+
+LIST_FIELDS = (
+    "id",
+    "scenario_id",
+    "variant_id",
+    "profile",
+    "grade",
+    "effective_axes",
+    "effective_capabilities",
+    "category",
+    "tags",
+    "requires",
+    "source_path",
+    "source",
+    "estimated_duration_s",
+    "resource_budget",
+)
+
+
+def instance_directory(instance_id):
+    # JVM -Xlog uses ':' as a delimiter even when the argv is shell-quoted.
+    # The public ID remains unchanged; only its filesystem storage key differs.
+    return "instance-" + hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+
+
+def inventory(plans, dependencies):
+    rows = []
+    for plan in plans:
+        row = {key: plan[key] for key in LIST_FIELDS}
+        row["test_kind"] = plan.get("test_kind", "functional")
+        row["metadata"] = plan["metadata"]
+        if "reports" in plan:
+            row["reports"] = plan["reports"]
+        if "implementation" in plan:
+            row["implementation"] = plan["implementation"]
+        row["execution"] = plan["execution"]
+        row["compiled"] = plan
+        rows.append(row)
+    from scenario.execution_plan import dependency_files
+    if dependencies != dependency_files():
+        raise ScenarioError("execution code/config changed during compilation")
+    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows,
+                dependencies=dependencies)
+
+
+def select(plans, exact_ids):
+    if exact_ids is None:
+        if not plans:
+            raise ScenarioError("no matching instances")
+        return plans
+    ids = exact_ids.split(",")
+    known = {plan["id"]: plan for plan in plans}
+    if not ids or any(not value for value in ids) or len(ids) != len(set(ids)):
+        raise ScenarioError("instance selection is empty or contains duplicates")
+    missing = set(ids) - set(known)
+    if missing:
+        raise ScenarioError(f"unknown exact instance IDs: {sorted(missing)}")
+    return [known[value] for value in ids]
+
+
+def summarize(rows):
+    failed = sum(
+        row["status"] in ("FAIL", "ERROR", "TIMEOUT")
+        or any(c["status"] != "PASS" for c in row["cleanup"])
+        for row in rows
+    )
+    return dict(
+        passed_count=sum(r["status"] == "PASS" for r in rows),
+        failed_count=failed,
+        finding_confirmed=sum(r["status"] == "FINDING-CONFIRMED" for r in rows),
+        finding_resolved=sum(r["status"] == "FINDING-RESOLVED" for r in rows),
+        exit_code=1 if failed else 0,
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, help="scenario file or directory")
+    add_selection_arguments(parser)
+    parser.add_argument(
+        "--grade", choices=("strict", "normal", "loose"), default="normal"
+    )
+    parser.add_argument("--instances", help="comma separated exact instance IDs")
+    parser.add_argument("--list-json", action="store_true")
+    parser.add_argument("--plan", type=Path, help="execute a frozen parent-owned plan")
+    parser.add_argument("--plan-sha256", help="expected frozen plan checksum")
+    parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--archive", type=Path,
+                        help="optional single-file scenario experiment archive")
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
+    parser.add_argument("--lease-json", type=Path)
+    parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
+    args = parser.parse_args(argv)
+    resolve_selection(args, parser)
+    try:
+        from scenario.execution_plan import dependency_files
+        dependencies = dependency_files()
+        registry = handlers()
+        if args.plan:
+            if args.experiment_params:
+                raise ScenarioError("frozen plans already contain effective experiment parameters")
+            if args.list_json or not args.plan_sha256:
+                raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
+            from scenario.execution_plan import load_plan
+            plans = select(load_plan(args.plan, args.plan_sha256), args.instances)
+            if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
+                raise ScenarioError("frozen plan profile/grade disagrees with selection")
+        else:
+            if args.plan_sha256:
+                raise ScenarioError("--plan-sha256 requires --plan")
+            plans = select(
+                classify(
+                    compile_scenarios(
+                        exact_documents(preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind), args.instances),
+                        args.profile,
+                        registry,
+                        grade=args.grade,
+                    ),
+                    args.suite, kind=args.kind,
+                ),
+                args.instances,
+            )
+        if args.list_json:
+            print(json.dumps(inventory(plans, dependencies), indent=2, allow_nan=False))
+            return 0
+        if args.out_dir is None or args.lease_json is None:
+            raise ScenarioError(
+                "execution requires --out-dir and --lease-json from the parent port planner"
+            )
+        if ":" in str(args.out_dir.resolve()):
+            raise ScenarioError(
+                "Java mock output directory cannot contain a colon (JVM -Xlog delimiter)"
+            )
+        leases = [validate_lease(args.lease_json, p["resource_budget"]) for p in plans]
+    except (ScenarioError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    # Keep --list-json free of gRPC/proto/process initialization.
+    from scenario.backend import JavaMockBackend
+    from scenario.runtime import StageTimeout, execute_instance
+
+    from workload.policy import execute_workload
+
+    cancelled = threading.Event()
+
+    def cancel(signum, frame):
+        cancelled.set()
+        # Synchronous stage I/O must unwind promptly; cleanup has a distinct
+        # deadline and its own cancel/join handling. A repeated TERM during
+        # cleanup can fail that cleanup, which remains visible as ERROR.
+        handler = signal.getsignal(signal.SIGALRM)
+        if callable(handler) and getattr(handler, "__name__", "") == "expire":
+            raise StageTimeout(f"child interrupted by signal {signum}")
+
+    previous = {
+        sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    retirement = None
+    try:
+        for index, (plan, lease) in enumerate(zip(plans, leases)):
+            if retirement is not None:
+                rows.append(dict({key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
+                                 status="ERROR", duration_ms=0,
+                                 not_started=True, stages=[], cleanup=[], error=retirement))
+            else:
+                backend = JavaMockBackend(lease)
+                backend.retain_tsdb = args.retain_tsdb
+                rows.append(
+                    (
+                        execute_workload
+                        if plan["test_kind"] == "workload"
+                        else execute_instance
+                    )(
+                        plan,
+                        backend,
+                        registry,
+                        args.out_dir / "instances" / instance_directory(plan["id"]),
+                        cancelled=cancelled,
+                        enforce_deadlines=True,
+                    )
+                )
+                from scenario.lane_safety import cleanup_failure
+                retirement = cleanup_failure(rows[-1])
+                from scenario.lane_safety import occupied_ports
+                from adapters.environment import port_in_use
+                busy = occupied_ports(lease["intervals"], lambda port: port_in_use(port, "0.0.0.0"))
+                if busy:
+                    retirement = "lane ports not released: " + str(busy)
+            payload = dict(scenario_results_schema_version=1, summary=summarize(rows), instances=rows)
+            target = args.out_dir / "scenarios.json"
+            temporary = args.out_dir / "scenarios.json.tmp"
+            temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+            temporary.replace(target)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if args.archive:
+            from artifacts.archive import create_archive
+
+            create_archive(
+                args.archive, {"run": args.out_dir}, kind="scenario",
+                status="incomplete" if cancelled.is_set() or len(rows) != len(plans)
+                       else "complete",
+                metadata={"profile": args.profile, "grade": args.grade,
+                          "instance_count": len(rows), "planned_count": len(plans)},
+            )
+    return summarize(rows)["exit_code"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

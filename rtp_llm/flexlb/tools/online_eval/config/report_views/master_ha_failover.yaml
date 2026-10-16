@@ -1,0 +1,267 @@
+report_view_schema_version: 1
+kind: selected
+report:
+  subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
+  id: ha-core
+  producer: workload-ha
+metrics:
+  query_plan: master_ha_failover.yaml
+  diagnostic_only:
+  - mock/running_sum
+  - mock/waiting_sum
+  - mock/engine_count
+  - mock/cache_hit_ratio
+charts:
+  events:
+    kill_a:
+      label: A kill
+      source: stage
+      stage: kill_a
+      boundary: end
+    kill_b:
+      label: B kill
+      source: stage
+      stage: kill_b
+      boundary: end
+    restart_a:
+      label: A restart
+      source: stage
+      stage: restart_a
+      boundary: end
+    restart_b:
+      label: B restart
+      source: stage
+      stage: restart_b
+      boundary: end
+  event_ids:
+  - kill_a
+  - kill_b
+  - restart_a
+  - restart_b
+  curves:
+    ha/sent:
+      metric_id: ha/sent
+      labels: {}
+      name: 发出
+      group: 请求
+      unit: requests/s
+      axis: qps
+      color: '#2f54eb'
+      hidden: false
+    ha/success:
+      metric_id: ha/success
+      labels: {}
+      name: 成功
+      group: 请求
+      unit: requests/s
+      axis: qps
+      color: '#52c41a'
+      hidden: false
+    ha/failed:
+      metric_id: ha/failed
+      labels: {}
+      name: 失败
+      group: 请求
+      unit: requests/s
+      axis: qps
+      color: '#f5222d'
+      hidden: false
+    ha/prefill_peak_qps:
+      metric_id: ha/prefill_peak_qps
+      labels: {}
+      name: 最热 Prefill
+      group: Prefill 分配
+      unit: requests/s
+      axis: qps
+      color: '#f5222d'
+      hidden: false
+    ha/prefill_mean_qps:
+      metric_id: ha/prefill_mean_qps
+      labels: {}
+      name: 全体 Prefill 平均
+      group: Prefill 分配
+      unit: requests/s
+      axis: qps
+      color: '#52c41a'
+      hidden: false
+    ha/prefill_skew:
+      metric_id: ha/prefill_skew
+      labels: {}
+      name: 最热 / 平均
+      group: Prefill 分配
+      unit: ratio
+      axis: skew
+      color: '#13c2c2'
+      hidden: false
+    ha/http_up/A:
+      metric_id: ha/http_up
+      labels:
+        master: A
+      name: '{master} · HTTP 可回读'
+      group: '{master}'
+      unit: boolean
+      axis: up
+      color: '#1677ff80'
+      hidden: false
+    ha/http_up/B:
+      metric_id: ha/http_up
+      labels:
+        master: B
+      name: '{master} · HTTP 可回读'
+      group: '{master}'
+      unit: boolean
+      axis: up
+      color: '#722ed180'
+      hidden: false
+    ha/scheduler_inflight/A:
+      metric_id: ha/scheduler_inflight
+      labels:
+        master: A
+      name: '{master} · 调度在飞'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#1677ff'
+      hidden: false
+    ha/scheduler_inflight/B:
+      metric_id: ha/scheduler_inflight
+      labels:
+        master: B
+      name: '{master} · 调度在飞'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#722ed1'
+      hidden: false
+    ha/prefill_inflight_requests/A:
+      metric_id: ha/prefill_inflight_requests
+      labels:
+        master: A
+      name: '{master} · Prefill 在飞请求'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#13c2c2'
+      hidden: false
+    ha/prefill_inflight_requests/B:
+      metric_id: ha/prefill_inflight_requests
+      labels:
+        master: B
+      name: '{master} · Prefill 在飞请求'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#eb2f96'
+      hidden: false
+    ha/decode_master_queued/A:
+      metric_id: ha/decode_master_queued
+      labels:
+        master: A
+      name: '{master} · Decode Master 排队'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#fa8c16'
+      hidden: false
+    ha/decode_master_queued/B:
+      metric_id: ha/decode_master_queued
+      labels:
+        master: B
+      name: '{master} · Decode Master 排队'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#faad14'
+      hidden: false
+    ha/decode_confirmed_running/A:
+      metric_id: ha/decode_confirmed_running
+      labels:
+        master: A
+      name: '{master} · Decode 已确认运行'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#52c41a'
+      hidden: false
+    ha/decode_confirmed_running/B:
+      metric_id: ha/decode_confirmed_running
+      labels:
+        master: B
+      name: '{master} · Decode 已确认运行'
+      group: '{master}'
+      unit: requests
+      axis: count
+      color: '#a0d911'
+      hidden: false
+  panels:
+  - id: request_qps
+    title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
+    caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
+    empty_caption: 缺少有效请求或 Master HTTP 观测；缺失值不补零。
+    curve_ids:
+    - ha/sent
+    - ha/success
+    - ha/failed
+    - ha/http_up/A
+    - ha/http_up/B
+    axes:
+      qps:
+        title: requests / s
+        position: left
+      up:
+        title: HTTP 状态 (0/1)
+        position: right
+        min: 0
+        max: 1
+  - id: inflight
+    title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
+    caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
+    empty_caption: 缺少有效 Master inflight 观测；缺失值不补零。
+    curve_ids:
+    - ha/scheduler_inflight/A
+    - ha/scheduler_inflight/B
+    - ha/prefill_inflight_requests/A
+    - ha/prefill_inflight_requests/B
+    - ha/decode_master_queued/A
+    - ha/decode_master_queued/B
+    - ha/decode_confirmed_running/A
+    - ha/decode_confirmed_running/B
+    - ha/http_up/A
+    - ha/http_up/B
+    axes:
+      count:
+        title: requests
+        position: left
+      up:
+        title: HTTP 状态 (0/1)
+        position: right
+        min: 0
+        max: 1
+  - id: prefill_balance
+    title: Prefill 5 秒滚动分配均衡性
+    caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数。此短窗指标仅作观测，不作强制门禁。A/B
+      HTTP 可回读使用独立 0/1 轴，不代表 gRPC 已恢复；竖线标出 Master 事件。
+    empty_caption: 缺少有效 Prefill 分配观测；缺失值不补零。
+    curve_ids:
+    - ha/prefill_peak_qps
+    - ha/prefill_mean_qps
+    - ha/prefill_skew
+    - ha/http_up/A
+    - ha/http_up/B
+    axes:
+      qps:
+        title: requests / s
+        position: left
+      up:
+        title: HTTP 状态 (0/1)
+        position: right
+        min: 0
+        max: 1
+      skew:
+        title: 最热 / 平均 (倍)
+        position: right
+        min: 0
+sections:
+  sources:
+    title: 数据来源与完整性
+    opened: false

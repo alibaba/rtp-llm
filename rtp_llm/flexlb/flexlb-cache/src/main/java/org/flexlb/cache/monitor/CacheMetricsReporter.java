@@ -24,6 +24,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
@@ -100,6 +101,7 @@ public class CacheMetricsReporter {
         // Cache service response time metrics
         monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
         monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
 
         // Cache diff related metrics
         monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE);
@@ -107,6 +109,11 @@ public class CacheMetricsReporter {
 
         // Engine view map size metrics
         monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
+    }
+
+    /** Report completed local and global index retirement, excluding metric publication. */
+    public void reportEngineCacheRemovalTime(double elapsedMs) {
+        monitor.report(CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT, elapsedMs);
     }
 
     /**

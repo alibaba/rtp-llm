@@ -1,0 +1,82 @@
+"""Program-owned numeric types; YAML can only narrow their legal ranges."""
+
+from collections.abc import Mapping
+from input_contract import NumberRule
+from traffic.request_rules import PRIORITY, JAVA_LENGTH
+
+
+NONNEGATIVE = NumberRule(integer=False, minimum=0)
+COUNT = NumberRule(integer=True, minimum=0)
+POSITIVE_COUNT = NumberRule(integer=True, minimum=1)
+FRACTION = NumberRule(integer=False, minimum=0, maximum=1)
+OFFSET = NumberRule(integer=False)
+
+
+def number_fields(rule, *paths):
+    return dict.fromkeys(paths, rule)
+
+
+SOURCE_NUMBERS = {
+    **number_fields(COUNT, 'traffic.source.parameters.count',
+                    'traffic.source.parameters.output_tokens'),
+    'traffic.source.parameters.priority': PRIORITY,
+}
+OUTPUT_DISTRIBUTION_NUMBERS = number_fields(COUNT,
+    'traffic.source.parameters.output_distribution.mean_tokens',
+    'traffic.source.parameters.output_distribution.seed')
+JAVA_FLOW_NUMBERS = {
+    **number_fields(NONNEGATIVE, 'traffic.client.playback.qps', 'traffic.poll_s'),
+    'traffic.client.playback.max_laps': COUNT,
+    **number_fields(POSITIVE_COUNT, 'traffic.client.playback.duration_s',
+        'traffic.client.limits.max_concurrency', 'traffic.client.limits.request_timeout_s',
+        'traffic.client.limits.drain_timeout_s', 'traffic.client.transport.channels',
+        'traffic.client.transport.event_loop_threads'),
+}
+CAPTURE_NUMBERS = number_fields(POSITIVE_COUNT,
+    'observation.capture.max_samples', 'observation.capture.max_bytes')
+
+# Shared paths have one type and intrinsic range. Programs may declare a smaller
+# budget; YAML may further narrow it. Neither can weaken the shared rule.
+COMMON_NUMBERS = {
+    **SOURCE_NUMBERS, **OUTPUT_DISTRIBUTION_NUMBERS, **JAVA_FLOW_NUMBERS,
+    **CAPTURE_NUMBERS, 'procedure.setup_timeout_s': NONNEGATIVE,
+    'observation.sample_s': NONNEGATIVE, 'observation.max_gap_s': NONNEGATIVE,
+    'traffic.input_len': JAVA_LENGTH, 'traffic.output_len': JAVA_LENGTH,
+    'traffic.count': POSITIVE_COUNT, 'checks.offered_load.expected': FRACTION,
+}
+
+
+def parameter_rules(defaults):
+    from document_io import DocumentError as ScenarioError
+
+    if not isinstance(defaults, Mapping):
+        raise ScenarioError("numeric parameter contract must be a mapping")
+    for path, rule in defaults.items():
+        if (type(path) is not str or not path or any(not part for part in path.split('.'))
+                or not isinstance(rule, NumberRule)):
+            raise ScenarioError("invalid program numeric parameter contract")
+        if path in COMMON_NUMBERS:
+            bounds = {key: getattr(rule, key) for key in ('minimum', 'maximum')
+                      if getattr(rule, key) is not None}
+            try:
+                compatible = COMMON_NUMBERS[path].narrow(bounds, path) == rule
+            except ValueError:
+                compatible = False
+            if not compatible:
+                raise ScenarioError("conflicting shared numeric field: " + path)
+    return dict(defaults)
+
+
+def narrow_parameters(rules, refinements):
+    from document_io import DocumentError as ScenarioError
+
+    if not isinstance(refinements, dict):
+        raise ScenarioError("parameter_schema must be a mapping")
+    unknown = set(refinements) - set(rules)
+    if unknown:
+        raise ScenarioError("parameter_schema: unknown configuration fields " + str(sorted(unknown)))
+    try:
+        return {path: rule.narrow(refinements[path], path) if path in refinements else rule
+                for path, rule in rules.items()}
+    except ValueError as exc:
+        raise ScenarioError(str(exc)) from exc

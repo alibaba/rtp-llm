@@ -1,0 +1,81 @@
+"""Shared contracts: no scenario imports, consistent launcher isolation."""
+
+import os
+import re
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from adapters.load_client import LOAD_CLIENT_ENV_VARS
+from adapters.requests import ClientRecords, request_success
+from adapters.java_client import ClientOps
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class SharedRuntimeTests(unittest.TestCase):
+    def test_requests_can_load_without_any_case_framework(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import adapters.requests; "
+                'assert not any(k.startswith("flexlb_test_framework") for k in sys.modules)',
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unfinished_output_is_not_business_success(self):
+        rows = ClientRecords("run1")
+        record = rows.issue(42, lambda: 1)
+        rows.update(
+            record,
+            schedule={"status": "OK"},
+            stream={"status": "OK", "first_output_s": 2},
+            consumer_exit_s=3,
+        )
+        self.assertFalse(request_success(record))
+        rows.update(record, business_finished=True)
+        self.assertTrue(request_success(record))
+        rows.update(record, business_error_code=8511)
+        self.assertFalse(request_success(record))
+
+    def test_python_blanks_ambient_priority_and_preserves_explicit_override(self):
+        with patch.dict(
+            os.environ,
+            {
+                "FORCE_PRIORITY": "99",
+                "RAMP_UP_SECONDS": "500",
+                "REPLAY_UNIQUE_PREFIX": "false",
+            },
+        ):
+            env = ClientOps(None)._base_env({"PRIORITY": 70})
+        self.assertEqual(env["PRIORITY"], "70")
+        for name in ("FORCE_PRIORITY", "RAMP_UP_SECONDS", "REPLAY_UNIQUE_PREFIX"):
+            self.assertEqual(env[name], "")
+
+
+    def test_java_environment_reads_are_all_isolated(self):
+        directory = ROOT.parents[1] / "flexlb-mock-engine/src/main/java/org/flexlb/mockengine"
+        sources = [(directory / name).read_text() for name in
+                   ("JavaLoadClient.java", "Playback.java", "FlowControl.java", "ClientEventJournal.java")]
+        names = set()
+        for source in sources:
+            names.update(re.findall(
+                r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"', source))
+            names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))
+            names.update(re.findall(r'text\(env,\s*"([A-Z_]+)"', source))
+        self.assertTrue(names)
+        self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
+        self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
+        self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
+
+
+
+if __name__ == "__main__":
+    unittest.main()

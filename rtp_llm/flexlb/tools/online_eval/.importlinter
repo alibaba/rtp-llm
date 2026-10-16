@@ -1,0 +1,53 @@
+[importlinter]
+root_packages =
+    analysis
+    case_api
+    cases
+    scenario
+    reporting
+    workload
+    scripts
+    monitoring
+    runtime
+    diagnostics
+    artifacts
+    adapters
+    traffic
+
+[importlinter:contract:analysis]
+name = 分析不依赖报表
+type = forbidden
+source_modules =
+    analysis
+    cases.*.analysis
+forbidden_modules =
+    reporting
+    cases.*.report
+    cases.*.panels
+
+[importlinter:contract:inputs]
+name = 输入契约不依赖编译器
+type = forbidden
+source_modules =
+    cases.*.inputs
+forbidden_modules =
+    scenario.compiler
+    scenario.program_compiler
+    scenario.stage_compiler
+
+[importlinter:contract:case-api]
+name = 公共 case 接口不依赖业务实现
+type = forbidden
+source_modules =
+    case_api
+forbidden_modules =
+    cases
+    workload
+
+[importlinter:contract:scenario]
+name = 场景库不依赖命令脚本
+type = forbidden
+source_modules =
+    scenario
+forbidden_modules =
+    scripts

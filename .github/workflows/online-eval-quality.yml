@@ -1,0 +1,33 @@
+name: online_eval quality
+
+on:
+  pull_request:
+    paths:
+      - 'rtp_llm/flexlb/tools/online_eval/**'
+      - '.github/workflows/online-eval-quality.yml'
+  push:
+    branches: ['codex/**', main]
+    paths:
+      - 'rtp_llm/flexlb/tools/online_eval/**'
+      - '.github/workflows/online-eval-quality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rtp_llm/flexlb/tools/online_eval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt -r requirements-quality.txt pytest
+      - run: python scripts/commands/check_quality.py
+      - run: python -m pytest -q tests/test_quality_boundaries.py tests/test_case_author_contract.py tests/test_case_extension_boundaries.py
+        env:
+          PYTHONPATH: src:.
