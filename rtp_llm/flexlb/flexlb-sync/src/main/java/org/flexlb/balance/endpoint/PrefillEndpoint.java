@@ -241,6 +241,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ScheduledRequest exactHead,
             long batchId,
             int maximumInflightBatches) {
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
@@ -272,6 +275,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             reserveRouteOwnership(
             ScheduledRequest exactItem,
             long predictedMs) {
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         if (isGenerationRetiringOrRetired()) {
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
@@ -282,6 +288,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        if (!hasFreshSchedulingStatus()) { return null; }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         return handoffPermit == null

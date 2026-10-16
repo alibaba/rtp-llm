@@ -225,7 +225,7 @@ class DirectAdmissionContractTest {
             try {
                 var response = status(worker, Map.of(), Map.of());
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(response))).endpoint();
+                        worker.prepareNewStatus(worker.freezeStatusResponse(response), null)).endpoint();
             } finally {
                 worker.lock.unlock();
             }
@@ -289,7 +289,7 @@ class DirectAdmissionContractTest {
             try {
                 var response = status(worker, running, finished);
                 projection = endpoint.applyPreparedStatus(worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                        worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
             } finally {
                 worker.lock.unlock();
             }

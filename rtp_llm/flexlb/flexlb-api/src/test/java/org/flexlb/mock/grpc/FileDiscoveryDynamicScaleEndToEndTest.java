@@ -43,7 +43,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -170,22 +169,22 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 // republishes the exact generations used by routing.
                 engineWorkerStatus,
                 workerAddressService,
-                statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 healthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
                 cacheAwareService,
                 cacheIntervalService,
                 5_000L,
-                new LongAdder(),
+                0L,
                 1L,
                 false,
-                STATUS_STALE_AFTER_US);
+                STATUS_STALE_AFTER_US, 60_000_000L);
 
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
-                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor,
+                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
-                cacheIntervalService, 5_000L, new LongAdder(), 1L, false, STATUS_STALE_AFTER_US);
+                cacheIntervalService, 5_000L, 0L, 1L, false, STATUS_STALE_AFTER_US, 60_000_000L);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");

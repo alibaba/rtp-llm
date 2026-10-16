@@ -662,6 +662,15 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
             snapshot = cache_status_snapshot_;
         }
         if (snapshot) {
+            // -1 always requests a full snapshot (cold start/index recovery).
+            if (latest_version >= 0 && latest_version == snapshot->version) {
+                KVCacheInfo info;
+                info.version = snapshot->version;
+                info.available_kv_cache = snapshot->available_kv_cache;
+                info.total_kv_cache = snapshot->total_kv_cache;
+                info.block_size = snapshot->block_size;
+                return info;
+            }
             return *snapshot;
         }
     }
@@ -723,9 +732,11 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     }
 
     if (need_cache_keys && block_tree_cache_) {
-        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
+        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot(latest_version);
         info.version                  = snapshot.version;
-        info.cached_keys              = std::move(snapshot.keys);
+        if (latest_version < 0 || latest_version != snapshot.version) {
+            info.cached_keys = std::move(snapshot.keys);
+        }
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?

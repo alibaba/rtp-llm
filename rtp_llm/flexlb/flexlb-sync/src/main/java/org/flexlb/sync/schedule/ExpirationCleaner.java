@@ -4,6 +4,7 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -38,6 +39,7 @@ public class ExpirationCleaner {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final long workerTimeoutUs;
+    private final long statusCommitGraceUs;
     private final CacheAwareService cacheAwareService;
     private final WorkerDirectory workerDirectory;
 
@@ -51,6 +53,8 @@ public class ExpirationCleaner {
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
+        this.statusCommitGraceUs = configService.loadBalanceConfig().getWorkerRegistry()
+                .getHealth().getStatusCommitGraceMs() * 1000L;
     }
 
     /**
@@ -69,6 +73,17 @@ public class ExpirationCleaner {
 
     @Scheduled(fixedRateString = "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
     public void cleanExpiredWorkers() {
+        if (logger.isInfoEnabled()) {
+            logger.info("event=worker_counts phase=CLEANUP_START "
+                            + "prefill_discovered={} prefill_published={} "
+                            + "decode_discovered={} decode_published={} "
+                            + "vit_discovered={} vit_published={} "
+                            + "pdfusion_discovered={} pdfusion_published={}",
+                    workerDirectory.discoveredCount(RoleType.PREFILL), workerDirectory.routingCapacity(RoleType.PREFILL),
+                    workerDirectory.discoveredCount(RoleType.DECODE), workerDirectory.routingCapacity(RoleType.DECODE),
+                    workerDirectory.discoveredCount(RoleType.VIT), workerDirectory.routingCapacity(RoleType.VIT),
+                    workerDirectory.discoveredCount(RoleType.PDFUSION), workerDirectory.routingCapacity(RoleType.PDFUSION));
+        }
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {
             retirements.addAll(beginExpiredRetirements(
@@ -92,8 +107,10 @@ public class ExpirationCleaner {
 
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            workerStatus.trace().record(Stage.EXPIRATION_LOCK_ATTEMPT);
+            if (!workerStatus.lock.tryLock()) { continue; }
             try {
+                workerStatus.trace().record(Stage.EXPIRATION_LOCK_ACQUIRED);
                 if (workerStatusMap.get(item.getKey()) != workerStatus) {
                     continue;
                 }
@@ -104,13 +121,20 @@ public class ExpirationCleaner {
                 long expirationTime = health.lastSuccessfulPollUs()
                         + workerTimeoutUs;
                 long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime) {
+                boolean transportFailed = health.consecutiveTransportFailures() >= 3L;
+                boolean reportedDead = workerStatus.hasReceivedStatusRpc() && !health.reportedAlive();
+                if (transportFailed || reportedDead || (currentTime > expirationTime
+                        && !workerStatus.isStatusPollProtected(currentTime, statusCommitGraceUs))) {
+                    if (!workerStatus.tryClaimHealthRetirement(health)) { continue; }
                     endpointToRetire = workerDirectory.beginRetirement(
-                            role, item.getKey(), workerStatus);
+                            role, item.getKey(), workerStatus, transportFailed ? "CONSECUTIVE_STATUS_FAILURES"
+                                    : reportedDead ? "WORKER_REPORTED_NOT_ALIVE" : "STATUS_EXPIRED",
+                            workerTimeoutUs);
                     retirementStarted = true;
                 }
             } finally {
                 workerStatus.lock.unlock();
+                workerStatus.trace().record(Stage.EXPIRATION_LOCK_RELEASED);
             }
             if (retirementStarted) {
                 retirements.add(new PendingRetirement(
@@ -123,10 +147,10 @@ public class ExpirationCleaner {
         return retirements;
     }
 
-    /** Phase two: await already-detached generations and finalize identities. */
+    /** Phase two: hand off drains and exact-generation cleanup without waiting. */
     private void completeRetirements(List<PendingRetirement> retirements) {
         for (PendingRetirement retirement : retirements) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     retirement.role(),
                     retirement.ipPort(),
                     retirement.workerStatus(),

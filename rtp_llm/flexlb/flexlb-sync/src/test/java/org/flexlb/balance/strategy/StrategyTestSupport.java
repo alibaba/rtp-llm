@@ -88,9 +88,9 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response));
+                    status.freezeStatusResponse(response), null);
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.recordSuccessfulPoll(response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -118,7 +118,7 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(observation);
+                    status.prepareNewStatus(observation, null);
             return registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
         } finally {

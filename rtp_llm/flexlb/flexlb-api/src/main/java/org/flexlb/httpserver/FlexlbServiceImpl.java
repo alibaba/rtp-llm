@@ -996,6 +996,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     default -> FlexlbTrace.scheduleFailureType(response.getCode());
                 };
                 FlexlbTrace.markBusinessError(traceContext, response.getCode(), errorType);
+                FlexlbTrace.recordScheduleFailure(traceContext, response.getCode(), errorType,
+                        ctx == null ? null : ctx.getSchedulingDiagnostics());
             }
             if (ctx != null && ownsLocalRoute(origin)) {
                 FlexlbTrace.setScheduleDuration(traceContext, FlexlbTrace.ROUTE_SUBMIT_MS,
