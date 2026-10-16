@@ -136,13 +136,6 @@ public class ConfigService {
         return currentModelServiceConfig.get();
     }
 
-    /**
-     * DSV4 compatibility alias retained for existing integrations.
-     */
-    public ServiceRoute loadModelServiceConfig() {
-        return modelServiceConfig();
-    }
-
     public void addUpdateListener(Consumer<FlexlbConfig> listener) {
         synchronized (updateLock) {
             updateListeners.add(listener);

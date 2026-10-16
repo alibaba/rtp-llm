@@ -65,8 +65,7 @@ public final class RoutingConfig {
     @Setter
     public static final class DecodeConfig {
         private DecodeCostEstimatorConfig costEstimator = new DecodeCostEstimatorConfig();
-        private DecodeAvailabilityConfig availability =
-                new DecodeAvailabilityConfig();
+        private DecodeAvailabilityConfig availability = new DecodeAvailabilityConfig();
     }
 
     @Getter
