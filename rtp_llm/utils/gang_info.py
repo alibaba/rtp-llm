@@ -8,6 +8,14 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import DistributeConfig
 
 
+def get_gang_member(gang_info: dict[str, Any], node_rank: int) -> dict[str, Any] | None:
+    """Use RTP's C2 member naming rule for both master and local-node lookup."""
+    for name, info in gang_info.items():
+        if name.endswith(f"part{node_rank}") or name.endswith(f"-rank-{node_rank}"):
+            return info
+    return None
+
+
 class GangInfoReader:
     def __init__(self, annotation_path: str):
         self._annotation_path = Path(annotation_path)
