@@ -21,7 +21,8 @@ public:
 protected:
     TransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                      size_t                                         max_descriptors_per_batch,
-                     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter);
+                     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                     BlockTreeTaskPool*                             load_task_pool = nullptr);
 
     virtual TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
@@ -34,6 +35,7 @@ private:
     execute(TransferTask task, std::vector<HostBufferView> hosts, std::vector<const GroupSet*> group_sets);
 
     BlockTreeTaskPool&                             transfer_task_pool_;
+    BlockTreeTaskPool*                             load_task_pool_;
     size_t                                         max_descriptors_per_batch_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
 };

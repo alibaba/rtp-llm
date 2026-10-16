@@ -371,7 +371,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                                 options_.transfer_worker_count);
     installStrategyRecorders(*setup.engine, setup.copy_stats);
     writer_.addResolvedConfigInt("transfer_worker_count", options_.transfer_worker_count);
-    writer_.addResolvedConfigInt("shared_transfer_worker_count",
+    writer_.addResolvedConfigInt("transfer_worker_count_per_direction",
                                  static_cast<int64_t>(setup.engine->transferWorkerCount()));
     writer_.addResolvedConfigInt("engine_max_descriptors_per_task", max_descriptors_per_task);
     writer_.addResolvedConfigInt("engine_group_set_count", engine_group_set_count);
