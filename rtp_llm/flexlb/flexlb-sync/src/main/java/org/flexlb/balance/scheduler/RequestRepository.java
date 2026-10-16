@@ -51,6 +51,9 @@ public final class RequestRepository {
                         throw new IllegalArgumentException(
                                 "positive request inactivity timeout required");
                     }
+                    if (!data.getConfig().getDispatcher().requiresGenerateInput()) {
+                        data.discardGenerateInput();
+                    }
                     data.register(scheduler, response);
                     context.register(
                             id, System.currentTimeMillis(), data.getRequestExpiresAtMs(), timeout);
@@ -123,6 +126,7 @@ public final class RequestRepository {
                     exact.data().getRequestId(),
                     new TerminalRecord(terminal, exact.data().getScheduler()));
             activeRequests.remove(exact.data().getRequestId(), exact);
+            exact.data().discardGenerateInput();
         }
     }
 
