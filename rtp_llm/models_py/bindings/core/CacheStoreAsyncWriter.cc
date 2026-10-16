@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
@@ -110,7 +111,7 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
     std::shared_ptr<StoreCompletionState> finished_completion_state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        unfinished                = state_ == State::RUNNING || finished_store_completion_state_ != nullptr;
+        unfinished                = state_ != State::IDLE || finished_store_completion_state_ != nullptr;
         active_completion_state   = active_store_completion_state_;
         finished_completion_state = finished_store_completion_state_;
     }
@@ -131,7 +132,7 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 void CacheStoreAsyncWriter::init(bool track_store_completions) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
-                            "CacheStoreAsyncWriter::init() called while already RUNNING. "
+                            "CacheStoreAsyncWriter::init() called with a RUNNING or SEALED cycle. "
                             "Must call waitAllDone() before re-initializing.");
     RTP_LLM_CHECK_WITH_INFO(finished_store_completion_state_ == nullptr,
                             "CacheStoreAsyncWriter::init() called before waitStoreCompletions() drained the previous "
@@ -244,17 +245,32 @@ CacheStoreAsyncWriter::registerStoreCompletionOn(const std::shared_ptr<StoreComp
     return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
 }
 
+void CacheStoreAsyncWriter::sealSubmissions() {
+    RTP_LLM_PROFILE_SCOPE("cache_store.seal_submissions");
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
+                            "CacheStoreAsyncWriter::sealSubmissions() requires a RUNNING cycle");
+    RTP_LLM_CHECK_WITH_INFO(active_store_completion_state_ != nullptr,
+                            "CacheStoreAsyncWriter::sealSubmissions() requires tracked store completions");
+    // Existing workers own their metadata and completion registrar. Keep this
+    // cycle alive until the final publication barrier drains them; they may
+    // still register callbacks after waiting for their GPU-ready events.
+    state_ = State::SEALED;
+}
+
 void CacheStoreAsyncWriter::finishSubmissions() {
+    RTP_LLM_PROFILE_SCOPE("cache_store.drain_submissions");
     std::shared_ptr<StoreCompletionState> completion_state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
-                                "CacheStoreAsyncWriter::finishSubmissions() called when not RUNNING. "
+        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING || state_ == State::SEALED,
+                                "CacheStoreAsyncWriter::finishSubmissions() called without a RUNNING or SEALED cycle. "
                                 "Call init() first.");
         completion_state = active_store_completion_state_;
+        RTP_LLM_CHECK_WITH_INFO(completion_state != nullptr,
+                                "CacheStoreAsyncWriter::finishSubmissions() requires tracked store completions");
+        state_ = State::SEALED;
     }
-    RTP_LLM_CHECK_WITH_INFO(completion_state != nullptr,
-                            "CacheStoreAsyncWriter::finishSubmissions() requires tracked store completions");
 
     {
         std::unique_lock<std::mutex> lock(wait_mutex_);
@@ -273,7 +289,7 @@ void CacheStoreAsyncWriter::finishSubmissions() {
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
+        RTP_LLM_CHECK_WITH_INFO(state_ == State::SEALED,
                                 "CacheStoreAsyncWriter changed state while finishing submissions");
         active_cache_store_.reset();
         state_ = State::IDLE;
@@ -283,6 +299,17 @@ void CacheStoreAsyncWriter::finishSubmissions() {
 }
 
 void CacheStoreAsyncWriter::waitStoreCompletions() {
+    RTP_LLM_PROFILE_SCOPE("cache_store.wait_publication");
+    bool drain_submissions = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        drain_submissions = state_ == State::SEALED;
+    }
+    if (drain_submissions) {
+        // A zero callback count before workers finish is not completion: a
+        // worker may be waiting on a GPU event before registering its store.
+        finishSubmissions();
+    }
     std::shared_ptr<StoreCompletionState> completion_state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -343,16 +370,22 @@ void CacheStoreAsyncWriter::cancelStoreCompletions(std::exception_ptr exception)
 // Block until all submitted tasks and any tracked publication complete, then
 // return to IDLE. Re-throws the first stored exception after draining.
 void CacheStoreAsyncWriter::waitAllDone() {
+    RTP_LLM_PROFILE_SCOPE("cache_store.wait_all_done");
     bool has_tracked_completions = false;
+    bool has_active_cycle        = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
-                                "CacheStoreAsyncWriter::waitAllDone() called when not RUNNING. "
+        has_active_cycle = state_ == State::RUNNING || state_ == State::SEALED;
+        RTP_LLM_CHECK_WITH_INFO(has_active_cycle || finished_store_completion_state_ != nullptr,
+                                "CacheStoreAsyncWriter::waitAllDone() called without an active cycle. "
                                 "Call init() first.");
-        has_tracked_completions = active_store_completion_state_ != nullptr;
+        has_tracked_completions =
+            active_store_completion_state_ != nullptr || finished_store_completion_state_ != nullptr;
     }
     if (has_tracked_completions) {
-        finishSubmissions();
+        if (has_active_cycle) {
+            finishSubmissions();
+        }
         waitStoreCompletions();
         return;
     }
