@@ -3,6 +3,7 @@ import json
 import os
 import pickle
 import sys
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -698,6 +699,185 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+
+class Int8AllReduceFp16ScaleConfigTest(TestCase):
+    def setUp(self):
+        self.device_env = {
+            name: os.environ[name]
+            for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+            if name in os.environ
+        }
+
+    def test_environment_cli_precedence_and_backend_serialization(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        env_name = "ENABLE_INT8_ALLREDUCE_FP16_SCALE"
+        flag = "--enable_int8_allreduce_fp16_scale"
+        cases = (
+            ({}, [], False),
+            ({env_name: "0"}, [], False),
+            ({env_name: "1"}, [], True),
+            ({env_name: "false"}, [], False),
+            ({env_name: "true"}, [], True),
+            ({env_name: "1"}, [flag, "false"], False),
+            ({env_name: "0"}, [flag, "true"], True),
+        )
+        for role in ("PREFILL", "DECODE"):
+            for env, args, expected in cases:
+                with (
+                    self.subTest(role=role, env=env, args=args),
+                    patch.dict(
+                        os.environ,
+                        {**self.device_env, "ROLE_TYPE": role, **env},
+                        clear=True,
+                    ),
+                ):
+                    configs = setup_args(["--model_type", "qwen_2", *args])
+                    quantization = configs.quantization_config
+                    self.assertIs(
+                        quantization.enable_int8_allreduce_fp16_scale, expected
+                    )
+                    restored = pickle.loads(pickle.dumps(quantization))
+                    self.assertIs(restored.enable_int8_allreduce_fp16_scale, expected)
+                    self.assertIn(
+                        f"enable_int8_allreduce_fp16_scale: {expected}",
+                        quantization.to_string(),
+                    )
+                    self.assertEqual(quantization.int8_mode, 0)
+                    self.assertEqual(quantization.get_quantization(), "")
+
+    def test_switch_propagates_to_model_config(self):
+        from rtp_llm.config.model_config import ModelConfig, build_model_config
+        from rtp_llm.ops import TaskType
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for enabled in (False, True, None):
+            with (
+                self.subTest(enabled=enabled),
+                patch.dict(os.environ, self.device_env, clear=True),
+            ):
+                configs = setup_args(
+                    [
+                        "--model_type",
+                        "qwen_2",
+                        "--checkpoint_path",
+                        "/unused-checkpoint",
+                        "--enable_int8_allreduce_fp16_scale",
+                        str(bool(enabled)),
+                    ]
+                )
+                if enabled is None:
+                    # Older serialized configs do not contain the new optional field.
+                    del configs.quantization_config.enable_int8_allreduce_fp16_scale
+                model_config = ModelConfig()
+                self.assertFalse(model_config.enable_int8_allreduce_fp16_scale)
+                kv_config = SimpleNamespace(
+                    seq_size_per_block=16,
+                    kernel_seq_size_per_block=0,
+                    ssm_state_dtype="fp32",
+                )
+                with (
+                    patch.object(ModelConfig, "init_precision_config"),
+                    patch(
+                        "rtp_llm.config.model_config.get_task_type_from_ckpt_path",
+                        return_value=TaskType.LANGUAGE_MODEL,
+                    ),
+                ):
+                    build_model_config(
+                        model_config,
+                        configs.model_args,
+                        kv_config,
+                        SimpleNamespace(hack_layer_num=0),
+                        quantization_config=configs.quantization_config,
+                    )
+                self.assertIs(
+                    model_config.enable_int8_allreduce_fp16_scale, bool(enabled)
+                )
+
+    def test_draft_inherits_scale_switch_and_preserves_weight_quantization(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_factory import ModelFactory
+        from rtp_llm.ops import SpeculativeType, TaskType
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for sp_type in (SpeculativeType.MTP, SpeculativeType.EAGLE):
+            for enabled in (False, True, None):
+                for sp_quantization in ("", "FP8"):
+                    with (
+                        self.subTest(
+                            sp_type=sp_type,
+                            enabled=enabled,
+                            sp_quantization=sp_quantization,
+                        ),
+                        patch.dict(os.environ, self.device_env, clear=True),
+                    ):
+                        configs = setup_args(
+                            ["--model_type", "qwen_2", "--act_type", "BF16"]
+                        )
+                        target = ModelConfig()
+                        target.max_seq_len = 2048
+                        target.quantization = "INT8"
+                        target.enable_int8_allreduce_fp16_scale = bool(enabled)
+                        if enabled is None:
+                            del target.enable_int8_allreduce_fp16_scale
+                        draft = ModelConfig()
+                        draft.is_mtp = True
+                        # The deployment switch must override a draft default too.
+                        draft.enable_int8_allreduce_fp16_scale = not bool(enabled)
+                        draft_cls = SimpleNamespace(
+                            _create_config=lambda path: draft,
+                            _post_build_model_config=lambda config: None,
+                            target_aux_hidden_capture_layer_ids=lambda *args: (),
+                        )
+                        engine = SimpleNamespace(
+                            sp_config=SimpleNamespace(
+                                type=sp_type,
+                                model_type="qwen_2-mtp",
+                                checkpoint_path="/unused-draft",
+                                quantization=sp_quantization,
+                            ),
+                            kv_cache_config=configs.kv_cache_config,
+                            profiling_debug_logging_config=(
+                                configs.profiling_debug_logging_config
+                            ),
+                        )
+                        with (
+                            patch.object(
+                                ModelFactory, "get_model_cls", return_value=draft_cls
+                            ),
+                            patch.object(ModelConfig, "init_precision_config"),
+                            patch(
+                                "rtp_llm.config.model_config.get_task_type_from_ckpt_path",
+                                return_value=TaskType.LANGUAGE_MODEL,
+                            ),
+                        ):
+                            result = ModelFactory.create_propose_model_config(
+                                engine, target, configs.model_args
+                            )
+                        self.assertIs(result, draft)
+                        self.assertIs(
+                            result.enable_int8_allreduce_fp16_scale, bool(enabled)
+                        )
+                        self.assertEqual(result.quantization, sp_quantization)
+                        self.assertEqual(target.quantization, "INT8")
+                        self.assertEqual(result.max_seq_len, target.max_seq_len)
+                        self.assertFalse(result.enable_w4a16_sm120_dense_ffn)
+
+    def test_invalid_cli_switch_is_rejected(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, self.device_env, clear=True), patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                setup_args(
+                    [
+                        "--model_type",
+                        "qwen_2",
+                        "--enable_int8_allreduce_fp16_scale",
+                        "invalid",
+                    ]
+                )
+        self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":
