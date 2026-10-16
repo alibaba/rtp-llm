@@ -227,6 +227,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                             "TP>1 / multi-rank (world_size=%lld) is not yet supported on Ascend NPU; "
                             "run single-card (world_size=1) until Ascend TP support lands.",
                             static_cast<long long>(parallelism_config.world_size));
+    // Fail-fast: the device-input pipeline is CUDA-only (kCUDA tensors).
+    // Remove with the launcher-side check once it uses getTorchCudaDevice().
+    RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                            "RTP_LLM_DEVICE_INPUT (device-input mode) is not yet supported on Ascend NPU; "
+                            "unset RTP_LLM_DEVICE_INPUT on Ascend deployments.");
     c10::DeviceGuard ctor_device_guard(
         c10::Device(torch::kPrivateUse1, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
     RTP_LLM_LOG_INFO("Ascend NormalEngine ctor: set device to %d", parallelism_config.local_rank);

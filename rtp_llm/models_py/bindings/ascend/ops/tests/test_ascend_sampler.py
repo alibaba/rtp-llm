@@ -518,6 +518,70 @@ class TestAscendSampler(unittest.TestCase):
                 msg=f"batch {i}: cum_log_probs={clp[i]}, expected={expected}")
 
     # ==================================================================
+    # Test 7e — ORIGINAL logprobs mode (return_original_all_probs=True):
+    #   all_probs / cum_log_probs come from the UNFILTERED softmax
+    #   (CUDA/generic parity); sampling still uses the filtered
+    #   distribution. (finding 23059)
+    # ==================================================================
+    def test_original_all_probs_unfiltered(self):
+        batch_size = 2
+        vocab_size = 6
+        logits_cpu = torch.tensor(
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],  # b0: top_k=1 → argmax idx5
+                [0.5, 3.0, 1.0, 2.5, 0.2, 0.1],  # b1: top_k=3 (no ties)
+            ],
+            dtype=torch.float32,
+        )
+        logits = logits_cpu.to(NPU_DEVICE)
+        step = 2
+        token_ids = torch.tensor(
+            [[10, 0, 0],
+             [20, 1, 1]],
+            dtype=torch.int32,
+        )
+        seq_lens = torch.tensor([2, 2], dtype=torch.int32)
+        input_lens = torch.tensor([-1, -1], dtype=torch.int32)
+        top_k = pinned_int_tensor([1, 3])
+        top_p = pinned_float_tensor([1.0, 1.0])
+        temperature = pinned_float_tensor([1.0, 1.0])
+        output_all_probs = torch.zeros((batch_size, vocab_size), dtype=torch.float32)
+        cum_log_probs = torch.zeros((batch_size,), dtype=torch.float32)
+
+        result = sampler_test_module.exec_sample_greedy(
+            logits=logits, input_lengths=input_lens, sequence_lengths=seq_lens,
+            token_ids=token_ids, step=step, top_k=top_k, top_p=top_p,
+            temperature=temperature, output_all_probs=output_all_probs,
+            cum_log_probs=cum_log_probs,
+            return_original_all_probs=True,
+        )
+
+        chosen = [row[step] for row in result["token_ids"].cpu().tolist()]
+        all_probs = result["output_all_probs"].cpu()
+        clp = result["cum_log_probs"].cpu().tolist()
+
+        # Reference: UNFILTERED softmax of the raw logits.
+        orig_probs = torch.softmax(logits_cpu, -1)
+
+        # b0 (top_k=1): the filtered distribution is one-hot; a multi-value
+        # all_probs row proves the ORIGINAL (unfiltered) distribution is
+        # reported instead.
+        self.assertEqual(chosen[0], int(torch.argmax(logits_cpu[0])))
+        self.assertGreater(
+            int((all_probs[0] > 0).sum()), 1,
+            "ORIGINAL mode: batch 0 all_probs must be the unfiltered softmax, "
+            "not the one-hot filtered distribution")
+
+        for i in range(batch_size):
+            self.assertTrue(
+                torch.allclose(all_probs[i], orig_probs[i], atol=2e-3),
+                f"batch {i}: all_probs must equal softmax(unfiltered logits)")
+            expected = float(torch.log(orig_probs[i][chosen[i]]))
+            self.assertAlmostEqual(
+                clp[i], expected, delta=2e-3,
+                msg=f"batch {i}: cum_log_probs={clp[i]}, expected(original)={expected}")
+
+    # ==================================================================
     # Test 7d — unsupported penalties must be rejected with a clear error;
     #   neutral values (=1.0 / =0.0) pass through as no-ops.
     # ==================================================================

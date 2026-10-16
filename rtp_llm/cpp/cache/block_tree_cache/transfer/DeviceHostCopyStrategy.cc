@@ -23,13 +23,18 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
 
     for (const auto& tile : plan.copy_tiles) {
         auto cpu_device = torch::Device(torch::kCPU);
-        auto cuda_device =
+#if USING_ASCEND
+        auto compute_device =
+            tile.device_index >= 0 ? torch::Device(torch::kPrivateUse1, tile.device_index) : torch::Device(torch::kPrivateUse1);
+#else
+        auto compute_device =
             tile.device_index >= 0 ? torch::Device(torch::kCUDA, tile.device_index) : torch::Device(torch::kCUDA);
+#endif
         if (plan.device_to_host) {
             dst_buffers.push_back(byte_tensor(tile.host_addr, tile.bytes, cpu_device));
-            src_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, cuda_device));
+            src_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, compute_device));
         } else {
-            dst_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, cuda_device));
+            dst_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, compute_device));
             src_buffers.push_back(byte_tensor(tile.host_addr, tile.bytes, cpu_device));
         }
     }

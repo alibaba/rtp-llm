@@ -36,7 +36,8 @@ PYBIND11_MODULE(sampler_test_module, m) {
            std::optional<torch::Tensor> presence_penalty,
            std::optional<torch::Tensor> frequency_penalty,
            std::optional<torch::Tensor> do_sample,
-           std::optional<std::vector<at::Generator>> generators) -> py::dict {
+           std::optional<std::vector<at::Generator>> generators,
+           bool return_original_all_probs) -> py::dict {
             GreedyParams params{
                 logits,
                 input_lengths,
@@ -50,7 +51,7 @@ PYBIND11_MODULE(sampler_test_module, m) {
                 no_repeat_ngram_size,
                 cum_log_probs,
                 output_log_probs,
-                false,  // return_original_all_probs
+                return_original_all_probs,
                 output_all_probs,
                 presence_penalty,
                 frequency_penalty,
@@ -90,6 +91,7 @@ PYBIND11_MODULE(sampler_test_module, m) {
         py::arg("frequency_penalty")   = py::none(),
         py::arg("do_sample")           = py::none(),
         py::arg("generators")          = py::none(),
+        py::arg("return_original_all_probs") = false,
         "Execute greedy/random sampling on Ascend NPU.\n\n"
         "Returns dict with keys: token_ids, success, cum_log_probs, output_all_probs.");
 }

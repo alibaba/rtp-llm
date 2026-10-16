@@ -204,6 +204,7 @@ def cc_test_wrapper(
         copts = copts,
         linkopts = linkopts,
         linkstatic = linkstatic,
+        tags = tags,
         visibility = visibility,
         **kwargs
     )

@@ -44,6 +44,11 @@ py_test(
     srcs = ["test_ascend_moe_strategy.py"],
     deps = [
         "//rtp_llm:testlib",
+        # impl/ascend is a standalone bazel package only pulled in by the
+        # using_ascend select in models_py/BUILD; declare it directly so the
+        # test's runfiles contain it under any build config (pure python, no
+        # device side effects).
+        "//rtp_llm/models_py/modules/factory/fused_moe/impl/ascend:ascend_moe",
     ],
 )
 

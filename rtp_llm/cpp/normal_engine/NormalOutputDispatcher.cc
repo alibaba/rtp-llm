@@ -424,11 +424,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                 int  label_end   = std::min(end_pos + 1, (int)tokens.size());
                 int  logprob_len = label_end - label_start;
                 if (logprob_len > 0) {
-                    // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
+                    // from_blob + to(compute device) is a synchronous copy; token buffer is stable during prefill.
                     auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
                                                          {(int64_t)logprob_len},
                                                          torch::kInt32)
-                                            .to(torch::kCUDA)
+                                            .to(getTorchCudaDevice())
                                             .toType(torch::kInt64)
                                             .unsqueeze(1);
                     auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);

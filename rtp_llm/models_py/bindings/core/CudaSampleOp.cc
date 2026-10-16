@@ -595,8 +595,10 @@ namespace rtp_llm {  // reopen
 //   - Temperature:        PyTorch div_() → torch_npu maps to NPU
 //   - Top-k/Top-p:        AscendC custom op applyTopKTopP
 //   - do_sample=false:    per-row merge with argmax (mixed batches)
-//   - cum_log_probs:      log of the sampled token's probability in the
-//                         filtered, renormalized distribution (CUDA parity)
+//   - cum_log_probs/all_probs: sampled token probability in the filtered,
+//                         renormalized distribution; ORIGINAL mode
+//                         (return_original_all_probs) uses the unfiltered
+//                         softmax (CUDA/generic parity)
 //   - Repetition/presence/frequency penalties and no_repeat_ngram_size:
 //                         not implemented — non-neutral values are rejected
 // ============================================================
@@ -709,7 +711,16 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     bool has_top_p = !std::all_of(top_p_ptr, top_p_ptr + batch_size,
                                    [](auto t) { return std::abs(t - 1.0f) < 1e-7f; });
 
+    // ORIGINAL logprobs mode snapshot: CUDA/generic compute all_probs and
+    // cum_log_probs from the unfiltered softmax. applyTopKTopP overwrites
+    // params.logits below, so capture the original distribution first
+    // (sampling itself still uses the filtered distribution).
+    torch::Tensor original_probs_t;
     if (has_top_k || has_top_p) {
+        if (params.return_original_all_probs &&
+            (params.output_all_probs.has_value() || params.cum_log_probs.has_value())) {
+            original_probs_t = torch::softmax(params.logits, -1);
+        }
         // Move top_k/top_p from CPU to NPU.
         // applyTopKTopP expects: k → INT32 1D [batch_size], p → FLOAT32 1D [batch_size].
         c10::optional<at::Tensor> k_npu;
@@ -728,6 +739,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
     // ---- 4. Softmax → probabilities (params.logits keeps the filtered logits) ----
     auto probs_t = torch::softmax(params.logits, -1);
+
+    // ORIGINAL mode: report probabilities from the unfiltered softmax.
+    const torch::Tensor& all_probs_src =
+        params.return_original_all_probs && original_probs_t.defined() ? original_probs_t : probs_t;
 
     // ---- 5. Output_all_probs ----
     torch::Tensor output_all_probs_t;
@@ -778,15 +793,16 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     samples_t.copy_(selected);
 
     if (output_all_probs_t.defined()) {
-        output_all_probs_t.copy_(probs_t);
+        output_all_probs_t.copy_(all_probs_src);
     }
 
     // ---- 7. Update cum_log_probs ----
-    // CUDA parity: accumulate the log probability of the sampled token under
-    // the filtered, renormalized distribution (probs_t), i.e. log(probs[i, token]).
+    // Accumulate the log probability of the sampled token under all_probs_src:
+    // the filtered, renormalized distribution by default, or the unfiltered
+    // softmax in ORIGINAL mode (return_original_all_probs, CUDA/generic parity).
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        auto token_probs     = probs_t.gather(
+        auto token_probs     = all_probs_src.gather(
             1, samples_t.reshape({(int64_t)batch_size, 1}).to(torch::kLong)).squeeze(-1);
         cum_log_probs_t.add_(token_probs.log().to(cum_log_probs_t.device()));
     }

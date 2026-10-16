@@ -102,6 +102,18 @@ def local_rank_start(
                 "are CUDA-only. Remove the spec/draft model config on Ascend until the "
                 "migration completes."
             )
+        # Fail-fast: the device-input publish/check pipeline is CUDA-only; on
+        # Ascend it would throw on the first real request and kill the engine
+        # loop thread. NormalEngine has a matching C++-side gate.
+        if is_ascend() and (
+            os.environ.get("RTP_LLM_DEVICE_INPUT") == "1"
+            or os.environ.get("RTP_LLM_DEVICE_INPUT_CHECK") == "1"
+        ):
+            raise RuntimeError(
+                "RTP_LLM_DEVICE_INPUT / RTP_LLM_DEVICE_INPUT_CHECK (device-input mode) "
+                "is not yet supported on Ascend NPU: the device-input pipeline is "
+                "CUDA-only. Unset these environment variables on Ascend deployments."
+            )
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)

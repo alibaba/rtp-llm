@@ -52,6 +52,13 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
         residual: torch.Tensor,
         bias: torch.Tensor,
     ):
+        if bias is not None and bias.numel() == 0:
+            # bert-style "bias is none" contract (same as RtpNorm.cc / rocm norm)
+            bias = torch.zeros(
+                hidden_states.shape[-1],
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
         hidden_states = hidden_states + bias + residual
         return torch.nn.functional.layer_norm(
             hidden_states,

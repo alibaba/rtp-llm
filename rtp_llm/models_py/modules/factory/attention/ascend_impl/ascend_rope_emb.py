@@ -1,7 +1,7 @@
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope import apply_rope_pos_ids_nhd
-from rtp_llm.ops import AttentionConfigs, get_rope_cache_once
+from rtp_llm.ops import AttentionConfigs, check_rope_cache, get_rope_cache_once
 
 
 class AscendRotaryEmbeddingOp:
@@ -24,6 +24,14 @@ class AscendRotaryEmbeddingOp:
                 is_cuda=True,  # Ascend can also set to True
                 interleave=False,
             )
+            if not check_rope_cache(self.rope_config, rope_cache):
+                # Fail at construction with the real cause instead of a
+                # confusing "requires cos_sin_cache" on every forward.
+                raise RuntimeError(
+                    f"Ascend RoPE has no cache for rope style "
+                    f"{self.rope_config.style} (only Base/Yarn generate a "
+                    f"cache in C++ RopeCache); use a Base/Yarn config on Ascend"
+                )
             self.cos_sin_cache = rope_cache.data
         self.num_heads = attn_config.head_num
         self.num_kv_heads = attn_config.kv_head_num
