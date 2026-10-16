@@ -23,7 +23,8 @@ class LoraManager:
         self.engine_ = engine
         self.lora_infos_ = {}
         self.max_lora_model_size_ = max_lora_model_size
-        self.device: str = f"cuda:{local_rank}"
+        from rtp_llm.device.device_type import device_name
+        self.device: str = f"{device_name()}:{local_rank}"
         assert isinstance(self.engine_, LanguageCppEngine)
         self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
         assert isinstance(self.engine_.model.model_weights_loader, ModelLoader)

@@ -7,6 +7,7 @@ load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "r
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
+load("@pip_ascend_torch//:requirements.bzl", requirement_ascend = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
@@ -24,6 +25,33 @@ _CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+_ascend_excluded = [
+    "triton",
+    "triton-kernels",
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
+    "pyrsmi",
+    "amdsmi",
+    "aiter",
+    "fast-safetensors",
+    "fastsafetensors",
+    "decord",
+    "av",
+    "deep_gemm",
+    "deep_ep",
+    "apache-tvm-ffi",
+    "flashinfer-python",
+    "flashinfer-cubin",
+    "nvidia-cutlass-dsl",
+    "flashinfer-jit-cache",
+    "fast-hadamard-transform",
+    "flash-mla",
+    "tilelang",
+    "rtp-kernel",
+    "flash_attn",
+    "flash-attn-3",
+]
+
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
@@ -40,6 +68,7 @@ def requirement(names):
                 visibility = ["//visibility:public"],
             )
             continue
+        ascend_deps     = [] if name in _ascend_excluded else [requirement_ascend(name)]
         native.py_library(
             name = name,
             deps = select({
@@ -49,6 +78,7 @@ def requirement(names):
                 "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
+                "@rtp_llm//:using_ascend": ascend_deps,
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -126,6 +156,7 @@ def whl_deps():
             "triton@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl",
             "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl",
         ],
+        "@rtp_llm//:using_ascend": ["torch==2.9.0+cpu", "torch_npu==2.9.0"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -135,6 +166,7 @@ def platform_deps():
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_cuda13_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2", "decord==0.6.0", "av==16.1.0"],
+        "@rtp_llm//:using_ascend": [],
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
@@ -169,6 +201,12 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
+        ],
+        "@rtp_llm//:using_ascend": [
+            "@torch_cpu_ascend//:torch_api",
+            "@torch_cpu_ascend//:torch",
+            "@torch_cpu_ascend//:torch_libs",
+            "@torch_npu_ascend//:torch_npu",
         ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
@@ -213,6 +251,9 @@ def select_py_bindings():
         "@rtp_llm//:using_rocm": [
             "@rtp_llm//rtp_llm/models_py/bindings/rocm:rocm_bindings_register",
         ],
+        "@rtp_llm//:using_ascend": [
+            "@rtp_llm//rtp_llm/models_py/bindings/ascend:ascend_bindings_register",
+        ],
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
@@ -240,6 +281,9 @@ def no_block_copy_link_deps():
             "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
         ],
         "@rtp_llm//:using_rocm": [
+            "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
+        ],
+        "@rtp_llm//:using_ascend": [
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
         "//conditions:default": [

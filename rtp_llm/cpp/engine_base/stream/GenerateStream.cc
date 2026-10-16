@@ -5,7 +5,7 @@
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
@@ -157,7 +157,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
@@ -1330,7 +1330,9 @@ std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto loss_cpu  = loss.is_cuda() ? loss.cpu() : loss;
+    // NPU tensors (PrivateUse1) must be copied to host too, otherwise the
+    // memcpy below dereferences a device pointer (is_cuda() is CUDA-only).
+    auto loss_cpu  = (loss.is_cuda() || loss.is_privateuseone()) ? loss.cpu() : loss;
     auto loss_size = loss_cpu.numel();
     RTP_LLM_CHECK(loss_index_ + loss_size < inputLength());
     memcpy(loss_.data_ptr<float>() + loss_index_, loss_cpu.data_ptr<float>(), loss_size * sizeof(float));

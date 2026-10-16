@@ -219,12 +219,30 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     }
     RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
+#if USING_ASCEND
+    // Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
+    // single-card only. Remove together with the launcher-side check when the
+    // Ascend TP feature lands.
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size <= 1,
+                            "TP>1 / multi-rank (world_size=%lld) is not yet supported on Ascend NPU; "
+                            "run single-card (world_size=1) until Ascend TP support lands.",
+                            static_cast<long long>(parallelism_config.world_size));
+    // Fail-fast: the device-input pipeline is CUDA-only (kCUDA tensors).
+    // Remove with the launcher-side check once it uses getTorchCudaDevice().
+    RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                            "RTP_LLM_DEVICE_INPUT (device-input mode) is not yet supported on Ascend NPU; "
+                            "unset RTP_LLM_DEVICE_INPUT on Ascend deployments.");
+    c10::DeviceGuard ctor_device_guard(
+        c10::Device(torch::kPrivateUse1, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
+    RTP_LLM_LOG_INFO("Ascend NormalEngine ctor: set device to %d", parallelism_config.local_rank);
+#else
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
     // to the right device.  The guard is scoped to the constructor body.
     c10::DeviceGuard ctor_device_guard(
         c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
     RTP_LLM_LOG_INFO("ROCm NormalEngine ctor: set device to %d", parallelism_config.local_rank);
+#endif
 #endif
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;

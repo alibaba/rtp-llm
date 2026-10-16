@@ -37,9 +37,10 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/utils:lru_cache"],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = select({
+        "@//:using_ascend": {"TEST_USING_DEVICE": "ASCEND"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
 
 )
 
@@ -51,9 +52,10 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = select({
+        "@//:using_ascend": {"TEST_USING_DEVICE": "ASCEND"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
 )
 
 cc_test(
@@ -66,9 +68,10 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = select({
+        "@//:using_ascend": {"TEST_USING_DEVICE": "ASCEND"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
 )
 
 cc_test(
@@ -78,9 +81,10 @@ cc_test(
     ],
     data = [],
     deps = google_test_deps + ["//rtp_llm/cpp/utils:linear_blocks_util"],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = select({
+        "@//:using_ascend": {"TEST_USING_DEVICE": "ASCEND"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
 )
 
 cc_test(
@@ -90,6 +94,9 @@ cc_test(
     ],
     copts = copts(),
     deps = google_test_deps + ["//rtp_llm/cpp/utils:device_pin"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
 )
 
 cc_test(
