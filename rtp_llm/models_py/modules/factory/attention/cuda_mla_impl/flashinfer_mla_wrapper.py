@@ -126,6 +126,16 @@ class MlaFlashInferImplBase(MlaImplBase):
 
 
 class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
+    def supports_generation_prefill_cuda_graph(self) -> bool:
+        # The impl already carries the graph-capture contract the MTP
+        # verify/draft prefill graphs exercise daily: prepare_cuda_graph
+        # refreshes the prefill wrapper plan (and the absorb short-sequence
+        # op) outside the capture region with forbid_realloc, so the
+        # generation-prefill runner's fixed-bucket capture replays the same
+        # fixed-address buffers. The C++ eligibility gates
+        # (use_mla / masked-MoE backend) still gate who reaches this path.
+        return True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
