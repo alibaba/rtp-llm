@@ -23,7 +23,7 @@
 namespace rtp_llm {
 namespace {
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -41,7 +41,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
     return makeTestGroupSet(
-        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
+        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool), enable_crc);
 }
 
 LoadTaskRunner::TaskPtr makeLoadTask(std::vector<TransferDescriptor> descriptors) {
@@ -65,7 +65,7 @@ public:
     explicit RecordingPerRankEngine(std::deque<bool> results):
         PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}), results_(std::move(results)) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         const TransferDescriptor& first     = descriptors.front();
@@ -75,9 +75,10 @@ public:
         const bool result = results_.front();
         results_.pop_front();
         if (result) {
-            return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+            return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
         }
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+        return std::make_shared<CompletedTransferAsyncContext>(
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
@@ -89,7 +90,7 @@ class PendingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
         bool released = false;
         {

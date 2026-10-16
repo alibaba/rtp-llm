@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <memory>
+#include <algorithm>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -15,9 +17,9 @@ namespace rtp_llm {
 
 namespace {
 
-std::shared_ptr<AsyncContext> invalidTransferContext() {
-    return std::make_shared<CompletedAsyncContext>(
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
+std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
+    return std::make_shared<CompletedTransferAsyncContext>(
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
 }
 
 }  // namespace
@@ -29,17 +31,31 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        size_t                   max_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
                                                        size_t                   transfer_queue_max_size,
-                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                       int64_t                                        world_rank):
     group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
+    std::shared_ptr<CrcTransferService> crc_service;
+    if (std::any_of(
+            group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group) { return group->crcEnabled(); })) {
+        crc_service = std::make_shared<CrcTransferService>(
+            group_sets_, max_descriptors_per_batch, 2 * transfer_worker_count, world_rank);
+    }
+    load_transfer_task_pool_ =
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferLoad");
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferBackground");
+    RTP_LLM_CHECK(load_transfer_task_pool_->start());
     RTP_LLM_CHECK(transfer_task_pool_->start());
-    device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
-    host_disk_executor_ =
-        std::make_unique<HostDiskTransferExecutor>(*transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
+    device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(*transfer_task_pool_,
+                                                                         max_descriptors_per_batch,
+                                                                         std::move(device_host_options),
+                                                                         metrics_reporter,
+                                                                         std::move(crc_service),
+                                                                         load_transfer_task_pool_.get());
+    host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get());
     if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
@@ -47,14 +63,18 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                              device_disk_staging_block_count,
                                                                              *transfer_task_pool_,
                                                                              max_descriptors_per_batch,
-                                                                             std::move(metrics_reporter));
+                                                                             std::move(metrics_reporter),
+                                                                             load_transfer_task_pool_.get());
     }
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {
+    load_transfer_task_pool_->stopAdmission();
     transfer_task_pool_->stopAdmission();
     cancelPendingStagingTransfers();
+    load_transfer_task_pool_->waitForIdle();
     transfer_task_pool_->waitForIdle();
+    load_transfer_task_pool_.reset();
     transfer_task_pool_.reset();
 }
 
@@ -65,13 +85,17 @@ void PerRankBlockTransferEngine::cancelPendingStagingTransfers() {
 }
 
 BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
-    return transfer_task_pool_->queueSizes();
+    auto load_sizes       = load_transfer_task_pool_->queueSizes();
+    auto background_sizes = transfer_task_pool_->queueSizes();
+    return {load_sizes.load + background_sizes.load,
+            load_sizes.background + background_sizes.background,
+            load_sizes.completion + background_sizes.completion};
 }
 
-std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
+std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
-        return invalidTransferContext();
+        return invalidTransferContext(descriptors.size());
     }
     const Tier                   source = descriptors.front().source_tier;
     const Tier                   target = descriptors.front().target_tier;
@@ -81,7 +105,7 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::execute(TransferTask t
     hosts.reserve(descriptors.size());
     for (const auto& descriptor : descriptors) {
         if (descriptor.source_tier != source || descriptor.target_tier != target) {
-            return invalidTransferContext();
+            return invalidTransferContext(descriptors.size());
         }
         const auto* group_set = group_sets_[descriptor.group_set_id].get();
         group_sets.push_back(group_set);
@@ -92,13 +116,13 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::execute(TransferTask t
 
     if (source == Tier::DISK && target == Tier::DEVICE) {
         if (device_disk_executor_ == nullptr) {
-            return invalidTransferContext();
+            return invalidTransferContext(descriptors.size());
         }
         return device_disk_executor_->executeDiskToDevice(std::move(task), group_sets);
     }
     if (source == Tier::DEVICE && target == Tier::DISK) {
         if (device_disk_executor_ == nullptr) {
-            return invalidTransferContext();
+            return invalidTransferContext(descriptors.size());
         }
         return device_disk_executor_->executeDeviceToDisk(std::move(task), *group_sets.front());
     }
@@ -108,7 +132,7 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::execute(TransferTask t
     if ((source == Tier::HOST && target == Tier::DISK) || (source == Tier::DISK && target == Tier::HOST)) {
         return host_disk_executor_->execute(std::move(task), std::move(hosts), std::move(group_sets));
     }
-    return invalidTransferContext();
+    return invalidTransferContext(descriptors.size());
 }
 
 HostBufferView PerRankBlockTransferEngine::resolveHostView(const GroupSet& group_set, BlockIdxType host_block) {

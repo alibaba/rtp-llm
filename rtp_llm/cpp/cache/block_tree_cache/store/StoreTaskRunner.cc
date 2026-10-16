@@ -49,7 +49,7 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
             metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
 
         auto stage_state = std::make_shared<TransferStageState>(
-            [this, task, &metrics_reporter, transfer_begin, callback](ErrorInfo error) mutable {
+            [this, task, &metrics_reporter, transfer_begin, callback](TransferResult result) mutable {
                 try {
                     static const std::vector<TransferDescriptor> empty_descriptors;
                     metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
@@ -57,11 +57,12 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                                             task->target_tier,
                                                             task->descriptors().size(),
                                                             transfer_begin,
-                                                            error.ok(),
-                                                            error.ok() ? task->descriptors() : empty_descriptors,
+                                                            result.ok(),
+                                                            result.ok() ? task->descriptors() : empty_descriptors,
                                                             group_sets_);
+                    metrics_reporter.maybeReportCopyError(Tier::DEVICE, task->target_tier, result);
                     task->phase = Task::Phase::FINISHED;
-                    callback(std::move(error));
+                    callback(std::move(result.status));
                 } catch (const std::exception& exception) {
                     task->phase = Task::Phase::FINISHED;
                     callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
@@ -73,9 +74,9 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
 
         const auto submit_batch = [&](const std::vector<TransferDescriptor>& descriptors) {
             stage_state->addBatch();
-            transfer_dispatcher.runTransfer(task->transfer_task.subtask(descriptors), [stage_state](ErrorInfo error) {
-                stage_state->completeBatch(std::move(error));
-            });
+            transfer_dispatcher.runTransfer(
+                task->transfer_task.subtask(descriptors),
+                [stage_state](TransferResult result) { stage_state->completeBatch(std::move(result)); });
         };
         if (task->target_tier == Tier::DISK) {
             for (const auto& descriptor : task->descriptors()) {

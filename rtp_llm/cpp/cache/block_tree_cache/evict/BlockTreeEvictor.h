@@ -77,8 +77,16 @@ public:
     bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
-    // Discard a detached operation's source without publishing its target.
+    // Release a detached operation's source CACHE reference after it settles, without publishing its target.
     void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
+
+    // Snapshot before settlement can delete nodes; paths remain valid across cascading drops.
+    struct InvalidationSource {
+        CacheKeysType cache_keys;
+        size_t        group_set_id;
+        Tier          source_tier;
+    };
+    void invalidateSources(const std::vector<InvalidationSource>& sources);
 
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
