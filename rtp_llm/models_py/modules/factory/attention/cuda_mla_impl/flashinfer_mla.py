@@ -621,6 +621,7 @@ class MlaFlashInferDecodeOp(object):
         self._t_decode_page_indptr_d = None
         self._t_bs = 0
         self._t_qo_indptr_d = None
+        self._t_qo_indptr_h = None
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
             ((max_context_len + self.token_per_block - 1) // self.token_per_block)
@@ -666,6 +667,9 @@ class MlaFlashInferDecodeOp(object):
             self._t_page_indice_d = fmha_params.page_indice_d
             self._t_decode_page_indptr_d = fmha_params.decode_page_indptr_d
             self._t_qo_indptr_d = fmha_params.qo_indptr_d
+            # Host indptr: the per-request q-row uniformity gate below reads
+            # it without any device sync (the device indptr would need one).
+            self._t_qo_indptr_h = fmha_params.qo_indptr_h
             self._t_bs = int(fmha_params.kvlen_h.size(0))
         if self.use_cuda_graph and self.kv_indices_d.size(
             0
@@ -719,21 +723,27 @@ class MlaFlashInferDecodeOp(object):
 
         if _use_trtllm_gen_decode():
             # Plain decode (tokens == requests) or the MTP verify
-            # (tokens == requests * (1+gen)) — the latter only when the
-            # metadata is self-consistent (qo count == kvlen count and the
-            # rows divide evenly); any disagreement falls back to the
-            # wrapper path. The captured plan tensors are only touched
-            # under this gate: plan() fills them under the same env gate,
-            # so the default (env-off) path leaves them None and must not
-            # read them (reading them unconditionally crashed the first
-            # default-env decode forward with AttributeError).
+            # (tokens == requests * (1+gen)) — both have UNIFORM q rows per
+            # request. This op is also the short-sequence absorb branch for
+            # ragged prefill batches (prefix>0, chunked-prefill continuation
+            # or reuse cache), whose per-request input_lengths differ; a
+            # mere tokens % qo_bs == 0 check would admit those and the
+            # reshape below would cut request boundaries at the wrong rows
+            # (silently wrong attention). The host indptr carries the true
+            # per-request boundaries and reads without a device sync.
+            # The captured plan tensors are only touched under this gate:
+            # plan() fills them under the same env gate, so the default
+            # (env-off) path leaves them None and must not read them
+            # (reading them unconditionally crashed the first default-env
+            # decode forward with AttributeError).
             qo_bs = int(self._t_qo_indptr_d.size(0)) - 1
             kv_bs = int(self._t_kvlen_d.size(0))
             tokens = q_nope.shape[0]
-            if qo_bs == kv_bs and tokens % qo_bs == 0:
-                attn_output = self._trtllm_decode_run(
-                    q_nope, q_pe, kv_cache, tokens // qo_bs
-                )
+            q_lens = self._t_qo_indptr_h[1 : qo_bs + 1] - self._t_qo_indptr_h[:qo_bs]
+            q_len = int(q_lens[0]) if qo_bs > 0 else 0
+            uniform = bool((q_lens == q_len).all().item()) if qo_bs > 0 else False
+            if qo_bs == kv_bs and uniform and tokens == qo_bs * q_len:
+                attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache, q_len)
             else:
                 attn_output = torch.empty_like(q_nope)
                 self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
