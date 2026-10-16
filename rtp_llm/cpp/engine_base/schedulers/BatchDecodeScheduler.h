@@ -30,12 +30,15 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
+                         int                                    dp_rank   = 0,
+                         RoleType                               role_type = RoleType::DECODE) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_   = SchedulerType::kBatchDecode;
-        dp_rank_          = dp_rank;
+        // Real startup requests arrive before external scheduler controls. The
+        // deployment role, not the synthetic warmup strategy, determines their mode.
+        scheduler_type_ = role_type == RoleType::PREFILL ? SchedulerType::kBatchPrefill : SchedulerType::kBatchDecode;
+        dp_rank_        = dp_rank;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -279,7 +282,7 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;

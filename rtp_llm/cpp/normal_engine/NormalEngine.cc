@@ -92,7 +92,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -280,8 +280,11 @@ void NormalEngine::initScheduler() {
                             runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
     }
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
-            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  parallelism_config.dp_rank,
+                                                  pd_sep_config.role_type));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {
@@ -332,7 +335,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
                                                          resource_context_,
@@ -531,7 +534,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
