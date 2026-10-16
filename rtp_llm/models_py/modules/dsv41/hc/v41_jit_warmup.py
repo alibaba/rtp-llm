@@ -24,7 +24,11 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
 from rtp_llm.models_py.modules.dsv41.hc import v41_mega_mhc, v41_prenorm
-from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit, _tile_ops
+from rtp_llm.models_py.modules.dsv41.hc.delayed import (
+    DelayedHCUnit,
+    _tile_ops,
+    can_fuse_big_pre,
+)
 
 _WARMED_KEYS: set[tuple] = set()
 
@@ -161,6 +165,21 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     # The delayed collapse/final head uses this same apply_mix specialization.
     hidden = ops.mhc_pre_apply_mix(residual, pre)
     ops.mhc_post(hidden, residual, post, comb, out=residual)
+    if include_norm and can_fuse_big_pre():
+        small_deepgemm = tokens <= 64 and v41_prenorm._has_prenorm_gemm()
+        ops.mhc_pre_big_fuse(
+            residual,
+            v41_prenorm.prepare_tf32_weight(unit.fn) if small_deepgemm else unit.fn,
+            unit.scale,
+            unit.base,
+            unit.norm_eps,
+            unit.hc_eps,
+            unit.hc_eps,
+            2.0,
+            unit.hc_sinkhorn_iters,
+            previous_pre_mix=pre.reshape(1, tokens, 4),
+            gemm_backend="deepgemm" if small_deepgemm else None,
+        )
 
 
 def _clone_pair(pair, device):
@@ -274,6 +293,13 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                 ),
                 device=device,
             )
+            if use_small and can_fuse_big_pre():
+                common._run_tilelang_warmup_launch_with_retry(
+                    "V41 HC fused small pre",
+                    f"config={config} m=1",
+                    partial(_launch_tilelang_chain, unit, 1, device, include_norm=True),
+                    device=device,
+                )
             del unit
             common._sync_cuda(device)
             common._release_cuda_cache(device)

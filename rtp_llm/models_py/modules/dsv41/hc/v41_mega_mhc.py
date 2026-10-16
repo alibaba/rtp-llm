@@ -224,12 +224,15 @@ def try_fused_post_pre(
     norm: torch.nn.Module,
     *,
     original_tokens: int | None = None,
+    reuse_residual: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
     A successful call also publishes the FFN pre-mix for the next sublayer's
     delayed readout. Unsupported inputs return ``None``; backend execution
-    failures propagate to the caller. Inputs are never overwritten.
+    failures propagate to the caller. ``reuse_residual`` overwrites the input
+    residual after its corresponding tiles have been loaded, or the padded
+    copy when padding is needed.
     ``original_tokens`` preserves the installed backend's pre-compaction
     split heuristic using at most 512 execution rows when padding is needed.
     Returned leading-row views retain that bounded padded storage.
@@ -261,7 +264,7 @@ def try_fused_post_pre(
         attn_out, residual, post, comb, previous_pre = (
             pad(value) for value in (attn_out, residual, post, comb, previous_pre)
         )
-    new_residual = torch.empty_like(residual)
+    new_residual = residual if reuse_residual else torch.empty_like(residual)
     new_pre = torch.empty_like(previous_pre)
     new_post = torch.empty_like(post)
     new_comb = torch.empty_like(comb)

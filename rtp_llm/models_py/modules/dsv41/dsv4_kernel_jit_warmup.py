@@ -2607,6 +2607,8 @@ def _launch_dummy_mhc_pre_big_fuse(
         base,
         residual,
         post_mix,
+        post_mix,
+        post_mix,
         comb_mix,
         layer_input,
     )
