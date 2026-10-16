@@ -113,7 +113,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -191,7 +191,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         return int(
             deep_gemm.get_block_m_for_mega_moe(
                 self.cfg.ep_size,
-                self.cfg.n_routed_experts,
+                self.cfg.physical_expert_num,
                 self._mega_buf.num_max_tokens_per_rank,
                 int(tokens),
                 self.cfg.n_activated_experts,
@@ -207,7 +207,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             return clamp_token_counts(override, max_tokens_per_rank)
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -235,7 +235,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         warmup_key = (
             "mega_moe_se",
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -247,6 +247,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             num_sms,
             _SHARED_RECIPE,
             tuple(token_counts),
+            self.supports_gate_pack,
+            cfg.maxpander_config,
         )
         if warmup_key in _MEGA_MOE_SE_JIT_WARMED_KEYS:
             return
@@ -262,7 +264,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 format_token_counts(token_counts),
                 cfg.max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -331,9 +333,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._validate_capacity(tokens)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
     def forward_gate_pack(
         self,
@@ -378,8 +378,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             tokens,
             block_m,
         )
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        y = self._execute_packed_inputs(tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
 

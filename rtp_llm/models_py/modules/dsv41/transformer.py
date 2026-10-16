@@ -144,6 +144,7 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        maxpander_config=args.maxpander_config,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         score_func=args.score_func,

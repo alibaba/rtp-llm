@@ -28,7 +28,10 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.moe_strategy in ("auto", cls.strategy_name))
         checker.check(config.moe_quant_method == "FP8_FP4")
-        checker.check(not config.has_redundant_experts)
+        checker.check(
+            not config.has_redundant_experts
+            or (getattr(config, "maxpander_enabled", False) and cls.requires_ep)
+        )
         checker.check((config.ep_size > 1) == cls.requires_ep)
         if cls.requires_shared:
             checker.check(config.n_shared_experts > 0)
@@ -59,6 +62,12 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         super().check_conditions(checker, config)
+        if getattr(config, "maxpander_enabled", False):
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+                _mega_moe_se_available,
+            )
+
+            checker.check(_mega_moe_se_available())
         if config.moe_strategy == "auto":
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
                 _mega_moe_se_available,

@@ -51,6 +51,8 @@ class MoEConfigAdapter:
             model_config.eplb_config.phy_exp_num(self.expert_num)
         )
         self.has_redundant_experts = self.physical_expert_num != self.expert_num
+        self.maxpander_config = model_config.maxpander_config
+        self.maxpander_enabled = self.maxpander_config.enabled
         self.moe_k = model_config.moe_k
         self.moe_topk_group = model_config.moe_topk_group
         self.hidden_size = model_config.hidden_size

@@ -25,6 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -163,6 +164,7 @@ class MoE(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -182,10 +184,18 @@ class MoE(nn.Module):
         self._is_decode_role = bool(is_decode_role)
         self.ep_size = ep_size
         self.ep_rank = ep_rank
-        self.n_local_experts = n_routed_experts // max(ep_size, 1)
+        from rtp_llm.utils.model_weight import W
+
+        if maxpander_config.enabled:
+            if is_decode_role:
+                raise ValueError(
+                    "MaxPander must be disabled before loading DECODE weights"
+                )
+            self.n_local_experts = resolved_layer_weights[W.v4_routed_w1_w].shape[0]
+        else:
+            self.n_local_experts = n_routed_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
-        from rtp_llm.utils.model_weight import W
 
         shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
         shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
@@ -224,9 +234,16 @@ class MoE(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
             shared_fp8_block_size=shared_fp8_block_size,
             is_decode_role=self._is_decode_role,
+            maxpander_config=maxpander_config,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        if maxpander_config.enabled and strategy_cls.name not in (
+            "mega",
+            "mega_se",
+            "mega_fused",
+        ):
+            raise ValueError("MaxPander DSV4.1 requires a MegaMoE strategy")
         self._routed_includes_shared = bool(
             getattr(strategy_cls, "routed_includes_shared", False)
         )
@@ -259,6 +276,7 @@ class MoE(nn.Module):
         self._has_visual_tokens = False
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
+        self._strategy.setup_routing(resolved_layer_weights)
         self._strategy.setup_weights(resolved_layer_weights)
         self._strategy.setup_runtime()
 

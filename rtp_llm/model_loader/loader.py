@@ -782,6 +782,13 @@ class ModelLoader:
 
     def create_eplb(self):
         weights_info = self._weights_info
+        self.model_config.maxpander_config.validate_placement(
+            expert_num=weights_info.expert_num_,
+            physical_expert_num=weights_info.phy_exp_num_,
+            ep_size=weights_info.ep_size,
+            dynamic_eplb=weights_info.enable_eplb_,
+            phy2log_path=self.model_config.phy2log_path,
+        )
 
         logging.info(
             "create eplb: expert_num: %d, phy_exp_num: %d",
@@ -798,6 +805,7 @@ class ModelLoader:
             num_nodes=weights_info.num_nodes,
             phy_exp_num=weights_info.phy_exp_num_,
             phy2log_path=phy2log_path,
+            maxpander_config=self.model_config.maxpander_config,
         )
 
         # dynamic expert balancer
@@ -825,7 +833,9 @@ class ModelLoader:
         phy2log = self._load_config.phy2log
 
         if expert_num == 0 or (
-            not self._weights_info.enable_eplb_ and redundant_expert == 0
+            not self._weights_info.enable_eplb_
+            and redundant_expert == 0
+            and not self.model_config.maxpander_config.enabled
         ):
             logging.info("don't need to init eplb weight, skip...")
             return

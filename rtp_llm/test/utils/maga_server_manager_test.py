@@ -1,8 +1,14 @@
+import select
 import signal
+import subprocess
+import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock, patch
+from textwrap import dedent
+from unittest.mock import Mock, call, patch
+
+import psutil
 
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -68,6 +74,178 @@ class MagaServerManagerTest(unittest.TestCase):
                 self.assertEqual(self.manager.exit_code, exit_code)
                 self.assertIn(f"pid=4242 {expected_reason}", "\n".join(logs.output))
                 self.manager.print_process_log.assert_called_once_with()
+
+    def test_stop_allows_parent_to_reap_children(self):
+        self.manager._server_process = Mock(pid=4242)
+        child = Mock()
+        parent = Mock()
+        parent.children.return_value = [child]
+        events = []
+        parent.terminate.side_effect = lambda: events.append("parent_terminate")
+        parent.wait.side_effect = lambda **kwargs: events.append("parent_wait")
+
+        def wait_for_children(processes, timeout):
+            events.append("children_wait")
+            return processes, []
+
+        with (
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ),
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=wait_for_children,
+            ),
+        ):
+            self.assertTrue(self.manager.stop_server())
+
+        self.assertEqual(
+            events[:3], ["parent_terminate", "parent_wait", "children_wait"]
+        )
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+        parent.kill.assert_not_called()
+        self.assertIsNone(self.manager.server_pid)
+
+    def test_stop_preserves_multiprocessing_resource_tracker(self):
+        script = dedent(
+            """
+            import gc
+            import multiprocessing
+            import signal
+            import threading
+            import time
+
+            shutdown_requested = threading.Event()
+
+            def request_stop(signum, frame):
+                shutdown_requested.set()
+
+            signal.signal(signal.SIGTERM, request_stop)
+            semaphore = multiprocessing.get_context("spawn").Semaphore()
+            print("ready", flush=True)
+            shutdown_requested.wait()
+            time.sleep(0.2)
+            del semaphore
+            gc.collect()
+            print("stopped", flush=True)
+            """
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.manager._server_process = process
+        try:
+            ready, _, _ = select.select([process.stdout], [], [], 10)
+            self.assertTrue(ready, "server fixture did not start")
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            self.assertTrue(self.manager.stop_server())
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0)
+            self.assertIn("stopped", stdout)
+            self.assertEqual(stderr, "")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+
+    def test_stop_escalates_after_parent_timeout(self):
+        self.manager._server_process = Mock(pid=4242)
+        child = Mock(pid=4243)
+        late_child = Mock(pid=4244)
+        parent = Mock()
+        parent.children.side_effect = [[child], [child, late_child]]
+        parent.wait.side_effect = [psutil.TimeoutExpired(17), 0]
+        parent.kill.side_effect = lambda: late_child.kill.assert_called_once_with()
+        with (
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ),
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[
+                    ([], [child, late_child]),
+                    ([child], [late_child]),
+                    ([late_child], []),
+                ],
+            ),
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            self.assertTrue(self.manager.stop_server(timeout=17))
+
+        self.assertIn("did not exit within 17s", "\n".join(logs.output))
+        self.assertEqual(
+            parent.wait.call_args_list, [call(timeout=17), call(timeout=5)]
+        )
+        child.terminate.assert_called_once_with()
+        late_child.terminate.assert_called_once_with()
+        child.kill.assert_not_called()
+        late_child.kill.assert_called_once_with()
+        parent.kill.assert_called_once_with()
+        self.assertIsNone(self.manager.server_pid)
+
+    def test_stop_continues_when_descendants_disappear(self):
+        self.manager._server_process = Mock(pid=4242)
+        file_stream = Mock()
+        self.manager._file_stream = file_stream
+        gone_child = Mock(pid=4243)
+        surviving_child = Mock(pid=4244)
+        gone_child.terminate.side_effect = psutil.NoSuchProcess(4243)
+        surviving_child.kill.side_effect = psutil.NoSuchProcess(4244)
+        parent = Mock()
+        parent.children.return_value = [gone_child, surviving_child]
+        with (
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ) as get_process,
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[
+                    ([], [gone_child, surviving_child]),
+                    ([gone_child], [surviving_child]),
+                    ([], []),
+                ],
+            ),
+        ):
+            self.assertTrue(self.manager.stop_server())
+            self.assertTrue(self.manager.stop_server())
+
+        get_process.assert_called_once_with(4242)
+        surviving_child.terminate.assert_called_once_with()
+        surviving_child.kill.assert_called_once_with()
+        parent.kill.assert_not_called()
+        file_stream.close.assert_called_once_with()
+        self.assertIsNone(self.manager.server_pid)
+
+    def test_stop_cleans_children_when_parent_disappears(self):
+        self.manager._server_process = Mock(pid=4242)
+        child = Mock(pid=4243)
+        parent = Mock()
+        parent.children.return_value = [child]
+        parent.terminate.side_effect = psutil.NoSuchProcess(4242)
+        with (
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ),
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[([], [child]), ([child], [])],
+            ),
+        ):
+            self.assertTrue(self.manager.stop_server())
+
+        child.terminate.assert_called_once_with()
+        child.kill.assert_not_called()
+        parent.wait.assert_not_called()
+        parent.kill.assert_not_called()
+        self.assertIsNone(self.manager.server_pid)
 
     def test_concurrent_stop_preserves_probed_process_diagnostics(self):
         process = Mock(pid=4242)

@@ -8,6 +8,7 @@ from typing import Callable, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
@@ -54,6 +55,7 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -84,6 +86,17 @@ class Fp8Fp4MoeRuntimeConfig:
                 f"divisible by ep_size={ep_size}"
             )
         self.has_redundant_experts = self.physical_expert_num != self.expert_num
+        self.maxpander_config = maxpander_config
+        self.maxpander_enabled = maxpander_config.enabled
+        if self.maxpander_enabled and moe_strategy not in ("mega_moe", "mega_moe_se"):
+            raise ValueError(
+                "MaxPander FP8/FP4 requires explicit mega_moe or mega_moe_se"
+            )
+        maxpander_config.validate_placement(
+            expert_num=self.expert_num,
+            physical_expert_num=self.physical_expert_num,
+            ep_size=ep_size,
+        )
         self.n_routed_experts = self.expert_num
         self.moe_k = int(moe_k)
         self.n_activated_experts = self.moe_k
@@ -151,6 +164,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         warmup_include_capacity: bool = False,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -192,6 +206,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            maxpander_config=maxpander_config,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights

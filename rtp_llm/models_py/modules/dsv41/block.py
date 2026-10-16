@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     AttentionFP8,
@@ -79,6 +80,7 @@ class Block(nn.Module):
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -162,6 +164,7 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            maxpander_config=maxpander_config,
         )
         if v41_config is not None and not is_decode_role:
             self.ffn.gate._prefill_gate_chunk_rows = 32768

@@ -12,6 +12,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import (
@@ -412,6 +413,31 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        model_config.maxpander_config = getattr(
+            engine_config, "maxpander_config", MaxPanderRuntimeConfig()
+        )
+        if model_config.maxpander_config.enabled:
+            model_config.maxpander_config.validate_placement(
+                expert_num=model_config.expert_num,
+                physical_expert_num=model_config.eplb_config.phy_exp_num(
+                    model_config.expert_num
+                ),
+                ep_size=engine_config.parallelism_config.ep_size,
+                dynamic_eplb=model_config.eplb_config.enable_eplb(),
+                phy2log_path=model_config.phy2log_path,
+            )
+            if model_config.model_name not in ("DeepSeekV4", "DeepSeekV41"):
+                raise ValueError(
+                    "MaxPander currently supports only DeepSeek-V4/V4.1 FP8/FP4 MoE"
+                )
+            logging.info(
+                "MaxPander prefill placement: logical=%d redundant=%d EP=%d ratio=%g",
+                model_config.expert_num,
+                model_config.eplb_config.redundant_expert,
+                engine_config.parallelism_config.ep_size,
+                model_config.eplb_config.redundant_expert / model_config.expert_num,
+            )
+
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
@@ -507,6 +533,28 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+
+        propose_model_config.maxpander_config = model_config.maxpander_config
+        if model_config.maxpander_config.enabled:
+            from rtp_llm.eplb.maxpander_plan import draft_redundant_experts
+
+            # Draft configs are created independently, not cloned from target.
+            # Propagate a private static config after its logical E is resolved.
+            propose_model_config.eplb_config = copy.deepcopy(model_config.eplb_config)
+            propose_model_config.eplb_config.redundant_expert = draft_redundant_experts(
+                int(model_config.expert_num),
+                int(model_config.eplb_config.redundant_expert),
+                int(propose_model_config.expert_num),
+            )
+            propose_model_config.maxpander_config.validate_placement(
+                expert_num=propose_model_config.expert_num,
+                physical_expert_num=propose_model_config.eplb_config.phy_exp_num(
+                    propose_model_config.expert_num
+                ),
+                ep_size=engine_config.parallelism_config.ep_size,
+                dynamic_eplb=propose_model_config.eplb_config.enable_eplb(),
+                phy2log_path=propose_model_config.phy2log_path,
+            )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

@@ -138,7 +138,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -249,7 +249,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         return int(
             deep_gemm.get_block_m_for_mega_moe(
                 self.cfg.ep_size,
-                self.cfg.n_routed_experts,
+                self.cfg.physical_expert_num,
                 self._mega_buf.num_max_tokens_per_rank,
                 int(tokens),
                 self.cfg.n_activated_experts,
@@ -270,7 +270,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -278,7 +278,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -307,7 +307,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         warmup_key = (
             "mega_se",
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -317,6 +317,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             num_sms,
             self._shared_recipe,
             tuple(token_counts),
+            cfg.maxpander_config,
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
             (
                 float(getattr(self, "_gate_pack_route_scale", 1.0))
@@ -334,7 +335,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 format_token_counts(token_counts),
                 cfg.max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -417,11 +418,11 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         return (
             os.environ.get("DSV4_GATE_FUSED", "1") != "0"
             and os.environ.get("DSV4_GATE_FP32", "0") != "1"
-            and (gate.score_func == "sqrtsoftplus")
-            and (1 <= int(gate.topk) <= 32)
-            and (self.cfg.dim % 128 == 0)
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            and self.cfg.dim % 128 == 0
             and _gate_pack_input_packer_env_allows()
-            and (_get_mega_se_gate_pack_kernels() is not None)
+            and _get_mega_se_gate_pack_kernels() is not None
         )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
@@ -452,17 +453,18 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
     def forward_with_gate_pack(self, x, gate, input_ids):
+        if not self.can_use_gate_pack_static(gate):
+            raise RuntimeError(
+                "DSV4.1 MegaMoE SE fused gate-pack is unavailable for this gate or packer"
+            )
         kernels = _get_mega_se_gate_pack_kernels()
         pack_nonhash, pack_hash, _ = kernels
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         buf = self._mega_buf
-        y = self._mega_y[:tokens]
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_se_gate_pack"):
@@ -495,8 +497,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._launch(y, tokens, x.device)
-        return y
+        return self._execute_packed_inputs(tokens, x.device)
 
 
 __all__ = ["MegaMoEStrategySE"]
