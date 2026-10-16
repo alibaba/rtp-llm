@@ -1,0 +1,24 @@
+{
+  "case_id": "cache_store_mla_fp8_1to1_1k",
+  "layout": "mla",
+  "dtype": "fp8",
+  "source_tp": 1,
+  "target_tp": 1,
+  "tokens": 1024,
+  "block_tokens": 128,
+  "seed": 20261008,
+  "layers": 2,
+  "heads": 4,
+  "kv_heads": 4,
+  "head_dim": 64,
+  "pool_blocks": 11,
+  "deadline_ms": 30000,
+  "process_timeout_seconds": 90,
+  "latent_dim": 256,
+  "rope_dim": 32,
+  "model_source": {
+    "model": "deepseek-ai/DeepSeek-V2.5",
+    "repository_fixture": "internal_source/rtp_llm/tools/api/test/testdata/DeepSeek-V2.5/config.json",
+    "scale": "2 layers, 4 heads, 256 latent, 32 rope; no weights"
+  }
+}
