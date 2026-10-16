@@ -44,6 +44,9 @@ QUEUE scheduler 选中 Prefill 后，请求进入该 endpoint 的 `WorkerBatcher
 - 真实 KV 使用率未超过 `maxKvUsagePercent`（默认 90）；同样使用
   `availabilityHysteresisPercent` 做滞回。
 
+Decode 选择先排除缺失可路由 rank 的 DP 组，再对剩余 endpoint 计算容量和选择成本。
+DP 组使用 WorkerStatus 的 `dp_master_address` 识别；没有该地址的 worker 独立参与选择。
+
 `DecodeEndpoint.reserve()` 在对外发布前建立 shadow 预留，记录并发槽位、硬 KV
 和预期 KV。已在 Prefill 队列中的预留继续保护 KV，但不计入引擎面的
 concurrency，避免引擎空闲时被本地排队预留假性压满。

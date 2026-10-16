@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -256,18 +257,32 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return endpointRegistry.capture(role, ipPort);
     }
 
-    /** Immutable Decode routing values for one group. */
-    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(
-            String group) {
-        List<DecodeEndpoint.DecodeRoutingView> snapshots =
-                endpointRegistry.decodeRoutingSnapshot();
-        if (group == null || snapshots.isEmpty()) {
+    /**
+     * Decode candidates whose reported DP group has every rank available for routing.
+     */
+    public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(String group) {
+        List<DecodeEndpoint.DecodeRoutingView> snapshots = endpointRegistry.decodeRoutingSnapshot();
+        if (snapshots.isEmpty()) {
             return snapshots;
         }
-        ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
-                new ArrayList<>(snapshots.size());
+        Map<String, DpGroupMembers> dpGroups = new HashMap<>();
         for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
-            if (group.equals(snapshot.topology().group())) {
+            WorkerStatus.EngineObservation engine = snapshot.workerStatus().fields();
+            if (engine.dpMasterAddress() != null) {
+                dpGroups.computeIfAbsent(engine.dpMasterAddress(), ignored -> new DpGroupMembers())
+                        .add(engine.dpSize(), engine.dpRank());
+            }
+        }
+        if (group == null && dpGroups.isEmpty()) {
+            return snapshots;
+        }
+        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = new ArrayList<>(snapshots.size());
+        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
+            if (group != null && !group.equals(snapshot.topology().group())) {
+                continue;
+            }
+            String masterAddress = snapshot.workerStatus().fields().dpMasterAddress();
+            if (masterAddress == null || dpGroups.get(masterAddress).hasAllRanks()) {
                 matching.add(snapshot);
             }
         }

@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -71,6 +72,16 @@ class DecodeSelectorTest {
         WorkerStatus worker = createWorkerStatus(ip);
         setKv(worker, totalKv, availableKv);
         decodeStatuses.put(ip + ":8080", worker);
+        return worker;
+    }
+
+    private WorkerStatus dpWorker(String ip, String group, String masterAddress, long rank) {
+        WorkerStatus worker = createWorkerStatus(ip, group);
+        WorkerStatusResponse response = StrategyTestSupport.response(RoleType.DECODE, true, 10_000L, 10_000L, 2L);
+        response.setDpSize(2);
+        response.setDpRank(rank);
+        response.setDpMasterAddress(masterAddress);
+        StrategyTestSupport.publish(worker, response);
         return worker;
     }
 
@@ -272,6 +283,31 @@ class DecodeSelectorTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void missingDpRankBlocksItsGroupButIndependentDecodeCanBeSelected() {
+        WorkerStatus rankZero = dpWorker("127.0.0.1", "routing-a", "10.0.0.1", 0);
+        WorkerStatus rankOne = dpWorker("127.0.0.2", "routing-a", "10.0.0.1", 1);
+        WorkerStatus independent = dpWorker("127.0.0.3", "routing-b", null, 0);
+        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
+        try {
+            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, rankZero.getLogicalIpPort(), rankZero);
+            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, independent.getLogicalIpPort(), independent);
+            DecodeSelector selector = availableStrategy(registry);
+
+            Assertions.assertNull(selectStatus(selector, context(100, 1L), RoleType.DECODE, "routing-a"));
+            Assertions.assertEquals("127.0.0.3",
+                    selectStatus(selector, context(100, 2L), RoleType.DECODE, null).getServerIp());
+
+            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, rankOne.getLogicalIpPort(), rankOne);
+
+            ServerStatus selected = selectStatus(selector, context(100, 3L), RoleType.DECODE, "routing-a");
+            Assertions.assertNotNull(selected);
+            Assertions.assertTrue(List.of("127.0.0.1", "127.0.0.2").contains(selected.getServerIp()));
+        } finally {
+            registry.close();
+        }
     }
 
     @ParameterizedTest

@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +26,9 @@ class WorkerDirectoryTest {
 
     private WorkerDirectory workerDirectory;
     private EndpointRegistry registry;
+
+    private record DecodeMember(WorkerStatus status, WorkerStatusResponse response) {
+    }
 
     @BeforeEach
     void setUp() {
@@ -202,6 +206,106 @@ class WorkerDirectoryTest {
                         .stream()
                         .map(EndpointRegistry.PrefillRoutingEntry::address)
                         .toList());
+    }
+
+    @Test
+    void decodeGroupIsRoutableOnlyWhenEveryRankHasAnEndpoint() {
+        DecodeMember rankZero = decodeMember("routing-a", "10.0.0.1", 0, 2, 8400);
+        DecodeMember rankOne = decodeMember("routing-a", "10.0.0.1", 1, 2, 8401);
+        publishDecode(rankZero);
+
+        assertTrue(workerDirectory.decodeRoutingSnapshot("routing-a").isEmpty());
+        assertEquals(2, workerDirectory.getWorkerStatuses(RoleType.DECODE, "routing-a").size());
+
+        publishDecode(rankOne);
+
+        assertEquals(2, workerDirectory.decodeRoutingSnapshot("routing-a").size());
+    }
+
+    @Test
+    void retiringOneRankHidesItsGroupWithoutRemovingWorkerStatuses() {
+        DecodeMember rankZero = decodeMember("routing-a", "10.0.0.1", 0, 2, 8410);
+        DecodeMember rankOne = decodeMember("routing-a", "10.0.0.1", 1, 2, 8411);
+        DecodeMember independent = decodeMember("routing-a", null, 0, 1, 8412);
+        publishDecode(rankZero);
+        publishDecode(rankOne);
+        publishDecode(independent);
+
+        EndpointRegistry.DetachedGeneration detached;
+        rankOne.status().lock.lock();
+        try {
+            detached = workerDirectory.beginRetirement(
+                    RoleType.DECODE, rankOne.status().getLogicalIpPort(), rankOne.status());
+        } finally {
+            rankOne.status().lock.unlock();
+        }
+        assertNotNull(detached);
+        detached.retireAndAwait();
+
+        assertEquals(List.of(independent.status().getLogicalIpPort()),
+                workerDirectory.decodeRoutingSnapshot("routing-a").stream().map(view -> view.address()).toList());
+        assertEquals(3, workerDirectory.getWorkerStatuses(RoleType.DECODE, "routing-a").size());
+        assertSame(rankOne.status(), workerDirectory.statusSnapshot(RoleType.DECODE)
+                .get(rankOne.status().getLogicalIpPort()));
+    }
+
+    @Test
+    void decodeGroupsWithTheSameRanksAreSeparatedByMasterAddress() {
+        DecodeMember incomplete = decodeMember("routing-a", "10.0.0.1", 0, 2, 8420);
+        DecodeMember completeZero = decodeMember("routing-a", "10.0.0.2", 0, 2, 8421);
+        DecodeMember completeOne = decodeMember("routing-a", "10.0.0.2", 1, 2, 8422);
+        DecodeMember otherPolicy = decodeMember("routing-b", null, 0, 1, 8423);
+        publishDecode(incomplete);
+        publishDecode(completeZero);
+        publishDecode(completeOne);
+        publishDecode(otherPolicy);
+
+        List<String> eligibleAddresses = workerDirectory.decodeRoutingSnapshot("routing-a")
+                .stream().map(view -> view.address()).sorted().toList();
+        assertEquals(List.of(completeZero.status().getLogicalIpPort(), completeOne.status().getLogicalIpPort())
+                .stream().sorted().toList(), eligibleAddresses);
+        assertEquals(3, workerDirectory.decodeRoutingSnapshot(null).size());
+    }
+
+    @Test
+    void duplicateRanksDoNotMakeAGroupRoutable() {
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 0, 2, 8430));
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 1, 2, 8431));
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 1, 2, 8432));
+
+        assertTrue(workerDirectory.decodeRoutingSnapshot("routing-a").isEmpty());
+    }
+
+    @Test
+    void inconsistentDpSizesDoNotMakeAGroupRoutable() {
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 0, 2, 8440));
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 1, 3, 8441));
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 2, 3, 8442));
+
+        assertTrue(workerDirectory.decodeRoutingSnapshot("routing-a").isEmpty());
+    }
+
+    private DecodeMember decodeMember(String group, String masterAddress, long rank, long size, int port) {
+        WorkerStatus status = status(RoleType.DECODE, group, port);
+        discover(status);
+        WorkerStatusResponse response = RunnerTestSupport.response(status, true, 1L);
+        response.setDpMasterAddress(masterAddress);
+        response.setDpSize(size);
+        response.setDpRank(rank);
+        return new DecodeMember(status, response);
+    }
+
+    private void publishDecode(DecodeMember member) {
+        WorkerStatus status = member.status();
+        status.lock.lock();
+        try {
+            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
+                    status.freezeStatusResponse(member.response()));
+            registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
+            status.recordSuccessfulPoll(true);
+        } finally {
+            status.lock.unlock();
+        }
     }
 
     private void assertRoleEndpoint(RoleType role, int port) {

@@ -112,6 +112,12 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 `dp_master_address` 保存 Engine 状态上报的 DP master 地址，随同一次状态事务写入
 `WorkerStatus.committedEngineObservation()`；未上报时为 `null`。
+Decode 决策按非空 `dp_master_address` 识别 DP 组，与流量策略的 `group` 分别处理。
+只有组内可路由 endpoint 覆盖 `dp_size` 指定的全部 rank（从 0 到 `dp_size - 1`，
+各 rank 唯一且成员报告的 `dp_size` 一致），这一组的 Decode 才能进入候选集。
+任一 rank 的 endpoint 不可路由时，整组暂不参与新请求的选择；地址为 `null` 的
+Decode 作为独立 worker 按原有可用性规则选择。候选过滤只影响新的路由决策，
+WorkerStatus 的发现、退役和任务清理仍由各自的生命周期管理。
 
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
