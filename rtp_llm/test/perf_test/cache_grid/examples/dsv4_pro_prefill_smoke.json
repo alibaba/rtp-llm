@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "kind": "explicit_cache_grid_smoke",
+  "description": "DSV4-Pro CP=8 prefill scheduler and prefix-cache smoke grid",
+  "generator": {
+    "name": "manual_smoke_grid",
+    "version": 1,
+    "alignment": 128,
+    "cache_alignment": 4096,
+    "commit_tail_constraint": {
+      "tokens": 4096,
+      "description": "Every cache-hit case leaves at least 4096 uncached tokens"
+    }
+  },
+  "summary": {
+    "input_count": 5,
+    "case_count": 31,
+    "estimated_measure_requests": 93,
+    "estimated_seed_requests": 26
+  },
+  "cases": [
+    {"case_id": 0, "batch_size": 1, "input_len": 4096, "cache_len": 0, "description": "Short cold request; expected global compute tokens: 4096"},
+    {"case_id": 1, "batch_size": 1, "input_len": 8192, "cache_len": 0, "description": "8K cold baseline"},
+    {"case_id": 2, "batch_size": 1, "input_len": 8192, "cache_len": 4096, "description": "8K request with one 4096-token cached block"},
+    {"case_id": 3, "batch_size": 1, "input_len": 65536, "cache_len": 0, "description": "64K cold request; expected global compute tokens: 65536"},
+    {"case_id": 4, "batch_size": 1, "input_len": 65536, "cache_len": 32768, "description": "64K request with 50 percent cache reuse"},
+    {"case_id": 5, "batch_size": 1, "input_len": 65536, "cache_len": 61440, "description": "64K near-full hit; expected global compute tokens: 4096"},
+    {"case_id": 6, "batch_size": 1, "input_len": 131072, "cache_len": 0, "description": "128K cold baseline"},
+    {"case_id": 7, "batch_size": 1, "input_len": 131072, "cache_len": 65536, "description": "128K request with 50 percent cache reuse"},
+    {"case_id": 8, "batch_size": 1, "input_len": 131072, "cache_len": 126976, "description": "128K near-full hit; expected global compute tokens: 4096"},
+    {"case_id": 9, "batch_size": 1, "input_len": 196608, "cache_len": 0},
+    {"case_id": 10, "batch_size": 1, "input_len": 196608, "cache_len": 4096},
+    {"case_id": 11, "batch_size": 1, "input_len": 196608, "cache_len": 8192},
+    {"case_id": 12, "batch_size": 1, "input_len": 196608, "cache_len": 12288},
+    {"case_id": 13, "batch_size": 1, "input_len": 196608, "cache_len": 16384},
+    {"case_id": 14, "batch_size": 1, "input_len": 196608, "cache_len": 20480},
+    {"case_id": 15, "batch_size": 1, "input_len": 196608, "cache_len": 24576},
+    {"case_id": 16, "batch_size": 1, "input_len": 196608, "cache_len": 28672},
+    {"case_id": 17, "batch_size": 1, "input_len": 196608, "cache_len": 32768},
+    {"case_id": 18, "batch_size": 1, "input_len": 196608, "cache_len": 36864},
+    {"case_id": 19, "batch_size": 1, "input_len": 196608, "cache_len": 40960},
+    {"case_id": 20, "batch_size": 1, "input_len": 196608, "cache_len": 45056},
+    {"case_id": 21, "batch_size": 1, "input_len": 196608, "cache_len": 49152},
+    {"case_id": 22, "batch_size": 1, "input_len": 196608, "cache_len": 53248},
+    {"case_id": 23, "batch_size": 1, "input_len": 196608, "cache_len": 57344},
+    {"case_id": 24, "batch_size": 1, "input_len": 196608, "cache_len": 61440},
+    {"case_id": 25, "batch_size": 1, "input_len": 196608, "cache_len": 65536},
+    {"case_id": 26, "batch_size": 1, "input_len": 196608, "cache_len": 73728},
+    {"case_id": 27, "batch_size": 1, "input_len": 196608, "cache_len": 77824},
+    {"case_id": 28, "batch_size": 1, "input_len": 196608, "cache_len": 81920},
+    {"case_id": 29, "batch_size": 1, "input_len": 196608, "cache_len": 86016},
+    {"case_id": 30, "batch_size": 1, "input_len": 196608, "cache_len": 90112}
+  ]
+}

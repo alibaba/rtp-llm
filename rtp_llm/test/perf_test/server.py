@@ -3,6 +3,9 @@ import logging
 import os
 from typing import Dict, List, Optional
 
+import requests
+
+from rtp_llm.test.perf_test.cache_grid.runner.scheduler import configure_scheduler
 from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -36,6 +39,9 @@ class EngineServer:
             env["USE_BATCH_DECODE_SCHEDULER"] = (
                 "1" if use_batch_decode_scheduler else "0"
             )
+        if getattr(self._args, "cache_profile_backend", "kineto") == "nsys":
+            env["GEN_TIMELINE_SYNC"] = "0"
+            engine_cli += " --gen_timeline_sync=False"
 
         logging.info(f"Starting server with engine CLI: {engine_cli}")
         logging.info(f"remaining_args (raw list): {self._remaining_args}")
@@ -59,6 +65,12 @@ class EngineServer:
         self._server = None
         if server is not None:
             server.stop_server()
+
+    def set_scheduler_mode(self, *, batch_size: int, mode: str) -> Dict[str, object]:
+        """Configure BatchDecodeScheduler before issuing performance requests."""
+        return configure_scheduler(
+            self.port, batch_size=batch_size, mode=mode, post=requests.post, attempts=20
+        )
 
     @property
     def port(self) -> int:
