@@ -192,21 +192,26 @@ class FaultInjectionE2ETest {
 
     @Test
     @Timeout(30)
-    void c06_no_respond_hangs_stream_but_dispatch_ack_succeeds_and_engine_drains() throws Exception {
+    void c06_no_respond_is_transport_blackhole_and_clears() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 50, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
-            JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
-            long decodeAvailableBefore = decode.getAvailableKvTokens();
             prefill.setFaultConfig(FaultInjectionConfig.builder()
                     .noRespond(true)
                     .build());
 
-            // 控制面语义：enqueue ack 不受 noRespond 影响 → 调度器视角成功
-            Response response = submitTo(h, 0, 9601);
-            assertTrue(response.isSuccess(),
-                    "noRespond does not affect the enqueue ack: " + response.getErrorMessage());
+            java.util.concurrent.CountDownLatch enqueueReturned = new java.util.concurrent.CountDownLatch(1);
+            prefill.enqueueBatch(MockEngineTestSupport.batch(9601,
+                    MockEngineTestSupport.slot(0, MockEngineTestSupport.input(9601, 10))),
+                    new StreamObserver<>() {
+                        public void onNext(EngineRpcService.EnqueueBatchResponsePB value) { enqueueReturned.countDown(); }
+                        public void onError(Throwable error) { enqueueReturned.countDown(); }
+                        public void onCompleted() { enqueueReturned.countDown(); }
+                    });
+            assertFalse(enqueueReturned.await(150, TimeUnit.MILLISECONDS),
+                    "RPC blackhole must suppress Enqueue responses too");
+            assertEquals(0, prefill.getAcceptedCount());
 
             // 数据面语义：流上永远没有任何事件（不完成、不报错）
             StreamResult silent = callGenerateStream(prefill, 9602);
@@ -216,10 +221,6 @@ class FaultInjectionE2ETest {
             // 引擎内部状态照常排空、不泄漏、不影响后续恢复
             AutoTpmE2EHarness.await(() -> prefill.getRunningCount() == 0, 5_000,
                     "noRespond engine still settles its internal accounting");
-            assertEquals(0L, decode.getOccupiedKvTokens(),
-                    "suppressed decode handoff must release its reserved KV lease");
-            assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens(),
-                    "decode KV availability must return to its pre-request value");
             prefill.clearFaultConfig();
             Response recovered = submitTo(h, 0, 9603);
             assertTrue(recovered.isSuccess(), "engine recovers after clearing the fault");
@@ -336,9 +337,12 @@ class FaultInjectionE2ETest {
             StrategyErrorType expectedError = clientCancellation
                     ? StrategyErrorType.REQUEST_CANCELLED : StrategyErrorType.RESOURCE_EXHAUSTED;
             assertEquals(expectedError.getErrorCode(), expired.getCode());
-            // Cleanup may wait for inactivity, but it cannot replace an earlier client cancellation.
-            assertTrue(expired.getErrorMessage().contains(clientCancellation
-                    ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
+            if (clientCancellation) {
+                assertTrue(expired.getErrorMessage().contains(CancelReason.CLIENT_CANCELLED.getMessage()));
+            } else {
+                assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                        expired.getAdmissionRejectReason());
+            }
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
             AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0

@@ -24,7 +24,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.performanceModel;
@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code /metrics} in BOTH emission modes (per-engine and role-aggregated):
  *
  * <ul>
- *   <li>{@code mock_engine_cache_blocks} / {@code available_blocks} /
+ *   <li>{@code rtp_llm_kv_cache_pool_total_blocks} / {@code available_blocks} /
  *       {@code held_blocks} / {@code referenced_blocks} — the three-state block
  *       decomposition as per-scrape GAUGES (prefill leases hold keyless blocks
  *       mid-flight; completion hands them to the LRU restoring availability;
@@ -65,6 +65,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BlockPoolMetricsObservabilityTest {
 
+    @Test
+    void prefillBatchHistogramIsExportedInBothMetricModes() throws Exception {
+        MockPerformanceModel model = performanceModel(tempDir, "10");
+        JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
+        assertEquals(0, enqueueAndFetch(prefill, batch(99, slot(0,
+                inputWithBlockKeys(990L, SPB, List.of(990L))))).getErrorsCount());
+
+        String perEngine = httpGet(controlPort(), "/metrics?per_engine=true");
+        String aggregate = httpGet(controlPort(), "/metrics");
+        assertTrue(perEngine.contains("mock_prefill_batch_size_bucket{"));
+        assertTrue(perEngine.contains("le=\"1\"} 1"));
+        assertTrue(perEngine.contains("le=\"+Inf\"} 1"));
+        assertTrue(aggregate.contains("mock_prefill_batch_size_count{role=\"prefill\"} 1"));
+        assertTrue(aggregate.contains("mock_prefill_batch_size_sum{role=\"prefill\"} 1"));
+        assertFalse(perEngine.contains("mock_prefill_batches_total"));
+        assertFalse(perEngine.contains("mock_prefill_batch_requests_total"));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final int SPB = 1024;
@@ -72,7 +90,7 @@ class BlockPoolMetricsObservabilityTest {
 
     /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
     private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"(?:,engine_incarnation=\"[^\"]+\")?\\}\\s+(\\d+)");
 
     /** {@code metric_name{role="..."} value} */
     private static final Pattern ROLE_METRIC_PATTERN = Pattern.compile(
@@ -125,7 +143,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
                 7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(1, slot(0, tooBig)));
+                enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
         assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode());
@@ -159,14 +177,14 @@ class BlockPoolMetricsObservabilityTest {
                 "the decode bucket must carry no prefill rejection");
         assertEquals(null, byRole.get("mock_engine_kv_admission_fails_total").get("decode"),
                 "the decode bucket must carry no admission failure");
-        assertEquals(10L, byRole.get("mock_engine_cache_blocks").getOrDefault("prefill", -1L),
+        assertEquals(10L, byRole.get("rtp_llm_kv_cache_pool_total_blocks").getOrDefault("prefill", -1L),
                 "aggregated cache_blocks = the role's pool total");
 
         // A serviceable request afterwards: the counter holds (no double
         // counting) — the pool is not poisoned by the rejection.
         EngineRpcService.GenerateInputPB small =
                 inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
-        assertEquals(0, enqueue(prefill, batch(2, slot(0, small))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(2, slot(0, small))).getErrorsCount());
         Map<String, Map<Integer, Long>> after =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         assertEquals(1L, after.get("mock_engine_lack_mem_rejects_total")
@@ -188,7 +206,7 @@ class BlockPoolMetricsObservabilityTest {
 
         // in-flight asserted via snapshot before the metrics scrape so the
         // gauge reading cannot race the completion.
-        assertEquals(0, enqueue(prefill, batch(3, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(3, slot(0,
                 inputWithBlockKeys(30L, 3 * SPB, List.of(31L, 32L, 33L)))))
                 .getErrorsCount());
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -200,14 +218,14 @@ class BlockPoolMetricsObservabilityTest {
         Map<String, Map<Integer, Long>> mid =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         int prefillPort = prefill.getGrpcPort();
-        assertEquals(100L, mid.get("mock_engine_cache_blocks").getOrDefault(prefillPort, -1L),
+        assertEquals(100L, mid.get("rtp_llm_kv_cache_pool_total_blocks").getOrDefault(prefillPort, -1L),
                 "the pool size gauge is the configured block count");
         assertEquals(3L, mid.get("mock_engine_held_blocks").getOrDefault(prefillPort, -1L),
                 "the in-flight lease holds its 3 keyless blocks");
         assertEquals(0L, mid.get("mock_engine_referenced_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "fresh keys carry no references");
-        assertEquals(97L, mid.get("mock_engine_available_blocks")
+        assertEquals(97L, mid.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "held blocks leave the available set");
 
@@ -223,7 +241,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, done.get("mock_engine_referenced_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "no in-flight references remain");
-        assertEquals(100L, done.get("mock_engine_available_blocks")
+        assertEquals(100L, done.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(prefillPort, -1L),
                 "parked pure-LRU keys count as available (release != delete)");
     }
@@ -302,10 +320,10 @@ class BlockPoolMetricsObservabilityTest {
      * retired): an oversized decode request (11 blocks vs a 10-block pool,
      * cold LRU so the net demand alone overflows) cannot provision its lease
      * at hand-off admission. scheduleDecodeCompletion ACCEPTS and TERMINATES
-     * the request: the typed terminal carries the master-surface error 8211
+     * the request: the typed terminal carries the domain error 602
      * (DECODE_MALLOC_FAILED — the production P-side closeGrpcStream rewrite;
      * the raw 602 stays in the message text), the engine_events decode_done
-     * row carries error_code=8211 with cancelled=false, an error frame closes
+     * row carries error_code=602 with cancelled=false, an error frame closes
      * the client stream, the lifecycle ends "failed", and because 11 +
      * reserve > 10 total the failure classifies PERMANENT — lack_mem_rejects
      * counts 1 on the D engine (kv_admission_fails stays 0) — and every
@@ -332,14 +350,11 @@ class BlockPoolMetricsObservabilityTest {
                 -1, queue),
                 "the admission failure still ACCEPTS the request (accepted-and-terminal)");
 
-        // The client stream closes with an error frame: RpcErrorPB has no
-        // LACK_MEM enum face, so the frame carries UNKNOWN_ERROR and the
-        // numeric 602 contract travels in the message.
+        // Preserve the numeric domain code even though the protobuf enum has no named 602 value.
         EngineRpcService.GenerateOutputsPB frame = queue.poll(10, TimeUnit.SECONDS);
         assertNotNull(frame, "an error frame must close the stream");
         assertTrue(frame.hasErrorInfo(), "the closing frame is an error frame");
-        assertEquals(EngineRpcService.ErrorCodePB.UNKNOWN_ERROR,
-                frame.getErrorInfo().getErrorCode());
+        assertEquals(602, frame.getErrorInfo().getErrorCodeValue());
         assertTrue(frame.getErrorInfo().getErrorMessage().contains("LACK_MEM (602)"),
                 "the message must carry the 602 contract: "
                         + frame.getErrorInfo().getErrorMessage());
@@ -355,9 +370,9 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.TaskInfoPB terminal = status.getFinishedTaskList(0);
         assertEquals(201L, terminal.getRequestId());
         assertTrue(terminal.hasErrorInfo(), "the terminal must carry error info");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 terminal.getErrorInfo().getErrorCode(),
-                "decode terminals carry the master-surface 8211");
+                "decode terminals carry the domain 602");
         assertTrue(terminal.getErrorInfo().getErrorMessage().contains("602"),
                 "the raw 602 travels in the message text: "
                         + terminal.getErrorInfo().getErrorMessage());
@@ -366,14 +381,14 @@ class BlockPoolMetricsObservabilityTest {
                         .get("201").get("end_state"),
                 "the lifecycle must end failed");
 
-        // engine_events decode_done row: cancelled=false + error_code=8211
+        // engine_events decode_done row: cancelled=false + error_code=602
         // (the aggregate-side skip key).
         List<JsonNode> rows = readEventRows(eventsFile);
         assertEquals(1, rows.size(), "exactly one decode_done row");
         JsonNode row = rows.get(0);
         assertEquals("decode_done", row.path("event").asText());
-        assertEquals(8211L, row.path("error_code").asLong(),
-                "the failure row must carry error_code=8211 (master surface)");
+        assertEquals(602L, row.path("error_code").asLong(),
+                "the failure row must carry error_code=602 (master surface)");
         assertEquals(false, row.path("cancelled").asBoolean());
 
         // D-side accounting + full rollback: 11 + reserve > 10 total →
@@ -390,7 +405,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, metrics.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "no lease residue on the pool");
-        assertEquals(10L, metrics.get("mock_engine_available_blocks")
+        assertEquals(10L, metrics.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the pool is fully available again");
         assertEquals(0, MockEngineTestSupport.activeDecodeRequests(decode),
@@ -404,7 +419,7 @@ class BlockPoolMetricsObservabilityTest {
      * P-enqueue decode-KV reservation reject (the mock counterpart of
      * production's prepare-stage ALLOCATE rejection): a request that fits
      * the PREFILL pool but overflows the role_addrs-targeted DECODE pool is
-     * rejected SYNCHRONOUSLY in the enqueue ack with the master-surface 8211
+     * rejected SYNCHRONOUSLY in the enqueue ack with the domain 602
      * (raw 602 in the message text), the message marks the decode-side
      * allocation, the P lease is released (zero P residue), and because 11 +
      * reserve > 10 total the failure classifies PERMANENT — it counts on the
@@ -413,7 +428,7 @@ class BlockPoolMetricsObservabilityTest {
      * the D pool keeps no residue.
      */
     @Test
-    void enqueueDecodeReservationRejectIsSynchronous8211() throws Exception {
+    void enqueueDecodeReservationPreservesDomain602() throws Exception {
         MockPerformanceModel model = performanceModel(tempDir, "10");
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
@@ -426,20 +441,14 @@ class BlockPoolMetricsObservabilityTest {
                 List.of(301L, 302L, 303L, 304L, 305L,
                         306L, 307L, 308L, 309L, 310L, 311L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(6, slot(0, tooBigForDecode)));
+                enqueueAndFetch(prefill, batch(6, slot(0, tooBigForDecode)));
         assertEquals(1, ack.getErrorsCount(),
                 "the D-pool overflow must reject the request synchronously");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
-                "decode-side reservation rejects carry the master-surface 8211");
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
-                "the raw 602 travels in the message text: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage()
-                        .contains("decode-side KV allocation rejected by D engine port="
-                                + decodePort),
-                "the error message must mark the decode-side surface: "
-                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
+                "decode-side reservation rejects carry the domain 602");
+        assertEquals("decode ALLOCATE permanently exceeds KV capacity",
+                ack.getErrors(0).getErrorInfo().getErrorMessage());
 
         Map<String, Map<Integer, Long>> metrics =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
@@ -458,7 +467,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(0L, metrics.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "no D lease residue");
-        assertEquals(10L, metrics.get("mock_engine_available_blocks")
+        assertEquals(10L, metrics.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the D pool is untouched (the failed acquire changed no state)");
         assertEquals(0, MockEngineTestSupport.activeDecodeRequests(decode),
@@ -491,7 +500,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB first = inputWithDecodeAndKeys(
                 401L, 4 * SPB, decodePort, 26,
                 List.of(401L, 402L, 403L, 404L));
-        assertEquals(0, enqueue(prefill, batch(7, slot(0, first))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(7, slot(0, first))).getErrorsCount());
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (System.nanoTime() < deadline && prefill.getInflightCount() < 1) {
             Thread.sleep(5);
@@ -505,7 +514,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(4L, reserved.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the P-enqueue reservation holds the SAME 4 blocks on the D pool");
-        assertEquals(16L, reserved.get("mock_engine_available_blocks")
+        assertEquals(16L, reserved.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "reserved blocks leave the D pool's available set");
         assertEquals(0L, reserved.get("mock_engine_kv_admission_fails_total")
@@ -528,7 +537,7 @@ class BlockPoolMetricsObservabilityTest {
                 "adoption must reuse the reserved blocks (held 4..5 with the "
                         + "26-token growth, never doubled 8+), got " + heldWhileDecoding);
         assertEquals(20L - heldWhileDecoding,
-                decoding.get("mock_engine_available_blocks")
+                decoding.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "the D pool keeps capacity conservation while decoding");
 
@@ -539,7 +548,7 @@ class BlockPoolMetricsObservabilityTest {
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         assertEquals(0L, done.get("mock_engine_held_blocks").getOrDefault(decodePort, -1L),
                 "completion returns the lease");
-        assertEquals(20L, done.get("mock_engine_available_blocks")
+        assertEquals(20L, done.get("rtp_llm_kv_cache_pool_available_blocks")
                         .getOrDefault(decodePort, -1L),
                 "parked pure-LRU keys count as available (admit != delete)");
         assertEquals(0L, done.get("mock_engine_kv_admission_fails_total")
@@ -554,7 +563,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB second = inputWithDecodeAndKeys(
                 402L, 4 * SPB, decodePort, 26,
                 List.of(405L, 406L, 407L, 408L));
-        assertEquals(0, enqueue(prefill, batch(8, slot(0, second))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(8, slot(0, second))).getErrorsCount());
         while (System.nanoTime() < deadline && prefill.getInflightCount() < 1) {
             Thread.sleep(5);
         }

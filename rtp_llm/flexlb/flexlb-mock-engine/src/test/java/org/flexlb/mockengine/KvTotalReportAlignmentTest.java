@@ -26,8 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Reported-total alignment with the built block pool (capacity model v2
  * reporting-caliber regression guard).
  *
- * <p>Regression fixed here: {@code --prefill-cache-blocks}/
- * {@code --decode-cache-blocks} shrink the pool the engine actually builds,
+ * <p>Regression fixed here: {@code --prefill-kv-pool-blocks}/
+ * {@code --decode-kv-pool-blocks} shrink the pool the engine actually builds,
  * but the master-facing total used to stay at the per-role DEFAULT token
  * constant — so the master's used = total - available math read ~99.9% on a
  * 4-block decode pool, every decode engine tripped the KV-full gate, and the
@@ -121,12 +121,29 @@ class KvTotalReportAlignmentTest {
                 observer));
     }
 
+    @Test
+    void cacheRpcRebuildsResponseAndReadsCapacityForSameVersion() throws Exception {
+        var service = startOne("prefill", 4, BASE_PORT + 6, 0);
+        var request = EngineRpcService.CacheVersionPB.newBuilder()
+                .setLatestCacheVersion(service.getCacheVersion()).setNeedCacheKeys(true).build();
+        EngineRpcService.CacheStatusPB first = unary(observer -> service.getCacheStatus(request, observer));
+        EngineRpcService.CacheStatusPB repeated = unary(observer -> service.getCacheStatus(request, observer));
+        org.junit.jupiter.api.Assertions.assertNotSame(first, repeated);
+        assertEquals(first, repeated);
+        service.setFaultConfig(FaultInjectionConfig.builder().kvPressureTokens(SPB).build());
+        EngineRpcService.CacheStatusPB pressured = unary(observer -> service.getCacheStatus(request, observer));
+        assertEquals(first.getVersion(), pressured.getVersion());
+        assertEquals(first.getCacheKeysMap(), pressured.getCacheKeysMap());
+        assertEquals(first.getAvailableKvCache() - SPB, pressured.getAvailableKvCache());
+        assertEquals(pressured, EngineRpcService.CacheStatusPB.parseFrom(pressured.toByteArray()));
+    }
+
     /** The master's KV gate math on the reported pair: used = total - available. */
     private static double usedRatio(long total, long available) {
         return total <= 0 ? 1.0 : (double) (total - available) / total;
     }
 
-    // ───────── decode side: --decode-cache-blocks 4 ─────────
+    // ───────── decode side: --decode-kv-pool-blocks 4 ─────────
 
     @Test
     void decodeBlockOverrideShrinksReportedTotalOnEverySurface() throws Exception {
@@ -161,7 +178,7 @@ class KvTotalReportAlignmentTest {
         assertTrue(idleUsedRatio < 0.9, "idle decode pool must stay under the KV-full gate");
     }
 
-    // ───────── prefill side: --prefill-cache-blocks 4 (same lesion) ─────────
+    // ───────── prefill side: --prefill-kv-pool-blocks 4 (same lesion) ─────────
 
     @Test
     void prefillBlockOverrideShrinksReportedTotalOnEverySurface() throws Exception {

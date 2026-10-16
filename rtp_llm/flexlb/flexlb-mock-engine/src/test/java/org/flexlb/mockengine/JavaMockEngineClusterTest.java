@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
@@ -58,9 +58,9 @@ class JavaMockEngineClusterTest {
     void ackIsImmediateWhileQueuedBatchTransitionsFromWaitingToRunningToFinished() throws Exception {
         JavaMockEngineCluster.FastRpcService service = service(model("180", 1.0));
 
-        EngineRpcService.EnqueueBatchResponsePB firstAck = enqueue(
+        EngineRpcService.EnqueueBatchResponsePB firstAck = enqueueAndFetch(
                 service, batch(11, slot(0, input(1, 100), input(2, 200))));
-        EngineRpcService.EnqueueBatchResponsePB secondAck = enqueue(
+        EngineRpcService.EnqueueBatchResponsePB secondAck = enqueueAndFetch(
                 service, batch(12, slot(0, input(3, 300), input(4, 400), input(5, 500))));
 
         assertEquals(2, firstAck.getSuccessesCount());
@@ -97,19 +97,22 @@ class JavaMockEngineClusterTest {
     }
 
     @Test
-    void dpSlotsAreIndependentBatchesWithPerSlotExecutionTime() throws Exception {
+    void singleDpRejectsForeignRankWithoutExecutingIt() throws Exception {
         JavaMockEngineCluster.FastRpcService service = service(model("100*batchSize", 1.0));
 
-        enqueue(service, batch(21,
+        var ack = enqueueAndFetch(service, batch(21,
                 slot(0, input(1, 100)),
                 slot(1, input(2, 100))));
 
+        assertEquals(1, ack.getSuccessesCount());
+        assertEquals(1, ack.getErrorsCount());
+        assertEquals(3, ack.getErrors(0).getErrorInfo().getErrorCode());
         EngineRpcService.WorkerStatusPB finished = awaitStatus(service,
-                status -> status.getFinishedTaskListCount() == 2,
+                status -> status.getFinishedTaskListCount() == 1,
                 2_000);
         assertTrue(finished.getFinishedTaskListList().stream()
                 .allMatch(task -> task.getExecutionTimeMs() == 100));
-        assertEquals(List.of(0L, 1L), finished.getFinishedTaskListList().stream()
+        assertEquals(List.of(0L), finished.getFinishedTaskListList().stream()
                 .map(EngineRpcService.TaskInfoPB::getDpRank)
                 .sorted()
                 .toList());

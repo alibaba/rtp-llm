@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Parity tests for JavaLoadClient against the Python reference implementation
- * (the legacy Python load client): shard ordering, gradient pacing,
+ * (the legacy Python load client): shard ordering,
  * length truncation, nearest-rank percentiles, fallback endpoint parsing and
  * pushgateway metric payload format.
  */
@@ -41,9 +41,80 @@ class JavaLoadClientParityTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true);
-        return new JavaLoadClient(config);
+                "engine_service", "", 0, 0, "", false, "", true);
+        return new JavaLoadClient(config, true);
+    }
+
+    @Test
+    void monitorExportsCumulativeHistogramFromObservedLatency() throws Exception {
+        try (JavaLoadClient client = dryRunClient()) {
+            var observe = JavaLoadClient.class.getDeclaredMethod("observeLatency", String.class, double.class);
+            observe.setAccessible(true);
+            observe.invoke(client, "ttft", 10.0);
+            observe.invoke(client, "ttft", 30.0);
+            var field = JavaLoadClient.class.getDeclaredField("monitor");
+            field.setAccessible(true);
+            var registry = (io.micrometer.prometheus.PrometheusMeterRegistry) field.get(client);
+            String body = registry.scrape();
+            assertTrue(body.contains("flexlb_client_ttft_seconds_bucket{"));
+            assertTrue(body.contains("flexlb_client_ttft_seconds_count 2.0"));
+            assertTrue(body.contains("flexlb_client_ttft_seconds_sum 0.04"));
+            assertFalse(body.contains("quantile="));
+        }
+    }
+
+    @Test
+    void compactTokensPreservePartialTailAndActualHashes() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var compact = mapper.createObjectNode().put("rid", "compact").put("il", 1031)
+                .put("ol", 8).put("ts", 0).put("priority", 50).put("cache_key_block_size", 512);
+        compact.putArray("input_token_blocks").add(7).add(8).add(9);
+        var explicit = compact.deepCopy();
+        explicit.remove("input_token_blocks");
+        var tokens = explicit.putArray("input_ids");
+        for (int i = 0; i < 1031; i++) tokens.add(i < 512 ? 7 : i < 1024 ? 8 : 9);
+        JavaLoadClient.validateControlledTrace(compact);
+        JavaLoadClient.validateControlledTrace(explicit);
+        var client = dryRunClient();
+        var actual = client.parseTraceRecord(compact);
+        var expected = client.parseTraceRecord(explicit);
+        assertEquals(expected.tokenIds, actual.tokenIds);
+        assertEquals(expected.blockKeys, actual.blockKeys);
+        assertEquals(9, actual.tokenIds.get(1030));
+        assertEquals(expected.blockKeys, JavaLoadClient.truncateRecords(List.of(actual), 1024, 0).get(0).blockKeys);
+        compact.putArray("input_ids").add(1);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+        compact.remove("input_ids");compact.put("il", 1024);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+        compact.put("il", 1031);compact.withArray("input_token_blocks").set(0,mapper.getNodeFactory().numberNode(-1));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(compact));
+    }
+
+    @Test
+    void perRecordBlockSizeMatchesHashesAndScheduleWire() throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        var row = json.createObjectNode().put("rid", "blocks-512").put("il", 1024)
+                .put("ol", 8).put("ts", 0).put("priority", 50).put("cache_key_block_size", 512);
+        var tokens = row.putArray("input_ids");
+        for (int n = 0; n < 1024; n++) tokens.add(n < 512 ? 7 : 8);
+        JavaLoadClient.validateControlledTrace(row);
+        var client = dryRunClient();
+        var record = client.parseTraceRecord(row);
+        assertEquals(2, record.blockKeys.size());
+        var expected = com.google.common.hash.Hashing.murmur3_128().newHasher();
+        for (int n = 0; n < 512; n++) expected.putInt(7);
+        assertEquals(expected.hash().asLong(), record.blockKeys.get(0));
+        var request = client.buildScheduleRequest(record,
+                org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.getDefaultInstance());
+        assertEquals(512, request.getCacheKeyBlockSize());
+        assertEquals(record.blockKeys, request.getBlockCacheKeysList());
+        assertEquals(512, JavaLoadClient.truncateRecords(List.of(record), 0, 4).get(0).cacheKeyBlockSize);
+        row.put("cache_key_block_size", 513);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JavaLoadClient.validateControlledTrace(row));
     }
 
     // ------------------------------------------------------------------
@@ -126,28 +197,6 @@ class JavaLoadClientParityTest {
         assertEquals(2, shard1.size());
         assertEquals(1, shard1.get(0).requestId);
         assertEquals(5, shard1.get(1).requestId);
-    }
-
-    // ------------------------------------------------------------------
-    // Item 3: gradient pacing — linear ramp from start to max over duration.
-    // ------------------------------------------------------------------
-
-    @Test
-    void gradientSpeedRampsLinearly() {
-        assertEquals(10.0, JavaLoadClient.gradientSpeed(0.0, 60, 10, 1000), 1e-9);
-        assertEquals(1000.0, JavaLoadClient.gradientSpeed(60.0, 60, 10, 1000), 1e-9);
-        // halfway: 10 + (1000 - 10) * 0.5 = 505
-        assertEquals(505.0, JavaLoadClient.gradientSpeed(30.0, 60, 10, 1000), 1e-9);
-    }
-
-    @Test
-    void gradientSpeedClampsProgressAndStartSpeed() {
-        // elapsed beyond duration clamps to max speed
-        assertEquals(1000.0, JavaLoadClient.gradientSpeed(120.0, 60, 10, 1000), 1e-9);
-        // negative elapsed treated as 0
-        assertEquals(10.0, JavaLoadClient.gradientSpeed(-5.0, 60, 10, 1000), 1e-9);
-        // start speed floored at 1 (Python: max(1, gradient_start_speed))
-        assertEquals(1.0, JavaLoadClient.gradientSpeed(0.0, 60, 0, 1000), 1e-9);
     }
 
     // ------------------------------------------------------------------

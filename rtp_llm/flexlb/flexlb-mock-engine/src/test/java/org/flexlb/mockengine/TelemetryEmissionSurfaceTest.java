@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -25,6 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TelemetryEmissionSurfaceTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void mockLoggingConfigurationIsPackaged() {
+        assertNotNull(JavaMockEngineCluster.class.getResource("/logback.xml"));
+    }
 
     @Test
     void statsLineCarriesAllParsedKeys() {
