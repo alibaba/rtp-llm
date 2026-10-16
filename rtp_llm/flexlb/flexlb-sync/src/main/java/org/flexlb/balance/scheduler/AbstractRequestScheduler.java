@@ -233,9 +233,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         }
                     }
                     case REMOTE -> {
-                        if (permission.delivery() != null) {
-                            runtime.startDeliveryCleanup(permission.delivery());
-                        }
                         closeRequest(
                                 ctx,
                                 new EndEvidence(
@@ -1228,6 +1225,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             before.preemption() == null
                                     || before.preemption().finished()
                                     || deliveryFailure
+                                    || ending == EndKind.FRONTEND
                                     || ending == EndKind.INACTIVITY
                                     || ending == EndKind.RETIREMENT;
                     if (before.outcome() == null
@@ -1311,7 +1309,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                                                             .REQUEST_END)));
                                 }
                                 var delivery = ctx.snapshot().delivery();
-                                if (delivery != null && delivery.abandonment() != null) {
+                                if (delivery != null
+                                        && (delivery.abandonment() != null
+                                                || ctx.snapshot().cancellation() != null)) {
                                     failure =
                                             Failures.run(
                                                     failure,

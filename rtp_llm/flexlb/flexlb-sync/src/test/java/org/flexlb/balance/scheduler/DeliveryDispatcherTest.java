@@ -205,7 +205,7 @@ class DeliveryDispatcherTest {
                         .findFirst()
                         .orElseThrow();
         assertEquals(
-                first.ctx().data().getGenerateInput().getUnknownFields(),
+                first.ctx().data().getGenerateInput().toWireBuilder().getUnknownFields(),
                 firstSent.getUnknownFields());
         boolean replaced = enabled && validScheduleContext;
         assertEquals(
@@ -229,6 +229,7 @@ class DeliveryDispatcherTest {
                 first.ctx()
                         .data()
                         .getGenerateInput()
+                        .toWireBuilder()
                         .getRequestInfo()
                         .getTraceContext()
                         .getTracestate(),

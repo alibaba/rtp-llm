@@ -334,11 +334,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             DecodeRoutingView before = state.routingView(ipPort());
             requestStatuses = state.calibrateLocked(prepared.observation());
             ws.publishPreparedStatus(prepared);
+            DecodeRoutingView after = state.routingView(ipPort());
             capacityImproved =
-                    state.routingView(ipPort()).engineLoad() < before.engineLoad()
-                            || state.routingView(ipPort()).realKvAvailable()
-                                    > before.realKvAvailable()
-                            || state.routingView(ipPort()).realKvUsed() < before.realKvUsed();
+                    after.engineLoad() < before.engineLoad()
+                            || after.realKvAvailable() > before.realKvAvailable()
+                            || after.realKvUsed() < before.realKvUsed();
         } catch (RuntimeException | Error failure) {
             beginRetirement();
             throw failure;

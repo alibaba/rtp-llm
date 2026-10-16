@@ -202,7 +202,7 @@ final class BatchCodec {
             throw new IllegalArgumentException(
                     "generateInputPb is missing for request " + item.requestId());
         }
-        var input = prepared.toBuilder();
+        var input = prepared.toWireBuilder();
         checkArgument(
                 input.getRequestId() == item.requestId(),
                 "request_id mismatch between schedule request and GenerateInputPB");

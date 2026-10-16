@@ -309,6 +309,7 @@ public final class ContextResult {
             boolean finished,
             EndEvidence pendingTerminal,
             boolean confirmationPending,
+            boolean restorationObserved,
             ReconciliationPermit reconciliation) {}
 
     public record CloseFacts(
