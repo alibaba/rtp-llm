@@ -295,6 +295,9 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
     layout.dsa_mla_resident_tokens = config_.dsa_mla_resident_tokens;
     layout.dsa_mla_hbm_blocks = config_.dsa_mla_hbm_blocks;
+    layout.dsa_prefill_staging_tokens = config_.dsa_prefill_staging_tokens;
+    layout.dsa_prefill_hbm_layers     = config_.dsa_prefill_hbm_layers;
+    layout.dsa_prefill_staging_layers = config_.dsa_prefill_staging_layers;
     layout.mla_hbm_cache_by_layer = block_pool_->allLayerHbmCacheBase();
     layout.block_generations = block_pool_->blockGenerations();
     auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();

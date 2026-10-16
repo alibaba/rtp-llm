@@ -1,12 +1,28 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+
+void SharedBlockCache::traceEvictionLifetime(CacheKeyType key, int64_t lifetime_ms, const char* scope) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RTP_LLM_CACHE_LIFETIME_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (enabled && (static_cast<uint64_t>(key) & 63) == 0) {
+        RTP_LLM_LOG_INFO("[KV_LIFETIME] scope=%s key=%lu lifetime_ms=%ld time_us=%ld sample_rate=64",
+                         scope,
+                         static_cast<unsigned long>(key),
+                         lifetime_ms,
+                         currentTimeUs());
+    }
+}
 
 void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -175,6 +191,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                     result.evicted_slots[tree_key.cache_key] = removed_item.slots;
                     result.evicted_lifetime_ms[tree_key.cache_key] =
                         std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+                    traceEvictionLifetime(tree_key.cache_key, result.evicted_lifetime_ms[tree_key.cache_key], "device");
                     result.evicted_namespaces[tree_key.cache_key] =
                         removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
                     if (removed_item.has_dependency) {
@@ -220,6 +237,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
         result.evicted_slots[cache_key] = removed_item.slots;
         result.evicted_lifetime_ms[cache_key] =
             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+        traceEvictionLifetime(cache_key, result.evicted_lifetime_ms[cache_key], "device");
         result.evicted_namespaces[cache_key] =
             removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
         if (removed_item.has_dependency) {
@@ -294,6 +312,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                         result.evicted_slots[tree_key.cache_key] = removed_item.slots;
                         result.evicted_lifetime_ms[tree_key.cache_key] =
                             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+                        traceEvictionLifetime(
+                            tree_key.cache_key, result.evicted_lifetime_ms[tree_key.cache_key], "device");
                         result.evicted_namespaces[tree_key.cache_key] =
                             removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
                         if (removed_item.has_dependency) {
@@ -343,6 +363,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         result.evicted_slots[cache_key] = removed_item.slots;
         result.evicted_lifetime_ms[cache_key] =
             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+        traceEvictionLifetime(cache_key, result.evicted_lifetime_ms[cache_key], "device");
         result.evicted_namespaces[cache_key] =
             removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
         if (removed_item.has_dependency) {
@@ -852,6 +873,7 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
             item.slot_created_time_us[static_cast<size_t>(group_id)] :
             item.created_time_us;
     result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
+    traceEvictionLifetime(cache_key, result.evicted_lifetime_ms[cache_key], "device");
     result.evicted_state_only_group[cache_key] = group_id;
 
     item.slots[static_cast<size_t>(group_id)] = NULL_BLOCK_IDX;

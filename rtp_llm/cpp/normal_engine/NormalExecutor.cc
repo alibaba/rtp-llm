@@ -446,6 +446,20 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        static const bool trace_prefill     = []() {
+            const char* value = std::getenv("RTP_LLM_PREFILL_CACHE_STATS");
+            return value && std::string(value) == "1";
+        }();
+        if (trace_prefill && tp_rank_ == 0 && stream_groups.totalContextBatchSize() > 0) {
+            RTP_LLM_LOG_INFO("[PREFILL_FORWARD] begin_us=%ld batch=%zu exec_tokens=%zu kv_tokens=%zu "
+                             "max_seq=%zu forward_us=%ld",
+                             start_time_us,
+                             stream_groups.totalContextBatchSize(),
+                             stream_groups.modelExecuteTokenSize(),
+                             stream_groups.contextExecuteTokenSizeWithCache(),
+                             stream_groups.maxSeqLen(),
+                             executor_collector.model_forward_us);
+        }
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

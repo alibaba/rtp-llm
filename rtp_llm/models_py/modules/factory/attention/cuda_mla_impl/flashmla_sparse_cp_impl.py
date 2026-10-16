@@ -6,6 +6,7 @@ Mirrors flashmla_sparse_impl.py but with all-gather + restore + zig-zag q split.
 import copy
 import logging
 import os
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -24,9 +25,10 @@ except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import all_gather
+from rtp_llm.models_py.distributed.pynccl_cp import all_gather, all_gather_kv_overlap
 from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
 from rtp_llm.models_py.distributed.pynccl_cp import warmup as warmup_pynccl
+from rtp_llm.models_py.distributed.pynccl_cp import warmup_kv_overlap
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_kv_allgather_restore_indices,
     cp_actual_owned_kv_lens,
@@ -43,6 +45,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.utils.model_weight import W
 
 from .cp_topk_offsets_triton import offset_cp_topk
 from .flashmla_sparse_impl import (
@@ -517,7 +520,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         reverse_indices = (
             prepare_kv_scatter_indices(self.total_local_ids, local_tokens)
             if (
-                os.environ.get("RTP_CP_PREPARED_SCATTER", "0") == "1"
+                (
+                    os.environ.get("RTP_CP_PREPARED_SCATTER", "0") == "1"
+                    or os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+                )
                 and not self.total_local_ids_is_identity
                 and self.total_local_ids.is_cuda
             )
@@ -815,34 +821,18 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         layer_id: int = 0,
         scatter_out: Optional[torch.Tensor] = None,
         original_q_len: Optional[int] = None,
+        prepared_kv: Optional[torch.Tensor] = None,
+        defer_output_scatter: bool = False,
     ) -> torch.Tensor:
         """Attend in total_local_ids order, then restore the original local rows.
 
         When original_q_len is provided, q has already been selected before the
         input BMM. It contains only len(total_local_ids) rows, while the output
         still has original_q_len rows, including zero-filled padding positions.
+        defer_output_scatter keeps the selected order for the caller's V BMM.
         """
-        gathered_ckv = all_gather(
-            compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
-        )
-        gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
-        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
-
-        restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
-        restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
-        self.kv_cache_write_op.forward(
-            restored_ckv,
-            restored_k_pe,
-            kv_cache,
-            self.mla_params,
-            slot_mapping_override=(
-                self.sharded_slot_mapping if self.kv_cache_sharded else None
-            ),
-        )
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        if prepared_kv is None:
+            self.write_kv(compressed_kv, k_pe, kv_cache)
 
         no_q_work = (
             topk is None
@@ -851,7 +841,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             or self.total_local_ids.numel() == 0
         )
         if no_q_work:
-            if self.kv_cache_sharded and self._gather is not None:
+            if (
+                prepared_kv is None
+                and self.kv_cache_sharded
+                and self._gather is not None
+            ):
                 fused_kv = self._allocate_fused_kv()
                 self._gather_sharded_kv_cache(kv_cache, fused_kv)
             return None
@@ -875,11 +869,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk)
+            out0 = self._attend_gather(q0, kv_cache, topk, prepared_kv)
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
 
-        if use_identity_q:
+        if use_identity_q or defer_output_scatter:
             return out0
         reverse_indices = self.scatter_reverse_indices
         if reverse_indices is not None and reverse_indices.numel() != total_q_len:
@@ -893,8 +887,31 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         return out
 
+    def write_kv(self, compressed_kv, k_pe, kv_cache):
+        gathered_ckv = all_gather(
+            compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
+        )
+        gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
+        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
+        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+
+        restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
+        restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
+        self.kv_cache_write_op.forward(
+            restored_ckv,
+            restored_k_pe,
+            kv_cache,
+            self.mla_params,
+            slot_mapping_override=(
+                self.sharded_slot_mapping if self.kv_cache_sharded else None
+            ),
+        )
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+
     def _allocate_fused_kv(self) -> torch.Tensor:
-        """Allocate the layer-local BF16 gather destination after Indexer."""
+        """Allocate the layer-local BF16 gather destination."""
         ws = self._gather
         assert ws is not None and self.block_table is not None
         return _allocate_prefill_fused_kv(
@@ -903,10 +920,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.block_table.device,
         )
 
-    def _gather_sharded_kv_cache(
-        self, kv_cache, fused_kv: torch.Tensor, return_rank_major: bool = False
-    ) -> Optional[torch.Tensor]:
-        """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
+    def _pack_sharded_kv_cache(self, kv_cache, fused_kv: torch.Tensor) -> torch.Tensor:
+        """Pack local history for the sharded gather, matching Indexer's layout:
 
           1) Drive the GPU gather kernel with *actual* owned lengths so
              ``page_idx = local_idx / kernel_tpb`` never walks past the rank's
@@ -920,8 +935,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
              ``local_fused`` via ``_scatter_actual_to_padded``. Padding rows
              stay clean zero, matching the indexer's
              ``copy_actual_indexer_k_to_padded`` contract.
-          3) all_gather the padded local buffer.
-          4) ``gathered[sharded_kv_restore_indices]`` restores logical KV.
+        The caller all-gathers the padded buffer and restores logical KV using
+        ``sharded_kv_restore_indices``.
 
         ``sharded_local_kv_lens`` / ``sharded_workspace_starts`` /
         ``sharded_kv_restore_indices`` (padded, owner-grain) are unchanged —
@@ -974,7 +989,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
             )
 
-        gathered = all_gather(
+        return local_fused
+
+    def _gather_sharded_kv_cache(
+        self, kv_cache, fused_kv: torch.Tensor, gather=None, return_rank_major=False
+    ) -> Optional[torch.Tensor]:
+        local_fused = self._pack_sharded_kv_cache(kv_cache, fused_kv)
+        gathered = (gather or all_gather)(
             local_fused.contiguous(), group=Group.TP, role="mla_history"
         ).reshape(-1, local_fused.size(-1))
         if return_rank_major:
@@ -1018,15 +1039,20 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         q0: torch.Tensor,
         kv_cache,
         topk: torch.Tensor,
+        prepared_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the CP plan supplies the per-q-token
         workspace offset for the sparse attention indices."""
         ws = self._gather
         assert ws is not None and self.precomputed_kv_offsets is not None
-        fused_kv = self._allocate_fused_kv()
+        fused_kv = prepared_kv
+        if fused_kv is None:
+            fused_kv = self._allocate_fused_kv()
         restore_indices = None
-        if self.kv_cache_sharded:
+        if prepared_kv is not None:
+            pass  # The producer event was joined by SparseMlaCpImpl.
+        elif self.kv_cache_sharded:
             if os.environ.get("RTP_CP_REMAP_HISTORY_TOPK", "0") == "1":
                 rank_major = self._gather_sharded_kv_cache(
                     kv_cache, fused_kv, return_rank_major=True
@@ -1142,6 +1168,34 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # code that swaps fmha_impl still sees the owner granularity.
         self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
         self._glm53_prefill_workspace: Optional[Glm53PrefillWorkspace] = None
+        self.overlap_kv = (
+            self._kv_cache_sharded
+            and self.fmha_impl._gather is not None
+            and attn_configs.q_lora_rank > 0
+            and not is_cuda_graph
+            and (
+                os.environ.get("RTP_LLM_CP_KV_OVERLAP", "0") == "1"
+                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") == "1"
+            )
+        )
+        self._cross_layer_prefetch = None
+        self._kv_overlap_stream = None
+        if self.overlap_kv:
+            self._kv_overlap_stream = warmup_kv_overlap(Group.TP)
+
+    def begin_cross_layer_prefetch(self, cache):
+        if (
+            not self.overlap_kv
+            or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") != "1"
+            or not cache.layerwise
+            or len(cache.staging) < 2
+            or not any(self.attn_inputs.prefix_lengths.reshape(-1).tolist())
+        ):
+            return None
+        from .cp_kv_prefetch import CrossLayerKvPrefetch
+
+        self._cross_layer_prefetch = CrossLayerKvPrefetch(self, cache)
+        return self._cross_layer_prefetch
 
     def enable_glm53_prefill_workspace(self) -> None:
         """Enable GLM5.3's per-forward attention workspace manager."""
@@ -1278,40 +1332,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             "total_local_ids_is_identity"
         ]
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
-        layer_id: int,
-        topk_indices: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        workspace = self._glm53_prefill_workspace
-        try:
-            return self._forward_impl(
-                q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices
-            )
-        finally:
-            # GLM's large MoE follows attention in every layer. Return the slot
-            # here so MoE can reuse it; keeping it across layers would raise the
-            # non-attention peak. This also covers OOM/kernel exception paths.
-            if workspace is not None:
-                workspace.release()
-
-    def _forward_impl(
-        self,
-        q: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
-        layer_id: int,
-        topk_indices: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
-        is request-local. Returns [total_q_len, H, nope_head_dim]."""
-        assert kv_cache is not None
-
+    def _apply_rope(self, q, k_pe):
         # RoPE in-place on full q_pe / k_pe via full_rope_pos_ids. Padding rows
         # get pos=0 but never read: q is selected by total_local_ids; k_pe is
         # all-gathered then re-indexed by kv_restore_unpad_indices.
@@ -1344,6 +1365,96 @@ class SparseMlaCpImpl(SparseMlaImpl):
                     self.rope_params,
                     precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
                 )
+        return k_pe
+
+    @contextmanager
+    def prepare_kv(self, q, compressed_kv, k_pe, kv_cache, layer_id=0):
+        """Prepare this layer's KV and return its consumer-ready event.
+
+        Enter inside the layer-cache context: its H2D-ready event must already
+        be on the compute stream. Same-layer mode joins its producer before
+        leaving this context. Cross-layer mode owns independent future slots
+        and drains at the MoE window boundary and forward cleanup instead.
+        """
+        compute = torch.cuda.current_stream(q.device)
+        stream = self._kv_overlap_stream
+        assert stream is not None
+        k_pe = self._apply_rope(q, k_pe)
+        self.fmha_impl.write_kv(compressed_kv, k_pe, kv_cache)
+        pipeline = getattr(self, "_cross_layer_prefetch", None)
+        if pipeline is not None:
+            # Forward cleanup owns the producer join. A layer-exit wait here
+            # would serialize the next layer's prefetch before O projection.
+            yield pipeline.prepare(layer_id, kv_cache)
+            return
+        fused_kv = self.fmha_impl._allocate_fused_kv()
+        # Pack before releasing independent compute. Otherwise Q BMM can use
+        # every SM while packing is still queued, delaying NCCL until Q ends.
+        # Allocate all large buffers on compute to reuse its allocator pool.
+        local_fused = self.fmha_impl._pack_sharded_kv_cache(kv_cache, fused_kv)
+        gathered = torch.empty(
+            (self._cp_size * local_fused.size(0), local_fused.size(1)),
+            dtype=local_fused.dtype,
+            device=local_fused.device,
+        )
+        stream.wait_stream(compute)
+        try:
+            with torch.cuda.stream(stream):
+                all_gather_kv_overlap(local_fused, Group.TP, output=gathered)
+                # Restore directly into the destination, without an equally
+                # large advanced-indexing temporary followed by a D2D copy.
+                torch.index_select(
+                    gathered,
+                    0,
+                    self.fmha_impl.sharded_kv_restore_indices,
+                    out=fused_kv,
+                )
+                ready = torch.cuda.Event()
+                ready.record(stream)
+            yield fused_kv, ready
+        finally:
+            # All shared tensors were allocated on compute; this also protects
+            # their allocator lifetime if Indexer raises before forward().
+            compute.wait_stream(stream)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor],
+        prepared_kv=None,
+    ) -> torch.Tensor:
+        workspace = self._glm53_prefill_workspace
+        try:
+            return self._forward_impl(
+                q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices, prepared_kv
+            )
+        finally:
+            # GLM's large MoE follows attention in every layer. Return the slot
+            # here so MoE can reuse it; keeping it across layers would raise the
+            # non-attention peak. This also covers OOM/kernel exception paths.
+            if workspace is not None:
+                workspace.release()
+
+    def _forward_impl(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor],
+        prepared_kv=None,
+    ) -> torch.Tensor:
+        """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
+        is request-local. Returns [total_q_len, H, nope_head_dim]."""
+        assert kv_cache is not None
+
+        if prepared_kv is None:
+            k_pe = self._apply_rope(q, k_pe)
 
         workspace = self._glm53_prefill_workspace
         q_transform_out = None
@@ -1383,6 +1494,23 @@ class SparseMlaCpImpl(SparseMlaImpl):
             del q_selected
         else:
             q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
+        # For a full permutation, V BMM keeps exactly the same matrix shape.
+        # Reorder its narrower output instead of the 512-wide Attention result.
+        # Partial/padded layouts retain the original GEMM and scatter behavior.
+        defer_output_scatter = (
+            os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+            and original_q_len is not None
+            and local_ids.numel() == original_q_len
+            and original_q_len >= 256
+            and self.weights[layer_id][W.mla_vc].size(-1) < self.kv_lora_rank
+        )
+        fused_kv = None
+        if prepared_kv is not None:
+            fused_kv, ready = prepared_kv
+            torch.cuda.current_stream(q.device).wait_event(ready)
+            pipeline = getattr(self, "_cross_layer_prefetch", None)
+            if pipeline is not None:
+                pipeline.consume(layer_id)
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,
@@ -1393,8 +1521,23 @@ class SparseMlaCpImpl(SparseMlaImpl):
             layer_id=layer_id,
             scatter_out=scatter_out,
             original_q_len=original_q_len,
+            prepared_kv=fused_kv,
+            defer_output_scatter=defer_output_scatter,
         )
+        pipeline = getattr(self, "_cross_layer_prefetch", None)
+        if pipeline is not None:
+            pipeline.release(layer_id)
         if attn_output is None:
             return None
         output = self._apply_output_bmm(attn_output, layer_id)
+        if defer_output_scatter:
+            output = triton_kv_scatter(
+                output,
+                local_ids,
+                original_q_len,
+                out=workspace.scatter_output(
+                    original_q_len, self.num_heads, output.size(-1)
+                ),
+                reverse_indices=self.fmha_impl.scatter_reverse_indices,
+            )
         return output

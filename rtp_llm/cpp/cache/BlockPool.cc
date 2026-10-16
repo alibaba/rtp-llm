@@ -384,7 +384,7 @@ void BlockPool::validateConfig() const {
                                 config_.block_num);
         RTP_LLM_CHECK_WITH_INFO(
             layout_cfg.layer_num > 0, "MemoryLayoutConfig.layer_num must be > 0 (layout=%zu)", layout_idx);
-        RTP_LLM_CHECK_WITH_INFO(layout_cfg.kv_block_pool_size_bytes > 0,
+        RTP_LLM_CHECK_WITH_INFO(layout_cfg.kv_block_pool_size_bytes > 0 || layout_cfg.mla_layered_prefill,
                                 "MemoryLayoutConfig.kv_block_pool_size_bytes must be > 0 (layout=%zu)",
                                 layout_idx);
     }
@@ -792,7 +792,7 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
 }
 
 void BlockPool::initFreeBlocks() {
-    if (config_.mla_tiered_cache) {
+    if (config_.mla_tiered_cache && !config_.memory_layouts.front().mla_layered_prefill) {
         const char* value = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
         const std::string denominator = value ? value : "3";
         RTP_LLM_CHECK_WITH_INFO(!denominator.empty()
@@ -1099,7 +1099,7 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
 }
 
 std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const {
-    if (!config_.mla_tiered_cache) {
+    if (!config_.mla_tiered_cache || config_.memory_layouts.front().mla_layered_prefill) {
         return {};
     }
     std::vector<KVCachePoolMetricsSnapshot> snapshots(2);

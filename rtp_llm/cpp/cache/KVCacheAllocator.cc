@@ -241,6 +241,11 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         }
 
         for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
+            if (config_.dsa_prefill_staging_tokens) {
+                const bool on_host = config_.prefillLayerOnHost(layer_id);
+                mla_copy_type      = BatchCopyParams::get_copy_type(on_host ? MEMORY_CPU_PINNED : MEMORY_GPU,
+                                                               on_host ? MEMORY_CPU_PINNED : MEMORY_GPU);
+            }
             auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
             auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
 

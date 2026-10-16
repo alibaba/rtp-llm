@@ -48,6 +48,8 @@ class GptModelBase(nn.Module):
         self.kv_cache: Optional[KVCache] = None
         self.pinned_mla_groups = {}
         self._pinned_mla_cache_key = None
+        self.layered_prefill_cache = None
+        self._layered_prefill_cache_key = None
         self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
@@ -55,9 +57,13 @@ class GptModelBase(nn.Module):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
-        if self.kv_cache is not None and getattr(self.kv_cache, "dsa_mla_resident_tokens", 0):
+        if self.kv_cache is not None and getattr(
+            self.kv_cache, "dsa_mla_resident_tokens", 0
+        ):
             if self.micro_batch_size != 1:
-                raise ValueError("Pinned MLA working sets require enable_layer_micro_batch=0")
+                raise ValueError(
+                    "Pinned MLA working sets require enable_layer_micro_batch=0"
+                )
             from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.pinned_mla_cache import (
                 build_working_sets,
             )
@@ -78,6 +84,34 @@ class GptModelBase(nn.Module):
         else:
             self.pinned_mla_groups = {}
             self._pinned_mla_cache_key = None
+        staging_tokens = getattr(self.kv_cache, "dsa_prefill_staging_tokens", 0)
+        if staging_tokens:
+            if self.micro_batch_size != 1:
+                raise ValueError("Layered prefill requires enable_layer_micro_batch=0")
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.layered_prefill_cache import (
+                ContiguousPrefillCache,
+            )
+            from rtp_llm.utils.dsa_indexing import build_dsa_indexer_kv_slot_mapping
+
+            backing = [
+                self.kv_cache.get_layer_cache(i).kv_cache_base
+                for i in range(self.layer_num)
+            ]
+            key = (staging_tokens, *(tensor.data_ptr() for tensor in backing))
+            if key != self._layered_prefill_cache_key:
+                mapping = build_dsa_indexer_kv_slot_mapping(self.config, self.layer_num)
+                hbm_layers = self.kv_cache.dsa_prefill_hbm_layers
+                self.layered_prefill_cache = ContiguousPrefillCache(
+                    backing,
+                    mapping,
+                    staging_tokens,
+                    hbm_layers,
+                    self.kv_cache.dsa_prefill_staging_layers,
+                )
+                self._layered_prefill_cache_key = key
+        else:
+            self.layered_prefill_cache = None
+            self._layered_prefill_cache_key = None
         if self.kv_cache is not None:
             num_layers = len(self.kv_cache.kv_cache_base_by_layer)
             layer0_shape = (

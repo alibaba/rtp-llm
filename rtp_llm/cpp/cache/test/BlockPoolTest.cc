@@ -8,6 +8,9 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <limits>
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -553,6 +556,223 @@ TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
     EXPECT_EQ(reused_query.blocks(), (BlockIndicesType{1, 2, 3, 13}));  // Long suffix goes to host.
     EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);  // Prefix was only referenced.
 
+}
+
+static ModelConfig makeLayeredPrefillModel() {
+    auto model                                 = makeTestModelConfig(8);
+    model.model_type                           = "glm_5";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 448;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.attn_config.tokens_per_block         = 64;
+    model.enable_glm52_shared_indexer_kv_cache = true;
+    model.glm52_indexer_kv_slot_mapping        = {0, 0, 0, 0, 1, 1, 1, 1};
+    return model;
+}
+
+TEST_F(BlockPoolTest, LayeredPrefillStoresEachLogicalBlockOnce) {
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+    auto            model = makeLayeredPrefillModel();
+    KVCacheConfig   options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num            = 16;
+    options.enable_memory_cache       = true;
+    options.memory_cache_size_mb      = 8;
+    options.enable_remote_cache       = false;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_kv_len = 128;
+    const auto config = CacheConfigCreator::createConfig(model, ParallelismConfig{}, runtime, options, std::nullopt);
+    ASSERT_GT(config.block_num, 16u);
+    ASSERT_EQ(config.dsa_prefill_staging_tokens, 192u);
+    ASSERT_EQ(config.dsa_mla_resident_tokens, 0u);
+    const auto  pool_config = BlockPoolConfigHelper::createConfig(config);
+    const auto& layout      = pool_config.memory_layouts.front();
+    EXPECT_EQ(pool_config.total_size_bytes,
+              (8 - config.dsa_prefill_hbm_layers) * config.block_num * config.kv_block_stride_bytes);
+    EXPECT_EQ(layout.mla_hbm_size_bytes,
+              config.dsa_prefill_hbm_layers * config.block_num * config.kv_block_stride_bytes);
+    EXPECT_LE(layout.mla_hbm_size_bytes + layout.kv_scale_pool_size_bytes
+                  + 3 * config.dsa_prefill_staging_layers * config.kv_block_stride_bytes,
+              options.test_block_num * config.block_size_bytes);
+    block_pool_ = std::make_shared<BlockPool>(pool_config);
+    ASSERT_TRUE(block_pool_->init());
+    const auto tensors = block_pool_->allLayerCacheBase();
+    const auto scales  = block_pool_->allLayerScaleCacheBase();
+    for (int layer = 0; layer < 8; ++layer) {
+        const bool owner = layer == 0 || layer == 4;
+        ASSERT_EQ(tensors[layer].is_cuda(), !config.prefillLayerOnHost(layer));
+        if (config.prefillLayerOnHost(layer)) {
+            EXPECT_TRUE(tensors[layer].is_pinned());
+        }
+        EXPECT_EQ(scales[layer].defined(), owner);
+        const auto info = block_pool_->convertIndexToBuffer(layer, 2);
+        EXPECT_EQ(info.size(), owner ? 2u : 1u);
+        EXPECT_EQ(block_pool_->convertIndexToAddr(layer, 2).kv_addr,
+                  static_cast<char*>(tensors[layer].data_ptr()) + 2 * config.kv_block_stride_bytes);
+    }
+    // Request and transfer refs guard the same logical block across all layers.
+    const auto blocks = block_pool_->malloc(2);
+    ASSERT_EQ(blocks.size(), 2u);
+    block_pool_->connectorReference(blocks);
+    block_pool_->requestFree(blocks);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 3);
+    block_pool_->connectorFree(blocks);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(block_pool_->malloc(2), blocks);
+    // Ordinary memory-cache settings select this backing implementation and
+    // must not allocate the legacy connector's second host pool, even in warmup.
+    options.reuse_cache = true;
+    PDSepConfig pd;
+    pd.role_type = RoleType::PREFILL;
+    for (bool warmup : {false, true}) {
+        KVCacheManager manager(
+            config, warmup, nullptr, options, ParallelismConfig{}, runtime, SpeculativeExecutionConfig{}, pd);
+        ASSERT_TRUE(manager.init());
+        EXPECT_FALSE(manager.hasActiveConnectors());
+    }
+}
+
+TEST_F(BlockPoolTest, LayeredPrefillContiguousMaximizesBudgetedCapacity) {
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+    autil::EnvGuard slots("RTP_LLM_DSA_PREFILL_STAGING_LAYERS", "4");
+    auto            model = makeLayeredPrefillModel();
+    KVCacheConfig   options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num            = 16;
+    options.enable_memory_cache       = true;
+    options.memory_cache_size_mb      = 8;
+    options.enable_remote_cache       = false;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_kv_len = 128;
+    int previous_prefix                            = 8;
+    for (int host_mb : {1, 2, 4, 8}) {
+        options.memory_cache_size_mb = host_mb;
+        const auto config =
+            CacheConfigCreator::createConfig(model, ParallelismConfig{}, runtime, options, std::nullopt);
+        EXPECT_GE(config.dsa_prefill_hbm_layers, 1);
+        EXPECT_LT(config.dsa_prefill_hbm_layers, 8);
+        EXPECT_LE(config.dsa_prefill_hbm_layers, previous_prefix);
+        previous_prefix        = config.dsa_prefill_hbm_layers;
+        const auto budget      = options.test_block_num * config.block_size_bytes;
+        const auto host_budget = static_cast<size_t>(host_mb) * 1024 * 1024;
+        size_t     best        = 0;
+        int        best_prefix = 0;
+        // Brute-force feasible block counts independently of the closed-form
+        // allocator. Includes reserved block zero and all shared Indexer bytes.
+        for (int prefix = 1; prefix < 8; ++prefix) {
+            const size_t host_stride = (8 - prefix) * config.kv_block_stride_bytes;
+            const size_t hbm_stride  = config.block_size_bytes - host_stride;
+            const size_t stage_slots = std::min(4, 8 - prefix);
+            for (size_t blocks = 2; blocks <= host_budget / host_stride; ++blocks) {
+                if (blocks * hbm_stride + std::min(blocks, size_t(3)) * stage_slots * config.kv_block_stride_bytes
+                        <= budget
+                    && blocks >= best) {
+                    best        = blocks;
+                    best_prefix = prefix;
+                }
+            }
+        }
+        EXPECT_EQ(config.block_num, best);
+        EXPECT_EQ(config.dsa_prefill_hbm_layers, best_prefix);
+        const auto  pool_config = BlockPoolConfigHelper::createConfig(config);
+        const auto& layout      = pool_config.memory_layouts.front();
+        EXPECT_LE(pool_config.total_size_bytes, host_budget);
+        EXPECT_LE(layout.mla_hbm_size_bytes + layout.kv_scale_pool_size_bytes
+                      + config.dsa_prefill_staging_tokens / 64 * config.dsa_prefill_staging_layers
+                            * config.kv_block_stride_bytes,
+                  budget);
+        block_pool_ = std::make_shared<BlockPool>(pool_config);
+        ASSERT_TRUE(block_pool_->init());
+        const auto tensors = block_pool_->allLayerCacheBase();
+        const auto scales  = block_pool_->allLayerScaleCacheBase();
+        for (int layer = 0; layer < 8; ++layer) {
+            EXPECT_EQ(tensors[layer].is_cuda(), layer < best_prefix);
+            EXPECT_EQ(config.prefillLayerOnHost(layer), layer >= best_prefix);
+            if (layer >= best_prefix) {
+                EXPECT_TRUE(tensors[layer].is_pinned());
+            }
+            if (scales[layer].defined()) {
+                EXPECT_TRUE(scales[layer].is_cuda());
+            }
+        }
+    }
+}
+
+TEST_F(BlockPoolTest, LayeredPrefillUsesSchedulerKvBudgetAndMemoryCacheSize) {
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+    auto            model = makeLayeredPrefillModel();
+    KVCacheConfig   options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num            = 4096;
+    options.memory_cache_size_mb      = 8;
+    options.enable_memory_cache       = true;
+    options.enable_remote_cache       = false;
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 8;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                     = 3;
+    runtime.fifo_scheduler_config.max_batch_kv_len      = 1001;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 32;
+    auto create = [&] { return CacheConfigCreator::createConfig(model, parallelism, runtime, options, std::nullopt); };
+    const auto sharded = create();
+    EXPECT_EQ(sharded.dsa_prefill_staging_tokens, 320u);  // ceil(1001 / (8*64)) + 3 pages.
+    CPSlotMapper mapper(0, 8, 64);
+    // Independent per-request page accounting, including table padding at ID 0.
+    for (int a : {1, 63, 64, 65, 511, 512, 513}) {
+        for (int b : {1, 63, 64, 65, 511, 512, 513}) {
+            for (int c : {1, 63, 64, 65, 511, 512, 513}) {
+                if (a + b + c < 1001) {
+                    EXPECT_LE(1 + mapper.localBlockCount(a) + mapper.localBlockCount(b) + mapper.localBlockCount(c),
+                              sharded.dsa_prefill_staging_tokens / 64);
+                }
+            }
+        }
+    }
+    parallelism.prefill_cp_config.kv_cache_sharded = false;
+    EXPECT_EQ(create().dsa_prefill_staging_tokens, 1216u);
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.tp_size                            = 1;
+    EXPECT_EQ(create().dsa_prefill_staging_tokens, 1216u);
+    parallelism.tp_size = 8;
+    for (int limit : {0, -1}) {
+        runtime.fifo_scheduler_config.max_batch_kv_len      = limit;
+        runtime.fifo_scheduler_config.max_batch_tokens_size = 513;
+        EXPECT_EQ(create().dsa_prefill_staging_tokens, 320u);
+    }
+    runtime.fifo_scheduler_config.max_batch_kv_len = 1;
+    model.max_seq_len                              = 1025;  // Scheduler admits a long singleton above its batch limit.
+    EXPECT_EQ(create().dsa_prefill_staging_tokens, 384u);
+    for (int64_t limit : {int64_t(0), std::numeric_limits<int64_t>::max()}) {
+        runtime.fifo_scheduler_config.max_batch_kv_len      = limit;
+        runtime.fifo_scheduler_config.max_batch_tokens_size = 0;
+        const auto full                                     = create();
+        EXPECT_EQ(full.dsa_prefill_staging_tokens, full.block_num * full.seq_size_per_block);
+    }
+    options.memory_cache_size_mb = 0;
+    EXPECT_ANY_THROW(create());
+    options.memory_cache_size_mb = 8;
+    options.enable_remote_cache  = true;
+    EXPECT_ANY_THROW(create());
+    options.enable_remote_cache = false;
+    {
+        autil::EnvGuard disabled("RTP_LLM_DSA_PREFILL_LAYOUT", "0");
+        const auto      ordinary = create();
+        EXPECT_EQ(ordinary.dsa_prefill_staging_tokens, 0u);
+        EXPECT_EQ(ordinary.dsa_prefill_hbm_layers, -1);
+        EXPECT_EQ(ordinary.block_num, options.test_block_num);
+        EXPECT_FALSE(ordinary.prefillLayerOnHost(7));
+    }
+    {
+        autil::EnvGuard invalid("RTP_LLM_DSA_PREFILL_LAYOUT", "2");
+        EXPECT_ANY_THROW(create());
+    }
 }
 
 TEST_F(BlockPoolTest, PinnedMlaRoundsAutomaticWorkingSetToPhysicalBlocks) {
