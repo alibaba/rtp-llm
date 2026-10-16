@@ -421,13 +421,7 @@ class MoE(nn.Module):
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     y = self._forward_gate_pack(x, input_ids_flat)
-                with record_function_range("dsv4.moe.add_shared"):
-                    T = x.size(0)
-                    out = _get_or_create_final_out(
-                        max(T, self.max_tokens_per_rank, 1), self.dim, x.dtype, x.device
-                    )
-                    out[:T].copy_(y)
-                    return out[:T].view(shape)
+                return (y if y.dtype == x.dtype else y.type_as(x)).view(shape)
             with record_function_range("dsv4.moe.shared_expert_start"):
                 self._shared_executor.start(self.shared_experts, x)
             try:
@@ -483,14 +477,7 @@ class MoE(nn.Module):
                         f"L{self.layer_id:02d}_moe_y_{dbg_pos_name}",
                         y[dbg_pos_mask].contiguous(),
                     )
-                return y.type_as(x).view(shape)
-            with record_function_range("dsv4.moe.add_shared"):
-                T = x.size(0)
-                out = _get_or_create_final_out(
-                    max(T, self.max_tokens_per_rank, 1), self.dim, x.dtype, x.device
-                )
-                out[:T].copy_(y)
-                return out[:T].view(shape)
+            return (y if y.dtype == x.dtype else y.type_as(x)).view(shape)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
