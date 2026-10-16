@@ -541,6 +541,7 @@ struct PDSepConfig {
     // When GenerateDone is set and stream has no error, stopStream() waits up to
     // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
     int64_t prefill_stop_stream_wait_timeout_ms = 2000;
+    bool    maxpander_enabled                  = false;
 
     std::string to_string() const;
 };

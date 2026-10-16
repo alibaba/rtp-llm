@@ -2202,6 +2202,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
         .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
         .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
+        .def_readwrite("maxpander_enabled", &PDSepConfig::maxpander_enabled)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2226,11 +2227,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_port_offset,
                                       self.decode_entrance,
                                       self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.prefill_prepare_resource_pool_size,
+                                      self.maxpander_enabled);
             },
             [](py::tuple t) {
-                if (t.size() != 22)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                if (t.size() != 22 && t.size() != 23)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 or 23 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
@@ -2256,6 +2258,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_entrance                     = t[19].cast<bool>();
                     c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
                     c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
+                    if (t.size() == 23) {
+                        c.maxpander_enabled = t[22].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

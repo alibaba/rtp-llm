@@ -23,8 +23,9 @@ namespace {
 constexpr int  kInitTimeoutMs  = 120 * 1000;
 constexpr char kLinkProbeToken = 0x5a;
 
-constexpr uint32_t kFrameMagic   = 0x52545042;  // "RTPB"
-constexpr uint16_t kFrameVersion = 1;
+constexpr uint32_t kFrameMagic    = 0x52545042;  // "RTPB"
+constexpr uint32_t kShutdownMagic = 0x52545053;
+constexpr uint16_t kFrameVersion  = 1;
 
 struct BroadcastFrameHeader {
     uint32_t magic         = kFrameMagic;
@@ -250,6 +251,7 @@ void CpuTpBroadcaster::reset() {
     tp_rank_       = 0;
     tp_size_       = 1;
     next_sequence_ = 0;
+    shutdown_      = false;
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -416,10 +418,34 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
     initialized_.store(true, std::memory_order_release);
 }
 
+void CpuTpBroadcaster::shutdown() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::mutex> broadcast_lock(broadcast_mu_);
+    if (!initialized_.load(std::memory_order_acquire) || shutdown_) {
+        return;
+    }
+    shutdown_ = true;
+    if (tp_rank_ != 0) {
+        return;
+    }
+    const BroadcastFrameHeader header{kShutdownMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, 0};
+    for (int peer_rank = 1; peer_rank < tp_size_; ++peer_rank) {
+        const auto written = writeAllWithTimeout(peer_fds_[peer_rank], &header, sizeof(header), 1000);
+        if (written != static_cast<ssize_t>(sizeof(header))) {
+            RTP_LLM_LOG_WARNING("CpuTpBroadcaster shutdown notification to rank %d failed: %s",
+                                peer_rank,
+                                std::strerror(errno));
+        }
+    }
+}
+
 void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     std::lock_guard<std::mutex> lock(broadcast_mu_);
     RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
                             "CpuTpBroadcaster::broadcast called before initialize");
+    if (shutdown_) {
+        throw Shutdown();
+    }
     if (tp_size_ <= 1) {
         return;
     }
@@ -454,7 +480,8 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 static_cast<unsigned long long>(next_sequence_),
                                 std::strerror(errno));
         RTP_LLM_CHECK_WITH_INFO(
-            received_header.magic == kFrameMagic && received_header.version == kFrameVersion
+            (received_header.magic == kFrameMagic || received_header.magic == kShutdownMagic)
+                && received_header.version == kFrameVersion
                 && received_header.header_bytes == sizeof(BroadcastFrameHeader),
             "CpuTpBroadcaster invalid frame header at sequence %llu: magic=0x%x version=%u bytes=%u",
             static_cast<unsigned long long>(next_sequence_),
@@ -465,6 +492,12 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 "CpuTpBroadcaster sequence mismatch: expected %llu, got %llu",
                                 static_cast<unsigned long long>(next_sequence_),
                                 static_cast<unsigned long long>(received_header.sequence));
+        if (received_header.magic == kShutdownMagic) {
+            RTP_LLM_CHECK_WITH_INFO(received_header.payload_bytes == 0,
+                                    "CpuTpBroadcaster shutdown frame must not contain a payload");
+            shutdown_ = true;
+            throw Shutdown();
+        }
         RTP_LLM_CHECK_WITH_INFO(
             received_header.payload_bytes == nbytes,
             "CpuTpBroadcaster payload size mismatch at sequence %llu: rank 0 sent %llu bytes, rank %d expects %zu",

@@ -20,6 +20,40 @@ def mega_moe_jit_warmup_enabled() -> bool:
     return model_warm_up_enabled()
 
 
+def make_moe_warmup_expert_ids(config, device):
+    import torch
+
+    if config.maxpander_config.enabled:
+        local_experts = int(config.n_routed_experts) // int(config.ep_size)
+        expert_start = int(config.ep_rank) * local_experts
+    else:
+        expert_start = int(config.local_expert_start)
+        local_experts = int(config.local_expert_end) - expert_start
+    return expert_start + torch.arange(
+        int(config.n_activated_experts), dtype=torch.long, device=device
+    ) % max(local_experts, 1)
+
+
+def warmup_moe_executor(executor, device):
+    import torch
+    import torch.distributed as dist
+
+    distributed = dist.is_available() and dist.is_initialized()
+    if distributed:
+        dist.barrier()
+    config = executor.cfg
+    inputs = torch.zeros((1, int(config.dim)), dtype=torch.bfloat16, device=device)
+    weights = torch.zeros(
+        (1, int(config.n_activated_experts)), dtype=torch.float32, device=device
+    )
+    weights[:, 0] = 1.0
+    indices = make_moe_warmup_expert_ids(config, device).unsqueeze(0).contiguous()
+    executor(inputs, weights, indices)
+    torch.cuda.synchronize()
+    if distributed:
+        dist.barrier()
+
+
 def _ceil_div(a: int, b: int) -> int:
     return (int(a) + int(b) - 1) // int(b)
 

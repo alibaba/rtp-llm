@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
@@ -148,6 +149,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
         n_physical_experts: Optional[int] = None,
+        maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig(),
         *,
         chunking_enabled: bool = True,
         model_type: str = "generic_fp8_fp4_moe",
@@ -163,6 +165,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self._is_decode_role = bool(is_decode_role)
+        self.maxpander_config = maxpander_config
+        if is_decode_role and maxpander_config.enabled:
+            raise ValueError("MaxPander must be disabled before loading DECODE weights")
         self.chunking_enabled = chunking_enabled
         self._observer_factory = observer_factory
         self._record_function_scope = record_function_scope
@@ -190,6 +195,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             moe_w1_layout=moe_w1_layout,
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
+            maxpander_config=maxpander_config,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -276,6 +282,10 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
+        if is_decode_forward and self.maxpander_config.enabled:
+            raise ValueError(
+                "MaxPander PREFILL weights cannot execute a DECODE forward"
+            )
         shape = x.shape
         flat_x = x.reshape(-1, self.dim)
         flat_ids = None if input_ids is None else input_ids.reshape(-1)

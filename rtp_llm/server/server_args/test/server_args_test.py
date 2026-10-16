@@ -37,6 +37,184 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class MaxPanderArgumentsTest(TestCase):
+    def test_disabled_startup_ignores_residual_tuning(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        environment = {
+            "MAXPANDER_ENABLE": "1",
+            "MAXPANDER_SEED": "-1",
+            "MAXPANDER_WF_PASSES": "0",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            for role in ("PREFILL", "DECODE", "PDFUSION", "VIT"):
+                with self.subTest(role=role):
+                    config = setup_args(
+                        ["--role_type", role, "--maxpander_enable", "false"]
+                    )
+                    resolved = EngineConfig.create(config).maxpander_config
+                    self.assertFalse(resolved.enabled)
+                    self.assertFalse(resolved.requested)
+            inherited = setup_args(["--role_type", "DECODE"])
+            resolved = EngineConfig.create(inherited).maxpander_config
+            self.assertTrue(resolved.requested)
+            self.assertFalse(resolved.enabled)
+            for name, value in environment.items():
+                self.assertEqual(os.environ[name], value)
+            with self.assertRaisesRegex(ValueError, "maxpander_seed"):
+                EngineConfig.create(setup_args(["--role_type", "PREFILL"]))
+
+    def test_cli_overrides_environment_without_writeback(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        environment = {
+            "MAXPANDER_ENABLE": "1",
+            "MAXPANDER_SEED": "17",
+            "MAXPANDER_WF_PASSES": "3",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = setup_args(
+                ["--maxpander_enable", "false", "--maxpander_seed", "9"]
+            )
+            self.assertFalse(config.maxpander_config.enable)
+            self.assertEqual(config.maxpander_config.seed, 9)
+            self.assertEqual(config.maxpander_config.wf_passes, 3)
+            for name, value in environment.items():
+                self.assertEqual(os.environ[name], value)
+            from_env = setup_args([])
+            self.assertTrue(from_env.maxpander_config.enable)
+            self.assertEqual(from_env.maxpander_config.seed, 17)
+
+    def test_resolves_before_loading_and_disables_decode(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            for role in ("PREFILL", "DECODE", "FRONTEND"):
+                config = setup_args(
+                    [
+                        "--role_type",
+                        role,
+                        "--maxpander_enable",
+                        "--moe_strategy",
+                        "mega_moe_se",
+                    ]
+                )
+                engine_config = EngineConfig.create(config)
+                resolved = engine_config.maxpander_config
+                self.assertEqual(resolved.enabled, role == "PREFILL")
+                self.assertEqual(
+                    engine_config.pd_sep_config.maxpander_enabled, resolved.enabled
+                )
+                restored = pickle.loads(pickle.dumps(engine_config.pd_sep_config))
+                self.assertEqual(restored.maxpander_enabled, resolved.enabled)
+                self.assertTrue(resolved.requested)
+                self.assertEqual(config.eplb_config.redundant_expert, 0)
+                self.assertEqual(pickle.loads(pickle.dumps(resolved)), resolved)
+            invalid = setup_args(
+                [
+                    "--role_type",
+                    "DECODE",
+                    "--maxpander_enable",
+                    "--redundant_expert",
+                    "64",
+                ]
+            )
+            with self.assertRaisesRegex(ValueError, "remove.*redundant_expert"):
+                EngineConfig.create(invalid)
+
+    def test_default_and_unsupported_prefill_backend(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(
+                EngineConfig.create(setup_args([])).maxpander_config.enabled
+            )
+            invalid = setup_args(["--role_type", "PREFILL", "--maxpander_enable"])
+            with self.assertRaisesRegex(ValueError, "explicit mega_moe"):
+                EngineConfig.create(invalid)
+
+    def test_frontend_ignores_inherited_maxpander_settings(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        environment = {
+            "MAXPANDER_ENABLE": "1",
+            "MAXPANDER_SEED": "-1",
+            "MAXPANDER_WF_PASSES": "65",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            config = EngineConfig.create(setup_args(["--role_type", "FRONTEND"]))
+            self.assertTrue(config.maxpander_config.requested)
+            self.assertFalse(config.maxpander_config.enabled)
+            self.assertFalse(config.pd_sep_config.maxpander_enabled)
+
+    def test_prefill_rejects_decode_execution_features_only_when_enabled(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            for feature in ("enable_cuda_graph", "use_batch_decode_scheduler"):
+                for role in ("PREFILL", "DECODE", "FRONTEND"):
+                    for enabled in (False, True):
+                        with self.subTest(feature=feature, role=role, enabled=enabled):
+                            arguments = setup_args(
+                                [
+                                    "--role_type",
+                                    role,
+                                    "--maxpander_enable",
+                                    str(enabled),
+                                    "--moe_strategy",
+                                    "mega_moe",
+                                    "--" + feature,
+                                    "true",
+                                ]
+                            )
+                            if enabled and role == "PREFILL":
+                                with self.assertRaisesRegex(ValueError, feature):
+                                    EngineConfig.create(arguments)
+                            else:
+                                config = EngineConfig.create(arguments)
+                                self.assertFalse(config.pd_sep_config.maxpander_enabled)
+
+    def test_v41_uses_its_own_strategy_selection(self):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for model_type in ("deepseek_v41", "deepseek_v41_dspark"):
+            for strategy in ("auto", "mega", "mega_se", "mega_fused"):
+                with self.subTest(model_type=model_type, strategy=strategy):
+                    with patch.dict(
+                        os.environ, {"DSV4_MOE_STRATEGY": strategy}, clear=True
+                    ):
+                        config = EngineConfig.create(
+                            setup_args(
+                                [
+                                    "--role_type",
+                                    "PREFILL",
+                                    "--model_type",
+                                    model_type,
+                                    "--maxpander_enable",
+                                    "true",
+                                ]
+                            )
+                        )
+                        self.assertTrue(config.maxpander_config.enabled)
+                        self.assertEqual(config.moe_config.moe_strategy, "auto")
+                        self.assertEqual(os.environ["DSV4_MOE_STRATEGY"], strategy)
+
+    def test_legacy_pd_config_pickle_keeps_maxpander_disabled(self):
+        from rtp_llm.ops import PDSepConfig
+
+        current = PDSepConfig()
+        current.maxpander_enabled = True
+        legacy = PDSepConfig.__new__(PDSepConfig)
+        legacy.__setstate__(current.__getstate__()[:22])
+        self.assertFalse(legacy.maxpander_enabled)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

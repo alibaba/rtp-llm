@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.config.maxpander_config import MaxPanderRuntimeConfig
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -59,6 +60,7 @@ class V4Args:
     # moe
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
+    maxpander_config: MaxPanderRuntimeConfig = MaxPanderRuntimeConfig()
     n_shared_experts: int = 1
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
@@ -144,6 +146,7 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        maxpander_config=args.maxpander_config,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         score_func=args.score_func,

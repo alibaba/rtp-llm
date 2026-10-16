@@ -1,4 +1,5 @@
-load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -52,6 +53,11 @@ py_test(
         "comparison_utils.py",
         "comparison_utils_test.py",
     ],
+)
+
+py_test(
+    name = "local_checkpoint_test",
+    srcs = ["local_checkpoint.py", "local_checkpoint_test.py"],
 )
 
 exports_files([
@@ -176,6 +182,58 @@ custom_smoke_test(
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
     ],
+)
+
+cuda13_sm100_py_test(
+    name = "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_maxpander_off_sm100",
+    srcs = ["deepseek_v41_maxpander_off_contract_test.py"],
+    main = "deepseek_v41_maxpander_off_contract_test.py",
+    gpu_count = 4,
+    timeout = "eternal",
+    deps = SMOKE_FRAMEWORK_DEPS,
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "deepseek_v41_full_contract_test.py",
+        "local_checkpoint.py",
+    ],
+    env = {
+        "SMOKE_ARGS": "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+        "WORLD_SIZE": "4",
+        "PYTHONNOUSERSITE": "1",
+    },
+    env_inherit = ["REMOTE_JIT_DIR"],
+    tags = ["manual", "dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract", "maxpander"],
+    legacy_create_init = 0,
+)
+
+cuda13_sm100_py_test(
+    name = "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_maxpander_r96_sm100",
+    srcs = ["deepseek_v41_maxpander_contract_test.py"],
+    main = "deepseek_v41_maxpander_contract_test.py",
+    gpu_count = 4,
+    timeout = "eternal",
+    deps = SMOKE_FRAMEWORK_DEPS,
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "deepseek_v41_full_contract_test.py",
+        "local_checkpoint.py",
+    ],
+    env = {
+        "SMOKE_ARGS": "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+        "WORLD_SIZE": "4",
+        "PYTHONNOUSERSITE": "1",
+    },
+    env_inherit = ["REMOTE_JIT_DIR"],
+    tags = ["manual", "dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract", "maxpander"],
+    legacy_create_init = 0,
 )
 
 custom_smoke_test(

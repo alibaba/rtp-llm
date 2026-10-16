@@ -7,6 +7,7 @@ from unittest import mock
 
 import torch
 
+from rtp_llm.config.maxpander_config import MaxPanderConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -108,7 +109,9 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             n_shared_experts=0,
             swiglu_limit=7.0,
             ep_size=2,
-            ep_rank=0,
+            ep_rank=1,
+            physical_expert_num=32,
+            maxpander_config=MaxPanderConfig(enable=True).resolve("PREFILL"),
             max_tokens_per_rank=4,
             moe_strategy="mega_moe",
             route_scale=2.5,
@@ -133,6 +136,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             executor.warmup_jit([1, 4])
 
         self.assertEqual(forward.call_count, 2)
+        for call in forward.call_args_list:
+            self.assertTrue(torch.all(call.args[2] < executor.cfg.n_routed_experts))
         self.assertEqual(forward_gate_pack.call_count, 4)
         payloads = [call.args[1] for call in forward_gate_pack.call_args_list]
         nonhash = [payload for payload in payloads if payload.bias is not None]
@@ -141,6 +146,12 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         self.assertEqual(len(hashed), 2)
         self.assertTrue(all(payload.route_scale == 2.5 for payload in payloads))
         self.assertTrue(all(payload.input_ids is not None for payload in hashed))
+        self.assertTrue(
+            all(
+                torch.all(payload.tid2eid < executor.cfg.n_routed_experts)
+                for payload in hashed
+            )
+        )
         self.assertEqual(barrier.call_count, 3)
 
     def test_unchunked_generated_counts_use_bucket_representative(self):

@@ -79,13 +79,6 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
         )
 
         if not _mega_moe_se_available():
-            from rtp_llm.models_py.modules.maxpander import maxpander_enabled
-
-            if maxpander_enabled():
-                raise RuntimeError(
-                    "MaxPander mega_moe_se requires DeepGEMM shared_recipe support; "
-                    "refusing to silently replace the anchor's fused shared expert"
-                )
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
                 MegaMoeExecutor,
             )

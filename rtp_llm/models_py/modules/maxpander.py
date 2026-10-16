@@ -1,23 +1,50 @@
-"""Static physical expert routing, between logical Top-K and MegaMoE packing.
+"""Static physical expert routing after packing, before MegaMoE dispatch.
 
-Only startup reads tensors on the host. Each invocation recomputes local token
-demand and WF quotas on GPU, including graph replay; there is no CPU fallback.
+Only startup reads tensors on the host. Zero redundancy uses a direct lookup;
+redundant placements recompute local token demand and WF quotas on GPU, including
+graph replay. There is no CPU fallback.
 Placement is immutable for the lifetime of this module. Counts are rank-local,
 not a claim of globally optimal balancing across CP/DP ranks.
 """
-
-import os
 
 import torch
 import torch.nn as nn
 
 
-def maxpander_enabled() -> bool:
-    return os.environ.get("MAXPANDER_ENABLE", "0") == "1"
+class PackedMoeExecutorMixin:
+    def setup_routing(self, layer_weights):
+        config = self.cfg.maxpander_config
+        self.physical_router = None
+        if config.enabled:
+            from rtp_llm.utils.model_weight import W
+
+            config.validate_placement(
+                expert_num=self.cfg.n_routed_experts,
+                physical_expert_num=self.cfg.physical_expert_num,
+                ep_size=self.cfg.ep_size,
+            )
+            self.physical_router = MaxPanderRouter(
+                layer_weights.get(W.log2phy),
+                layer_weights.get(W.logic_expert_cnt),
+                num_logical=self.cfg.n_routed_experts,
+                num_physical=self.cfg.physical_expert_num,
+                ep_size=self.cfg.ep_size,
+                wf_passes=config.wf_passes,
+            )
+
+    def _execute_packed_inputs(self, tokens, device):
+        router = getattr(self, "physical_router", None)
+        if router is not None:
+            router.remap_inplace(self._mega_buf.topk_idx[:tokens])
+        output = self._mega_y[:tokens]
+        self._launch(output, tokens, device)
+        return output
 
 
 class MaxPanderRouter(nn.Module):
-    def __init__(self, log2phy, counts, *, num_logical, num_physical, ep_size):
+    def __init__(
+        self, log2phy, counts, *, num_logical, num_physical, ep_size, wf_passes=8
+    ):
         super().__init__()
         if not (1 < ep_size and 0 < num_logical <= num_physical <= 2048):
             raise ValueError("MaxPander requires EP>1 and 0<E<=P<=2048")
@@ -52,8 +79,9 @@ class MaxPanderRouter(nn.Module):
         if not log2phy.is_cuda or counts.device != log2phy.device:
             raise ValueError("MaxPander routing tables must be on the same CUDA device")
         self.num_logical = num_logical
+        self._direct_mapping = num_physical == num_logical
         self.ep_size = ep_size
-        self.passes = int(os.environ.get("MAXPANDER_WF_PASSES", "8"))
+        self.passes = int(wf_passes)
         if not 1 <= self.passes <= 64:
             raise ValueError("MAXPANDER_WF_PASSES must be in [1,64]")
         device = log2phy.device
@@ -63,11 +91,24 @@ class MaxPanderRouter(nn.Module):
 
         candidate_tensor = torch.tensor(candidates, dtype=torch.int32, device=device)
         buffer("cand_phys", candidate_tensor)
+        if self._direct_mapping:
+            for name in (
+                "cand_gpu",
+                "rep_count",
+                "counts",
+                "hot_order",
+                "quota",
+                "alloc",
+                "rank_counter",
+            ):
+                buffer(name, None)
+            return
         buffer(
             "cand_gpu", torch.where(candidate_tensor >= 0, candidate_tensor // cap, -1)
         )
         buffer("rep_count", counts.to(dtype=torch.int32).clone())
         buffer("counts", torch.zeros(num_logical, dtype=torch.float32, device=device))
+        buffer("hot_order", torch.empty(num_logical, dtype=torch.int32, device=device))
         buffer("quota", torch.empty((num_logical, 2), dtype=torch.int32, device=device))
         buffer(
             "alloc", torch.empty((num_logical, 2), dtype=torch.float32, device=device)
@@ -77,33 +118,67 @@ class MaxPanderRouter(nn.Module):
         )
 
     def forward(self, logical_ids):
+        return self.remap_inplace(logical_ids.clone())
+
+    def remap_inplace(self, logical_ids):
         import triton
 
         from rtp_llm.models_py.modules.maxpander_kernels import (
+            _direct_remap_kernel,
             _wf_count_kernel,
+            _wf_hot_order_kernel,
             _wf_quota_kernel,
             _wf_scatter_kernel,
         )
 
         if logical_ids.dtype not in (torch.int32, torch.int64):
             raise ValueError("expert IDs must be int32/int64")
-        if logical_ids.device != self.counts.device:
+        if logical_ids.device != self.cand_phys.device:
             raise ValueError("expert IDs and placement must share a CUDA device")
-        flat = logical_ids.reshape(-1).contiguous()
-        n = flat.numel()
-        if n == 0:
+        if logical_ids.ndim != 2 or logical_ids.stride(1) != 1:
+            raise ValueError(
+                "expert IDs must have shape [tokens, topk] with contiguous columns"
+            )
+        if logical_ids.stride(0) < logical_ids.size(1):
+            raise ValueError("expert ID rows must not overlap")
+        numel = logical_ids.numel()
+        if numel == 0:
             return logical_ids  # Caller still executes the EP collective.
-        if n > 2**24:
+        block = min(1024, triton.next_power_of_2(numel))
+        grid = (triton.cdiv(numel, block),)
+        if self._direct_mapping:
+            _direct_remap_kernel[grid](
+                logical_ids,
+                self.cand_phys,
+                self.num_logical,
+                numel,
+                logical_ids.stride(0),
+                TOPK=logical_ids.size(1),
+                BLOCK_SIZE=block,
+            )
+            return logical_ids
+        if numel > 2**24:
             raise ValueError("rank-local WF counts exceed exact float32 integer range")
         self.counts.zero_()
-        self.rank_counter.zero_()
-        block = min(1024, triton.next_power_of_2(n))
-        grid = (triton.cdiv(n, block),)
-        _wf_count_kernel[grid](flat, self.counts, self.num_logical, n, BLOCK_SIZE=block)
-        hot_order = torch.argsort(self.counts, descending=True, stable=True)
+        _wf_count_kernel[grid](
+            logical_ids,
+            self.counts,
+            self.num_logical,
+            numel,
+            logical_ids.stride(0),
+            TOPK=logical_ids.size(1),
+            BLOCK_SIZE=block,
+        )
+        _wf_hot_order_kernel[(1,)](
+            self.counts,
+            self.hot_order,
+            self.rank_counter,
+            self.num_logical,
+            BLOCK_EXPERTS=triton.next_power_of_2(self.num_logical),
+        )
         _wf_quota_kernel[(1,)](
             self.counts,
-            hot_order,
+            self.hot_order,
             self.cand_gpu,
             self.rep_count,
             self.quota,
@@ -113,15 +188,16 @@ class MaxPanderRouter(nn.Module):
             BLOCK_G=triton.next_power_of_2(self.ep_size),
             TILE_M=0,
         )
-        output = torch.empty_like(flat)
         _wf_scatter_kernel[grid](
-            flat,
+            logical_ids,
             self.quota,
             self.cand_phys,
             self.rank_counter,
-            output,
+            logical_ids,
             self.num_logical,
-            n,
+            numel,
+            logical_ids.stride(0),
+            TOPK=logical_ids.size(1),
             BLOCK_SIZE=block,
         )
-        return output.view_as(logical_ids)
+        return logical_ids

@@ -1,10 +1,30 @@
-"""GPU-only two-replica WF kernels, extracted from the existing WF dispatcher.
+"""GPU-only direct mapping and two-replica WF routing kernels.
 
-No host/torch fallback: failures must not silently break decode graph capture.
+No host/torch fallback; routing remains safe during CUDA graph capture.
 """
 
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _direct_remap_kernel(
+    topk_ids_ptr,
+    cand_phys_ptr,
+    num_logical,
+    numel,
+    row_stride,
+    TOPK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    in_bounds = offsets < numel
+    addresses = offsets // TOPK * row_stride + offsets % TOPK
+    logical_ids = tl.load(topk_ids_ptr + addresses, mask=in_bounds, other=-1)
+    valid = in_bounds & (logical_ids >= 0) & (logical_ids < num_logical)
+    safe_logical_ids = tl.where(valid, logical_ids, 0).to(tl.int32)
+    physical_ids = tl.load(cand_phys_ptr + safe_logical_ids * 2, mask=valid, other=-1)
+    tl.store(topk_ids_ptr + addresses, physical_ids, mask=in_bounds)
 
 
 @triton.jit
@@ -13,15 +33,38 @@ def _wf_count_kernel(
     counts_ptr,
     num_logical,
     numel,
+    row_stride,
+    TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < numel
-    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    addresses = offs // TOPK * row_stride + offs % TOPK
+    e = tl.load(topk_ids_ptr + addresses, mask=mask, other=-1).to(tl.int32)
     valid = mask & (e >= 0) & (e < num_logical)
     safe_e = tl.where(valid, e, 0)
     tl.atomic_add(counts_ptr + safe_e, 1.0, mask=valid)
+
+
+@triton.jit
+def _wf_hot_order_kernel(
+    counts_ptr,
+    hot_order_ptr,
+    rank_counter_ptr,
+    num_logical,
+    BLOCK_EXPERTS: tl.constexpr,
+):
+    """Sort demand descending with logical-ID tie breaks and reset scatter ranks."""
+    experts = tl.arange(0, BLOCK_EXPERTS)
+    valid = experts < num_logical
+    counts = tl.load(counts_ptr + experts, mask=valid, other=0).to(tl.uint64)
+    tie_break = tl.where(valid, num_logical - experts, 0).to(tl.uint64)
+    keys = (counts << 32) | tie_break
+    ordered = tl.sort(keys, descending=True)
+    logical_ids = (num_logical - (ordered & 0xFFFFFFFF)).to(tl.int32)
+    tl.store(hot_order_ptr + experts, logical_ids, mask=valid)
+    tl.store(rank_counter_ptr + experts, 0, mask=valid)
 
 
 @triton.jit
@@ -253,12 +296,15 @@ def _wf_scatter_kernel(
     out_ids_ptr,
     num_logical,
     numel,
+    row_stride,
+    TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < numel
-    e = tl.load(topk_ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    addresses = offs // TOPK * row_stride + offs % TOPK
+    e = tl.load(topk_ids_ptr + addresses, mask=mask, other=-1).to(tl.int32)
     valid = mask & (e >= 0) & (e < num_logical)
     safe_e = tl.where(valid, e, 0)
     rank = tl.atomic_add(rank_counter_ptr + safe_e, 1, mask=valid)
@@ -267,4 +313,4 @@ def _wf_scatter_kernel(
     p1 = tl.load(cand_phys_ptr + safe_e * 2 + 1, mask=valid, other=-1)
     phys = tl.where(rank < q0, p0, p1)
     phys = tl.where(valid, phys, -1)
-    tl.store(out_ids_ptr + offs, phys, mask=mask)
+    tl.store(out_ids_ptr + addresses, phys, mask=mask)

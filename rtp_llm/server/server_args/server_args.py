@@ -485,6 +485,7 @@ def init_all_group_args(
         py_env_configs.moe_config,
         py_env_configs.eplb_config,
         py_env_configs.deep_ep_config,
+        py_env_configs.maxpander_config,
     )
     init_parallel_group_args(
         parser,

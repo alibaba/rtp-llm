@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 import psutil
@@ -272,41 +273,57 @@ class MagaServerManager(object):
 
         return self.wait_sever_done(timeout)
 
-    def stop_server(self):
+    def stop_server(self, timeout: int = 600):
         with self._state_lock:
             self._stop_requested = True
             server_process = self._server_process
 
         if server_process is not None and server_process.pid is not None:
             try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
                 logging.info("stop server and children: %d", server_process.pid)
                 parent = psutil.Process(server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                # 添加超时机制，避免永久阻塞
+                children = list(parent.children(recursive=True))
+                parent_timed_out = False
                 try:
-                    parent.wait(timeout=10)
+                    parent.terminate()
+                    parent.wait(timeout=timeout)
+                except psutil.NoSuchProcess:
+                    pass
                 except psutil.TimeoutExpired:
+                    parent_timed_out = True
                     logging.warning(
-                        "Parent process did not exit gracefully, force killing"
+                        "Parent process did not exit within %ss; cleaning up descendants",
+                        timeout,
                     )
-                    parent.kill()
-                    parent.wait(timeout=5)
+                    children_by_pid = {child.pid: child for child in children}
+                    with suppress(psutil.NoSuchProcess):
+                        children_by_pid.update(
+                            (child.pid, child)
+                            for child in parent.children(recursive=True)
+                        )
+                    children = list(children_by_pid.values())
+
+                _, alive = psutil.wait_procs(children, timeout=5)
+                if alive:
+                    for child in alive:
+                        with suppress(psutil.NoSuchProcess):
+                            child.terminate()
+                    _, alive = psutil.wait_procs(alive, timeout=5)
+                    for child in alive:
+                        with suppress(psutil.NoSuchProcess):
+                            child.kill()
+                    if alive:
+                        psutil.wait_procs(alive, timeout=5)
+
+                if parent_timed_out:
+                    with suppress(psutil.NoSuchProcess):
+                        parent.kill()
+                        parent.wait(timeout=5)
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
-            except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
+            except Exception as error:
+                logging.warning("failed to get process with: " + str(error))
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None

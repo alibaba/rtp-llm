@@ -66,7 +66,17 @@ def _load_helpers():
         prefill_meta = importlib.import_module(
             "rtp_llm.models_py.modules.dsv41.fp8.prefill_meta"
         )
-    return cp, ced, collective, bounded, index_plan, kv_workspace, prefill_meta
+        maxpander = importlib.import_module("rtp_llm.models_py.modules.maxpander")
+    return (
+        cp,
+        ced,
+        collective,
+        bounded,
+        index_plan,
+        kv_workspace,
+        prefill_meta,
+        maxpander,
+    )
 
 
 (
@@ -77,6 +87,7 @@ def _load_helpers():
     _INDEX_PLAN,
     _KV_WORKSPACE,
     _PREFILL_META,
+    _MAXPANDER,
 ) = _load_helpers()
 
 
@@ -2128,6 +2139,11 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 _validate_capacity=lambda *a: None,
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
+                physical_router=None,
+                can_use_gate_pack_static=mock.Mock(return_value=True),
+            )
+            owner._execute_packed_inputs = types.MethodType(
+                _MAXPANDER.PackedMoeExecutorMixin._execute_packed_inputs, owner
             )
             gate = self._gate()
             scores = torch.full((4, 3), 7, dtype=torch.bfloat16)
@@ -2139,8 +2155,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 gate.tid2eid = torch.zeros(4, 2, dtype=torch.long)
                 gate._ced_row_projection.reset_mock()
                 pack.reset_mock()
+                owner.can_use_gate_pack_static.reset_mock()
+                owner._launch.reset_mock()
                 with mock.patch.dict(sys.modules, deep_gemm=dg):
-                    ns["forward_with_gate_pack"](
+                    result = ns["forward_with_gate_pack"](
                         owner,
                         torch.ones(4, 5, dtype=torch.bfloat16),
                         gate,
@@ -2149,6 +2167,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 gate._ced_row_projection.assert_called_once()
                 pack.assert_called_once()
                 self.assertIs(pack.call_args.args[1], scores)
+                owner.can_use_gate_pack_static.assert_called_once_with(gate)
+                owner._launch.assert_called_once()
+                self.assertEqual(owner._launch.call_args.args[1:], (4, result.device))
+                torch.testing.assert_close(result, owner._mega_y)
 
 
 class CedEncoderSplitTest(_SingleThreadTest):

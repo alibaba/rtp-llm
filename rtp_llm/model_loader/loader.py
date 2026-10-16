@@ -48,6 +48,9 @@ class ModelLoader:
         force_cpu_load_weights: bool = False,
         moe_pure_tp_preshard: bool = False,
     ):
+        model_config.maxpander_config.validate_weight_format(
+            is_ft_style=database.is_ft_style
+        )
         self.model_config = model_config
         self._task_type = model_config.task_type
         self._load_method = load_method
@@ -143,6 +146,7 @@ class ModelLoader:
         return lora_weights
 
     def dump_weight_as_ft_style(self, device: str, output_dir: str):
+        self.model_config.maxpander_config.validate_weight_format(is_ft_style=True)
         check_with_info(
             not self._load_config.is_ft_style_weight,
             "dump_weight_as_ft_style only support non-ft-style weight",
@@ -782,10 +786,13 @@ class ModelLoader:
 
     def create_eplb(self):
         weights_info = self._weights_info
-        if os.environ.get("MAXPANDER_ENABLE", "0") == "1" and weights_info.enable_eplb_:
-            raise ValueError(
-                "MaxPander requires static placement; disable dynamic EPLB"
-            )
+        self.model_config.maxpander_config.validate_placement(
+            expert_num=weights_info.expert_num_,
+            physical_expert_num=weights_info.phy_exp_num_,
+            ep_size=weights_info.ep_size,
+            dynamic_eplb=weights_info.enable_eplb_,
+            phy2log_path=self.model_config.phy2log_path,
+        )
 
         logging.info(
             "create eplb: expert_num: %d, phy_exp_num: %d",
@@ -802,6 +809,7 @@ class ModelLoader:
             num_nodes=weights_info.num_nodes,
             phy_exp_num=weights_info.phy_exp_num_,
             phy2log_path=phy2log_path,
+            maxpander_config=self.model_config.maxpander_config,
         )
 
         # dynamic expert balancer
@@ -831,7 +839,7 @@ class ModelLoader:
         if expert_num == 0 or (
             not self._weights_info.enable_eplb_
             and redundant_expert == 0
-            and os.environ.get("MAXPANDER_ENABLE", "0") != "1"
+            and not self.model_config.maxpander_config.enabled
         ):
             logging.info("don't need to init eplb weight, skip...")
             return

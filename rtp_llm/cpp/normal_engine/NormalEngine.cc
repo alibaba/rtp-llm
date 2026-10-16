@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
@@ -145,6 +146,14 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
+    if (pd_sep_config.maxpander_enabled) {
+        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PREFILL,
+                                "MaxPander requires a dedicated PREFILL worker");
+        RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_cuda_graph,
+                                "MaxPander PREFILL workers do not support enable_cuda_graph");
+        RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler,
+                                "MaxPander PREFILL workers do not support use_batch_decode_scheduler");
+    }
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(params.py_model, "custom_output_handler")) {
@@ -674,6 +683,7 @@ absl::Status NormalEngine::stop() {
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    CpuTpBroadcaster::instance().shutdown();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }
@@ -684,10 +694,15 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const CpuTpBroadcaster::Shutdown&) {
+            RTP_LLM_LOG_INFO("normal engine received TP shutdown");
+            running_ = false;
         }
     }
 }
@@ -698,6 +713,13 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
+        return false;
+    }
+    const auto& generate_config = *stream->generateConfig();
+    if (pd_sep_config.maxpander_enabled && !generate_config.pd_separation && generate_config.max_new_tokens > 1) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "MaxPander PREFILL workers cannot decode locally; use PD separation for max_new_tokens > 1 "
+                            "without beam search or multiple return sequences");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
