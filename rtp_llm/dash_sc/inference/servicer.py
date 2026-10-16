@@ -706,7 +706,11 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
     from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
         prepare_vl_inputs_from_token_ids,
     )
-    from rtp_llm.multimodal.multimodal_util import _get_http_heads, request_get
+    from rtp_llm.multimodal.multimodal_util import (
+        _get_http_heads,
+        _record_download_time,
+        request_get,
+    )
 
     # Cache bytes only for this request; a URL may change between requests.
     downloaded = {}
@@ -726,32 +730,37 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
                 started = time.monotonic()
                 status = None
                 try:
-                    with request_get(
-                        url,
-                        _get_http_heads(),
-                        timeout=(min(5, remaining), min(20, remaining)),
-                    ) as response:
-                        status = response.status_code
-                        if status in (408, 429, 500, 502, 503, 504):
-                            raise requests.ConnectionError(
-                                "temporary image download failure"
-                            )
-                        if status != 200:
-                            raise ValueError("image download failed")
-                        chunks = []
-                        size = 0
-                        for chunk in _image_download_chunks(
-                            response, download_deadline
-                        ):
-                            if time.monotonic() >= download_deadline:
-                                raise requests.Timeout(
-                                    "image download deadline exceeded"
+                    try:
+                        with request_get(
+                            url,
+                            _get_http_heads(),
+                            timeout=(min(5, remaining), min(20, remaining)),
+                        ) as response:
+                            status = response.status_code
+                            if status in (408, 429, 500, 502, 503, 504):
+                                raise requests.ConnectionError(
+                                    "temporary image download failure"
                                 )
-                            size += len(chunk)
-                            if size > 10 * 1024 * 1024:
-                                raise ValueError("Multimodal file size is too large")
-                            chunks.append(chunk)
-                        downloaded[url] = b"".join(chunks)
+                            if status != 200:
+                                raise ValueError("image download failed")
+                            chunks = []
+                            size = 0
+                            for chunk in _image_download_chunks(
+                                response, download_deadline
+                            ):
+                                if time.monotonic() >= download_deadline:
+                                    raise requests.Timeout(
+                                        "image download deadline exceeded"
+                                    )
+                                size += len(chunk)
+                                if size > 10 * 1024 * 1024:
+                                    raise ValueError(
+                                        "Multimodal file size is too large"
+                                    )
+                                chunks.append(chunk)
+                            downloaded[url] = b"".join(chunks)
+                    finally:
+                        _record_download_time(started)
                     break
                 except Exception as error:
                     # Exception strings and URL query parameters can contain credentials.
@@ -789,7 +798,7 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
                         code = (
                             ExceptionType.CONNECT_TIMEOUT
                             if isinstance(error, (requests.Timeout, ReadTimeoutError))
-                            else ExceptionType.MM_DOWNLOAD_TEMPORARY
+                            else ExceptionType.MM_DOWNLOAD_FAILED
                         )
                         raise FtRuntimeException(
                             code, "Temporary multimodal download failure"

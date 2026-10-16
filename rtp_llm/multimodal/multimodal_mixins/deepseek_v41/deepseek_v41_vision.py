@@ -1,6 +1,7 @@
 """V4.1 ViT/aligner adapter with row-major image spans and three delimiters."""
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -8,6 +9,8 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     IMAGE,
     V41ImageInput,
@@ -62,6 +65,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         self._encode_cache = {}
         self._encode_cache_order = []
         self._encode_cache_lock = threading.Lock()
+        self._encode_cache_tokens = 0
+        self._encode_cache_bytes = 0
         self._encode_cache_capacity = max(
             0, int(os.environ.get("V41_IMAGE_ENCODE_CACHE_ITEMS", "16"))
         )
@@ -135,17 +140,26 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         )
 
     def _encode_image_cached(self, image: V41ImageInput):
-        if self._encode_cache_capacity <= 0:
-            return None
-        key = self._encode_cache_key(image)
-        if key is None:
-            return None
+        key = self._encode_cache_key(image) if self._encode_cache_capacity > 0 else None
+        cached = None
         with self._encode_cache_lock:
-            if key in self._encode_cache:
+            if key is not None and key in self._encode_cache:
                 self._encode_cache_order.remove(key)
                 self._encode_cache_order.append(key)
-                return self._encode_cache[key]
-        return None
+                cached = self._encode_cache[key]
+            tokens = self._encode_cache_tokens
+            size_bytes = self._encode_cache_bytes
+        metric = (
+            (
+                AccMetrics.VIT_EMBEDDING_CACHE_HIT_QPS_METRIC
+                if cached is not None
+                else AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC
+            )
+            if key is not None
+            else None
+        )
+        self._report_encode_cache_metrics(tokens, size_bytes, metric)
+        return cached
 
     def _encode_image_store(self, key, result: torch.Tensor):
         if key is None or self._encode_cache_capacity <= 0:
@@ -155,9 +169,44 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 return
             self._encode_cache[key] = result
             self._encode_cache_order.append(key)
+            self._encode_cache_tokens += result.shape[0]
+            self._encode_cache_bytes += result.numel() * result.element_size()
+            eviction_count = 0
             while len(self._encode_cache_order) > self._encode_cache_capacity:
                 evicted = self._encode_cache_order.pop(0)
-                self._encode_cache.pop(evicted, None)
+                removed = self._encode_cache.pop(evicted)
+                self._encode_cache_tokens -= removed.shape[0]
+                self._encode_cache_bytes -= removed.numel() * removed.element_size()
+                eviction_count += 1
+            tokens = self._encode_cache_tokens
+            size_bytes = self._encode_cache_bytes
+        self._report_encode_cache_metrics(
+            tokens,
+            size_bytes,
+            (
+                AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC
+                if eviction_count
+                else None
+            ),
+            eviction_count,
+        )
+
+    @staticmethod
+    def _report_encode_cache_metrics(
+        tokens: int, size_bytes: int, metric=None, count: int = 1
+    ):
+        tags = {"cache_type": "v41_encode"}
+        try:
+            if metric is not None:
+                kmonitor.report(metric, count, tags)
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens, tags
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes, tags
+            )
+        except Exception:
+            logging.exception("Failed to report DeepSeek-V4.1 encode cache metrics")
 
     @torch.inference_mode()
     def _encode_image_compute(self, image: V41ImageInput) -> torch.Tensor:

@@ -5,10 +5,13 @@ The formulas and four token types follow HF revision
 """
 
 import base64
+import contextlib
 import hashlib
 import io
 import json
+import logging
 import math
+import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -17,13 +20,52 @@ import torch
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
+from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.vit_metrics import (
+    collect_vit_preprocess_metrics,
+    record_vit_preprocess_value,
+    vit_preprocess_timer,
+)
 
 register_heif_opener()
 
 TEXT = -1
 IMAGE_START, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(4)
 IMAGE_PLACEHOLDER = "<\uff5cdeepseek_image\uff5c>"
+_METRIC_TAGS = {"model": "deepseek_v41", "mm_type": "image"}
+
+
+@contextlib.contextmanager
+def _report_preprocess_metrics():
+    from rtp_llm.multimodal.multimodal_util import collect_download_timing
+
+    start_ns = time.monotonic_ns()
+    with collect_vit_preprocess_metrics() as metrics, collect_download_timing() as download:
+        try:
+            yield
+        finally:
+            total_ms = (time.monotonic_ns() - start_ns) / 1_000_000.0
+            download_ms = max(0.0, min(download.elapsed_ms, total_ms))
+            # This path runs in the frontend; retain the reporter's actual role tags.
+            try:
+                for sample in metrics.samples:
+                    kmonitor.report(sample.metric, sample.value, sample.tags)
+                kmonitor.report(
+                    GaugeMetrics.VIT_PREPROCESS_RT_METRIC, total_ms, _METRIC_TAGS
+                )
+                kmonitor.report(
+                    GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms, _METRIC_TAGS
+                )
+                kmonitor.report(
+                    GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC,
+                    max(0.0, total_ms - download_ms),
+                    _METRIC_TAGS,
+                )
+            except Exception:
+                logging.exception(
+                    "Failed to report DeepSeek-V4.1 preprocessing metrics"
+                )
 
 
 @dataclass(frozen=True)
@@ -155,22 +197,37 @@ def plan_image_grid(width: int, height: int, config: V41ImageProcessorConfig):
 
 
 def preprocess_image(image: Image.Image, config: V41ImageProcessorConfig):
-    image = image.convert("RGB")
-    llm_h, llm_w, best_height, best_width = plan_image_grid(
-        image.width, image.height, config
+    # Pillow decodes lazily; conversion must be inside the decode timer.
+    with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, _METRIC_TAGS):
+        image = image.convert("RGB")
+    return _preprocess_rgb_image(image, config)
+
+
+def _preprocess_rgb_image(image: Image.Image, config: V41ImageProcessorConfig):
+    with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, _METRIC_TAGS):
+        llm_h, llm_w, best_height, best_width = plan_image_grid(
+            image.width, image.height, config
+        )
+        patch = config.vision_patch_size
+        vit_h, vit_w = best_height // patch, best_width // patch
+        image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
+    record_vit_preprocess_value(
+        GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+        best_height * best_width,
+        _METRIC_TAGS,
     )
-    patch = config.vision_patch_size
-    vit_h, vit_w = best_height // patch, best_width // patch
-    image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
-    values = (
-        torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
-    )
-    values = ((values - 0.5) / 0.5).to(torch.bfloat16)
-    patches = (
-        values.reshape(3, vit_h, patch, vit_w, patch)
-        .permute(1, 3, 0, 2, 4)
-        .reshape(vit_h * vit_w, 3, patch, patch)
-    )
+    with vit_preprocess_timer(
+        GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, _METRIC_TAGS
+    ):
+        values = (
+            torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
+        )
+        values = ((values - 0.5) / 0.5).to(torch.bfloat16)
+        patches = (
+            values.reshape(3, vit_h, patch, vit_w, patch)
+            .permute(1, 3, 0, 2, 4)
+            .reshape(vit_h * vit_w, 3, patch, patch)
+        )
     return patches, vit_h, vit_w, llm_h, llm_w
 
 
@@ -246,36 +303,49 @@ def prepare_vl_inputs_from_token_ids(
         raise ValueError(
             "image placeholder count does not match the supplied image records"
         )
-    tokens, token_types, image_inputs = [], [], []
-    records = iter(images)
-    for token in prompt_tokens:
-        if token != config.image_token_id:
-            tokens.append(token)
-            token_types.append(TEXT)
-            continue
-        data = load_image_bytes(next(records), url_loader=url_loader)
-        if max_image_bytes is not None and len(data) > max_image_bytes:
-            raise ValueError("Multimodal file size is too large")
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)
-        except (OSError, Image.DecompressionBombError) as error:
-            raise ValueError(MMErr.IMG_OPEN) from error
-        types = image_token_types(llm_h, llm_w)
-        image_inputs.append(
-            V41ImageInput(
-                len(tokens),
-                patches,
-                vit_h,
-                vit_w,
-                types,
-                hashlib.sha256(data).hexdigest(),
-                config.identity,
-                source_bytes=data if retain_source_bytes else b"",
-            )
-        )
-        tokens.extend([config.image_token_id] * types.numel())
-        token_types.extend(types.tolist())
-    return V41PreparedInputs(
-        prompt, tuple(tokens), tuple(token_types), tuple(image_inputs)
+    metrics_context = (
+        _report_preprocess_metrics() if len(images) else contextlib.nullcontext()
     )
+    with metrics_context:
+        tokens, token_types, image_inputs = [], [], []
+        records = iter(images)
+        for token in prompt_tokens:
+            if token != config.image_token_id:
+                tokens.append(token)
+                token_types.append(TEXT)
+                continue
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
+            ):
+                data = load_image_bytes(next(records), url_loader=url_loader)
+            if max_image_bytes is not None and len(data) > max_image_bytes:
+                raise ValueError("Multimodal file size is too large")
+            try:
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, _METRIC_TAGS
+                ):
+                    with Image.open(io.BytesIO(data)) as source:
+                        image = source.convert("RGB")
+                patches, vit_h, vit_w, llm_h, llm_w = _preprocess_rgb_image(
+                    image, config
+                )
+            except (OSError, Image.DecompressionBombError) as error:
+                raise ValueError(MMErr.IMG_OPEN) from error
+            types = image_token_types(llm_h, llm_w)
+            image_inputs.append(
+                V41ImageInput(
+                    len(tokens),
+                    patches,
+                    vit_h,
+                    vit_w,
+                    types,
+                    hashlib.sha256(data).hexdigest(),
+                    config.identity,
+                    source_bytes=data if retain_source_bytes else b"",
+                )
+            )
+            tokens.extend([config.image_token_id] * types.numel())
+            token_types.extend(types.tolist())
+        return V41PreparedInputs(
+            prompt, tuple(tokens), tuple(token_types), tuple(image_inputs)
+        )
