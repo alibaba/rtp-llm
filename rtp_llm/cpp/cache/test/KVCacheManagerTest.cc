@@ -815,6 +815,28 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     EXPECT_EQ(linear_group_set_memberships, 1u);
 }
 
+TEST_F(KVCacheManagerTest, AuxiliaryPagedCacheReducesBlockBudget) {
+    ModelConfig model_config;
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.head_num         = 2;
+    model_config.attn_config.kv_head_num      = 2;
+    model_config.attn_config.size_per_head    = 16;
+    model_config.attn_config.tokens_per_block = 16;
+    model_config.kv_cache_spec_descs          = {{KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention}}};
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_mem_mb = 1;
+    const auto config = CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, kv_cache_config);
+    const auto baseline = CacheConfigCreator::computeLocalBlockNum(
+        config, model_config, RuntimeConfig{}, kv_cache_config, ParallelismConfig{});
+    model_config.auxiliary_paged_cache_bytes_per_block = 1024;
+    const auto with_aux = CacheConfigCreator::computeLocalBlockNum(
+        config, model_config, RuntimeConfig{}, kv_cache_config, ParallelismConfig{});
+    EXPECT_LT(with_aux, baseline);
+    EXPECT_LE(static_cast<size_t>(with_aux) * (config.blockSizeBytesForGroup("full") + 1024), 1024u * 1024u);
+}
+
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
     auto expect_pool_backing = [](RoleType role_type) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);

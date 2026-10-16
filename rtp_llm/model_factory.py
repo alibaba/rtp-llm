@@ -31,6 +31,7 @@ from rtp_llm.ops import (
     TaskType,
     VitSeparation,
 )
+from rtp_llm.utils.import_util import load_external_model_packages
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -278,6 +279,14 @@ class ModelFactory:
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+        if model_config.model_type == "atom_qwen4_exp":
+            # ATOM's Qwen4Exp target must export the complete HC state for its
+            # one-layer MTP drafter; ordinary requests keep the mixed-only path.
+            model_config.atom_qwen4_exp_mtp_target = (
+                engine_config.sp_config.type == SpeculativeType.MTP
+                and propose_model_config is not None
+                and propose_model_config.model_type == "atom_qwen4_exp_mtp"
+            )
 
         model = ModelFactory._create_model(
             model_config=model_config,
@@ -358,6 +367,7 @@ class ModelFactory:
         Returns:
             ModelConfig instance for the main model
         """
+        load_external_model_packages(model_args.external_model_packages)
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
         model_config = model_cls._create_config(model_args.ckpt_path)
         build_model_config(

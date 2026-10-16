@@ -85,7 +85,7 @@ mask_logits(const int batch_size, const int vocab_size, T* logits_batch, const u
     }
 }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 template<typename T>
 __global__ void packed_mask_logits(T* __restrict__ logits_batch,
                                    const int32_t* __restrict__ packed_allow_mask,
@@ -145,7 +145,7 @@ void invokeMaskLogits(T* logits_batch,
     check_cuda_error();
 }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 template<typename T>
 void invokePackedMaskLogits(T* logits_batch,
                             const int32_t* __restrict__ packed_allow_mask,
@@ -191,7 +191,7 @@ template void invokeMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                               const int    vocab_size,
                                               cudaStream_t stream);
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 template void invokePackedMaskLogits<float>(float* logits_batch,
                                             const int32_t* __restrict__ packed_allow_mask,
                                             const int32_t* __restrict__ row_indices,
