@@ -36,6 +36,9 @@ class CacheGeometryTest(unittest.TestCase):
         )
         engine.kv_cache_config.seq_size_per_block = 512
         engine.kv_cache_config.kernel_seq_size_per_block = 256
+        # The real flow copies the resolved CLI span into attn_config, and the
+        # snapshot mirrors resolveSeqSizes which reads it from there.
+        model.attn_config.tokens_per_block = 512
         engine.sp_config.gen_num_per_cycle = 3
         self.assertEqual(
             cache_geometry_snapshot(model, engine, speculative=True),
@@ -46,6 +49,51 @@ class CacheGeometryTest(unittest.TestCase):
             ),
         )
         self.assertEqual(first["gen_num_per_cycle"], 0)
+
+    def test_resolution_matches_cpp_when_kernel_equals_seq(self):
+        # CLI --kernel_seq_size_per_block=64 with the default seq=64: DSv4
+        # promotes kernel==seq==64 to 256 before preflight, and the snapshot
+        # must agree with CacheConfigCreator::resolveSeqSizes.
+        model = SimpleNamespace(
+            attn_config=SimpleNamespace(
+                tokens_per_block=256, kernel_tokens_per_block=256
+            )
+        )
+        engine = SimpleNamespace(
+            kv_cache_config=SimpleNamespace(
+                seq_size_per_block=64, kernel_seq_size_per_block=64
+            ),
+            sp_config=SimpleNamespace(gen_num_per_cycle=0),
+        )
+        self.assertEqual(
+            cache_geometry_snapshot(model, engine, speculative=False),
+            dict(
+                physical_tokens_per_block=256,
+                kernel_tokens_per_block=256,
+                gen_num_per_cycle=0,
+            ),
+        )
+
+    def test_distinct_kernel_is_kept(self):
+        model = SimpleNamespace(
+            attn_config=SimpleNamespace(
+                tokens_per_block=512, kernel_tokens_per_block=64
+            )
+        )
+        engine = SimpleNamespace(
+            kv_cache_config=SimpleNamespace(
+                seq_size_per_block=512, kernel_seq_size_per_block=64
+            ),
+            sp_config=SimpleNamespace(gen_num_per_cycle=0),
+        )
+        self.assertEqual(
+            cache_geometry_snapshot(model, engine, speculative=False),
+            dict(
+                physical_tokens_per_block=512,
+                kernel_tokens_per_block=64,
+                gen_num_per_cycle=0,
+            ),
+        )
 
 
 @unittest.skipIf(torch is None, "requires Torch and native cache descriptors")

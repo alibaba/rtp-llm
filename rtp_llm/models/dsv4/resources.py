@@ -2,12 +2,19 @@
 
 
 def cache_geometry_snapshot(model_config, engine_config, *, speculative):
-    """Use the same resolved inputs as HybridPoolConfigCreator, without Torch."""
+    """Use the same resolved inputs as HybridPoolConfigCreator, without Torch.
+
+    Mirrors CacheConfigCreator::resolveSeqSizes: the model-side attn config
+    holds the post-promotion geometry and wins when set; raw KVCacheConfig
+    values are the fallback for callers without resolved model geometry.
+    """
     config = engine_config.kv_cache_config
-    physical = int(config.seq_size_per_block)
-    if physical <= 0 or physical == 64:
-        physical = int(model_config.attn_config.tokens_per_block)
-    kernel = int(config.kernel_seq_size_per_block)
+    physical = int(model_config.attn_config.tokens_per_block)
+    if physical <= 0:
+        physical = int(config.seq_size_per_block)
+    kernel = int(getattr(model_config.attn_config, "kernel_tokens_per_block", 0) or 0)
+    if kernel <= 0:
+        kernel = int(config.kernel_seq_size_per_block)
     if kernel <= 0:
         kernel = physical
     return {
