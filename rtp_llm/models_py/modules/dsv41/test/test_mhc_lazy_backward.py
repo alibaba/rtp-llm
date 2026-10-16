@@ -9,6 +9,105 @@ import torch
 
 
 class MHCLazyBackwardTest(unittest.TestCase):
+    def test_delayed_big_fuse_optional_deepgemm_gate(self):
+        from rtp_llm.models_py.modules.dsv41.hc import v41_prenorm
+        from rtp_llm.models_py.modules.dsv41.hc.delayed import can_fuse_big_pre
+
+        with patch.dict("os.environ", {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"}):
+            with patch.object(v41_prenorm, "_has_prenorm_gemm", return_value=False):
+                self.assertFalse(can_fuse_big_pre())
+        with patch.dict("os.environ", {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"}):
+            self.assertTrue(can_fuse_big_pre())
+
+    def test_delayed_prefill_big_fuse_matches_separate_chain(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("requires Blackwell CUDA")
+        from rtp_llm.models_py.modules.dsv41.hc.delayed import _tile_ops
+
+        ops = _tile_ops()
+        torch.manual_seed(17)
+        fn = torch.randn(24, 20480, device="cuda") / 20480**0.5
+        scale = torch.randn(3, device="cuda") * 0.1
+        base = torch.randn(24, device="cuda") * 0.1
+        with torch.inference_mode():
+            for rows in (1, 32, 64, 65, 2048):
+                residual = torch.randn(
+                    1, rows, 4, 5120, device="cuda", dtype=torch.bfloat16
+                )
+                previous = torch.randn(1, rows, 4, device="cuda")
+                mixes = ops.mhc_pre_norm_fn(residual, fn, None, 1e-6, n_splits=1)
+                pre, post, comb = ops.mhc_pre_split_mixes(
+                    mixes, scale, base, 4, 2.0, 1e-6
+                )
+                comb = ops.sinkhorn_normalize(comb, repeat=20, eps=1e-6)
+                readout = ops.mhc_pre_apply_mix(
+                    residual, previous.unsqueeze(-1).contiguous()
+                )
+                fused = ops.mhc_pre_big_fuse(
+                    residual,
+                    fn,
+                    scale,
+                    base,
+                    1e-6,
+                    1e-6,
+                    1e-6,
+                    2.0,
+                    20,
+                    previous_pre_mix=previous,
+                )
+                for expected, actual in zip((pre, post, comb), fused[:3]):
+                    torch.testing.assert_close(
+                        actual.reshape(-1), expected.reshape(-1), rtol=1e-5, atol=1e-5
+                    )
+                torch.testing.assert_close(fused[3], readout, rtol=0, atol=0)
+
+    def test_delayed_small_pre_uses_fused_path(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("requires Blackwell CUDA")
+        from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit, _tile_ops
+        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
+            _has_prenorm_gemm,
+            prepare_tf32_weight,
+        )
+
+        torch.manual_seed(29)
+        fn = torch.randn(24, 20480, device="cuda") / 20480**0.5
+        base = torch.randn(24, device="cuda") * 0.1
+        scale = torch.randn(3, device="cuda") * 0.1
+        kwargs = dict(
+            dim=5120, hc_mult=4, hc_sinkhorn_iters=20, norm_eps=1e-6, hc_eps=1e-6
+        )
+        previous = DelayedHCUnit(fn, base, scale, **kwargs)
+        unit = DelayedHCUnit(fn, base, scale, **kwargs)
+        unit.set_previous(previous)
+        ops = _tile_ops()
+        with torch.inference_mode():
+            for rows in (1, 64):
+                x = torch.randn(1, rows, 4, 5120, device="cuda", dtype=torch.bfloat16)
+                previous.pre_mix_out = torch.randn(1, rows, 4, device="cuda")
+                with patch(
+                    "rtp_llm.models_py.modules.dsv41.hc.delayed.can_fuse_big_pre",
+                    return_value=False,
+                ):
+                    expected = unit.pre(x)
+                with patch.dict(
+                    "os.environ", {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"}
+                ):
+                    with patch.object(
+                        ops, "mhc_pre_big_fuse", wraps=ops.mhc_pre_big_fuse
+                    ) as fused:
+                        actual = unit.pre(x)
+                fused.assert_called_once()
+                if _has_prenorm_gemm():
+                    self.assertEqual(fused.call_args.kwargs["gemm_backend"], "deepgemm")
+                    self.assertEqual(
+                        fused.call_args.args[1].data_ptr(),
+                        prepare_tf32_weight(unit.fn).data_ptr(),
+                    )
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                for got, ref in zip(actual[1:], expected[1:]):
+                    torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)
+
     def load_kernels(self, name, kernels):
         root = Path(__file__).resolve().parents[3] / "3rdparty/tile_kernels"
         kernel = types.ModuleType(f"_test_tile.mhc.{name}_kernel")
