@@ -127,3 +127,14 @@ def test_parent_sigkill_closes_owner_pipe_and_reclaims_workload_group(tmp_path):
                 os.killpg(group, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize('callback,stop', [(lambda:None,None), (lambda d:None,lambda d:None)])
+def test_cleanup_signatures_are_rejected_at_registration_without_acquisition(callback,stop):
+    ctx=ResourceScope(time.monotonic,time.sleep,False)
+    with pytest.raises(ValueError,match='positional arguments'):
+        ctx.add_cleanup('bad',callback,request_stop=stop)
+    assert ctx._cleanup==[]
+    with pytest.raises(ValueError,match='positional arguments'):
+        ctx.register_resource('bad',object(),cleanup=callback,request_stop=stop)
+    assert ctx.resource_count==0 and ctx._cleanup==[]

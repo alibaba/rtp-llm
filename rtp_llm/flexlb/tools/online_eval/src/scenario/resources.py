@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from scenario.contracts import ResourceHandle
+from case_api.call_contract import validate_call
 from runtime.deadline import Deadline, interruptible
 
 
@@ -12,6 +13,13 @@ class CleanupAction:
     callback: object
     request_stop: object = None
     state: str = "ACTIVE"
+
+
+def _cleanup_action(name, callback, request_stop):
+    validate_call(callback, 1, 'cleanup.' + name)
+    if request_stop is not None:
+        validate_call(request_stop, 0, 'cleanup.' + name + '.request_stop')
+    return CleanupAction(name, callback, request_stop)
 
 
 class ResourceScope:
@@ -28,7 +36,7 @@ class ResourceScope:
         return value
 
     def add_cleanup(self, name, callback, *, request_stop=None):
-        self._cleanup.append(CleanupAction(name, callback, request_stop))
+        self._cleanup.append(_cleanup_action(name, callback, request_stop))
 
     @property
     def resource_count(self):
@@ -51,11 +59,12 @@ class ResourceScope:
         handle = ResourceHandle(
             kind, f"resource_{len(self._resources) + 1}", self.env_epoch
         ).to_dict()
+        action = _cleanup_action(handle['id'], cleanup, request_stop) if cleanup is not None else None
         self._resources[handle["id"]] = (handle, value, historical)
         if evidence is not None:
             self._evidence_exporters[handle["id"]] = evidence
-        if cleanup is not None:
-            self.add_cleanup(handle["id"], cleanup, request_stop=request_stop)
+        if action is not None:
+            self._cleanup.append(action)
         return dict(handle)
 
     def resource(self, value, kind, allow_stale=False):
