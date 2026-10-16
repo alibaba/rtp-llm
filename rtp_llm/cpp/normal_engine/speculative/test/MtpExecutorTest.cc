@@ -72,18 +72,19 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
     auto         input_lengths = torch::tensor({3683}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     TensorHolder holder;
-    auto         snapshot = MtpExecutor::snapshotMutableHostInputToCuda(input_lengths, holder);
+    auto         snapshot = MtpExecutor::snapshotMutableHostInput(input_lengths, holder);
 
-    ASSERT_TRUE(snapshot.is_cuda());
+    ASSERT_FALSE(snapshot.is_cuda());
+    ASSERT_TRUE(snapshot.is_pinned());
     ASSERT_EQ(holder.tensors.size(), 1);
     ASSERT_TRUE(holder.tensors.front().is_pinned());
     ASSERT_NE(holder.tensors.front().data_ptr(), input_lengths.data_ptr());
     input_lengths.fill_(922);
     EXPECT_EQ(holder.tensors.front().item<int32_t>(), 3683);
-    EXPECT_EQ(snapshot.cpu().item<int32_t>(), 3683);
+    EXPECT_EQ(snapshot.item<int32_t>(), 3683);
 
     auto device_input    = input_lengths.to(torch::kCUDA);
-    auto device_snapshot = MtpExecutor::snapshotMutableHostInputToCuda(device_input, holder);
+    auto device_snapshot = MtpExecutor::snapshotMutableHostInput(device_input, holder);
     EXPECT_EQ(device_snapshot.data_ptr(), device_input.data_ptr());
     EXPECT_EQ(holder.tensors.size(), 1);
 }

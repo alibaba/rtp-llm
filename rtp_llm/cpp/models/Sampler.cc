@@ -21,8 +21,33 @@ Sampler::Sampler(const SamplerInitParams& params):
     }
 }
 
+Sampler::~Sampler() {
+    try {
+        waitGreedySamplingBufferEvents();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("failed to drain sampler staging buffers: %s", e.what());
+    }
+}
+
+void Sampler::retirePendingGreedySamplingBuffers() {
+    pending_greedy_sampling_slots_.erase(
+        std::remove_if(pending_greedy_sampling_slots_.begin(),
+                       pending_greedy_sampling_slots_.end(),
+                       [](const GreedySamplingBufferSlot& slot) { return slot.ready_event->query(); }),
+        pending_greedy_sampling_slots_.end());
+}
+
 void Sampler::allocateGreedySamplingBuffers(size_t max_batch_size) {
+#if USING_CUDA
+    retirePendingGreedySamplingBuffers();
+    for (auto& slot : greedy_sampling_buffer_slots_) {
+        if (slot.ready_event && !slot.ready_event->query()) {
+            pending_greedy_sampling_slots_.push_back(std::move(slot));
+        }
+    }
+#else
     waitGreedySamplingBufferEvents();
+#endif
     max_batch_size_ = max_batch_size;
     auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
     for (auto& slot : greedy_sampling_buffer_slots_) {
@@ -39,8 +64,8 @@ void Sampler::ensureGreedySamplingBuffers(size_t batch_size) {
     if (batch_size <= max_batch_size_) {
         return;
     }
-    // Fixed users fail fast on impossible batch sizes. Dynamic users wait for all
-    // pending slot events before rebuilding every slot together.
+    // Fixed users fail fast on impossible batch sizes. Dynamic users retain
+    // in-flight slots while rebuilding the larger buffers.
     RTP_LLM_CHECK_WITH_INFO(!fixed_max_batch_size_,
                             "sampler batch size [%lu] exceeds initialized max batch size [%lu]",
                             batch_size,
@@ -56,13 +81,29 @@ void Sampler::waitGreedySamplingBufferEvents() {
             slot.ready_event.reset();
         }
     }
+    for (auto& slot : pending_greedy_sampling_slots_) {
+        slot.ready_event->synchronize();
+    }
+    pending_greedy_sampling_slots_.clear();
 }
 
 GreedySamplingBuffers& Sampler::nextGreedySamplingBuffers(size_t batch_size) {
     ensureGreedySamplingBuffers(batch_size);
     auto& slot = greedy_sampling_buffer_slots_[greedy_sampling_buffer_index_];
     if (slot.ready_event) {
+#if USING_CUDA
+        retirePendingGreedySamplingBuffers();
+        if (!slot.ready_event->query()) {
+            pending_greedy_sampling_slots_.push_back(std::move(slot));
+            auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+            slot.buffers    = {torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                               torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                               torch::empty({(int64_t)max_batch_size_}, pinned_i64),
+                               max_batch_size_};
+        }
+#else
         slot.ready_event->synchronize();
+#endif
         slot.ready_event.reset();
     }
     current_greedy_sampling_slot_ = &slot;

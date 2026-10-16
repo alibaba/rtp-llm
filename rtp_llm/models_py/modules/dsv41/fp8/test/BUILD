@@ -26,6 +26,7 @@ _TESTS = [
     "test_v41_flash_mla_cache_format",
     "test_v41_fp4_transport",
     "test_v41_global_overlap",
+    "test_v41_host_swa_metadata",
     "test_v41_grouped_gemm",
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
@@ -59,6 +60,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_host_swa_metadata",
     "test_v41_sparse_decode",
     "test_v41_decode_topk",
     "test_v41_decode_indexer",

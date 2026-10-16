@@ -28,6 +28,64 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_prefill_host_plan_keeps_gathered_rows_and_is_shared_only_in_forward(self):
+        host = torch.tensor([[2, 7], [9, 2]], dtype=torch.int32)
+        table = host.clone()
+        cp = object()
+        requests = torch.tensor([1, -1, 0, 1], dtype=torch.int32)
+        positions = torch.tensor([11, -1, 3, 12], dtype=torch.int32)
+        ends = torch.tensor([4, 13], dtype=torch.int32)
+        attn = SimpleNamespace(
+            _cp_ctx=cp,
+            _swa_cp_byte_sliced=lambda: True,
+            _pool_raw_u8=lambda _: torch.empty(13, 4096, dtype=torch.uint8),
+        )
+        planned = (object(), object())
+        cache = {}
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata.try_host_slot_metadata",
+                return_value=planned,
+            ) as planner,
+            patch.object(
+                dspark_model_module,
+                "compute_swa_slot_mapping_from_positions",
+                side_effect=AssertionError("synchronous compaction fallback"),
+            ),
+        ):
+            for _ in range(3):
+                result = DeepSeekV4DSparkModel._commit_slot_metadata(
+                    attn,
+                    table,
+                    requests,
+                    positions,
+                    ends,
+                    136,
+                    512,
+                    cache,
+                    host_block_table=host,
+                )
+                self.assertIs(result, planned)
+            planner.assert_called_once()
+            args, kwargs = planner.call_args
+            self.assertIs(args[0], table)
+            self.assertIs(args[1], host)
+            self.assertIs(args[2], cp)
+            self.assertIs(kwargs["request_ids"], requests)
+            self.assertIs(kwargs["positions"], positions)
+            DeepSeekV4DSparkModel._commit_slot_metadata(
+                attn,
+                table,
+                requests,
+                positions,
+                ends,
+                136,
+                512,
+                {},
+                host_block_table=host,
+            )
+            self.assertEqual(planner.call_count, 2)
+
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(
@@ -411,9 +469,11 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         cp_inputs = SimpleNamespace(
             attention_inputs=SimpleNamespace(
                 context_parallel_info=SimpleNamespace(
-                    prefill_qkv_padding_mask=torch.ones(4, dtype=torch.bool)
+                    prefill_qkv_padding_mask=torch.ones(4, dtype=torch.bool),
+                    prefill_prefix_lengths_cpu=torch.tensor([10], dtype=torch.int32),
                 ),
                 prefix_lengths=torch.tensor([10], dtype=torch.int32),
+                input_lengths_device=torch.tensor([2], dtype=torch.int32),
             )
         )
 
@@ -430,6 +490,14 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertIs(commit_ctx, cp_ctx)
         # The ctx is derived from THIS forward's metadata, sized by its rows.
         self.assertEqual(build_mock.call_args.args[3], 2)
+        self.assertIs(
+            build_mock.call_args.kwargs["prefix_lengths_host"],
+            cp_inputs.attention_inputs.context_parallel_info.prefill_prefix_lengths_cpu,
+        )
+        self.assertIs(
+            build_mock.call_args.kwargs["chunk_lengths_device"],
+            cp_inputs.attention_inputs.input_lengths_device,
+        )
 
         # A dense forward (no CP-split prefill stream) uses the packed layout
         # even on a CP-enabled engine.

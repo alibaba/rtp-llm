@@ -116,6 +116,7 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_tagged_attention_inputs,
     build_block_tables_batched,
     create_tagged_cache_store_writer,
+    device_attention_metadata,
     host_block_tables,
 )
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, permits_ced
@@ -406,11 +407,13 @@ def forward_layers(
                 cp_rank,
                 int(input_ids.size(0)),
                 input_ids.device,
-                prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
+                prefix_lengths=device_attention_metadata(attn_inputs, "prefix_lengths"),
                 prefix_lengths_host=getattr(
                     cp_info, "prefill_prefix_lengths_cpu", None
                 ),
-                chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
+                chunk_lengths_device=device_attention_metadata(
+                    attn_inputs, "input_lengths"
+                ),
                 kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
             )
     with _profiler.record_function_range("dsv4.prefill.propagate_cp_context"):
@@ -538,10 +541,10 @@ def forward_layers(
             prefix_lengths: Optional[torch.Tensor] = None
             max_seqlen_q = 0
             if attn_inputs is not None:
-                il = getattr(attn_inputs, "input_lengths", None)
+                il = device_attention_metadata(attn_inputs, "input_lengths")
                 if il is not None and il.numel() > 0:
                     input_lengths = il.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device, dtype=torch.int32, non_blocking=True
                     ).contiguous()
                     max_seqlen_q = (
                         max(cp_ctx.chunk_lengths_per_req)
@@ -549,10 +552,10 @@ def forward_layers(
                         and cp_ctx.chunk_lengths_per_req is not None
                         else int(input_lengths.max().item())
                     )
-                pl = getattr(attn_inputs, "prefix_lengths", None)
+                pl = device_attention_metadata(attn_inputs, "prefix_lengths")
                 if pl is not None and pl.numel() > 0:
                     prefix_lengths = pl.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device, dtype=torch.int32, non_blocking=True
                     ).contiguous()
             # The workspace was allocated at function entry, before
             # embedding could fragment its cached address range.  It remains a
@@ -887,17 +890,23 @@ def forward_prefill(
 
     cu_seqlens = attn.cu_seqlens
     device_cu = attn.cu_seqlens_device
-    capturing = input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
-    if (capturing or cu_seqlens is None or cu_seqlens.numel() < 2) and (
-        device_cu is not None and device_cu.numel() >= 2
+    if (
+        device_cu is not None
+        and device_cu.numel() >= 2
+        and device_cu.device == input_ids.device
     ):
         cu_seqlens = device_cu
     lengths = attn.input_lengths_device
     if lengths is None or lengths.numel() == 0:
         lengths = attn.input_lengths
-    cu_seqlens = _resolve_prefill_cu_seqlens(
-        cu_seqlens, lengths, input_ids.device if capturing else torch.device("cpu")
-    )
+    # Eager prefill and graph capture consume the same device boundaries. The
+    # native host mirror remains available for host-only shape decisions; do
+    # not send already-uploaded boundaries back to CPU between target kernels.
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        cu_seqlens = cu_seqlens.to(input_ids.device, non_blocking=True)
+    elif lengths is not None:
+        lengths = lengths.to(input_ids.device, non_blocking=True)
+    cu_seqlens = _resolve_prefill_cu_seqlens(cu_seqlens, lengths, input_ids.device)
     positions = inputs.combo_position_ids
     # warmup / cudagraph capture path doesn't populate position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)

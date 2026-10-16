@@ -19,7 +19,7 @@ namespace rtp_llm {
 class Sampler {
 public:
     Sampler(const SamplerInitParams& params);
-    ~Sampler() {};
+    ~Sampler();
 
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
@@ -28,6 +28,7 @@ private:
     void                                  ensureGreedySamplingBuffers(size_t batch_size);
     void                                  allocateGreedySamplingBuffers(size_t max_batch_size);
     void                                  waitGreedySamplingBufferEvents();
+    void                                  retirePendingGreedySamplingBuffers();
     GreedySamplingBuffers&                nextGreedySamplingBuffers(size_t batch_size);
     void                                  markGreedySamplingBufferReady();
 
@@ -36,8 +37,8 @@ private:
         std::shared_ptr<torch::Event> ready_event;
     };
 
-    // Rotate across forward calls and wait on a per-slot event before reuse so async host-to-device
-    // copies have consumed the pinned host buffers before the CPU overwrites them.
+    // Rotate across forward calls. Pending slots retain their immutable host
+    // sources until the upload event completes; reuse never blocks serving.
     static constexpr size_t kGreedySamplingBufferSlots = 3;
 
     bool                                                             fixed_max_batch_size_         = false;
@@ -45,6 +46,7 @@ private:
     size_t                                                           greedy_sampling_buffer_index_ = 0;
     GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
     std::array<GreedySamplingBufferSlot, kGreedySamplingBufferSlots> greedy_sampling_buffer_slots_;
+    std::vector<GreedySamplingBufferSlot>                            pending_greedy_sampling_slots_;
     std::atomic<bool>                                                forward_in_progress_{false};
     cuda_graph::GraphStream                                          copy_stream_;
 };
