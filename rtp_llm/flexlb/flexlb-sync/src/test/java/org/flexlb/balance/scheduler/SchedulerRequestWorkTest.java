@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -313,7 +314,7 @@ class SchedulerRequestWorkTest {
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
                 org.mockito.Mockito.mock(DeliveryDispatcher.class), service,
-                org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+                org.mockito.Mockito.mock(EngineGrpcClient.class));
     }
 
     private static void close(SchedulerRuntime runtime) {

@@ -595,7 +595,7 @@ public class MetricConstant {
      * of the cancelled request, raw 1-100 value — matches the rest of the
      * auto_tpm family; "0" = not inflight / no budget), reason
      * (PRIORITY_PREEMPTED / USER_CANCELLED / DEADLINE_EXCEEDED). Counted
-     * once per cancel intent injected into the EngineCancelChannel: the
+     * once per cancel intent injected into the EngineGrpcClient: the
      * preemption path and the Frontend-initiated cancel path.
      */
     public static final String AUTO_TPM_CANCEL_QPS = "auto_tpm.cancel.qps";

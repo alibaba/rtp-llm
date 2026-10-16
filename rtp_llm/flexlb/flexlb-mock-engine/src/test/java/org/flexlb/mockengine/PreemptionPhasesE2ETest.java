@@ -1,8 +1,7 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -31,7 +30,7 @@ import static org.mockito.Mockito.verify;
  * <ul>
  *   <li>A1 Prefill 优先级插队 — 保留低优请求，不再为 token 配额驱逐；</li>
  *   <li>A2 Decode queued reservation 撤回 — 低优请求重新排队，容量先交给高优请求；</li>
- *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
+ *   <li>A3 accepted 让位 — 真实 MockEngineClients，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
  * </ul>

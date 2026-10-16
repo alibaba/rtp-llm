@@ -193,7 +193,7 @@ public abstract class FlexLBMockTestBase {
                 configService,
                 dispatcher,
                 reporter,
-                createRequestSchedulerReporter(), new org.flexlb.balance.eviction.GrpcEngineCancelChannel(grpcClient));
+                createRequestSchedulerReporter(), grpcClient);
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 

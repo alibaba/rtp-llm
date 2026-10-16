@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
@@ -21,6 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -32,11 +31,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -70,8 +69,8 @@ class PdfusionSchedulingTest {
         AbstractRequestScheduler lifecycle = SchedulerTestSupport.create(service, reporter, requestReporter,
                 mock(RecentCacheKeyTraceReporter.class));
         PlacementAvailability availability = new PlacementAvailability();
-        var grpc = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
-        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyInt(), any()))
+        var grpc = mock(EngineGrpcClient.class);
+        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(call -> java.util.concurrent.CompletableFuture.completedFuture(
                         LinearDeliveryFixture.ack(call.getArgument(2))));
         DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, null, reporter, null);
@@ -99,7 +98,7 @@ class PdfusionSchedulingTest {
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         RequestWorkerSelector router = new RequestWorkerSelector(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class), org.mockito.Mockito.mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(SchedulingTestConfig.newConfig())), new DecodeSelector(directory, SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()), SchedulingTestConfig.capacity(SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()).loadBalanceConfig())), new VitWorkerSelector(directory), model);
         RequestScheduler scheduler = SchedulerTestSupport.configure(lifecycle, service.loadBalanceConfig(), router, reporter, mock(DecodeCapacityAcquirer.class), availability);
-        SchedulerRuntime runtime = new SchedulerRuntime(SchedulerTestSupport.repository(lifecycle), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+        SchedulerRuntime runtime = new SchedulerRuntime(SchedulerTestSupport.repository(lifecycle), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(EngineGrpcClient.class));
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);

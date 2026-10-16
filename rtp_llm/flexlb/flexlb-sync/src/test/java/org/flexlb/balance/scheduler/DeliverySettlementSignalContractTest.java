@@ -6,10 +6,10 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -29,6 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 
 /** Transport proof and sender exit cannot stand in for actual local P/D settlement. */
@@ -97,8 +99,8 @@ class DeliverySettlementSignalContractTest {
         final RequestContext context;
         final RequestRoute route;
         final DeliveryClaim claim;
-        final EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        final CompletableFuture<EngineCancelChannel.CancelAck> proof = new CompletableFuture<>();
+        final EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        final CompletableFuture<EngineGrpcClient.CancelReply> proof = new CompletableFuture<>();
         final CompletableFuture<Void> settled;
         final AtomicInteger cancelCalls = new AtomicInteger();
         final AtomicInteger releaseAttempts = new AtomicInteger();
@@ -119,11 +121,11 @@ class DeliverySettlementSignalContractTest {
                     mock(RequestSchedulerReporter.class), mock(RecentCacheKeyTraceReporter.class));
             runtime = scheduler.runtime;
             dispatcher = SchedulerTestSupport.dispatcher(runtime);
-            when(channel.cancel(any(), eq(ID), any(), anyLong())).thenAnswer(call -> {
+            when(channel.cancelAsync(any(), anyInt(), argThat(request -> request.getRequestId() == ID), anyLong())).thenAnswer(call -> {
                 cancelCalls.incrementAndGet();
                 return proof;
             });
-            ReflectionTestUtils.setField(runtime, "cancelChannel", channel);
+            ReflectionTestUtils.setField(runtime, "engineClient", channel);
             prefill = spy(EndpointTestSupport.unstartedPrefill(config,
                     WorkerStatus.createDiscovered(RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null),
                     dispatcher, scheduler));
@@ -201,7 +203,7 @@ class DeliverySettlementSignalContractTest {
             scheduler.cancel(ID, BATCH, CancelReason.CLIENT_CANCELLED);
             session = cleanupSession();
             assertFalse(settled.isDone());
-            proof.complete(EngineCancelChannel.CancelAck.REQUEST_CLEANED);
+            proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         }
 
         CompletableFuture<Void> cleanupSession() { return dispatcher.cleanupDelivery(claim, channel, runtime); }

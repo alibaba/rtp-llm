@@ -8,7 +8,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
@@ -152,7 +151,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             var availability = new PlacementAvailability();
             var directory = new EndpointRegistry(service, repository, reporter, dispatcher, availability);
             runtime = new SchedulerRuntime(repository, directory, reporter,
-                    mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineCancelChannel.class));
+                    mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineGrpcClient.class));
             owner = new QueuedRequestScheduler(config, mock(RequestWorkerSelector.class), reporter,
                     mock(DecodeCapacityAcquirer.class), runtime, availability,
                     new DecodeResources.AdmissionCapacity(64L, 90), mock(RecentCacheKeyTraceReporter.class));

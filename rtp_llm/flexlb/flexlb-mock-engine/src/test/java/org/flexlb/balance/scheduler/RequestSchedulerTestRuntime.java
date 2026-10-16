@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -21,6 +20,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -55,13 +55,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             DeliveryDispatcher delivery,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            EngineCancelChannel cancelChannel) {
+            EngineGrpcClient engineClient) {
         Objects.requireNonNull(delivery, "delivery");
         var capacity = new PlacementConfiguration().decodeAdmissionCapacity(configService);
         this.registry = new EndpointRegistry(configService, requests, deliveryReporter, delivery, placementAvailability);
         this.router = new BindingRouter(registry, configService, capacity);
         this.runtime = org.mockito.Mockito.spy(new SchedulerRuntime(requests, registry, deliveryReporter, requestReporter,
-                delivery, configService, cancelChannel));
+                delivery, configService, engineClient));
         var facilities = org.mockito.Mockito.spy(runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(runtime, "deliveries", facilities);
         // Keep transport and Dispatcher real; inject capacity pressure at its infrastructure owner.
@@ -76,7 +76,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             Runnable remove = (Runnable) invocation.callRealMethod();
             return (Runnable) () -> { deliveryListeners.remove(wake); remove.run(); };
         }).when(facilities).watchDeliveryCapacity(org.mockito.ArgumentMatchers.any());
-        this.decodeCapacity = new DecodeCapacityAcquirer(cancelChannel, requests, runtime, requestReporter, configService, capacity);
+        this.decodeCapacity = new DecodeCapacityAcquirer(engineClient, requests, runtime, requestReporter, configService, capacity);
         this.scheduler = PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
                 router, deliveryReporter, decodeCapacity, placementAvailability, capacity, new org.flexlb.service.RecentCacheKeyTraceReporter());
         runtime.registerScheduler(scheduler);

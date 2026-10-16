@@ -575,8 +575,7 @@ final class MockControlServer {
             // unchanged": no fences, no terminal records, no census branch).
             JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
             if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
-                // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
-                // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
+                // Outlive the HTTP test client's 500ms timeout (750ms > 500ms) so the
                 // client future times out, then answer 504. The cached
                 // thread pool keeps other control-plane requests responsive.
                 try {

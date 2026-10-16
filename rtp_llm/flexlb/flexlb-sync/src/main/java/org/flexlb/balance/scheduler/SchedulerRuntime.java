@@ -1,29 +1,20 @@
 package org.flexlb.balance.scheduler;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.delivery.BatchIdGenerator;
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.dao.route.RoleType;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.FunctionCounter;
-import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.flexlb.metric.SafeFlexMonitor;
-import org.flexlb.constant.MetricConstant;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.core.env.Environment;
 
 import java.util.Map;
 import java.util.Objects;
@@ -34,13 +25,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -74,7 +58,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         deliveries.configureBatchIds(environment);
     }
 
-    private final EngineCancelChannel cancelChannel;
+    private final EngineGrpcClient engineClient;
     final ExecutorService deliveryCleanupExecutor = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("flexlb-delivery-cleanup-", 1).factory());
     private final ScheduledThreadPoolExecutor cleanupExecutor =
@@ -89,7 +73,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     }
 
     void startDeliveryCleanup(DeliveryClaim claim) {
-        dispatcher.cleanupDelivery(claim, cancelChannel, this);
+        dispatcher.cleanupDelivery(claim, engineClient, this);
     }
 
     private final ExecutorService requestWorkers = Executors.newFixedThreadPool(
@@ -319,16 +303,16 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             DeliveryDispatcher dispatcher, ConfigService config,
-            EngineCancelChannel cancelChannel) {
-        this(requests, endpoints, deliveryReporter, requestReporter, dispatcher, config, cancelChannel, System::currentTimeMillis);
+            EngineGrpcClient engineClient) {
+        this(requests, endpoints, deliveryReporter, requestReporter, dispatcher, config, engineClient, System::currentTimeMillis);
     }
 
     SchedulerRuntime(RequestRepository requests, EndpointRegistry endpoints, DeliveryMetricsReporter deliveryReporter,
                      RequestSchedulerReporter requestReporter, DeliveryDispatcher dispatcher,
                      ConfigService config,
-                     EngineCancelChannel cancelChannel, LongSupplier clock) {
+                     EngineGrpcClient engineClient, LongSupplier clock) {
         deliveries = new DeliveryExecution(config, this::recordFailure);
-        this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
+        this.engineClient = Objects.requireNonNull(engineClient, "engineClient");
         cleanupExecutor.setRemoveOnCancelPolicy(true);
         cleanupExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         cleanupExecutor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
