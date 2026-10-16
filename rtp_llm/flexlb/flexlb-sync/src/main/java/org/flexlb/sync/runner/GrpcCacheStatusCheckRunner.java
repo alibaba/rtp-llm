@@ -127,11 +127,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 throw failure;
             }
             rpc.whenComplete((response, failure) -> pollTrace.record(Stage.RPC_COMPLETED, failure))
-                    .thenApply(response -> {
-                        pollTrace.record(Stage.CONVERSION_STARTED);
-                        return convertCacheStatusResponse(response);
-                    })
-                    // Readiness precedes executor handoff; it is not an internal gRPC queue timestamp.
                     .whenComplete((response, failure) -> pollTrace.record(Stage.CALLBACK_READY, failure))
                     .handleAsync((response, failure) -> {
                         pollTrace.record(Stage.CALLBACK_STARTED);
@@ -148,7 +143,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                         .build();
                                 handleCacheStatusResponse(errorStatus, startTime);
                             } else {
-                                handleCacheStatusResponse(response, startTime);
+                                handleCacheStatusResponse(convertCacheStatusResponse(response), startTime);
                             }
                         } catch (Throwable callbackFailure) {
                             pollTrace.record(Stage.CALLBACK_FAILED, callbackFailure);
@@ -178,20 +173,30 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private CacheStatus convertCacheStatusResponse(EngineRpcService.CacheStatusPB response) {
-        if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
-                || !workerStatus.isActiveGeneration()) {
-            return CacheStatus.builder().message("stale worker generation").build();
+        var trace = pollLease.pollTrace();
+        trace.record(Stage.CONVERSION_STARTED);
+        try {
+            if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                    || !workerStatus.isActiveGeneration()) {
+                return CacheStatus.builder().message("stale worker generation").build();
+            }
+            WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+            CacheStatus previous = current.cacheStatus();
+            // Check before copying protobuf keys. Empty keys on an unchanged version
+            // mean "keep the indexed snapshot", not "clear this worker's cache".
+            if (!debug && current.indexInitialized() && previous != null
+                    && current.indexedVersion() == response.getVersion()
+                    && previous.getVersion() == response.getVersion()) {
+                return EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
+            }
+            return EngineStatusConverter.convertToCacheStatus(response);
+
+        } catch (RuntimeException | Error localFailure) {
+            trace.record(Stage.CONVERSION_FAILED, localFailure);
+            throw localFailure;
+        } finally {
+            trace.record(Stage.CONVERSION_COMPLETED);
         }
-        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
-        CacheStatus previous = current.cacheStatus();
-        // Check before copying protobuf keys. Empty keys on an unchanged version
-        // mean "keep the indexed snapshot", not "clear this worker's cache".
-        if (!debug && current.indexInitialized() && previous != null
-                && current.indexedVersion() == response.getVersion()
-                && previous.getVersion() == response.getVersion()) {
-            return EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
-        }
-        return EngineStatusConverter.convertToCacheStatus(response);
     }
 
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
@@ -210,52 +215,35 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             workerStatus.cacheMutationLock.lock();
             try {
                 pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ACQUIRED);
-                boolean updateRequired;
-                pollLease.pollTrace().record(Stage.CACHE_LOCK_ATTEMPT);
-                workerStatus.lock.lock();
-                try {
-                    pollLease.pollTrace().record(Stage.CACHE_LOCK_ACQUIRED);
-                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
-                            || !workerStatus.isActiveGeneration()) {
-                        pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
-                        return;
-                    }
-                    updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
-                    if (updateRequired) {
+                // Retirement may start after this check. Its cleanup waits for
+                // this cache lock, and retains this identity until cleanup succeeds.
+                if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                        || !workerStatus.isActiveGeneration()) {
+                    pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
+                    return;
+                }
+                boolean updateRequired = validateCacheStatusResponse(workerStatus, newCacheStatus);
+                if (updateRequired) {
+                    workerStatus.publishCacheStatus(newCacheStatus);
+                } else {
+                    WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
+                    if (current.indexInitialized() && current.cacheStatus() != null
+                            && current.indexedVersion() == newCacheStatus.getVersion()
+                            && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
                         workerStatus.publishCacheStatus(newCacheStatus);
-                    } else {
-                        WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
-                        if (current.indexInitialized() && current.cacheStatus() != null
-                                && current.indexedVersion() == newCacheStatus.getVersion()
-                                && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
-                            workerStatus.publishCacheStatus(newCacheStatus);
-                        }
                     }
-                } finally {
-                    workerStatus.lock.unlock();
-                    pollLease.pollTrace().record(Stage.CACHE_LOCK_RELEASED);
                 }
 
-                // Address-scoped index writes keep the cache lock, never the health lock.
                 WorkerCacheUpdateResult result = updateRequired && roleType.requiresCacheKeys()
                         ? updateLocalKvCache() : null;
-                pollLease.pollTrace().record(Stage.CACHE_LOCK_ATTEMPT);
-                workerStatus.lock.lock();
-                try {
-                    pollLease.pollTrace().record(Stage.CACHE_LOCK_ACQUIRED);
-                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
-                            || !workerStatus.isActiveGeneration()) {
-                        pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_CHANGED_OR_RETIRING");
-                        return;
-                    }
-                    if (result != null && result.isSuccess()) {
-                        workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
-                    }
-                    successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
-                } finally {
-                    workerStatus.lock.unlock();
-                    pollLease.pollTrace().record(Stage.CACHE_LOCK_RELEASED);
+                if (!workerStatus.isActiveGeneration()) {
+                    pollLease.pollTrace().record(Stage.RESPONSE_DISCARDED, "GENERATION_RETIRING");
+                    return;
                 }
+                if (result != null && result.isSuccess()) {
+                    workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
+                }
+                successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
                 if (updateRequired) {
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 } else {

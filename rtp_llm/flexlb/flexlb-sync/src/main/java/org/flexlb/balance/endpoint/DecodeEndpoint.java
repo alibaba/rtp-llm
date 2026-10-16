@@ -131,9 +131,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ReservationHandle reservation, AdmissionCapacity capacity) {
         java.util.Objects.requireNonNull(reservation, "reservation");
         java.util.Objects.requireNonNull(capacity, "capacity");
+        if (!hasFreshSchedulingStatus() && !isRetired()) {
+            return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null);
+        }
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
-            return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
+            return new EngineDispatchPermitAcquisition(isRetired() ? EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED
+                    : EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null);
         }
         try (pin) {
             DecodeState.DispatchAcquisition acquired = state.acquireDispatchPermit(reservation, capacity);
