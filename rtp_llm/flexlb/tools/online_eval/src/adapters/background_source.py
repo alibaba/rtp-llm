@@ -21,7 +21,17 @@ class BackgroundSource(SampleWorker):
             raise ValueError('background source requires an explicit identity')
         self.path, self.wall_clock = Path(path), wall_clock
         self.latest_sample = None
+        self.attached = False
         super().__init__(self._capture, clock, params)
+
+    def attach(self, scope, deadline):
+        """Own the stop-hook signature and register recovery before starting."""
+        if self.attached:
+            raise ValueError('background source already has an owner')
+        self.attached = True
+        scope.add_cleanup(self.name, self.stop_sampling, request_stop=self.stop_event.set)
+        self.start(deadline)
+        return self
 
     def _capture(self, deadline):
         started, epoch = self.clock(), self.wall_clock()

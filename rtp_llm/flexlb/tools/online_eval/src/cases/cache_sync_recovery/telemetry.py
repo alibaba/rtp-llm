@@ -3,7 +3,7 @@
 import math
 import re
 import urllib.request
-from pathlib import Path
+from diagnostics.process_resources import process_resources
 
 DIAGNOSTIC_METRICS = {
     'global_keys': ('cache_global_total_count', {}),
@@ -51,19 +51,7 @@ def diagnostic_metrics(raw):
 
 
 def resource(proc):
-    pid = proc.pid
-    if not Path(f"/proc/{pid}/cgroup").exists():
-        return dict(cpu_usec=None, memory_bytes=None, rss_bytes=None, cpu_max=None, memory_max=None,
-                    unavailable="per-process Linux cgroup v2 evidence unavailable")
-    path = next(line.split("::", 1)[1] for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines()
-                if line.startswith("0::"))
-    group = Path("/sys/fs/cgroup") / path.lstrip("/")
-    cpu = {k: int(v) for k, v in (line.split() for line in (group/"cpu.stat").read_text().splitlines())}
-    rss = next(int(line.split()[1])*1024 for line in Path(f"/proc/{pid}/status").read_text().splitlines()
-               if line.startswith("VmRSS:"))
-    return dict(cpu_usec=cpu["usage_usec"], throttled_usec=cpu.get("throttled_usec"),
-                memory_bytes=int((group/"memory.current").read_text()), rss_bytes=rss,
-                cpu_max=(group/"cpu.max").read_text().strip(), memory_max=(group/"memory.max").read_text().strip())
+    return process_resources(proc.pid)
 
 
 def fingerprint_matches(expected, observed):

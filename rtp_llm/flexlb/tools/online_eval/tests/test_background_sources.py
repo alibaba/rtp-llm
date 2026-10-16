@@ -82,3 +82,21 @@ def test_source_read_failure_is_preserved_in_shutdown_artifact(tmp_path):
     with pytest.raises(SamplingError, match='adapter failed'):
         sampler.latest()
     assert 'adapter failed' in json.loads((tmp_path/'samples.status.json').read_text())['error']
+
+
+def test_real_resource_scope_stops_and_joins_source_and_preserves_retry_ownership(tmp_path):
+    from scenario.resources import ResourceScope
+    entered = threading.Event()
+    def read(deadline):
+        entered.set()
+        while True:
+            deadline.check()
+            time.sleep(.001)
+    scope=ResourceScope(time.monotonic,time.sleep,False)
+    sampler=source(tmp_path,read).attach(scope,Deadline(time.monotonic()+1))
+    assert entered.wait(1)
+    assert all(row['status']=='PASS' for row in scope.cleanup(1))
+    assert not sampler.thread.is_alive()
+    assert json.loads((tmp_path/'samples.status.json').read_text())['joined'] is True
+    with pytest.raises(ValueError,match='owner'):
+        sampler.attach(scope,Deadline(time.monotonic()+1))

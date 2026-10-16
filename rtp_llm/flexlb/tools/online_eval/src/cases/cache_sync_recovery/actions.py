@@ -144,9 +144,7 @@ def execute(ctx, params, deadline):
             directory/'diagnostics.jsonl', identity=dict(env_epoch=ctx.env_epoch),
             clock=ctx.clock, wall_clock=ctx.wall_clock,
             params=dict(duration_s=deadline.remaining(), interval_s=o['sample_s'], **o['capture']))
-        ctx.add_cleanup('cache_diagnostics', diagnostic.stop_sampling,
-                        request_stop=lambda d: diagnostic.stop_event.set())
-        diagnostic.start(deadline)
+        diagnostic.attach(ctx, deadline)
 
     def fixture(e, operation, **options):
         result = control_json(ctx.ops, "cache_fixture", deadline,
