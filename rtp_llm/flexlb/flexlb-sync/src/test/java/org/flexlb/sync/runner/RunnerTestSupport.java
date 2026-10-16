@@ -94,9 +94,9 @@ public final class RunnerTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response));
+                    status.freezeStatusResponse(response), null);
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.recordSuccessfulPoll(response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -111,11 +111,11 @@ public final class RunnerTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response));
+                    status.freezeStatusResponse(response), null);
             WorkerEndpoint endpoint = registry
                     .publishPreparedEndpoint(address, status, prepared)
                     .endpoint();
-            status.recordSuccessfulPoll(true);
+            status.recordSuccessfulPoll(true, null);
             return endpoint;
         } finally {
             status.lock.unlock();

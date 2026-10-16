@@ -180,7 +180,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
-                        status.prepareNewStatus(observation);
+                        status.prepareNewStatus(observation, null);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {

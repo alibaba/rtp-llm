@@ -4,10 +4,15 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.annotation.PreDestroy;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -15,6 +20,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -29,12 +39,41 @@ import java.util.function.Supplier;
  */
 @Component
 public final class WorkerDirectory {
+    private static final Logger diagnosticLogger = LoggerFactory.getLogger("syncLogger");
 
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
             statusesByRole = new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
+    // At most one task per RETIRING generation: its identity stays installed
+    // until cleanup completes. Never run drains on sync/status/scheduler callers.
+    private final Executor retirementExecutor;
 
+    @PreDestroy
+    public void close() {
+        if (retirementExecutor instanceof ExecutorService owned) {
+            owned.shutdown();
+        }
+    }
+
+    public void completeRetirementAsync(
+            RoleType role, String address, WorkerStatus status,
+            EndpointRegistry.DetachedGeneration detached,
+            CacheAwareService cacheAwareService, Logger logger) {
+        retirementExecutor.execute(() -> completeRetirement(
+                role, address, status, detached, cacheAwareService, logger));
+    }
+
+    @Autowired
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
+        this(endpointRegistry, Executors.newScheduledThreadPool(4, runnable -> {
+            Thread thread = new Thread(runnable, "worker-retirement");
+            thread.setDaemon(true);
+            return thread;
+        }));
+    }
+
+    public WorkerDirectory(EndpointRegistry endpointRegistry, Executor retirementExecutor) {
+        this.retirementExecutor = Objects.requireNonNull(retirementExecutor, "retirementExecutor");
         this.endpointRegistry = Objects.requireNonNull(
                 endpointRegistry, "endpointRegistry");
         for (RoleType role : RoleType.values()) {
@@ -50,7 +89,7 @@ public final class WorkerDirectory {
         return Map.copyOf(statusesByRole.get(role));
     }
 
-    /** Identity check used by asynchronous callbacks under the status lock. */
+    /** Lock-free identity check; retiring identities stay installed until cache cleanup succeeds. */
     public boolean isCurrentStatus(
             RoleType role, String address, WorkerStatus expected) {
         return expected != null && role != null && address != null
@@ -109,8 +148,12 @@ public final class WorkerDirectory {
             String address,
             WorkerStatus status,
             WorkerStatus.PreparedStatus prepared) {
-        return endpointRegistry.publishPreparedEndpoint(
+        EndpointRegistry.EndpointPublication publication = endpointRegistry.publishPreparedEndpoint(
                 address, status, prepared);
+        if (publication.endpoint() != null) {
+            status.trace().record(Stage.ENDPOINT_PUBLISHED);
+        }
+        return publication;
     }
 
     /**
@@ -118,14 +161,16 @@ public final class WorkerDirectory {
      * The caller must hold the matching {@link WorkerStatus#lock}.
      */
     public EndpointRegistry.DetachedGeneration beginRetirement(
-            RoleType role,
-            String address,
-            WorkerStatus status) {
+            RoleType role, String address, WorkerStatus status,
+            String reason, long timeoutUs) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(address, "address");
         status.requireGenerationLock();
         status.requireActiveGeneration();
+
+        status.trace().recordUnavailable(reason, status.pollHealth().lastSuccessfulPollUs(),
+                timeoutUs, status.pollHealth().consecutiveTransportFailures());
 
         WorkerEndpoint expected = endpointRegistry.get(
                 role, address, status);
@@ -144,6 +189,9 @@ public final class WorkerDirectory {
                     "WorkerStatus generation changed while its lock was held: "
                             + address + "#" + status.getGenerationId());
         }
+        status.trace().record(Stage.ENDPOINT_WITHDRAWN);
+        // Format bounded evidence; the existing async appender handles file I/O.
+        reportTrace(address, status, "PROGRESS", "UNKNOWN");
         return detached;
     }
 
@@ -165,16 +213,25 @@ public final class WorkerDirectory {
         Objects.requireNonNull(logger, "logger");
 
         Throwable cleanupFailure = null;
+        boolean finalized;
+        status.trace().record(Stage.RETIREMENT_CLEANUP_BEGIN);
         try {
             if (detached != null) {
+                status.trace().record(Stage.ENDPOINT_AWAIT_BEGIN);
                 detached.retireAndAwait();
+                status.trace().record(Stage.ENDPOINT_AWAIT_END);
             }
         } catch (Throwable retirementFailure) {
             cleanupFailure = retirementFailure;
+            status.trace().record(Stage.ENDPOINT_AWAIT_FAILED, retirementFailure);
         } finally {
-            finalizeRetirement(
+            finalized = finalizeRetirement(
                     role, address, status, cacheAwareService, logger);
         }
+        String outcome = cleanupFailure == null && finalized ? "SUCCESS" : "ERROR";
+        status.trace().record(Stage.RETIREMENT_CLEANUP_END);
+        // Report once after cleanup, outside the worker lock.
+        reportTrace(address, status, "RETIREMENT", outcome);
         if (cleanupFailure != null) {
             logger.error(
                     "Endpoint cleanup failed after retiring generation {} for {}",
@@ -182,42 +239,75 @@ public final class WorkerDirectory {
         }
     }
 
-    private void finalizeRetirement(
+    private boolean finalizeRetirement(
             RoleType role,
             String address,
             WorkerStatus status,
             CacheAwareService cacheAwareService,
             Logger logger) {
         Map<String, WorkerStatus> statuses = statusesByRole.get(role);
-        status.lock.lock();
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ATTEMPT);
+        status.cacheMutationLock.lock();
         try {
-            status.requireRetiringGeneration();
-            if (statuses.get(address) != status) {
-                logger.error(
-                        "Status identity changed before retirement finalized for {}#{}",
-                        address, status.getGenerationId());
-                return;
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ACQUIRED);
+            if (status.isActiveGeneration() || statuses.get(address) != status) {
+                status.trace().record(Stage.FINALIZE_FAILED, "GENERATION_CHANGED_OR_NOT_RETIRING");
+                logger.error("Invalid retirement identity for {}#{}", address, status.getGenerationId());
+                return false;
             }
+            boolean cacheCleanupSucceeded = true;
             try {
                 if (role.requiresCacheKeys()) {
-                    cacheAwareService.removeEngineBlockCache(address);
+                    status.trace().record(Stage.CACHE_CLEANUP_BEGIN);
+                    cacheAwareService.removeEngineBlockCache(address, status.trace());
+                    status.trace().record(Stage.CACHE_CLEANUP_END);
                 }
             } catch (Throwable cacheCleanupFailure) {
+                cacheCleanupSucceeded = false;
+                status.trace().record(Stage.CACHE_CLEANUP_FAILED, cacheCleanupFailure);
                 logger.error(
                         "Cache cleanup failed while retiring generation {} for {}",
                         status.getGenerationId(), address, cacheCleanupFailure);
             }
-            if (!statuses.remove(address, status)) {
-                logger.error(
-                        "Exact status removal failed while its generation lock was held for {}#{}",
-                        address, status.getGenerationId());
+            if (!cacheCleanupSucceeded) {
+                // Keep same-address replacements out until old mappings are gone.
+                if (retirementExecutor instanceof ScheduledExecutorService scheduler && !scheduler.isShutdown()) {
+                    scheduler.schedule(() -> {
+                        if (isCurrentStatus(role, address, status)) {
+                            completeRetirement(role, address, status, null, cacheAwareService, logger);
+                        }
+                    }, 1L, TimeUnit.SECONDS);
+                }
+                return false;
             }
+            if (!statuses.remove(address, status)) {
+                status.trace().record(Stage.FINALIZE_FAILED, "STATUS_REMOVAL_FAILED");
+                logger.error("Exact status removal failed for {}#{}", address, status.getGenerationId());
+                return false;
+            }
+            status.trace().record(Stage.STATUS_REMOVED);
+            return true;
         } catch (Throwable finalizationFailure) {
+            status.trace().record(Stage.FINALIZE_FAILED, finalizationFailure);
             logger.error(
                     "Status retirement finalization failed for {}#{}",
                     address, status.getGenerationId(), finalizationFailure);
+            return false;
         } finally {
-            status.lock.unlock();
+            status.cacheMutationLock.unlock();
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_RELEASED);
+        }
+    }
+
+    private void reportTrace(String address, WorkerStatus status, String operation, String result) {
+        try {
+            if (!diagnosticLogger.isWarnEnabled()) { return; }
+            var snapshot = status.trace().snapshot();
+            // syncLogger already uses a bounded, never-blocking Logback AsyncAppender.
+            diagnosticLogger.warn("event=worker_trace endpoint={} generation={} operation={} result={} capturedMs={} {}",
+                    address, status.getGenerationId(), operation, result, snapshot.capturedAtMs(), snapshot.compact());
+        } catch (RuntimeException | LinkageError unavailable) {
+            // Diagnostics cannot interrupt endpoint withdrawal or cleanup.
         }
     }
 

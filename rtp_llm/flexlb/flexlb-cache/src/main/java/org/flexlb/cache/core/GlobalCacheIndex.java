@@ -1,6 +1,8 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -21,6 +23,8 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Component
 public class GlobalCacheIndex {
+
+    private static final int CACHE_REMOVE_LOCK_CHUNK_SIZE = 256;
 
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
@@ -46,14 +50,23 @@ public class GlobalCacheIndex {
      * @param blockCacheKey Cache block hash value
      * @param engineIpPort  Engine IP:Port
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
+    public void addCacheBlock(Long blockCacheKey, String engineIpPort, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIpPort == null) {
             log.warn("Invalid parameters: blockCacheKey={}, engineIpPort={}", blockCacheKey, engineIpPort);
             return;
         }
 
-        lock.lock();
+        boolean contended = !lock.tryLock();
+        if (contended) {
+            if (pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            }
+            lock.lock();
+        }
         try {
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            }
             Set<String> engines = blockToEnginesMap.computeIfAbsent(
                     blockCacheKey, k -> ConcurrentHashMap.newKeySet());
 
@@ -63,6 +76,9 @@ public class GlobalCacheIndex {
             }
         } finally {
             lock.unlock();
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+            }
         }
     }
 
@@ -72,13 +88,22 @@ public class GlobalCacheIndex {
      * @param engineIp      Engine IP
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
+    public void removeCacheBlock(String engineIp, Long blockCacheKey, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
 
-        lock.lock();
+        boolean contended = !lock.tryLock();
+        if (contended) {
+            if (pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            }
+            lock.lock();
+        }
         try {
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            }
             Set<String> engines = blockToEnginesMap.get(blockCacheKey);
             if (engines == null) {
                 return;
@@ -95,6 +120,9 @@ public class GlobalCacheIndex {
             }
         } finally {
             lock.unlock();
+            if (contended && pollTrace != null) {
+                pollTrace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+            }
         }
     }
 
@@ -103,26 +131,42 @@ public class GlobalCacheIndex {
      *
      * @param engineIp Engine IP
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys, EndpointTrace trace) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
 
-        lock.lock();
+        long scannedKeys = 0L;
+        long removedMappings = 0L;
+        var keys = blockCacheKeys.iterator();
         try {
-            blockToEnginesMap.forEach((blockCacheKey, engines) -> {
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
-                    totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
-                    if (engines.isEmpty()) {
-                        blockToEnginesMap.remove(blockCacheKey);
+            // Visit only this generation's detached keys, with bounded global-lock sections.
+            while (keys.hasNext()) {
+                if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);}
+                lock.lock();
+                try {
+                    if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);}
+                    for (int count = 0; count < CACHE_REMOVE_LOCK_CHUNK_SIZE && keys.hasNext(); count++) {
+                        Long key = keys.next();
+                        scannedKeys++;
+                        Set<String> engines = blockToEnginesMap.get(key);
+                        if (engines != null && engines.remove(engineIp)) {
+                            removedMappings++;
+                            totalMappings.decrement();
+                            if (engines.isEmpty()) {
+                                blockToEnginesMap.remove(key);
+                            }
+                        }
                     }
+                } finally {
+                    lock.unlock();
+                    if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_RELEASED);}
                 }
-            });
+            }
         } finally {
-            lock.unlock();
+            if (trace != null) {
+                trace.recordCleanupCounts(scannedKeys, removedMappings);
+            }
         }
     }
 

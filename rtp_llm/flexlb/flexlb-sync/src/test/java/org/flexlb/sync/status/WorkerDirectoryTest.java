@@ -1,17 +1,22 @@
 package org.flexlb.sync.status;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -24,6 +29,178 @@ class WorkerDirectoryTest {
 
     private WorkerDirectory workerDirectory;
     private EndpointRegistry registry;
+
+    @Test
+    void blockedRetirementsDoNotOccupyHealthExecutorOrReleaseGenerationEarly() throws Exception {
+        var config = Mockito.mock(ConfigService.class);
+        Mockito.when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        var endpoints = RunnerTestSupport.endpointRegistry(config);
+        var directory = new WorkerDirectory(endpoints);
+        var health = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var entered = new java.util.concurrent.CountDownLatch(4);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var cleaned = new java.util.concurrent.CountDownLatch(5);
+        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        var logger = Mockito.mock(org.slf4j.Logger.class);
+        Mockito.doAnswer(call -> {
+            entered.countDown();
+            assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            cleaned.countDown();
+            return null;
+        }).when(cache).removeEngineBlockCache(Mockito.anyString(), Mockito.any());
+        var statuses = new java.util.ArrayList<WorkerStatus>();
+        try {
+            for (int index = 0; index < 5; index++) {
+                var status = RunnerTestSupport.discovered(RoleType.PREFILL, null,
+                        "127.0.0." + (index + 1), 8080, 8081, "test");
+                statuses.add(status);
+                directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+                status.lock.lock();
+                try {
+                    directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST", -1L);
+                } finally {
+                    status.lock.unlock();
+                }
+                health.submit(() -> directory.completeRetirementAsync(RoleType.PREFILL,
+                        status.getIpPort(), status, null, cache, logger))
+                        .get(1, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS), "all four cleanup threads blocked");
+            var survivor = RunnerTestSupport.discovered(RoleType.DECODE, null, "127.0.0.20", 8080, 8081, "test");
+            directory.currentOrDiscover(RoleType.DECODE, survivor.getIpPort(), () -> survivor);
+            var grpc = Mockito.mock(org.flexlb.service.grpc.EngineGrpcService.class);
+            Mockito.when(grpc.getWorkerStatusAsync(Mockito.anyString(), Mockito.anyInt(), Mockito.anyLong(), Mockito.anyLong(), Mockito.any()))
+                    .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
+                            org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.newBuilder()
+                                    .setAlive(true).setRole("DECODE").setStatusVersion(1L).build()));
+            health.submit(() -> new org.flexlb.sync.runner.GrpcWorkerStatusRunner("model", survivor.getIpPort(),
+                    "test", RoleType.DECODE, null, survivor, survivor.tryBeginStatusPoll(1L), directory,
+                    Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), grpc, 1000L,
+                    cache, Runnable::run).run()).get(1, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(1L, survivor.appliedStatusCursor().statusVersion());
+            assertNotNull(directory.exactEndpoint(RoleType.DECODE, survivor.getIpPort(), survivor));
+            assertEquals(5, directory.discoveredCount(RoleType.PREFILL));
+            for (var status : statuses) {
+                assertSame(status, directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                    throw new AssertionError("replacement must wait for exact cleanup");
+                }));
+            }
+            release.countDown();
+            assertTrue(cleaned.await(2, java.util.concurrent.TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            health.shutdownNow();
+            directory.close();
+            endpoints.close();
+        }
+    }
+
+    @Test
+    void retirementLogContainsDecisionFailureAndCleanupOutcome() {
+        WorkerStatus status = status(RoleType.PREFILL, "group", 8080);
+        var lease = status.tryBeginStatusPoll(1L);
+        lease.pollTrace().record(Stage.RPC_COMPLETED, new IllegalStateException("deadline exceeded"));
+        lease.close();
+        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        Mockito.doThrow(new IllegalStateException("cache cleanup failed"))
+                .when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        var logger = Mockito.mock(org.slf4j.Logger.class);
+        discover(status);
+        try (var logs = new TraceLogs()) {
+            status.lock.lock();
+            EndpointRegistry.DetachedGeneration detached;
+            try {
+                detached = workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status,
+                        "STATUS_EXPIRED", 10_000_000L);
+            } finally {
+                status.lock.unlock();
+            }
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status,
+                    detached, cache, logger);
+            assertTrue(logs.lines.stream().anyMatch(line -> line.contains(status.getIpPort())));
+            assertTrue(logs.lines.stream().anyMatch(line -> line.contains("operation=RETIREMENT")
+                    && line.contains("result=ERROR")), "cache cleanup failure must not be reported as successful retirement");
+            var snapshot = status.trace().snapshot();
+            assertEquals("RETIREMENT_CLEANUP_END", snapshot.phase());
+            assertEquals("RPC_COMPLETED", snapshot.poll().failureStage());
+            assertTrue(snapshot.error().contains("cache cleanup failed"));
+            assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
+            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()),
+                    "failed cleanup must prevent same-address replacement");
+            Mockito.doNothing().when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status, null, cache, logger);
+            assertTrue(workerDirectory.statusSnapshot(RoleType.PREFILL).isEmpty());
+        } finally {
+            workerDirectory.close();
+            registry.close();
+        }
+    }
+
+    @Test
+    void failedCleanupRetriesInBackgroundWithoutAllowingReplacement() throws Exception {
+        var status = status(RoleType.PREFILL, "group", 8080);
+        discover(status);
+        var retried = new java.util.concurrent.CountDownLatch(1);
+        var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        Mockito.doAnswer(call -> {
+            assertSame(status, workerDirectory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                throw new AssertionError("replacement before successful cleanup");
+            }));
+            assertFalse(status.lock.isHeldByCurrentThread());
+            if (attempts.incrementAndGet() == 1) { throw new IllegalStateException("transient index failure"); }
+            retried.countDown();
+            return null;
+        }).when(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        status.lock.lock();
+        try {
+            workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST", -1L);
+        } finally {
+            status.lock.unlock();
+        }
+        try {
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status, null,
+                    cache, Mockito.mock(org.slf4j.Logger.class));
+            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()));
+            assertTrue(retried.await(3, java.util.concurrent.TimeUnit.SECONDS));
+            // Serializes with the retry through its last directory removal.
+            status.cacheMutationLock.lock();
+            try {
+                assertTrue(workerDirectory.statusSnapshot(RoleType.PREFILL).isEmpty());
+            } finally {
+                status.cacheMutationLock.unlock();
+            }
+            assertEquals(2, attempts.get());
+        } finally {
+            workerDirectory.close();
+            registry.close();
+        }
+    }
+
+    private static final class TraceLogs extends AppenderBase<ILoggingEvent>
+            implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                LoggerFactory.getLogger("syncLogger");
+        private final ConcurrentLinkedQueue<String> lines = new ConcurrentLinkedQueue<>();
+
+        private TraceLogs() {
+            start();
+            logger.addAppender(this);
+        }
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            if (event.getMessage().startsWith("event=worker_trace ")) {
+                lines.add(event.getFormattedMessage());
+            }
+        }
+
+        @Override
+        public void close() {
+            logger.detachAppender(this);
+            stop();
+        }
+    }
 
     @BeforeEach
     void setUp() {

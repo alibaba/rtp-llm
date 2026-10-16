@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -128,6 +129,11 @@ public class WorkerEndpoint {
      * may finish its already accepted handoff. The owner must close the pin on
      * every selected, rejected, and exceptional path.</p>
      */
+    /** New scheduling admissions require a fresh applied snapshot. */
+    public final GenerationPin tryPinSchedulingGeneration() {
+        return hasFreshSchedulingStatus() ? tryPinGeneration() : null;
+    }
+
     public final GenerationPin tryPinGeneration() {
         EndpointGenerationLifecycle.HandoffPermit permit =
                 generationLifecycle.tryAcquireHandoff();
@@ -137,6 +143,10 @@ public class WorkerEndpoint {
                         this,
                         status.getGenerationId(),
                         permit);
+    }
+
+    protected final boolean hasFreshSchedulingStatus() {
+        return !status.isStatusFreshnessEnforced() || status.isSchedulingStatusFresh(System.nanoTime()/1000);
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
@@ -174,6 +184,7 @@ public class WorkerEndpoint {
      */
     final void beginRetirement() {
         generationLifecycle.beginRetirement();
+        status.trace().record(Stage.ENDPOINT_GATE_CLOSED);
     }
 
     /**
