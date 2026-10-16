@@ -1087,6 +1087,8 @@ class KVCacheSpecDesc:
     memory: typing.Any
     tail: typing.Any
     cp: typing.Any
+    mha_kv_head_num: typing.Any
+    mha_size_per_head: typing.Any
     def __init__(self) -> None: ...
 
 
@@ -1719,6 +1721,9 @@ class SpeculativeExecutionConfig:
     gen_num_per_cycle: int
     model_type: str
     quantization: str
+    sp_diffusion_canvas: bool
+    sp_dspark_mask_token_id: int
+    sp_dspark_sample_from_anchor: bool
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str

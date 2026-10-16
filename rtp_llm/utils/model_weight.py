@@ -1494,6 +1494,21 @@ class W:
     dspark_markov_w1 = "dspark_markov_w1.weight"
     dspark_markov_w2 = "dspark_markov_w2.weight"
 
+    # DiffusionGemma globals and per-layer extras.
+    dgm_pre_ffn_ln_gamma = "pre_ffn_layernorm.gamma"
+    dgm_post_ffn_ln_gamma = "post_ffn_layernorm.gamma"
+    dgm_pre_ffn_ln2_gamma = "pre_ffn_layernorm_2.gamma"
+    dgm_post_ffn_ln1_gamma = "post_ffn_layernorm_1.gamma"
+    dgm_post_ffn_ln2_gamma = "post_ffn_layernorm_2.gamma"
+    dgm_layer_scalar_enc = "layer_scalar_enc"
+    dgm_layer_scalar_dec = "layer_scalar_dec"
+    dgm_router_scale = "router.scale"
+    dgm_router_per_expert_scale = "router.per_expert_scale"
+    dgm_self_cond_gate_w = "self_conditioning.gate.weight"
+    dgm_self_cond_up_w = "self_conditioning.up.weight"
+    dgm_self_cond_down_w = "self_conditioning.down.weight"
+    dgm_self_cond_pre_norm = "self_conditioning.pre_norm.weight"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1686,6 +1701,19 @@ class W:
         dspark_hidden_norm_gamma: sp_id,
         dspark_markov_w1: sp_id,
         dspark_markov_w2: sp_id,
+        dgm_pre_ffn_ln_gamma: sp_id,
+        dgm_post_ffn_ln_gamma: sp_id,
+        dgm_pre_ffn_ln2_gamma: sp_id,
+        dgm_post_ffn_ln1_gamma: sp_id,
+        dgm_post_ffn_ln2_gamma: sp_id,
+        dgm_layer_scalar_enc: sp_id,
+        dgm_layer_scalar_dec: sp_id,
+        dgm_router_scale: sp_id,
+        dgm_router_per_expert_scale: sp_id,
+        dgm_self_cond_gate_w: sp_id,
+        dgm_self_cond_up_w: sp_id,
+        dgm_self_cond_down_w: sp_id,
+        dgm_self_cond_pre_norm: sp_id,
     }
 
     weights_list = [

@@ -304,7 +304,11 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("diffusion_tokens",
+                       &PyModelOutputs::diffusion_tokens,
+                       "Optional [B, gamma] int32 tokens from a diffusion-canvas proposer; "
+                       "the DSpark executor accepts them verbatim instead of sampling");
 }
 
 }  // namespace torch_ext

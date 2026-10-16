@@ -720,6 +720,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    is_diffusion_canvas_        = is_dspark_ && params.sp_config.sp_diffusion_canvas;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -1000,7 +1001,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     } else if (dspark_prefill_commit_only_) {
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
-    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_, is_diffusion_canvas_));
     if (!is_dspark_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
     }
@@ -2301,6 +2302,21 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
     auto    propose_output = runDSparkProposeForward(proposal_input);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
+    if (is_diffusion_canvas_) {
+        // The python proposer already ran its entropy-bounded sampler and
+        // returned the final canvas tokens; skip Markov sampling entirely.
+        RTP_LLM_CHECK_WITH_INFO(propose_output.diffusion_tokens.defined()
+                                    && propose_output.diffusion_tokens.dim() == 2
+                                    && propose_output.diffusion_tokens.size(1)
+                                           == static_cast<int64_t>(propose_step_),
+                                "diffusion-canvas proposer must return [B, gamma=%zu] diffusion_tokens",
+                                propose_step_);
+        SamplerOutput output;
+        output.token_ids                = propose_output.diffusion_tokens.to(torch::kInt32).contiguous();
+        output.token_ids_are_point_mass = false;
+        draft_sampler_output            = std::move(output);
+        return;
+    }
     if (isTpRank0()) {
         draft_sampler_output = sampleDSparkDraft(stream_groups, propose_output.logits, round_state.anchors);
     }

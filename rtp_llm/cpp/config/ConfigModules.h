@@ -375,6 +375,11 @@ struct SpeculativeExecutionConfig {
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
     bool        sp_dspark_sample_from_anchor = true;
+    // Diffusion-canvas mode: the DSpark draft is a block-diffusion proposer
+    // whose python forward_propose returns [B, gamma] tokens directly; the
+    // executor skips Markov sampling and rejection, accepting every canvas
+    // token (the target-verify forward still runs and commits KV).
+    bool sp_diffusion_canvas = false;
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
 

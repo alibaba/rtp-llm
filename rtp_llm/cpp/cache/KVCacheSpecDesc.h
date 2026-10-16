@@ -78,6 +78,13 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+
+    // MHA shape overrides: models whose layers use several distinct KV shapes
+    // (e.g. DiffusionGemma's sliding 8x256 vs global 2x512 layers) declare one
+    // MultiHeadAttention spec per tag; each desc can override the shape it
+    // needs instead of inheriting the global attn_config shape.
+    std::optional<int32_t> mha_kv_head_num;
+    std::optional<int32_t> mha_size_per_head;
 };
 
 struct SpecBuildContext {
