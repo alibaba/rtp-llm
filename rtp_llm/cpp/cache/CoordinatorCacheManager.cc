@@ -190,8 +190,36 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
                                                             int               target_seq_len,
                                                             bool              enable_reuse_cache,
                                                             LoadAsyncContext* load_context) const {
-    for (const auto& group : cacheGroups()) {
-        if (!group->malloc(resource.mutableBlockIds(group->tag()), target_seq_len, enable_reuse_cache)) {
+    const auto groups = cacheGroups();
+    std::unordered_map<std::string, RequiredPositions> required_positions;
+    for (const auto& group : groups) {
+        if (!group->prefixReuseEnabled() || group->policy().group_type == CacheGroupType::FULL) {
+            continue;
+        }
+        const size_t blocks = resource.cacheKeys().size();
+        const size_t tail   = group->activeTailBlocks();
+        const size_t first  = tail > 0 && blocks > tail ? blocks - tail : 0;
+        for (size_t index = first; index < blocks; ++index) {
+            required_positions[group->tag()].insert(index);
+        }
+    }
+    if (load_context) {
+        for (const auto& desc : load_context->loadDescs()) {
+            for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
+                required_positions[tag].insert(desc.path_index);
+            }
+        }
+    }
+    for (const auto& group : groups) {
+        if (!group->prefixReuseEnabled()) {
+            continue;
+        }
+        if (!group->malloc(resource.mutableBlockIds(group->tag()),
+                           target_seq_len,
+                           enable_reuse_cache,
+                           0,
+                           nullptr,
+                           required_positions[group->tag()])) {
             return ErrorInfo(ErrorCode::MALLOC_FAILED, "failed to materialize matched KV cache blocks");
         }
     }
@@ -228,14 +256,17 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     start_block = 0;
     if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE
         || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE FULL groups");
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
     }
     const size_t block_size = seqSizePerBlock();
     for (const auto& group : config_.topology().groups()) {
-        if (group.policy.group_type != CacheGroupType::FULL || !group.policy.enable_prefix_reuse
-            || group.policy.active_tail_blocks > 0 || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+            || (group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks != 0)
             || group.seqSizePerBlock() != block_size) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE FULL groups");
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
         }
     }
     if (cache_keys.size() > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
@@ -275,7 +306,7 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
 
     // step 3. malloc the remaining blocks and bind them to the resource and load context
     const auto malloc_error = mallocAndBindLoadTargets(
-        *owner, static_cast<int>(cache_keys.size()) * seqSizePerBlock(), true, local_load.get());
+        *owner, static_cast<int>(cache_keys.size()) * seqSizePerBlock(), false, local_load.get());
     if (malloc_error.hasError()) {
         return malloc_error;
     }
@@ -299,10 +330,16 @@ ErrorInfo CoordinatorCacheManager::commitWriteBackDecodeCache(const KVCacheResou
             auto& blocks = resources[i][gid].device_blocks;
             for (const auto& tag : groups[gid]->groupTags()) {
                 const auto& source = resource.blocks(tag);
-                if (source.size() <= i || source[i] <= 0) {
+                if (source.size() <= i) {
                     return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks");
                 }
                 blocks.push_back(source[i]);
+            }
+            if (groups[gid]->groupType() != CacheGroupType::FULL
+                && std::all_of(blocks.begin(), blocks.end(), isNullBlockIdx)) {
+                blocks.clear();
+            } else if (std::any_of(blocks.begin(), blocks.end(), [](BlockIdxType block) { return block <= 0; })) {
+                return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks");
             }
         }
     }

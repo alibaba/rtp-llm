@@ -72,8 +72,8 @@ private:
     std::shared_ptr<LayerBlockConverter>          layer_block_converter_;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>           tp_broadcast_client_;
-    std::unique_ptr<P2PSchedulerDecodeRead> scheduler_;
-    std::unique_ptr<P2PWorkerDecodeRead>    worker_;
+    std::unique_ptr<P2PSchedulerDecodeRead>       read_scheduler_;
+    std::unique_ptr<P2PWorkerDecodeRead>          read_worker_;
     std::unique_ptr<P2PWorkerDecodeWrite>         write_worker_;
     std::unique_ptr<P2PSchedulerDecodeWrite>      write_scheduler_;
 };

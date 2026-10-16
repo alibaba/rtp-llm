@@ -96,9 +96,9 @@ protected:
         ASSERT_TRUE(broadcast->init());
         auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
         connector->decode_ = std::make_unique<P2PConnectorDecode>(connector_config, nullptr, nullptr);
-        connector->decode_->scheduler_ =
+        connector->decode_->read_scheduler_ =
             std::make_unique<P2PSchedulerDecodeRead>(scheduler_config, nullptr, broadcast);
-        ASSERT_TRUE(connector->decode_->scheduler_->init("manager_prefix_read_test"));
+        ASSERT_TRUE(connector->decode_->read_scheduler_->init("manager_prefix_read_test"));
 
         // Keep the manager, allocator reference handling, connector, planner and
         // scheduler real. Only remote worker/Prefill responses are test services;
