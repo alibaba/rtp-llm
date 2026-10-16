@@ -82,7 +82,6 @@ public:
                      P2PConnectorStartWriteResponsePB&      response,
                      std::function<bool()>                  is_cancelled = nullptr);
 
-    void handleWriteReady(const P2PConnectorWriteReadyRequestPB& request, P2PConnectorWriteReadyResponsePB& response);
     void handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
 
     void stopWriteback();
