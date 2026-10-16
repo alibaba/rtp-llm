@@ -42,9 +42,6 @@ public:
                                    const BatchGenerateInputPB* request,
                                    BatchGenerateOutputsPB*     response) override;
 public:
-    grpc::Status WriteReady(grpc::ServerContext*                   context,
-                            const P2PConnectorWriteReadyRequestPB* request,
-                            P2PConnectorWriteReadyResponsePB*      response);
 
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;

@@ -57,25 +57,6 @@ std::shared_ptr<BroadcastManager> DecodeWriteHelper::server(const std::string& a
     return peer;
 }
 
-std::shared_ptr<DecodeWriteHelper::ReadyResult>
-DecodeWriteHelper::ready(const std::string& decode_addr, P2PConnectorWriteReadyRequestPB request, int64_t deadline_ms) {
-    const auto timeout_ms = deadline_ms - currentTimeMs();
-    if (timeout_ms <= 0 || timeout_ms > std::numeric_limits<int>::max()) {
-        return nullptr;
-    }
-    auto peer = server(decode_addr);
-    if (!peer) {
-        return nullptr;
-    }
-    return peer->broadcast<P2PConnectorWriteReadyRequestPB, P2PConnectorWriteReadyResponsePB>(
-        {request},
-        static_cast<int>(timeout_ms),
-        [deadline_ms](auto& stub, auto& context, const auto& request, auto* queue) {
-            context->set_deadline(std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)));
-            return stub->AsyncWriteReady(context.get(), request, queue);
-        });
-}
-
 std::shared_ptr<DecodeWriteHelper::CancelResult> DecodeWriteHelper::cancel(const std::string& prefill_addr,
                                                                            const std::string& unique_key,
                                                                            int64_t            deadline_ms,
