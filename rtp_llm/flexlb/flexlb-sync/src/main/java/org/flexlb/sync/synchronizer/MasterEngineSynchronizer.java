@@ -56,6 +56,7 @@ public final class MasterEngineSynchronizer {
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
     private final ThreadPoolExecutor cacheStatusExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
     // Retain only operations that currently occupy an executor thread or a caller thread.
     private final Map<EndpointTrace.Poll, RoleType> activeSyncs = new ConcurrentHashMap<>();
@@ -90,6 +91,15 @@ public final class MasterEngineSynchronizer {
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        statusApplicationExecutor =
+                new ThreadPoolExecutor(
+                        statusThreads,
+                        statusThreads,
+                        60L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(15_000),
+                        new NamedThreadFactory("status-application-executor"),
+                        new ThreadPoolExecutor.AbortPolicy());
         // Cache overload must not run cache work on a health/discovery caller.
         int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
         cacheStatusExecutor =
@@ -129,6 +139,10 @@ public final class MasterEngineSynchronizer {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
             engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor",
+                    statusApplicationExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "cacheStatusExecutor", cacheStatusExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
@@ -158,7 +172,7 @@ public final class MasterEngineSynchronizer {
                 }
                 logger.warn(
                         "event=worker_sync_trace model={} role={} tasksPerCycle={} engine={}"
-                            + " status={} {}",
+                                + " status={} {}",
                         modelName,
                         active.getValue(),
                         requiredRoles.size(),
@@ -195,6 +209,7 @@ public final class MasterEngineSynchronizer {
                                 workerAddressService,
                                 statusCheckExecutor,
                                 cacheStatusExecutor,
+                                statusApplicationExecutor,
                                 engineHealthReporter,
                                 engineGrpcService,
                                 roleType,
@@ -238,6 +253,7 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
         cacheStatusExecutor.shutdown();
         activeSyncs.clear();
     }

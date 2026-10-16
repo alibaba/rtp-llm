@@ -48,6 +48,9 @@ public class KvCacheManager implements EngineCacheInvalidator {
     @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
     private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
+    // Only failed updates retain a diff. Callers serialize each address through
+    // its generation's cache lock; retries replay idempotently before new diffs.
+    private final Map<String, DiffResult> pendingUpdates = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -134,6 +137,12 @@ public class KvCacheManager implements EngineCacheInvalidator {
         }
         physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
 
+        DiffResult pending = pendingUpdates.get(engineIPort);
+        if (pending != null) {
+            applyDiff(engineIPort, pending, pollTrace);
+            pendingUpdates.remove(engineIPort, pending);
+        }
+
         // Calculate diff
         DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks);
         cacheMetricsReporter.reportCacheDiffMetrics(
@@ -145,23 +154,11 @@ public class KvCacheManager implements EngineCacheInvalidator {
             return;
         }
 
-        // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort, pollTrace);
-            }
-        }
-
-        // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // Remove from local view
-            engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock, pollTrace);
+        try {
+            applyDiff(engineIPort, diffResult, pollTrace);
+        } catch (RuntimeException | Error failure) {
+            pendingUpdates.put(engineIPort, diffResult);
+            throw failure;
         }
 
         // Report metrics
@@ -170,6 +167,19 @@ public class KvCacheManager implements EngineCacheInvalidator {
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+    }
+
+    private void applyDiff(String address, DiffResult diff, EndpointTrace.Poll pollTrace) {
+        for (Long key : diff.getAddedBlocks()) {
+            // Track ownership first, including a global write that fails midway.
+            engineLocalView.addOrUpdateCacheBlock(address, key);
+            globalCacheIndex.addCacheBlock(key, address, pollTrace);
+        }
+        for (Long key : diff.getRemovedBlocks()) {
+            // Retain ownership until global removal succeeds for cleanup/replay.
+            globalCacheIndex.removeCacheBlock(address, key, pollTrace);
+            engineLocalView.removeCacheBlock(address, key);
+        }
     }
 
     /** Remove both local and global cache-index state for one engine. */
@@ -181,9 +191,13 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (engineIpPort == null) {
             return;
         }
-        Set<Long> removedBlocks = engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        // The cache lock excludes writers. Retain ownership on failure so a
+        // retry can safely repeat removal of any already-removed mappings.
+        Set<Long> removedBlocks = engineLocalView.getEngineCacheBlocks(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         physicalIpPortByLogicalIpPort.remove(engineIpPort);
+        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        pendingUpdates.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
     }
@@ -223,6 +237,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
         globalCacheIndex.clear();
         engineLocalView.clear();
         physicalIpPortByLogicalIpPort.clear();
+        pendingUpdates.clear();
 
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(

@@ -119,7 +119,9 @@ public class ExpirationCleaner {
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             boolean retirementStarted = false;
             workerStatus.trace().record(Stage.EXPIRATION_LOCK_ATTEMPT);
-            workerStatus.lock.lock();
+            if (!workerStatus.lock.tryLock()) {
+                continue;
+            }
             try {
                 workerStatus.trace().record(Stage.EXPIRATION_LOCK_ACQUIRED);
                 if (workerStatusMap.get(item.getKey()) != workerStatus) {
@@ -131,14 +133,27 @@ public class ExpirationCleaner {
                 WorkerStatus.PollHealth health = workerStatus.pollHealth();
                 long expirationTime = health.lastSuccessfulPollUs() + workerTimeoutUs;
                 long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime
-                        && !workerStatus.isStatusPollProtected(currentTime, statusCommitGraceUs)) {
+                boolean transportFailed = health.consecutiveTransportFailures() >= 3L;
+                boolean reportedDead =
+                        workerStatus.hasReceivedStatusRpc() && !health.reportedAlive();
+                if (transportFailed
+                        || reportedDead
+                        || (currentTime > expirationTime
+                                && !workerStatus.isStatusPollProtected(
+                                        currentTime, statusCommitGraceUs))) {
+                    if (!workerStatus.tryClaimHealthRetirement(health)) {
+                        continue;
+                    }
                     endpointToRetire =
                             workerDirectory.beginRetirement(
                                     role,
                                     item.getKey(),
                                     workerStatus,
-                                    "STATUS_EXPIRED",
+                                    transportFailed
+                                            ? "CONSECUTIVE_STATUS_FAILURES"
+                                            : reportedDead
+                                                    ? "WORKER_REPORTED_NOT_ALIVE"
+                                                    : "STATUS_EXPIRED",
                                     workerTimeoutUs);
                     retirementStarted = true;
                 }
@@ -154,10 +169,10 @@ public class ExpirationCleaner {
         return retirements;
     }
 
-    /** Phase two: await already-detached generations and finalize identities. */
+    /** Phase two: hand off drains and exact-generation cleanup without waiting. */
     private void completeRetirements(List<PendingRetirement> retirements) {
         for (PendingRetirement retirement : retirements) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     retirement.role(),
                     retirement.ipPort(),
                     retirement.workerStatus(),

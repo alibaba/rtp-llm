@@ -251,6 +251,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
             ScheduledRequest exactHead, long batchId, int maximumInflightBatches) {
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
             return new PrefillState.ReservationResult<>(
@@ -277,6 +281,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveRouteOwnership(
             ScheduledRequest exactItem, long predictedMs) {
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         if (isGenerationRetiringOrRetired()) {
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
@@ -286,6 +294,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        if (!hasFreshSchedulingStatus()) {
+            return null;
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
     }
@@ -567,7 +578,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         long predictedMs = completion.predictedWorkMs();
         long gapMs = actualMs - predictedMs;
         org.flexlb.util.Logger.debug(
-                "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
+                "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={}"
+                    + " batch_size={} engine={}",
                 batchId,
                 predictedMs,
                 actualMs,

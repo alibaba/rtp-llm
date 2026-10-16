@@ -10,6 +10,7 @@ import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -139,65 +140,57 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 roleType);
             } catch (RuntimeException | Error failure) {
                 pollTrace.record(Stage.RPC_INITIATION_FAILED, failure);
+                workerStatus.recordStatusRpcResult(pollLease, false, false, failure);
                 throw failure;
             }
-            rpc.whenComplete((response, failure) -> pollTrace.record(Stage.RPC_COMPLETED, failure))
-                    .thenApply(
-                            response -> {
-                                pollTrace.record(Stage.CONVERSION_STARTED);
-                                return EngineStatusConverter.convertToStatusObservation(
-                                        workerStatus, response);
-                            })
-                    // Readiness precedes executor handoff; it is not an internal gRPC queue
-                    // timestamp.
-                    .whenComplete(
-                            (response, failure) -> {
-                                pollLease.statusRpcCompleted(
-                                        failure == null
-                                                && response != null
-                                                && response.alive()
-                                                && response.role() == roleType
-                                                && response.statusVersion() != null
-                                                && response.statusVersion() > 0L
-                                                && response.statusVersion()
-                                                        >= workerStatus
-                                                                .appliedStatusCursor()
-                                                                .statusVersion());
-                                pollTrace.record(Stage.CALLBACK_READY, failure);
-                            })
-                    .handleAsync(
-                            (response, failure) -> {
-                                pollTrace.record(Stage.CALLBACK_STARTED);
-                                try {
-                                    Throwable cause = EndpointTrace.unwrap(failure);
-                                    if (cause != null) {
-                                        handleException(cause, startTime);
-                                        recordStatusCheckFailure(cause);
-                                    } else {
-                                        handleStatusResponse(response, startTime);
-                                    }
-                                } catch (Throwable callbackFailure) {
-                                    pollTrace.record(Stage.CALLBACK_FAILED, callbackFailure);
-                                    logger.error(
-                                            "Worker status callback failed for {}",
-                                            ipPort,
-                                            callbackFailure);
-                                } finally {
-                                    pollTrace.record(Stage.CALLBACK_ENDED);
-                                }
-                                return null;
-                            },
-                            callbackExecutor)
-                    .whenComplete(
-                            (ignored, failure) -> {
-                                pollLease.close();
-                                if (failure != null) {
-                                    Throwable cause = EndpointTrace.unwrap(failure);
-                                    pollTrace.record(Stage.CALLBACK_FAILED, cause);
-                                    logger.error(
-                                            "Worker status callback failed for {}", ipPort, cause);
-                                }
-                            });
+            rpc.whenComplete(
+                    (response, failure) -> {
+                        pollTrace.record(Stage.RPC_COMPLETED, failure);
+                        long receivedUs = System.nanoTime() / 1000;
+                        Throwable cause = EndpointTrace.unwrap(failure);
+                        boolean valid = failure == null && validStatusResponse(response);
+                        workerStatus.recordStatusRpcResult(
+                                pollLease, valid, valid && response.getAlive(), cause);
+                        pollTrace.record(Stage.CALLBACK_READY, failure);
+                        // Reserve before releasing transport ownership, so a later RPC cannot
+                        // overtake this response in local reduction. No protobuf queue grows.
+                        boolean apply =
+                                workerStatus.tryBeginStatusApplication(pollLease, receivedUs);
+                        pollLease.close();
+                        if (!apply) {
+                            pollTrace.record(Stage.RESPONSE_DISCARDED, "STATUS_APPLICATION_BUSY");
+                            return;
+                        }
+                        try {
+                            callbackExecutor.execute(
+                                    () -> {
+                                        pollTrace.record(Stage.CALLBACK_STARTED);
+                                        try {
+                                            if (cause != null) {
+                                                handleException(cause);
+                                                recordStatusCheckFailure(cause);
+                                            } else {
+                                                handleStatusResponse(
+                                                        convertStatusResponse(response), startTime);
+                                            }
+                                        } catch (Throwable localFailure) {
+                                            pollTrace.record(Stage.CALLBACK_FAILED, localFailure);
+                                            logger.error(
+                                                    "Worker status local processing failed for {}",
+                                                    ipPort,
+                                                    localFailure);
+                                        } finally {
+                                            workerStatus.finishStatusApplication(pollLease);
+                                            pollTrace.record(Stage.CALLBACK_ENDED);
+                                        }
+                                    });
+                        } catch (RuntimeException rejected) {
+                            workerStatus.finishStatusApplication(pollLease);
+                            pollTrace.record(Stage.CALLBACK_FAILED, rejected);
+                            logger.error(
+                                    "Worker status application rejected for {}", ipPort, rejected);
+                        }
+                    });
             asyncInitiated = true;
         } catch (Throwable failure) {
             pollTrace.record(Stage.RUNNER_FAILED, failure);
@@ -206,6 +199,37 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (!asyncInitiated) {
                 pollLease.close();
             }
+        }
+    }
+
+    private WorkerStatus.StatusObservation convertStatusResponse(
+            EngineRpcService.WorkerStatusPB response) {
+        var trace = pollLease.pollTrace();
+        trace.record(Stage.CONVERSION_STARTED);
+        try {
+            var observation =
+                    EngineStatusConverter.convertToStatusObservation(workerStatus, response);
+            trace.record(Stage.CONVERSION_COMPLETED);
+            return observation;
+        } catch (RuntimeException | Error localFailure) {
+            trace.record(Stage.CONVERSION_FAILED, localFailure);
+            throw localFailure;
+        }
+    }
+
+    private boolean validStatusResponse(EngineRpcService.WorkerStatusPB response) {
+        if (response == null
+                || response.getStatusVersion() <= 0L
+                || response.getStatusVersion()
+                        < workerStatus.appliedStatusCursor().statusVersion()) {
+            return false;
+        }
+        try {
+            return RoleTypeProtoConverter.fromWorkerStatus(response) == roleType;
+        } catch (IllegalArgumentException invalidRole) {
+            // Conversion will classify malformed metadata as a local failure.
+            // Never let this scalar probe turn RPC=OK into a transport failure.
+            return false;
         }
     }
 
@@ -289,7 +313,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                     + ", response="
                                     + responseVersion);
                 }
-                workerStatus.recordSuccessfulPoll(observation.alive(), pollLease.pollTrace());
                 WorkerEndpoint exactEndpoint =
                         workerDirectory.exactEndpoint(roleType, ipPort, workerStatus);
 
@@ -374,7 +397,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     activityProjection = ep.observeStatusHeartbeat(workerStatus, observation);
                 }
                 if (observation.alive() && !generationRetiring) {
-                    pollLease.pollTrace().record(Stage.STATUS_APPLIED);
+                    workerStatus.recordStatusApplied(pollLease.pollTrace());
                 }
             } catch (Throwable failure) {
                 // Capture before the finally block performs and logs retirement.
@@ -391,7 +414,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     throw projectionFailure;
                 } finally {
                     if (generationRetiring) {
-                        workerDirectory.completeRetirement(
+                        workerDirectory.completeRetirementAsync(
                                 roleType,
                                 ipPort,
                                 workerStatus,
@@ -447,7 +470,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (!workerStatus.isActiveGeneration()) {
                 return;
             }
-            WorkerStatus.PollHealth health = workerStatus.recordTransportFailure();
+            WorkerStatus.PollHealth health = workerStatus.pollHealth();
             long failures = health.consecutiveTransportFailures();
             pollLease.pollTrace().record(Stage.TRANSPORT_FAILURE_RECORDED);
             logger.debug(
@@ -455,7 +478,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     failures,
                     MAX_CONSECUTIVE_FAILURES,
                     failure.getMessage());
-            if (failures < MAX_CONSECUTIVE_FAILURES) {
+            if (failures < MAX_CONSECUTIVE_FAILURES
+                    || !workerStatus.tryClaimHealthRetirement(health)) {
                 return;
             }
             endpointToRetire =
@@ -473,7 +497,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             pollLease.pollTrace().record(Stage.FAILURE_LOCK_RELEASED);
         }
         if (generationRetiring) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     roleType, ipPort, workerStatus, endpointToRetire, cacheAwareService, logger);
         }
     }

@@ -71,6 +71,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         health,
                         cache,
+                        health,
                         engineHealthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -129,6 +130,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         roleType,
@@ -160,6 +162,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         roleType,
@@ -189,6 +192,7 @@ class EngineSyncRunnerTest {
                         modelName,
                         workerDirectory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
@@ -223,6 +227,7 @@ class EngineSyncRunnerTest {
                         modelName,
                         workerDirectory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
@@ -279,6 +284,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         statusCheckExecutor,
+                        statusCheckExecutor,
                         engineHealthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
@@ -308,18 +314,20 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
                 Mockito.spy(
                         RunnerTestSupport.discovered(
                                 RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
-        when(status.pollHealth())
-                .thenReturn(
-                        new WorkerStatus.PollHealth(
-                                System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
+        ((java.util.concurrent.atomic.AtomicReference<WorkerStatus.PollHealth>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                status, "pollHealth"))
+                .set(
+                        new WorkerStatus.PollHealth(
+                                System.nanoTime() / 1000 - 2_000_000L, 20_000L, 0L, true));
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of());
 
@@ -328,6 +336,7 @@ class EngineSyncRunnerTest {
                         modelName,
                         directory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
@@ -443,12 +452,13 @@ class EngineSyncRunnerTest {
                 .when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
                         directory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
@@ -500,7 +510,7 @@ class EngineSyncRunnerTest {
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -530,7 +540,7 @@ class EngineSyncRunnerTest {
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -559,6 +569,7 @@ class EngineSyncRunnerTest {
                 workerAddressService,
                 statusCheckExecutor,
                 statusCheckExecutor,
+                statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
@@ -577,7 +588,7 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         String ipPort = "127.0.0.1:61000@0";
         WorkerStatus oldStatus =
                 RunnerTestSupport.discovered(
@@ -595,6 +606,7 @@ class EngineSyncRunnerTest {
                         modelName,
                         directory,
                         workerAddressService,
+                        statusCheckExecutor,
                         statusCheckExecutor,
                         statusCheckExecutor,
                         engineHealthReporter,
