@@ -290,7 +290,6 @@ def _create_local_python_repository(repository_ctx):
   python_include = _get_python_include(repository_ctx, python_bin)
   python_include_rule = _symlink_genrule_for_dir(
       repository_ctx, python_include, 'python_include', 'python_include')
-  python_import_lib_path, python_import_lib_name = _get_python_shared_library(repository_ctx, python_bin)
   python_import_lib_genrule = ""
   # To build Python C/C++ extension on Windows, we need to link to python import library pythonXY.lib
   # See https://docs.python.org/3/extending/windows.html
@@ -298,9 +297,12 @@ def _create_local_python_repository(repository_ctx):
     python_include = _norm_path(python_include)
     python_import_lib_name = _get_python_import_lib_name(repository_ctx, python_bin)
     python_import_lib_src = python_include.rsplit('/', 1)[0] + "/libs/" + python_import_lib_name
+    python_import_lib_path = python_import_lib_src
     python_import_lib_genrule = _symlink_genrule_for_dir(
       repository_ctx, None, '', 'python_import_lib',
       [python_import_lib_src], [python_import_lib_name])
+  else:
+    python_import_lib_path, python_import_lib_name = _get_python_shared_library(repository_ctx, python_bin)
   _tpl(repository_ctx, "BUILD", {
       "%{PYTHON_INCLUDE_GENRULE}": python_include_rule,
       "%{PYTHON_IMPORT_LIB_GENRULE}": python_import_lib_genrule,
