@@ -341,7 +341,18 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 sum(lengths),
                 1,
             )
+            # Match EmbeddingExecutor's CUDA metadata path, including an empty
+            # host cu_seqlens. Reading input_lengths through a CPU pointer here
+            # used to SIGSEGV before the graph could replay.
+            attn_inputs = attention
+            attn_inputs.input_lengths = attn_inputs.input_lengths.cuda()
+            attn_inputs.prefix_lengths = attn_inputs.prefix_lengths.cuda()
+            attn_inputs.cu_seqlens = torch.empty(0, dtype=torch.int32).pin_memory()
+            inputs.attention_inputs = _tag_attention_inputs(
+                attn_inputs, GROUP_TAGS, {"full": 1, "aux": 2}
+            )
             self.assertTrue(runner.canRun(inputs))
+            runner.prepareAttentionInputs(inputs)
             result = runner.forward(inputs).hidden_states.clone()
             torch.cuda.synchronize()
             hidden = (

@@ -624,15 +624,20 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                state.graph_token_capacity * sizeof(int32_t));
             captured_attn.context_total_kv_length = state.graph_token_capacity;
         } else if (isEmbeddingStylePrefillCudaGraph()) {
-            auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
-            auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-            int   cumulative_padding = 0;
-            int   token_idx          = 0;
-            for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
-                const int input_length = input_lengths[batch_idx];
-                std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
-                token_idx += input_length;
-                cumulative_padding += state.current_real_graph_seq_len - input_length;
+            // Transformer-only encoder attention owns its ragged metadata and
+            // does not consume padding_offset. Request lengths may be CUDA
+            // resident, so the legacy host-pointer loop must not run here.
+            if (!transformer_only_) {
+                auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
+                auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                int   cumulative_padding = 0;
+                int   token_idx          = 0;
+                for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
+                    const int input_length = input_lengths[batch_idx];
+                    std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
+                    token_idx += input_length;
+                    cumulative_padding += state.current_real_graph_seq_len - input_length;
+                }
             }
         } else {
             copyToHostMirror(inputs.attention_inputs.padding_offset,
