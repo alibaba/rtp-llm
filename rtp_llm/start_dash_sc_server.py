@@ -6,6 +6,7 @@ import traceback
 
 from setproctitle import setproctitle
 
+from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
 
@@ -38,7 +39,10 @@ def start_dash_sc_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     bind_barrier=None,
+    reporting_state=None,
 ):
+    if reporting_state is not None:
+        reporting.configure(reporting_state)
     _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
         f"[PROCESS_START]Start dash_sc server process rank_{rank_id}_server_{server_id}"

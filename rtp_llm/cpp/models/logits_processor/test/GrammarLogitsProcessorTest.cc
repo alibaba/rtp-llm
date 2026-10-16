@@ -1,6 +1,8 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -44,6 +46,21 @@ GrammarConfig grammarConfig(bool terminate_without_stop_token = true) {
 std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true, int vocab_size = 128) {
     return XGrammarBackend::create(makeAsciiTokenizerInfo(vocab_size).SerializeJSON(),
                                    grammarConfig(terminate_without_stop_token));
+}
+
+TEST(LogitsProcessorFactoryLifecycleTest, ReleasesReporterBeforeMetricsFactoryShutdown) {
+    auto config                = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("grammar_lifetime", kmonitor::MetricsTags{});
+        std::weak_ptr<kmonitor::MetricsReporter> reference = reporter;
+        LogitsProcessorFactory::init(ModelConfig{}, config, "", reporter);
+        reporter.reset();
+        ASSERT_FALSE(reference.expired());
+        LogitsProcessorFactory::shutdown();
+        EXPECT_TRUE(reference.expired());
+        LogitsProcessorFactory::shutdown();
+    }
 }
 
 struct ProcessorBundle {
@@ -369,8 +386,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto proc = makeProcessorFromKey(backend, {"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}

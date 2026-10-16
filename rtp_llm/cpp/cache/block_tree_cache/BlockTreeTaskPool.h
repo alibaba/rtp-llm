@@ -55,7 +55,11 @@ public:
     void stopAdmission();
     // Wait only for queued/running task bodies, including submitted completions.
     // External asynchronous transfers must be drained by their owner.
-    void waitForIdle();
+    void   waitForIdle();
+    bool   waitForIdleUntil(Clock::time_point deadline);
+    size_t pendingTaskCount() const {
+        return static_cast<size_t>(pending_tasks_.load(std::memory_order_acquire));
+    }
     void shutdown();
 
     BlockTreeQueueSizes queueSizes() const;

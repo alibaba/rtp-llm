@@ -4,9 +4,11 @@ from typing import Dict, Mapping
 
 import torch
 
+from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
 from rtp_llm.utils.model_weight import W
 
 
+@feature_weights_region()
 def adapt_split_moe_weights(
     weights: Dict[str, torch.Tensor],
     moe_inter_dim: int,

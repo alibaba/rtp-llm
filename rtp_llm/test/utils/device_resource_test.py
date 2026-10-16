@@ -4,10 +4,64 @@ import os
 import subprocess
 import sys
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.test.utils.device_resource import get_cuda_info, main, python_code
+from rtp_llm.test.utils.device_resource import (
+    _run_test_command,
+    get_cuda_info,
+    main,
+    python_code,
+)
+
+
+class SleepPreloadLauncherTest(unittest.TestCase):
+    def test_opt_in_preloads_child_and_restores_parent_on_failure(self):
+        @contextmanager
+        def configure_subprocess():
+            with patch.dict(os.environ, {"LD_PRELOAD": "test-tms.so"}):
+                yield
+                self.assertEqual(os.environ["LD_PRELOAD"], "test-tms.so")
+
+        def child(argv, *, env):
+            self.assertEqual(argv, ["native-test", "--original-arg"])
+            self.assertEqual(env["LD_PRELOAD"], "test-tms.so:libtorch_cpu.so")
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "2")
+            return subprocess.CompletedProcess(argv, 23)
+
+        module = SimpleNamespace(configure_subprocess=configure_subprocess)
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_TEST_TMS_PRELOAD": "1",
+                "LD_PRELOAD": "libtorch_cpu.so",
+                "CUDA_VISIBLE_DEVICES": "2",
+            },
+        ), patch.dict(sys.modules, {"torch_memory_saver": module}), patch.object(
+            sys, "argv", ["gpu_lock", "native-test", "--original-arg"]
+        ), patch(
+            "rtp_llm.test.utils.device_resource.subprocess.run", side_effect=child
+        ):
+            self.assertEqual(_run_test_command(), 23)
+            self.assertEqual(os.environ["LD_PRELOAD"], "libtorch_cpu.so")
+
+    def test_default_does_not_import_optional_allocator(self):
+        with patch.dict(os.environ, {"RTP_TEST_TMS_PRELOAD": "0"}), patch.dict(
+            sys.modules, {"torch_memory_saver": None}
+        ), patch(
+            "rtp_llm.test.utils.device_resource.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ):
+            self.assertEqual(_run_test_command(), 0)
+
+    def test_missing_required_allocator_fails_before_running_child(self):
+        with patch.dict(os.environ, {"RTP_TEST_TMS_PRELOAD": "1"}), patch.dict(
+            sys.modules, {"torch_memory_saver": None}
+        ), patch("rtp_llm.test.utils.device_resource.subprocess.run") as run:
+            with self.assertRaises(ImportError):
+                _run_test_command()
+            run.assert_not_called()
 
 
 class CudaDriverProbeTest(unittest.TestCase):

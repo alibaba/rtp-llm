@@ -17,6 +17,10 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
+#if USING_CUDA
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
+#endif
+
 using namespace std;
 
 namespace rtp_llm {
@@ -181,6 +185,21 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 #endif
 
+#if USING_CUDA
+    if (warm_up_ && cache_manager && model_init_params.hw_kernel_config.enable_cuda_graph
+        && VmmBackend().isAvailable()) {
+        // Decode warmup has real KV geometry, so it bypasses the Python
+        // no-cache warmup guard. Its throwaway graphs must not retain VMM
+        // allocations across warmup teardown. Change only this executor's
+        // owned config, never the caller's potentially const EngineInitParams.
+        // The serving executor keeps the original graph setting, even when
+        // construction below throws; no restoration or Python-object copy is needed.
+        model_init_params.hw_kernel_config.enable_cuda_graph = false;
+        RTP_LLM_LOG_INFO("decodeWarmUp: VMM active, disabling CUDA graph capture for the throwaway warmup "
+                         "executor; real executor captures after CacheManager init");
+    }
+#endif
+
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
         enable_ffn_disaggregate_ = true;
@@ -214,6 +233,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                  params.sp_config.tree_decode_config,
                                  params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
+}
+
+void NormalExecutor::drainAsyncRunners() {
+    // Flush the stream-async output-dispatch worker (D2H/KV release/update). sync() is a
+    // no-op when nothing is in flight (task_done_ starts true). Only meaningful when
+    // stream-async is enabled; unconditionally safe otherwise.
+    if (useStreamAsync()) {
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

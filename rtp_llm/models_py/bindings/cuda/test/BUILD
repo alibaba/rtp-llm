@@ -16,6 +16,26 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "no_block_copy_test",
+    srcs = ["NoBlockCopyTest.cc"],
+    copts = copts(),
+    env = {"GPU_COUNT": "2"},
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:no_block_copy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cuda_driver",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "2"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+        "//conditions:default": {"gpu": "H20", "gpu_count": "2"},
+    }),
+)
+
+cc_test(
     name = "cuda_speculative_sampling_test",
     srcs = ["CudaSpeculativeSamplingTest.cc"],
     copts = copts(),

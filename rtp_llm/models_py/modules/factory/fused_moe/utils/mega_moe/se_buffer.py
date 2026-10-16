@@ -170,9 +170,21 @@ def _get_or_create_mega_se_output(capacity, hidden, dtype, device):
     cached = _MEGA_SE_OUTPUT_CACHE.get(key)
     if cached is not None and cached.size(0) >= capacity:
         return cached
-    cached = torch.empty((max(capacity, 1), hidden), dtype=dtype, device=device)
+    from rtp_llm.model_loader.weight_memory_saver import pausable_empty
+
+    cached = pausable_empty((max(capacity, 1), hidden), dtype=dtype, device=device)
     _MEGA_SE_OUTPUT_CACHE[key] = cached
     return cached
+
+
+def mega_se_buffer_bytes() -> tuple[int, int]:
+    return (
+        sum(t.numel() * t.element_size() for t in _MEGA_SE_OUTPUT_CACHE.values()),
+        sum(
+            b.buffer.numel() * b.buffer.element_size()
+            for b in _MEGA_SE_BUF_CACHE.values()
+        ),
+    )
 
 
 def _signature_has(callable_obj, required: tuple[str, ...]) -> str | None:

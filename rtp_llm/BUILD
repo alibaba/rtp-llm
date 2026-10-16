@@ -142,9 +142,21 @@ requirement([
     "fastsafetensors",
     "pybind11_stubgen",
     "watchdog",
+    "filelock",
     "zstandard",
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+
+py_library(
+    name = "torch_memory_saver",
+    deps = select({
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch//torch_memory_saver:pkg"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch//torch_memory_saver:pkg"],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//torch_memory_saver:pkg"],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//torch_memory_saver:pkg"],
+        "//conditions:default": [],
+    }),
+)
 
 
 _JIT_CACHE_SRCS = [
@@ -153,12 +165,13 @@ _JIT_CACHE_SRCS = [
     "utils/jit_cache_deep_gemm.py",
 ]
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
+_JIT_CACHE_FLASHINFER_SRCS = ["utils/jit_cache_flashinfer.py"]
 
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
-    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + _JIT_CACHE_FLASHINFER_SRCS + [
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -172,6 +185,8 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        "//rtp_llm/utils/lifecycle:control",
+        "//rtp_llm/utils/lifecycle:resources",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
@@ -188,10 +203,18 @@ py_library(
 )
 
 py_library(
+    name = "jit_cache_flashinfer",
+    srcs = _JIT_CACHE_FLASHINFER_SRCS,
+    deps = [":filelock"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "jit_cache_manager_lib",
     srcs = _JIT_CACHE_SRCS,
     deps = [
         ":jit_cache_env",
+        ":jit_cache_flashinfer",
         ":utils",
         ":watchdog",
         ":zstandard",
@@ -469,6 +492,29 @@ py_library(
         ":openai_api",
         ":telemetry",
     ]
+)
+
+py_library(
+    name = "frontend_socket",
+    srcs = ["frontend/frontend_socket.py"],
+)
+
+py_library(
+    name = "frontend_sleep_routes",
+    srcs = ["frontend/sleep_routes.py"],
+    deps = [
+        ":fastapi",
+        ":orjson",
+        "//rtp_llm/utils/lifecycle:core",
+    ],
+)
+
+py_library(
+    name = "frontend_worker_address_utils",
+    srcs = ["frontend/worker_address_utils.py"],
+    deps = [
+        "//rtp_llm/utils/lifecycle:core",
+    ],
 )
 
 py_library(

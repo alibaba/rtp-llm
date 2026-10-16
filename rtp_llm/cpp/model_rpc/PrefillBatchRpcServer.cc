@@ -1,3 +1,4 @@
+#include <c10/util/ScopeExit.h>
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 
 #include "autil/Scope.h"
@@ -256,6 +257,13 @@ DeferredPrefillContext::~DeferredPrefillContext() {
             context->error_status = logical_status;
         }
         context->markRpcHandlingCompleted();
+    }
+    ttl_alarm.reset();
+    context.reset();
+    input.reset();
+    request_guard.reset();
+    if (admission_complete) {
+        admission_complete();
     }
 }
 
@@ -855,11 +863,11 @@ PrefillBatchRpcServer::~PrefillBatchRpcServer() {
     beginShutdown();
     deferred_contexts_->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down"));
     if (prepare_resource_worker_pool_) {
-        prepare_resource_worker_pool_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { prepare_resource_worker_pool_->stop(); });
         prepare_resource_worker_pool_.reset();
     }
     if (priority_cancel_executor_) {
-        priority_cancel_executor_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { priority_cancel_executor_->stop(); });
         priority_cancel_executor_.reset();
     }
 }
@@ -1064,17 +1072,40 @@ grpc::Status PrefillBatchRpcServer::admitGroup(const EnqueueGroupRequestPB* requ
     }
 
     slots.reserve(all_inputs.size());
-    const int group_size = static_cast<int>(all_inputs.size());
     for (const auto* input : all_inputs) {
-        auto input_copy = std::make_shared<GenerateInputPB>(*input);
+        // Acquire before resource preparation. Scheduler counters cannot see
+        // a request waiting on P->D allocation or on a later FetchResponse.
+        auto admission = acquireAdmission();
+        if (!admission.detail.admitted) {
+            addBatchError(response, input->request_id(), admission.detail.error_code, admission.detail.message);
+            continue;
+        }
+        auto complete_on_failure = c10::make_scope_exit([&]() {
+            if (admission.complete) {
+                admission.complete();
+            }
+        });
+        // The scope exit covers failure before ownership transfer. Once
+        // admission.complete moves into deferred, its destructor owns cleanup
+        // even if input copying or slots.push_back throws.
+        auto deferred                = std::make_shared<DeferredPrefillContext>();
+        deferred->admission_complete = std::exchange(admission.complete, {});
+        auto input_copy              = std::make_shared<GenerateInputPB>(*input);
         // Worker status derives batch_id from stream metadata; the batch RPC envelope is authoritative.
-        input_copy->set_group_size(group_size);
         input_copy->mutable_group_id()->set_value(request->batch_id());
 
         BatchSlot slot;
+        slot.deferred                = std::move(deferred);
         slot.input                   = std::move(input_copy);
         slot.fetch_attach_timeout_ms = request->fetch_attach_timeout_ms();
         slots.push_back(std::move(slot));
+    }
+    // A sleep transition can split admission within this batch. group_size
+    // describes this admitted subset, not the original RPC envelope: rejected
+    // inputs already have addBatchError entries, and downstream scheduling
+    // receives only these slots (the FIFO path treats group_size as metadata).
+    for (auto& slot : slots) {
+        slot.input->set_group_size(static_cast<int>(slots.size()));
     }
 
     return grpc::Status::OK;
@@ -1166,7 +1197,7 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         pfx_ctx->onflight_requests      = &onflight_requests_;
         pfx_ctx->loading_cache_requests = &loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
-        auto deferred                   = std::make_shared<DeferredPrefillContext>();
+        auto deferred                   = slot.deferred;
         deferred->context               = std::move(pfx_ctx);
         deferred->input                 = slot.input;
         deferred->request_guard         = std::move(guard);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -121,6 +122,11 @@ public:
     bool init();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
+    // Resource-phase boundary: admission and all engine ranks are already
+    // quiesced. Failure retains every owner/backing; only destruction after a
+    // successful drain may release pools. Wake creates a fresh empty cache.
+    bool   quiesceForSleep(std::chrono::steady_clock::time_point deadline);
+    size_t activeWorkCount() const;
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
@@ -194,6 +200,7 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
+    bool                                           quiescing_{false};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

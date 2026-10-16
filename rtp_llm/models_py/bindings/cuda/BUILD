@@ -139,6 +139,7 @@ cc_library(
 
 cc_library(
     name = "cuda_bindings",
+    linkopts = ["-ldl"],
     srcs = glob([
         "*.cc",
     ], exclude = [

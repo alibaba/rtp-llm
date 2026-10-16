@@ -92,6 +92,7 @@ cc_library(
         ":prepared_attention_inputs_guard",
         ":generation_prefill_cuda_graph_replay_metadata",
         ":cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/cache:kv_cache_physical_memory_controller",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
