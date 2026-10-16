@@ -1,5 +1,21 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -27,22 +43,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
     private RequestRegistry registry;
@@ -66,8 +66,9 @@ class QueuedDecodeWithdrawalTest {
         registry.attachGlobalQueue(queue);
         decode =
                 new DecodeEndpoint(
-                        WorkerStatus.createDiscovered(
-                                RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null),
+                        org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null)),
                         mock(EndpointEventProjector.class));
     }
 
@@ -263,7 +264,8 @@ class QueuedDecodeWithdrawalTest {
                         call -> {
                             assertFalse(
                                     RequestLifecycleTestSupport.prepareMember(registry, item),
-                                    "withdrawal must fence batch preparation before releasing the old route");
+                                    "withdrawal must fence batch preparation before releasing the"
+                                        + " old route");
                             registry.cancelRequest("4", 0, reason);
                             return true;
                         })

@@ -43,9 +43,8 @@ class GrpcWorkerStatusRunnerTest {
         var registry = RunnerTestSupport.endpointRegistry(config);
         try {
             var status =
-                    RunnerTestSupport.discovered(
-                            RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test");
-            status.configureStatusFreshness(20_000L);
+                    WorkerStatus.createDiscovered(
+                            RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test", 20_000L);
             var directory = directory(registry, status);
             var grpc = mock(EngineGrpcService.class);
             var version = new java.util.concurrent.atomic.AtomicLong();
@@ -77,11 +76,10 @@ class GrpcWorkerStatusRunnerTest {
                                             executor)
                                     .run();
             poll.accept(Runnable::run);
-            status.configureStatusFreshness(20_000L);
             var endpoint = directory.exactEndpoint(RoleType.DECODE, status.getIpPort(), status);
             assertNotNull(endpoint);
             poll.accept(queue::add);
-            long applied = status.lastStatusAppliedUs();
+            long applied = status.appliedSnapshotReceivedUs();
             long contact = status.pollHealth().lastSuccessfulPollUs();
             java.util.concurrent.TimeUnit.MILLISECONDS.sleep(30);
             for (int index = 0; index < 5; index++) {
@@ -90,7 +88,8 @@ class GrpcWorkerStatusRunnerTest {
             org.junit.jupiter.api.Assertions.assertEquals(
                     1, queue.size(), "at most one retained protobuf response");
             assertTrue(status.pollHealth().lastSuccessfulPollUs() > contact);
-            org.junit.jupiter.api.Assertions.assertEquals(applied, status.lastStatusAppliedUs());
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    applied, status.appliedSnapshotReceivedUs());
             assertTrue(status.isActiveGeneration());
             assertNull(
                     endpoint.tryPinSchedulingGeneration(),

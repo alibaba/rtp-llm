@@ -320,8 +320,9 @@ class RequestResourceAccountingTest {
                             new PlacementAvailability());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
             var worker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
+                    org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test"));
             worker.lock.lock();
             try {
                 prefill =
@@ -345,8 +346,9 @@ class RequestResourceAccountingTest {
             }
             decode =
                     new DecodeEndpoint(
-                            WorkerStatus.createDiscovered(
-                                    RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
+                            org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                                    WorkerStatus.createDiscovered(
+                                            RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")),
                             projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {

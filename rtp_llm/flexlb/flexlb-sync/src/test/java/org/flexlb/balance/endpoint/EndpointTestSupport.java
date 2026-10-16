@@ -28,12 +28,14 @@ public final class EndpointTestSupport {
     }
 
     static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
-        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
+        return org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null));
     }
 
     static WorkerStatus workerStatus(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+        return org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site));
     }
 
     static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {

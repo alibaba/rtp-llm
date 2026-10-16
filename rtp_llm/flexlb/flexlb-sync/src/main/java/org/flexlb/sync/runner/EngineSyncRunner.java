@@ -256,7 +256,6 @@ public class EngineSyncRunner implements Runnable {
                     continue;
                 }
 
-                workerStatus.configureStatusFreshness(statusStaleAfterUs);
                 WorkerStatus.PollLease statusPollLease =
                         workerStatus.tryBeginStatusPoll(syncCycleId);
                 if (statusPollLease != null) {
@@ -552,7 +551,7 @@ public class EngineSyncRunner implements Runnable {
                         site,
                         deploymentName,
                         engineIndex,
-                        multiEngineNum);
+                        multiEngineNum, statusStaleAfterUs);
         logger.info(
                 "Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(),
