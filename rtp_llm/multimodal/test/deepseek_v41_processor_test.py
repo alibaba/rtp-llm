@@ -17,6 +17,7 @@ import torch
 from PIL import Image
 from tokenizers import Tokenizer
 
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     IMAGE,
@@ -305,6 +306,163 @@ class V41ProcessorTest(TestCase):
 
 
 class V41TokenIdsProcessorTest(TestCase):
+    def test_preprocessing_reports_each_image_stage_and_request_total(self):
+        from rtp_llm.multimodal.multimodal_util import _record_download_time
+
+        config = V41ImageProcessorConfig(
+            vision_patch_size=2,
+            vision_downsample_ratio=1,
+            vision_min_pixels=0,
+            vision_max_n_token=32,
+        )
+        data = image_data(3, 5)
+        ids = [7, config.image_token_id, 8, config.image_token_id, 9]
+
+        def load_url(url):
+            _record_download_time(1.0)
+            return data
+
+        with patch(
+            "rtp_llm.multimodal.vit_metrics.time.monotonic_ns",
+            side_effect=range(0, 18000, 1000),
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.time.monotonic",
+            return_value=1.000002,
+        ), patch(
+            "rtp_llm.metrics.kmonitor.report"
+        ) as report:
+            prepared = prepare_vl_inputs_from_token_ids(
+                ids,
+                [{"url": "https://example.test/image"}, {"data": data}],
+                config,
+                url_loader=load_url,
+            )
+        by_metric = {}
+        for metric, value, tags in (call.args for call in report.call_args_list):
+            self.assertEqual(tags, {"model": "deepseek_v41", "mm_type": "image"})
+            by_metric.setdefault(metric, []).append(value)
+        for metric in (
+            GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
+            GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC,
+        ):
+            self.assertIn(metric, by_metric)
+            self.assertEqual(by_metric[metric], [1.0, 1.0])
+        self.assertEqual(
+            by_metric[GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC], [24.0, 24.0]
+        )
+        self.assertEqual(by_metric[GaugeMetrics.VIT_PREPROCESS_RT_METRIC], [0.017])
+        self.assertEqual(len(by_metric[GaugeMetrics.VIT_DOWNLOAD_RT_METRIC]), 1)
+        self.assertEqual(len(by_metric[GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC]), 1)
+        download_ms = by_metric[GaugeMetrics.VIT_DOWNLOAD_RT_METRIC][0]
+        other_ms = by_metric[GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC][0]
+        self.assertAlmostEqual(download_ms, 0.002)
+        self.assertAlmostEqual(other_ms, 0.015)
+        self.assertEqual(download_ms + other_ms, 0.017)
+        self.assertEqual(len(by_metric), 8)
+        self.assertEqual(len(prepared.images), 2)
+        torch.testing.assert_close(
+            prepared.images[0].patches, prepared.images[1].patches, rtol=0, atol=0
+        )
+        self.assertEqual(
+            prepared.image_content_hashes, (hashlib.sha256(data).hexdigest(),) * 2
+        )
+
+    def test_cached_image_fetch_does_not_count_as_download(self):
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        data = image_data(3, 5)
+        with patch("rtp_llm.metrics.kmonitor.report") as report:
+            prepare_vl_inputs_from_token_ids(
+                [config.image_token_id],
+                [{"url": "https://example.test/cached-image"}],
+                config,
+                url_loader=lambda url: data,
+            )
+        by_metric = {call.args[0]: call.args[1] for call in report.call_args_list}
+        self.assertIn(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, by_metric)
+        self.assertGreaterEqual(
+            by_metric[GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC], 0.0
+        )
+        self.assertEqual(by_metric[GaugeMetrics.VIT_DOWNLOAD_RT_METRIC], 0.0)
+        self.assertEqual(
+            by_metric[GaugeMetrics.VIT_PREPROCESS_RT_METRIC],
+            by_metric[GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC],
+        )
+
+    def test_preprocessing_reports_fetch_failure_without_later_stage_samples(self):
+        config = V41ImageProcessorConfig()
+        with patch("rtp_llm.metrics.kmonitor.report") as report:
+            with self.assertRaisesRegex(OSError, "image fetch failed"):
+                prepare_vl_inputs_from_token_ids(
+                    [config.image_token_id],
+                    [{"url": "https://example.test/image"}],
+                    config,
+                    url_loader=Mock(side_effect=OSError("image fetch failed")),
+                )
+        self.assertEqual(
+            [call.args[0] for call in report.call_args_list],
+            [
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+                GaugeMetrics.VIT_PREPROCESS_RT_METRIC,
+                GaugeMetrics.VIT_DOWNLOAD_RT_METRIC,
+                GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC,
+            ],
+        )
+
+    def test_preprocessing_metric_failure_preserves_result_and_parse_error(self):
+        config = V41ImageProcessorConfig(vision_min_pixels=0)
+        data = image_data(3, 5)
+        ids = [config.image_token_id]
+        original = prepare_vl_inputs_from_token_ids(ids, [{"data": data}], config)
+        with patch(
+            "rtp_llm.metrics.kmonitor.report",
+            side_effect=RuntimeError("metrics unavailable"),
+        ) as report:
+            with self.assertLogs(level="ERROR"):
+                actual = prepare_vl_inputs_from_token_ids(ids, [{"data": data}], config)
+            with self.assertLogs(level="ERROR"):
+                with self.assertRaises(ValueError) as raised:
+                    prepare_vl_inputs_from_token_ids(
+                        ids, [{"data": b"not an image"}], config
+                    )
+        self.assertEqual(report.call_count, 2)
+        self.assertEqual(str(raised.exception), MMErr.IMG_OPEN)
+        self.assertEqual(actual.token_ids, original.token_ids)
+        self.assertEqual(actual.token_types, original.token_types)
+        self.assertEqual(actual.image_content_hashes, original.image_content_hashes)
+        torch.testing.assert_close(
+            actual.images[0].patches, original.images[0].patches, rtol=0, atol=0
+        )
+
+    def test_failed_image_decode_is_timed_without_resize_or_patch_samples(self):
+        config = V41ImageProcessorConfig()
+        with patch("rtp_llm.metrics.kmonitor.report") as report:
+            with self.assertRaises(ValueError) as raised:
+                prepare_vl_inputs_from_token_ids(
+                    [config.image_token_id], [{"data": b"not an image"}], config
+                )
+        self.assertEqual(str(raised.exception), MMErr.IMG_OPEN)
+        self.assertEqual(
+            [call.args[0] for call in report.call_args_list],
+            [
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
+                GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+                GaugeMetrics.VIT_PREPROCESS_RT_METRIC,
+                GaugeMetrics.VIT_DOWNLOAD_RT_METRIC,
+                GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC,
+            ],
+        )
+
+    def test_text_only_and_invalid_marker_count_do_not_report_image_metrics(self):
+        config = V41ImageProcessorConfig()
+        with patch("rtp_llm.metrics.kmonitor.report") as report:
+            actual = prepare_vl_inputs_from_token_ids([7, 8], [], config)
+            with self.assertRaisesRegex(ValueError, "placeholder count"):
+                prepare_vl_inputs_from_token_ids([config.image_token_id], [], config)
+        self.assertEqual(actual.token_ids, (7, 8))
+        report.assert_not_called()
+
     def test_unreadable_image_preserves_public_error_message(self):
         config = V41ImageProcessorConfig(vision_min_pixels=0)
         for data in (b"not an image", image_data(3, 5)[:24]):

@@ -181,6 +181,13 @@ def _report_preprocess_timing(total_ms: float, download_ms: float) -> None:
     )
 
 
+def _report_v41_metric(metric, value, tags=None) -> None:
+    try:
+        kmonitor.report(metric, value, tags or {})
+    except Exception:
+        logging.exception("Failed to report typed ViT metric")
+
+
 def _report_preprocess_queue_size(queue_size: int) -> None:
     """Report the number of preprocessing work items not yet completed."""
     try:
@@ -1356,33 +1363,8 @@ class MMProcessEngine:
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
         if mm_inputs.HasField("v41_inputs"):
-            from rtp_llm.utils.grpc_util import trans_tensor
-
-            typed = mm_inputs.v41_inputs
-            if typed.schema_version != 1:
-                raise ValueError("unsupported V4.1 input schema version")
-            if mm_inputs.multimodal_inputs:
-                raise ValueError(
-                    "typed V4.1 images cannot be combined with generic images"
-                )
-            return self.submit_v41(
-                [
-                    dict(
-                        start=image.start,
-                        n_vit_h=image.n_vit_h,
-                        n_vit_w=image.n_vit_w,
-                        patches=trans_tensor(image.patches),
-                        types=torch.tensor(list(image.types), dtype=torch.int32),
-                        content_sha256=image.content_sha256,
-                        processor_identity=image.processor_identity,
-                        source_bytes=image.source_bytes,
-                    )
-                    for image in typed.images
-                ],
-                timeout_ms=mm_inputs.timeout_ms,
-                request_id=mm_inputs.request_id,
-                user_id=user_id,
-                service_name=service_name,
+            return self._run_v41_request(
+                lambda: self._submit_v41_rpc(mm_inputs, user_id, service_name)
             )
         try:
             converted_inputs = trans_mm_input(mm_inputs)
@@ -1400,6 +1382,59 @@ class MMProcessEngine:
         self, images, timeout_ms=0, request_id=0, user_id="", service_name=""
     ) -> MMEmbeddingRes:
         """Schedule typed images through the same bounded GPU queue as other models."""
+        return self._run_v41_request(
+            lambda: self._submit_v41_impl(
+                images, timeout_ms, request_id, user_id, service_name
+            )
+        )
+
+    def _submit_v41_rpc(self, mm_inputs, user_id, service_name) -> MMEmbeddingRes:
+        from rtp_llm.utils.grpc_util import trans_tensor
+
+        typed = mm_inputs.v41_inputs
+        if typed.schema_version != 1:
+            raise ValueError("unsupported V4.1 input schema version")
+        if mm_inputs.multimodal_inputs:
+            raise ValueError("typed V4.1 images cannot be combined with generic images")
+        return self._submit_v41_impl(
+            [
+                dict(
+                    start=image.start,
+                    n_vit_h=image.n_vit_h,
+                    n_vit_w=image.n_vit_w,
+                    patches=trans_tensor(image.patches),
+                    types=torch.tensor(list(image.types), dtype=torch.int32),
+                    content_sha256=image.content_sha256,
+                    processor_identity=image.processor_identity,
+                    source_bytes=image.source_bytes,
+                )
+                for image in typed.images
+            ],
+            mm_inputs.timeout_ms,
+            mm_inputs.request_id,
+            user_id,
+            service_name,
+        )
+
+    def _run_v41_request(self, compute) -> MMEmbeddingRes:
+        if not self.is_proxy_mode:
+            _report_v41_metric(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
+        try:
+            result = compute()
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
+        _report_v41_metric(
+            GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+            _embedding_token_length(result.embeddings),
+        )
+        if not self.is_proxy_mode:
+            _report_v41_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+        return result
+
+    def _submit_v41_impl(
+        self, images, timeout_ms, request_id, user_id, service_name
+    ) -> MMEmbeddingRes:
         validate = getattr(self.mm_part, "validate_prepared_images", None)
         if validate is None:
             raise ValueError("typed V4.1 inputs require a V4.1 vision model")
@@ -1409,6 +1444,7 @@ class MMProcessEngine:
             raise MMSchedulerRequestTooLargeError(
                 "V4.1 request exceeds image-count limit"
             )
+        _report_v41_metric(GaugeMetrics.VIT_IMAGE_COUNT_METRIC, len(validated))
         work_items = []
         for image in validated:
             # Empty URL bypasses the generic URL cache. The model cache uses the

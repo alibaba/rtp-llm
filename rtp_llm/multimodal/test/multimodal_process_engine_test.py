@@ -2220,6 +2220,131 @@ class MMProcessEngineGreenNetTest(TestCase):
         finally:
             engine.stop()
 
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_v41_reports_request_metrics_without_double_counting_proxy(self, report):
+        for proxy in (False, True):
+            with self.subTest(proxy=proxy):
+                engine, request = self._make_v41_engine_and_request()
+                engine._greennet_provider = GreenNetProvider()
+                engine.is_proxy_mode = proxy
+                try:
+                    report.reset_mock()
+                    for _ in range(2):
+                        result = engine.mm_embedding_rpc(request)
+                        self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
+                    samples = report.call_args_list
+                    for metric in (
+                        AccMetrics.VIT_QPS_METRIC,
+                        AccMetrics.VIT_SUCCESS_QPS_METRIC,
+                    ):
+                        values = [c.args[1] for c in samples if c.args[0] == metric]
+                        self.assertEqual(values, [] if proxy else [1, 1])
+                    for metric, expected in (
+                        (GaugeMetrics.VIT_IMAGE_COUNT_METRIC, 1),
+                        (GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC, 4),
+                    ):
+                        self.assertEqual(
+                            [c.args[1] for c in samples if c.args[0] == metric],
+                            [expected, expected],
+                        )
+                    self.assertFalse(
+                        any(
+                            c.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                            for c in samples
+                        )
+                    )
+                    self.assertEqual(engine.get_query_num(), 0)
+                finally:
+                    engine.stop()
+
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_v41_rejection_reports_error_once_and_no_success(self, report):
+        for failure in (
+            "schema",
+            "mixed",
+            "tensor",
+            "invalid_input",
+            "unsafe",
+            "scheduler",
+        ):
+            with self.subTest(failure=failure):
+                engine, request = self._make_v41_engine_and_request()
+                engine._greennet_provider = GreenNetProvider()
+                if failure == "schema":
+                    request.v41_inputs.schema_version = 2
+                elif failure == "mixed":
+                    request.multimodal_inputs.add()
+                elif failure == "tensor":
+                    request.v41_inputs.images[0].patches.Clear()
+                elif failure == "invalid_input":
+                    request.v41_inputs.images[0].processor_identity = "invalid"
+                elif failure == "unsafe":
+                    engine._greennet_provider = _StubGreenNetProvider(
+                        GreenNetVerdict(passed=False, code=2, message="blocked")
+                    )
+                else:
+                    engine._compute_embeddings = MagicMock(
+                        side_effect=RuntimeError("scheduler failed")
+                    )
+                try:
+                    report.reset_mock()
+                    with self.assertRaises(
+                        (ValueError, FtRuntimeException, RuntimeError)
+                    ) as raised:
+                        engine.mm_embedding_rpc(request)
+                    if failure == "unsafe":
+                        self.assertEqual(
+                            raised.exception.exception_type,
+                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                        )
+                    engine.report_vit_error(raised.exception)
+                    samples = report.call_args_list
+                    for metric in (
+                        AccMetrics.VIT_QPS_METRIC,
+                        AccMetrics.VIT_ERROR_QPS_METRIC,
+                    ):
+                        self.assertEqual(
+                            [c.args[1] for c in samples if c.args[0] == metric], [1]
+                        )
+                    for metric in (
+                        AccMetrics.VIT_SUCCESS_QPS_METRIC,
+                        GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                    ):
+                        self.assertFalse(any(c.args[0] == metric for c in samples))
+                    self.assertEqual(engine.get_query_num(), 0)
+                finally:
+                    engine.stop()
+
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_v41_empty_request_metrics_and_telemetry_failure(self, report):
+        engine, request = self._make_v41_engine_and_request()
+        engine._greennet_provider = GreenNetProvider()
+        try:
+            report.reset_mock()
+            result = engine.submit_v41([])
+            self.assertEqual(result.embeddings, [])
+            for metric, value in (
+                (AccMetrics.VIT_QPS_METRIC, 1),
+                (AccMetrics.VIT_SUCCESS_QPS_METRIC, 1),
+                (GaugeMetrics.VIT_IMAGE_COUNT_METRIC, 0),
+                (GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC, 0),
+            ):
+                self.assertEqual(
+                    [c.args[1] for c in report.call_args_list if c.args[0] == metric],
+                    [value],
+                )
+            report.side_effect = RuntimeError("metrics unavailable")
+            with self.assertLogs(level="ERROR"):
+                result = engine.submit_v41([])
+                self.assertEqual(result.embeddings, [])
+                request.v41_inputs.schema_version = 2
+                with self.assertRaisesRegex(ValueError, "unsupported V4.1"):
+                    engine.mm_embedding_rpc(request)
+            self.assertEqual(engine.get_query_num(), 0)
+        finally:
+            report.side_effect = None
+            engine.stop()
+
     def _make_input(self, url):
         return MultimodalInput(
             url,
