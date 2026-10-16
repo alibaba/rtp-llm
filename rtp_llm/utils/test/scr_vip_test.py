@@ -27,7 +27,6 @@ class ScrVipTest(unittest.TestCase):
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "checkpoint",
                 "RANK_SIZE": "2",
-                "RANK_ID": "1",
             },
             clear=True,
         )
@@ -185,12 +184,40 @@ class ScrVipTest(unittest.TestCase):
                 scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader)
             device.assert_not_called()
 
-    def test_worker_node_topology_must_match_gpu_topology(self):
-        for name, wrong in (("RANK_SIZE", "1"), ("RANK_ID", "0"), ("RANK_SIZE", "")):
-            with self.subTest(name=name, value=wrong), patch.dict(
-                os.environ, {name: wrong}
+    def test_local_vip_uses_rtp_node_rank_without_rank_id_env(self):
+        self.pc.world_size = 8
+        self.pc.local_world_size = 4
+        for phase in ("checkpoint", "restore"):
+            for rank in range(8):
+                with self.subTest(phase=phase, rank=rank), patch.dict(
+                    os.environ, {"SCR_PHASE": phase}
+                ), patch.object(scr_vip, "validate_device") as device:
+                    self.pc.world_rank = rank
+                    self.pc.local_rank = rank % 4
+                    expected = "22.0.1.2" if rank < 4 else "22.0.1.3"
+                    self.assertEqual(
+                        scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader),
+                        expected,
+                    )
+                    device.assert_called_once_with(expected)
+                    self.assertNotIn("RANK_ID", os.environ)
+
+    def test_local_vip_ignores_platform_rank_id_env(self):
+        with patch.dict(os.environ, {"RANK_ID": "0"}), patch.object(
+            scr_vip, "validate_device"
+        ) as device:
+            self.assertEqual(
+                scr_vip.internal_ip(self.pc, "10.0.0.3", self.reader), "22.0.1.3"
+            )
+            device.assert_called_once_with("22.0.1.3")
+            self.assertEqual(os.environ["RANK_ID"], "0")
+
+    def test_worker_node_count_must_match_gpu_topology(self):
+        for wrong in ("1", ""):
+            with self.subTest(value=wrong), patch.dict(
+                os.environ, {"RANK_SIZE": wrong}
             ), patch.object(scr_vip, "validate_device") as device:
-                with self.assertRaisesRegex(ValueError, name):
+                with self.assertRaisesRegex(ValueError, "RANK_SIZE"):
                     scr_vip.topology(self.pc, self.reader, wait=True)
                 device.assert_not_called()
 
@@ -218,7 +245,7 @@ class ScrVipTest(unittest.TestCase):
                     with self.subTest(
                         switch=switch, phase=phase, local_size=local_size
                     ):
-                        env = {"SCR_ENABLE": "1", "RANK_ID": "1"}
+                        env = {"SCR_ENABLE": "1"}
                         if switch is not None:
                             env["RTPLLM_ENABLE_SCR"] = switch
                         if phase is not None:

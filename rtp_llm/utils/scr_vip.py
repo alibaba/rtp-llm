@@ -103,20 +103,16 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
         raise ValueError("SCR VIP requires equally sized nodes")
     # The runc interposer reads node topology separately from RTP's GPU ranks.
     # Missing RANK_SIZE silently selects its single-node IPC registry.
-    expected = {
-        "RANK_SIZE": pc.world_size // pc.local_world_size,
-        "RANK_ID": pc.world_rank // pc.local_world_size,
-    }
-    for name, value in expected.items():
-        if os.environ.get(name) != str(value):
-            raise ValueError(
-                f"SCR VIP requires {name}={value} in the worker environment"
-            )
+    node_count = pc.world_size // pc.local_world_size
+    if os.environ.get("RANK_SIZE") != str(node_count):
+        raise ValueError(
+            f"SCR VIP requires RANK_SIZE={node_count} in the worker environment"
+        )
     deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:
             nodes = read_topology(pc.world_size, pc.local_world_size, gang_info)
-            validate_device(nodes[int(os.environ["RANK_ID"])])
+            validate_device(nodes[pc.world_rank // pc.local_world_size])
             return nodes
         except (
             OSError,
@@ -133,7 +129,7 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
 def internal_ip(pc, fallback: str, gang_info: GangInfoReader) -> str:
     if not enabled(pc):
         return fallback
-    return topology(pc, gang_info, wait=True)[int(os.environ["RANK_ID"])]
+    return topology(pc, gang_info, wait=True)[pc.world_rank // pc.local_world_size]
 
 
 def configure_network(pc) -> None:
