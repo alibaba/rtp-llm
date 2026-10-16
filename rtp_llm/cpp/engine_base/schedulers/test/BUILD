@@ -34,6 +34,13 @@ async_cache_test_deps = test_deps + [
 ]
 
 cc_test(
+    name = "batch_decode_scheduler_mode_test",
+    srcs = ["BatchDecodeSchedulerModeTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps,
+)
+
+cc_test(
     name = "fifo_scheduler_test",
     srcs = [
         "FIFOSchedulerTest.cc",

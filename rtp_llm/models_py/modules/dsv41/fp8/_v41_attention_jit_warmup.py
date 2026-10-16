@@ -543,8 +543,13 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                     (2 * count, stride), dtype=torch.float32, device=device
                 )
                 scores = values[:, -512:]
-                indices = torch.arange(count, device=device, dtype=torch.int64) * 2 + 1
-                for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                for offset, slot_offset, boundary_offset in product((0, 1), repeat=3):
+                    # Ragged tiles slice a packed completed-pair vector. An odd
+                    # preceding count shifts int64 boundaries by eight bytes.
+                    indices = _indexer_warmup_vector(
+                        count, torch.int64, device, 1, boundary_offset
+                    )
+                    indices.mul_(2).add_(1 - 2 * boundary_offset)
                     pos = _indexer_warmup_vector(
                         2 * count, torch.int64, device, 1, offset
                     )
@@ -710,8 +715,10 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                         torch.ones((2, 2), dtype=table_dtype, device=device),
                         layout.entries,
                         layout.tokens_per_block,
-                        layout.owner_tokens_per_block,
-                        4,
+                        # Producer ownership follows the global KV region for
+                        # every plane; state retains its own physical page size.
+                        layouts[0].owner_tokens_per_block,
+                        cp_size,
                         cp_rank,
                     )
                     for layout in layouts
@@ -773,6 +780,112 @@ def _warm_indexer(attn, max_seq_len, device):
             vector_stride=stride,
             vector_offset=offset,
         )
+
+
+def _native_topk_warmup_shapes(max_seq_len):
+    """Minimal witnesses for the K512 dispatcher in kernels/topk_v3.cu.
+
+    Register1/2/4, direct Cluster8/4, Streaming, and direct Cluster2 are
+    separate native functions. Width/row values themselves are runtime data.
+    The persistent branch is unreachable for K512: above 128K it requires
+    batch > 144, while uniform_plan's largest capacity is 128; at <= 128K
+    the capacities are <= 60, below the earlier direct-cluster batch limit.
+    Keep the dispatcher contract test in sync when native routing changes.
+    """
+    witnesses = (
+        (1, 512),
+        (1, 4097),
+        (1, 8193),
+        (1, 16385),
+        (9, 16385),
+        (17, 16385),
+        (37, 32769),
+    )
+    return tuple((rows, width) for rows, width in witnesses if width <= max_seq_len)
+
+
+def _warm_native_selectors(max_seq_len, device):
+    """Load native selector families without repeating Q/score JIT warmup.
+
+    DeepSelect has a second CUDA function above the device's SM count, even
+    though it is AOT rather than JIT. TopK-v3 remains reachable for ragged
+    widths/layouts and disabled DeepSelect; call its native entry directly so
+    the preferred selector cannot hide the fallback during startup.
+    Buffers are private and bounded by the dispatch witnesses, not context
+    capacity: the largest FP32 TopK score buffer is less than 5 MiB.
+    """
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_deepselect as sparse
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as dense
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
+
+    if max_seq_len < 512:
+        return
+    width = 1024 if max_seq_len >= 1024 else 512
+    dense_types = tuple(
+        dtype
+        for dtype in (torch.float32, torch.bfloat16)
+        if dense.is_available(device, dtype)
+    )
+    sparse_available = sparse.is_available(device)
+    if dense_types or sparse_available:
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        for rows in (1, sms + 1):
+            ends = torch.full((rows,), width, dtype=torch.int32, device=device)
+            output = torch.empty((rows, 512), dtype=torch.int32, device=device)
+            for dtype in (torch.float32, torch.bfloat16):
+                if dtype not in dense_types and not (
+                    dtype == torch.bfloat16 and sparse_available
+                ):
+                    continue
+                # Include native score padding without materializing a large
+                # request. Width and strides are not native template keys.
+                logits = torch.zeros((rows, width + 512), dtype=dtype, device=device)[
+                    :, :width
+                ]
+                if dtype in dense_types:
+                    for finite in (False, True):
+                        _require_launch(
+                            dense.try_select_tokens(
+                                logits, ends, out=output, filter_finite=finite
+                            ),
+                            "native dense DeepSelect",
+                        )
+                if dtype == torch.bfloat16 and sparse_available:
+                    _require_launch(
+                        sparse.try_select_sparse_tokens(logits, ends, output),
+                        "native sparse DeepSelect",
+                    )
+                del logits
+
+    if not topk._TOPK_V3_OK:
+        return
+    ops = topk.rtp_llm_ops
+    workspace = topk._get_topk_workspace(device)
+    finite_select = getattr(ops, "dsv41_topk_v3_finite", None)
+    selectors = (ops.topk_v3,)
+    if finite_select is not None:
+        selectors += (finite_select,)
+    dtypes = (
+        (torch.float32, torch.bfloat16) if topk.supports_bf16() else (torch.float32,)
+    )
+    for rows, width in _native_topk_warmup_shapes(max_seq_len):
+        ends = torch.full((rows,), width, dtype=torch.int32, device=device)
+        output = torch.empty((rows, 512), dtype=torch.int32, device=device)
+        stride = (width + 3) // 4 * 4
+        for dtype in dtypes:
+            # Native dispatch tests both base pointer and row-stride alignment.
+            # Offset one element selects its scalar-load specialization; this
+            # is also the branch used by a ragged contiguous odd-width matrix.
+            for offset in (0, 1):
+                storage = torch.zeros(
+                    rows * stride + offset, dtype=dtype, device=device
+                )
+                logits = storage[offset:].view(rows, stride)[:, :width]
+                for select in selectors:
+                    select(logits, ends, output, workspace, 512, width)
+                del logits, storage
 
 
 def _warm_swa_refresh(device):
@@ -1199,6 +1312,36 @@ def _warm_indexer_layout(
             )
 
 
+def _warm_index_plan(attn, device):
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_index_plan import (
+        try_build_index_plan,
+    )
+
+    # Production selection is contiguous int32. Query positions are long,
+    # including views; retain the existing int32 compatibility signature too.
+    # [3,M,1].unbind(0) is the actual batched metadata layout: odd M changes
+    # the count/start pointer alignment independently of query positions.
+    for rows, stride, offset in _indexer_warmup_layouts():
+        selected = torch.full(
+            (rows, attn.index_topk), -1, dtype=torch.int32, device=device
+        )
+        for dtype in (torch.int32, torch.int64):
+            positions = _indexer_warmup_vector(rows, dtype, device, stride, offset)
+            _require_launch(
+                try_build_index_plan(selected, positions, 0, 1, 0, attn.window_size),
+                "scalar FlashMLA index plan",
+            )
+            metadata = torch.ones((3, rows, 1), dtype=dtype, device=device)
+            _require_launch(
+                try_build_index_plan(
+                    selected, positions, *metadata.unbind(0), attn.window_size
+                ),
+                "batched FlashMLA index plan",
+            )
+
+
 def _warm_flash_mla(attn, device):
     import torch
 
@@ -1217,21 +1360,7 @@ def _warm_flash_mla(attn, device):
     indices[:, :, :4] = torch.arange(4, dtype=torch.int32, device=device)
     lengths = torch.full((2,), 4, dtype=torch.int32, device=device)
     if attn.compress_ratio:
-        from ._v41_prefill_index_plan import try_build_index_plan
-
-        selected = torch.full(
-            (2, attn.index_topk), -1, dtype=torch.int32, device=device
-        )
-        for dtype in (torch.int32, torch.int64):
-            positions = torch.arange(2, dtype=dtype, device=device)
-            offsets = torch.zeros((2, 1), dtype=dtype, device=device)
-            sizes = torch.ones((2, 1), dtype=dtype, device=device)
-            _require_launch(
-                try_build_index_plan(
-                    selected, positions, offsets, sizes, offsets, attn.window_size
-                ),
-                "batched FlashMLA index plan",
-            )
+        _warm_index_plan(attn, device)
     flash_mla_sparse_fwd(
         q=q,
         kv=kv,
@@ -1349,6 +1478,11 @@ def warmup_v41_attention_jit(
             run(("q_norm_rope", key), partial(_warm_q_norm_rope, attn, device))
             if getattr(attn, "is_index_source", False) and attn.compress_ratio:
                 run(("candidate_topk",), partial(_warm_candidate_topk, device))
+                if attn.index_topk == 512:
+                    run(
+                        ("native_selectors", max_seq_len),
+                        partial(_warm_native_selectors, max_seq_len, device),
+                    )
                 if attn.index_n_heads == 32:
                     run(
                         ("grouped_bounds", key),

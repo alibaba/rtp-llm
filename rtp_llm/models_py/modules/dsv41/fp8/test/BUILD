@@ -62,6 +62,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_attention_jit_warmup",
     "test_v41_owned_pool",
     "test_v41_cp_async",
     "test_v41_prefill_kv_workspace",
@@ -88,6 +89,10 @@ _X86_TESTS = [
             "//rtp_llm:jit_cache_env",
             test_requirement("pytest"),
         ],
+        data = [
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3.cu",
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3.cuh",
+        ] if name == "test_v41_attention_jit_warmup" else [],
         tags = ["dsv41_cuda13", "SM100_ARM_CU13"] + (["L20_CU13"] if name in _X86_TESTS else []),
         exec_properties = select({
             "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},

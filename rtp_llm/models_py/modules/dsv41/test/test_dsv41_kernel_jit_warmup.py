@@ -83,6 +83,37 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertFalse(warmup._ENGRAM_WARMED)
         self.assertFalse(warmup._DECODE_QUERY_WARMED)
 
+    def test_cp_positions_warmup_covers_engine_and_python_dtypes(self):
+        build = mock.Mock(return_value=object())
+        module = "rtp_llm.models_py.modules.dsv41._cp_metadata_triton"
+        with mock.patch.dict(
+            sys.modules,
+            {module: fake_module(module, try_build_cp_full_prefill_positions=build)},
+        ):
+            for batch in warmup.common._cp_batch_block_warmup_sizes(64):
+                lengths = torch.full((batch,), 3, dtype=torch.int64)
+                prefixes = torch.arange(batch, dtype=torch.int64)
+                build.reset_mock()
+                self.assertTrue(
+                    warmup.common._warm_cp_positions_jit(lengths, prefixes, 3 * batch)
+                )
+                self.assertEqual(
+                    {(c.args[0].dtype, c.args[1].dtype) for c in build.call_args_list},
+                    {
+                        (length_dtype, prefix_dtype)
+                        for length_dtype in (torch.int32, torch.int64)
+                        for prefix_dtype in (torch.int32, torch.int64)
+                    },
+                )
+                for call in build.call_args_list:
+                    self.assertEqual(call.args[0].tolist(), lengths.tolist())
+                    self.assertEqual(call.args[1].tolist(), prefixes.tolist())
+                    self.assertEqual(call.kwargs["total_tokens"], 3 * batch)
+            build.return_value = None
+            self.assertFalse(
+                warmup.common._warm_cp_positions_jit(lengths, prefixes, 3 * batch)
+            )
+
     def mega_fixture(self):
         from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 
