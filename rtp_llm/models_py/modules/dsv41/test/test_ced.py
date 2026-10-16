@@ -22,6 +22,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -1365,8 +1366,12 @@ class CedHostLayoutTest(_SingleThreadTest):
                     if isinstance(getattr(left, f.name), torch.Tensor)
                 )
             for a, b in tensors:
-                self.assertEqual(a.stride(), b.stride())
-                self.assertEqual(a.storage_offset(), b.storage_offset())
+                if a.is_contiguous():
+                    self.assertEqual(a.stride(), b.stride())
+                else:
+                    self.assertTrue(b.is_contiguous())
+                # Packed metadata uses aligned views into one allocation;
+                # absolute storage offsets are not part of the row contract.
                 self.assertEqual(a.device, b.device)
 
     def test_target_builds_selected_rows_without_full_tensor_indexing(self):
@@ -1426,6 +1431,104 @@ class CedHostLayoutTest(_SingleThreadTest):
                     )
                 self.assertEqual(fallback.call_count, int(noncanonical))
                 self.assert_layout_equal(expected, actual)
+
+    def test_packed_upload_preserves_types_strides_and_independent_forward_storage(
+        self,
+    ):
+        arrays = (
+            np.arange(27, dtype=np.int64)[1::3],
+            np.array([True, False, True], dtype=np.bool_),
+            np.arange(14, dtype=np.int32)[::2],
+            np.empty(0, dtype=np.int64),
+            np.arange(6, dtype=np.int64)[::-1],
+        )
+        values, host = _CED._upload_layout_arrays(arrays, torch.device("cpu"))
+        later, later_host = _CED._upload_layout_arrays(arrays, torch.device("cpu"))
+        self.assertNotEqual(host.data_ptr(), later_host.data_ptr())
+        for value, array, unchanged in zip(values, arrays, later):
+            self.assertTrue(np.array_equal(value.numpy(), array))
+            self.assertEqual(value.numpy().dtype, array.dtype)
+            self.assertEqual(value.stride(), (1,))
+            self.assertEqual(value.untyped_storage().data_ptr(), host.data_ptr())
+            self.assertEqual(value.storage_offset() * value.element_size() % 16, 0)
+            value.zero_()
+            self.assertTrue(np.array_equal(unchanged.numpy(), array))
+
+    def test_packed_layout_all_ranks_and_ragged_noncontiguous_selection(self):
+        lengths, prefixes = (1, 7, 129, 513), (0, 31, 30723, 8191)
+        chosen = torch.tensor([0, 1, 7, 8, 19, 136, 137, 150, 649])
+        # A real, noncontiguous host selection must not be read as packed bytes.
+        selected_storage = torch.full((2 * chosen.numel(),), -1, dtype=torch.int64)
+        selected_storage[::2] = chosen
+        selected = selected_storage[::2]
+        saw_empty_peer = False
+        for cp in (1, 2, 4):
+            rank_parts, masks, chunks, offset = [[] for _ in range(cp)], [], [], 0
+            for length in lengths:
+                padded = ((length + 2 * cp - 1) // (2 * cp)) * (2 * cp)
+                halves = torch.arange(padded).chunk(2 * cp)
+                for rank in range(cp):
+                    rank_parts[rank].append(
+                        torch.cat((halves[rank], halves[2 * cp - 1 - rank])) + offset
+                    )
+                masks.append((torch.arange(padded) < length).int())
+                chunks.append(padded // cp)
+                offset += padded
+            ranks = [torch.cat(parts) for parts in rank_parts]
+            for permuted in (False, True):
+                source = (
+                    [positions.flip(0) for positions in reversed(ranks)]
+                    if permuted
+                    else ranks
+                )
+                info = types.SimpleNamespace(
+                    prefill_qkv_padding_mask=torch.cat(masks),
+                    prefill_qkv_restore_indice=torch.argsort(torch.cat(source)).int(),
+                    prefill_actual_input_lengths_cpu=torch.tensor(
+                        lengths, dtype=torch.int32
+                    ),
+                    prefill_cp_chunk_lengths=torch.tensor(chunks, dtype=torch.int32),
+                )
+                for rank in range(cp):
+                    with self.subTest(cp=cp, rank=rank, permuted=permuted):
+                        ctx = _CP.build_cp_context(
+                            info,
+                            cp_size=cp,
+                            cp_rank=rank,
+                            chunk_length=len(ranks[rank]),
+                            device=torch.device("cpu"),
+                            position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                            kv_cache_sharded=cp > 1,
+                        )
+                        reference = _CED._query_layout_fallback(
+                            ctx, selected, None, keep_candidate_rows=True
+                        )
+                        actual = _CED._host_query_layout(
+                            ctx, selected, None, keep_candidate_rows=True
+                        )
+                        self.assertIsNotNone(actual)
+                        self.assert_layout_equal(reference, actual)
+                        context, exchange, groups = actual
+                        owner = exchange._layout_host_buffer.data_ptr()
+                        for value in (
+                            exchange.send_indices,
+                            exchange.receive_positions,
+                            context.relative_positions,
+                            context.global_positions,
+                            context.local_is_real,
+                            context.unpad_restore,
+                            context.req_id_per_token,
+                            context.gather_restore_positions,
+                            *(v for pair in groups for v in pair),
+                        ):
+                            self.assertEqual(value.untyped_storage().data_ptr(), owner)
+                            self.assertEqual(
+                                value.storage_offset() * value.element_size() % 16, 0
+                            )
+                        saw_empty_peer |= (
+                            0 in exchange.send_sizes or 0 in exchange.receive_sizes
+                        )
+        self.assertTrue(saw_empty_peer)
 
     def test_invalid_selection_retains_exception_type_and_message(self):
         ctx, _ = _context(65, 0)

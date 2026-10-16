@@ -14,6 +14,55 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_attention_jit_warmup import (
 )
 
 
+class HostCompactTableTest(unittest.TestCase):
+    def test_ragged_aliases_padding_strides_and_negative_view(self):
+        prefixes = (0, 17, 511, 1023, 3, 2047, 8191)
+        lengths = (0, 1, 129, 513, 7, 257, 17)
+        for dtype, columns, read, negative in itertools.product(
+            (torch.int32, torch.int64), (13, 18, 24), (False, True), (False, True)
+        ):
+            host = (torch.arange(7 * 36).reshape(7, 36) % 23 + 1).to(dtype)[:, ::2]
+            host[:, ::7] = 0
+            host[:, 1::11] = -3
+            if negative:
+                host = torch._neg_view(-host)
+            active = []
+            for req, (prefix, length) in enumerate(zip(prefixes, lengths)):
+                if not read and not length:
+                    continue
+                start, end = (
+                    (max(0, prefix - 127), prefix)
+                    if read
+                    else (prefix, prefix + length)
+                )
+                for col in range(
+                    start // 512, min((end + 511) // 512, columns, host.shape[1])
+                ):
+                    if int(host[req, col]) > 0:
+                        active.append((req, col, int(host[req, col])))
+            unique = sorted({block for _, _, block in active})
+            expected = torch.full((len(lengths), columns), -1, dtype=torch.int32)
+            for req, col, block in active:
+                expected[req, col] = unique.index(block)
+            actual_unique, actual = metadata._host_compact_table(
+                host, prefixes, lengths, columns, 512, read, pin_memory=False
+            )
+            self.assertEqual(actual_unique, unique)
+            self.assertTrue(torch.equal(actual, expected))
+
+    def test_host_plan_has_no_per_request_tensor_indexing(self):
+        host = torch.ones(64, 70, dtype=torch.int32)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            metadata._host_compact_table(
+                host, (31744,) * 64, (1024,) * 64, 70, 512, False, pin_memory=False
+            )
+        names = [event.name for event in prof.events()]
+        for name in ("aten::select", "aten::slice", "aten::index_put_", "aten::item"):
+            self.assertNotIn(name, names)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class HostSwaMetadataTest(unittest.TestCase):
     @staticmethod
