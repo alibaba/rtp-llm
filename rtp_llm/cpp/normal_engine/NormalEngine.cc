@@ -132,7 +132,8 @@ std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManag
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           bool                                          start_loop):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -264,7 +265,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     initScheduler();
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
-    (void)startLoop();
+    if (start_loop) {
+        (void)startLoop();
+    }
     (void)construction_guard.release();
 }
 
@@ -673,6 +676,11 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+#if !USING_CUDA
+    // Deferred RPC startup runs outside the constructor's device guard.
+    c10::DeviceGuard startup_device_guard(
+        c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(parallelism_config.local_rank)));
+#endif
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -688,7 +696,10 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();

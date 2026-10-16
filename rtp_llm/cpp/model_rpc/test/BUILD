@@ -142,9 +142,14 @@ cc_test(
 
 cc_test(
     name = "prefill_rpc_server_test",
-    srcs = ["PrefillRpcServerTest.cc"],
+    srcs = [
+        "PrefillRpcServerTest.cc",
+        "RpcEngineStartupTest.cc",
+    ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+    ],
     env = {},
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
