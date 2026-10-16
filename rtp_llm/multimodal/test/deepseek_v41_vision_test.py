@@ -2,9 +2,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ from safetensors import safe_open
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     TEXT,
     V41ImageInput,
@@ -272,6 +273,8 @@ class V41PreparedValidationTest(TestCase):
         adapter._encode_cache_capacity = 1
         adapter._encode_cache.clear()
         adapter._encode_cache_order.clear()
+        adapter._encode_cache_tokens = 0
+        adapter._encode_cache_bytes = 0
         adapter.encode_image(V41ImageInput(**trusted))
         adapter.encode_image(V41ImageInput(**other))
         self.assertEqual(len(adapter._encode_cache), 1)
@@ -316,6 +319,8 @@ class V41PreparedValidationTest(TestCase):
         torch.testing.assert_close(second, first, rtol=0, atol=0)
         adapter._encode_cache.clear()
         adapter._encode_cache_order.clear()
+        adapter._encode_cache_tokens = 0
+        adapter._encode_cache_bytes = 0
         recomputed = adapter.encode_image(V41ImageInput(**record))
         torch.testing.assert_close(recomputed, first, rtol=0, atol=0)
 
@@ -403,6 +408,151 @@ class V41PreparedValidationTest(TestCase):
         self.assertIsNot(second, first)
         torch.testing.assert_close(second, first, rtol=0, atol=0)
         self.assertEqual(len(adapter._encode_cache), 0)
+
+
+class V41EncodeCacheMetricsTest(TestCase):
+    def setUp(self):
+        module = "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision"
+        with patch.dict(os.environ, {"V41_IMAGE_ENCODE_CACHE_ITEMS": "2"}), patch(
+            module + ".V41ImageProcessorConfig.from_model_config",
+            return_value=V41ImageProcessorConfig(),
+        ), patch(module + ".ViT", return_value=torch.nn.Identity()), patch(
+            module + ".Aligner", return_value=torch.nn.Identity()
+        ):
+            self.adapter = DeepSeekV41VisionEmbedding(
+                SimpleNamespace(text={"hidden_size": 8}, vision_parameters=lambda: {}),
+                device="cpu",
+            )
+        reporter_patch = patch("rtp_llm.metrics.kmonitor.report")
+        self.report = reporter_patch.start()
+        self.addCleanup(reporter_patch.stop)
+
+    def image(self, content_hash):
+        return SimpleNamespace(
+            content_sha256=content_hash,
+            processor_identity="processor",
+            n_vit_h=3,
+            n_vit_w=6,
+        )
+
+    def reported(self, metric):
+        return [
+            call.args[1]
+            for call in self.report.call_args_list
+            if call.args[0] == metric
+        ]
+
+    def assert_residency(self, tensors):
+        token_samples = self.reported(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC)
+        byte_samples = self.reported(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC)
+        self.assertTrue(token_samples, "cache token occupancy must be reported")
+        self.assertTrue(byte_samples, "cache byte occupancy must be reported")
+        self.assertEqual(
+            token_samples[-1],
+            sum(tensor.shape[0] for tensor in tensors),
+        )
+        self.assertEqual(
+            byte_samples[-1],
+            sum(tensor.numel() * tensor.element_size() for tensor in tensors),
+        )
+
+    def test_cache_metrics_follow_hits_misses_and_lru_residency(self):
+        images = {name: self.image(name) for name in ("a", "b", "c")}
+        results = {
+            "a": torch.ones(5, 8, dtype=torch.bfloat16),
+            "b": torch.ones(7, 8, dtype=torch.float32),
+            "c": torch.ones(9, 8, dtype=torch.bfloat16),
+        }
+
+        def compute(image):
+            result = results[image.content_sha256]
+            self.adapter._encode_image_store(
+                self.adapter._encode_cache_key(image), result
+            )
+            return result
+
+        with patch.object(
+            self.adapter, "_encode_image_compute", side_effect=compute
+        ) as forward:
+            self.assertIs(self.adapter.encode_image(images["a"]), results["a"])
+            self.assert_residency([results["a"]])
+            self.assertIs(self.adapter.encode_image(images["b"]), results["b"])
+            self.assert_residency([results["a"], results["b"]])
+            self.assertIs(self.adapter.encode_image(images["a"]), results["a"])
+            self.assertIs(self.adapter.encode_image(images["c"]), results["c"])
+            self.assert_residency([results["a"], results["c"]])
+            self.assertEqual(forward.call_count, 3)
+
+        self.assertNotIn(
+            self.adapter._encode_cache_key(images["b"]), self.adapter._encode_cache
+        )
+        self.assertEqual(
+            self.reported(AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC), [1, 1, 1]
+        )
+        self.assertEqual(
+            self.reported(AccMetrics.VIT_EMBEDDING_CACHE_HIT_QPS_METRIC), [1]
+        )
+        self.assertEqual(
+            self.reported(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC), [1]
+        )
+        self.assertEqual(
+            self.reported(AccMetrics.VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC), []
+        )
+        for call in self.report.call_args_list:
+            self.assertEqual(call.args[2], {"cache_type": "v41_encode"})
+
+        self.report.reset_mock()
+        self.adapter._encode_image_store(
+            self.adapter._encode_cache_key(images["a"]), torch.zeros(100, 8)
+        )
+        self.assertIs(self.adapter.encode_image(images["a"]), results["a"])
+        self.assert_residency([results["a"], results["c"]])
+        self.assertEqual(
+            self.reported(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC), []
+        )
+
+    def test_cache_bypass_does_not_report_a_hit_or_miss(self):
+        self.assertIsNone(self.adapter._encode_image_cached(self.image("")))
+        self.assert_residency([])
+        trusted = self.image("trusted")
+        result = torch.ones(5, 8, dtype=torch.bfloat16)
+        self.adapter._encode_image_store(
+            self.adapter._encode_cache_key(trusted), result
+        )
+        for image, capacity in ((self.image(""), 2), (trusted, 0)):
+            with self.subTest(content_hash=image.content_sha256, capacity=capacity):
+                self.adapter._encode_cache_capacity = capacity
+                self.report.reset_mock()
+                self.assertIsNone(self.adapter._encode_image_cached(image))
+                self.adapter._encode_image_store(
+                    self.adapter._encode_cache_key(image), torch.zeros(100, 8)
+                )
+                self.assert_residency([result])
+                self.assertEqual(len(self.adapter._encode_cache), 1)
+                self.assertEqual(
+                    self.reported(AccMetrics.VIT_EMBEDDING_CACHE_HIT_QPS_METRIC), []
+                )
+                self.assertEqual(
+                    self.reported(AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC), []
+                )
+                self.assertEqual(
+                    self.reported(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC),
+                    [],
+                )
+                self.assertEqual(
+                    self.reported(AccMetrics.VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC),
+                    [],
+                )
+
+    def test_metric_failure_preserves_cache_results(self):
+        image = self.image("trusted")
+        result = torch.ones(5, 8, dtype=torch.bfloat16)
+        self.report.side_effect = RuntimeError("metric transport unavailable")
+        with self.assertLogs(level="ERROR"):
+            self.adapter._encode_image_store(
+                self.adapter._encode_cache_key(image), result
+            )
+            self.assertIs(self.adapter.encode_image(image), result)
 
 
 class V41VisionEmbeddingTest(TestCase):
