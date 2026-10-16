@@ -105,12 +105,8 @@ def _run_arithmetic_contract(rows, shape_name, n, k, leading=None):
         ).to(torch.float8_e8m0fnu)
         reference_weight, reference_scales = weight.clone(), scales.clone()
         immutable.extend((value, _hash(value)) for value in (weight, scales))
-        with pytest.MonkeyPatch.context() as patch:
-            # Deliberately conflict with the former selected-HMMA option to
-            # prove native-A8 precedence through the real factory.
-            patch.setenv("DSV41_SM90_NATIVE_A8", "1")
-            patch.setenv("DSV41_SM90_DENSE_G32_SELECTED", "1")
-            linear = V41MXFP8Linear(weight, scales)
+        # Exercise the production SM90 factory without experimental selectors.
+        linear = V41MXFP8Linear(weight, scales)
         adapter = linear._sm90_linear
         assert type(adapter) is Sm90MXFP8Linear
         config = json.loads(adapter.config.to_str())

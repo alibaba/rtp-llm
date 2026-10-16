@@ -99,12 +99,27 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Experimental implementations are retained for independent comparison tests.
+# Keep their original import paths, but exclude them from serving libraries.
+_DSV41_SM90_DENSE_EXPERIMENT_SRCS = [
+    "modules/dsv41/sm90_dense_deepgemm.py",
+    "modules/dsv41/sm90_dense_selected.py",
+    "modules/dsv41/sm90_dense_splitk32.py",
+    "modules/dsv41/sm90_dense_triton.py",
+    "modules/dsv41/sm90_dense_wgmma16.py",
+]
+
+_DSV41_SM90_EXPERIMENT_SRCS = _DSV41_SM90_DENSE_EXPERIMENT_SRCS + [
+    "modules/dsv41/engram_graph.py",
+    "modules/dsv41/fp8/_v41_sm90_attention.py",
+]
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ]),
+    ], exclude = _DSV41_SM90_EXPERIMENT_SRCS),
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
@@ -193,7 +208,7 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ]),
+    ], exclude = ["kernels/cuda/sm90_dense_deepgemm/**/*.py"]),
     data = glob([
         "kernels/cuda/sm90_moe_align/*.cu",
         "kernels/cuda/sm90_moe_align/*.cpp",
@@ -201,6 +216,18 @@ py_library(
         "kernels/cuda/sm90_moe_align/*.cuh",
         "kernels/cuda/sm90_moe_align/*.LICENSE",
         "kernels/cuda/sm90_moe_align/LICENSE",
+    ]),
+)
+
+# Dependency direction is tests -> experiments -> modules -> kernels;
+# serving targets cannot depend on these test-only implementations.
+py_library(
+    name = "dsv41_sm90_dense_experiments",
+    testonly = True,
+    srcs = _DSV41_SM90_DENSE_EXPERIMENT_SRCS + glob([
+        "kernels/cuda/sm90_dense_deepgemm/**/*.py",
+    ]),
+    data = glob([
         "kernels/cuda/sm90_dense_deepgemm/**/*.cu",
         "kernels/cuda/sm90_dense_deepgemm/**/*.cpp",
         "kernels/cuda/sm90_dense_deepgemm/**/*.h",
@@ -211,6 +238,24 @@ py_library(
         "kernels/cuda/sm90_dense_triton/LICENSE",
         "kernels/cuda/sm90_dense_triton/*.md",
     ]),
+    deps = [":modules"],
+    visibility = ["//rtp_llm/models_py/modules/dsv41/test:__pkg__"],
+)
+
+py_library(
+    name = "dsv41_sm90_attention_reference",
+    testonly = True,
+    srcs = ["modules/dsv41/fp8/_v41_sm90_attention.py"],
+    deps = [":modules"],
+    visibility = ["//rtp_llm/models_py/modules/dsv41/fp8/test:__pkg__"],
+)
+
+py_library(
+    name = "dsv41_sm90_engram_graph_experiment",
+    testonly = True,
+    srcs = ["modules/dsv41/engram_graph.py"],
+    deps = [":modules"],
+    visibility = ["//rtp_llm/models_py/modules/dsv41/test:__pkg__"],
 )
 
 py_library(

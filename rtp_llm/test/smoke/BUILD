@@ -208,6 +208,26 @@ custom_smoke_test(
 )
 
 custom_smoke_test(
+    name = "deepseek_v41_flash_dp8_ep8_sm90_flashinfer",
+    main = "deepseek_v41_sm90_flashinfer_contract_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Opt-in FlashInfer contract; keep the existing Humming CI entry unchanged.
+    # Full PDFUSION generation retains the original golden/cache assertions.
+    smoke_args = "--tp_size 1 --ep_size 8 --dp_size 8 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --decode_capture_config 1,2,4 --dsv4_fixed_pool_blocks 256 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 32768 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_sm90_contract_test.py",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+    ],
+)
+
+custom_smoke_test(
     name = "deepseek_v41_flash_cp8_ep8_graph_sm90",
     main = "deepseek_v41_sm90_contract_test.py",
     target_compatible_with = select({

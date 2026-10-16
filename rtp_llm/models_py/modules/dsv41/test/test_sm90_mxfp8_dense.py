@@ -116,14 +116,11 @@ class DenseScaleAndDispatchTest(unittest.TestCase):
             self.assertIsNone(linear._sm90_linear)
             self.assertIs(linear.weight_scales, pack.return_value)
 
-    def test_native_a8_overrides_shared_a16_selector(self):
+    def test_shared_expert_shape_uses_production_sm90_adapter(self):
         weight = SimpleNamespace(shape=(4608, 5120), is_cuda=True, device="cuda:0")
         scales = object()
         with (
             patch("torch.cuda.get_device_capability", return_value=(9, 0)),
-            patch.dict("os.environ", {
-                "DSV41_SM90_NATIVE_A8": "1", "DSV41_SM90_DENSE_G32_SELECTED": "1",
-            }),
             patch("rtp_llm.models_py.modules.dsv41.sm90_dense.Sm90MXFP8Linear") as adapter,
             patch.object(V41MXFP8Linear, "pack_scales") as pack,
         ):

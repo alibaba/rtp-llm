@@ -1,6 +1,5 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
-import os
 import weakref
 
 import torch
@@ -31,20 +30,6 @@ class V41MXFP8Linear(torch.nn.Module):
         self.N, self.K = weight.shape
         self._sm90_linear = None
         if weight.is_cuda and torch.cuda.get_device_capability(weight.device) == (9, 0):
-            # Bounded Round8 candidate: only the two measured shared-expert
-            # projection shapes. Keep opt-in until whole-model acceptance and
-            # clean performance have been revalidated; no SM100 behavior change.
-            if (
-                os.environ.get("DSV41_SM90_NATIVE_A8", "0") != "1"
-                and os.environ.get("DSV41_SM90_DENSE_G32_SELECTED", "0") == "1"
-                and (self.N, self.K) in ((4608, 5120), (5120, 2304))
-            ):
-                from rtp_llm.models_py.modules.dsv41.sm90_dense_selected import (
-                    Sm90SelectedG32Linear,
-                )
-
-                self._sm90_linear = Sm90SelectedG32Linear(weight, scales)
-                return
             from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 
             self._sm90_linear = Sm90MXFP8Linear(weight, scales)

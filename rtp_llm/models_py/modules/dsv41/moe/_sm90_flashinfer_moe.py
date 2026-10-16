@@ -202,7 +202,7 @@ class Sm90FlashInferLocalExperts(nn.Module):
             _STREAM_WORKSPACES[workspace_key] = torch.empty(
                 nbytes, device=device, dtype=torch.uint8
             )
-        self._workspaces[key] = (_STREAM_WORKSPACES[workspace_key], stream)
+        self._workspaces[key] = _STREAM_WORKSPACES[workspace_key]
         x = torch.zeros(
             (num_rows, self.hidden_size), device=device, dtype=torch.bfloat16
         )
@@ -258,7 +258,7 @@ class Sm90FlashInferLocalExperts(nn.Module):
         key = (x.shape[0], indices.shape[1])
         if key not in self._workspaces:
             raise RuntimeError(f"prepare{key} is required before forward/capture")
-        workspace, _ = self._workspaces[key]
+        workspace = self._workspaces[key]
         # Framework side-stream warmup and capture may differ from the setup
         # stream. Their owner must establish stream dependencies and serialize
         # uses of this scratch, including replay: changing streams alone is not

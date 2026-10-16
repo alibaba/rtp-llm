@@ -83,6 +83,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
         "//rtp_llm:jit_cache_env",
         test_requirement("pytest"),
     ],
@@ -104,6 +105,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
         "//rtp_llm:jit_cache_env",
         test_requirement("pytest"),
     ],
@@ -125,6 +127,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
         "//rtp_llm:jit_cache_env",
         test_requirement("pytest"),
     ],

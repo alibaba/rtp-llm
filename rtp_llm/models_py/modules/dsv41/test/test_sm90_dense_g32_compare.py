@@ -95,28 +95,22 @@ class _SplitK32Candidate:
         return self.quantized(*self.quantize(x), out)
 
 
-class _SelectedFactoryCandidate:
-    """Exercise the actual opt-in V41 factory, not a parallel proxy forward."""
+class _SelectedAdapterCandidate:
+    """Retained A16 comparison adapter; no production factory selects it."""
 
     def __init__(self, weight, scales):
         from rtp_llm.models_py.modules.dsv41.sm90_dense_selected import Sm90SelectedG32Linear
 
-        previous = os.environ.get("DSV41_SM90_DENSE_G32_SELECTED")
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv("DSV41_SM90_DENSE_G32_SELECTED", "1")
-            self.linear = V41MXFP8Linear(weight, scales)
-        assert os.environ.get("DSV41_SM90_DENSE_G32_SELECTED") == previous
-        self.adapter = self.linear._sm90_linear
-        assert isinstance(self.adapter, Sm90SelectedG32Linear), "Actual V41 factory did not select bounded adapter"
+        self.adapter = Sm90SelectedG32Linear(weight, scales)
         self.K = weight.shape[1]
         self.last_rows = None
 
     def quantize(self, x):
-        return self.linear._quantize_input(x)
+        return V41MXFP8Linear._quantize_input(self, x)
 
     def quantized(self, q, packed, out):
         self.last_rows = q.numel() // self.K
-        return self.linear.forward_quantized(q, packed, out=out)
+        return self.adapter.forward_quantized(q, packed, out=out)
 
     def prepared(self, q, scales, out):
         self.last_rows = q.numel() // self.K
@@ -124,7 +118,7 @@ class _SelectedFactoryCandidate:
 
     def full_chain(self, x, out):
         self.last_rows = x.numel() // self.K
-        return self.linear(x, out=out)
+        return self.quantized(*self.quantize(x), out)
 
 
 class _Wgmma16Candidate(_SplitK32Candidate):
@@ -165,10 +159,10 @@ def _arm_builders(weight, scales, quantize, rows):
 
     # Unsupported fixtures never construct or invoke this bounded adapter.
     if tuple(weight.shape) in ((4608, 5120), (5120, 2304)):
-        yield ("selected_factory", "W8A8_G32",
-               dict(factory="V41MXFP8Linear", opt_in="DSV41_SM90_DENSE_G32_SELECTED=1",
-                    setting_scope="Constructor only; prior environment restored"),
-               2 if rows >= 512 else 1, lambda: _SelectedFactoryCandidate(weight, scales))
+        yield ("selected_adapter", "W8A8_G32",
+               dict(adapter="Sm90SelectedG32Linear", production_selected=False,
+                    setting_scope="Direct comparison adapter; no production dispatch"),
+               2 if rows >= 512 else 1, lambda: _SelectedAdapterCandidate(weight, scales))
 
     # Each candidate owns a legal MMA-specific repack. Never reinterpret the
     # WGMMA weight layout as MMA. The two tuning arms differ only in M tile.
@@ -190,7 +184,7 @@ def _arm_builders(weight, scales, quantize, rows):
 
 def _save_arithmetic_evidence(method, name, case):
     """Operand FP8 does not establish Tensor Core arithmetic dtype."""
-    selected_wgmma16 = (isinstance(method, _SelectedFactoryCandidate)
+    selected_wgmma16 = (isinstance(method, _SelectedAdapterCandidate)
                         and method.adapter.get_dispatch(method.last_rows)["backend"] == "humming_wgmma16")
     if isinstance(method, _Wgmma16Candidate) or selected_wgmma16:
         from humming.kernel.humming import HummingKernel
@@ -223,7 +217,7 @@ def _save_arithmetic_evidence(method, name, case):
                     evidence_status="Current DG extension saved; inspect SASS")
     selected_dispatch = None
     selected_humming = False
-    if isinstance(method, _SelectedFactoryCandidate):
+    if isinstance(method, _SelectedAdapterCandidate):
         selected_dispatch = method.adapter.get_dispatch(method.last_rows)
         selected_humming = getattr(method.adapter, "last_compiled_kernel", None) is None
     if isinstance(method, _Candidate) or selected_humming:
@@ -234,7 +228,7 @@ def _save_arithmetic_evidence(method, name, case):
                     prior_cubin_sha256="689c06297981fab9820aa9e0b9dd01c69dce98cc1ce682cdb6f3d68c60a72b04",
                     prior_sass=["F2FP.F16.E4M3.UNPACK_B", "HMMA.16816.F32"],
                     meaning="Even E4M3 MMA PTX can lower to FP16 SASS; do not claim native FP8 from PTX alone")
-    if not isinstance(method, (_TritonCandidate, _SelectedFactoryCandidate)):
+    if not isinstance(method, (_TritonCandidate, _SelectedAdapterCandidate)):
         return dict(decision="NOT_RUN", arithmetic_dtype="UNVERIFIED",
                     meaning="Do not infer native FP8 instructions from E4M3 storage or backend name")
     evidence = []
@@ -424,14 +418,13 @@ def _run(rows, shape_name, n, k, *, leading_shape=None):
                 method = build()
                 torch.cuda.synchronize()
                 observation["load_repack_wall_ms"] = (time.perf_counter() - begin) * 1000
-                if isinstance(method, _SelectedFactoryCandidate):
-                    observation["factory_dispatch"] = method.adapter.get_dispatch(rows)
+                if isinstance(method, _SelectedAdapterCandidate):
+                    observation["adapter_dispatch"] = method.adapter.get_dispatch(rows)
                     expected_backend = "humming_wgmma16" if rows >= 512 else "humming_mma"
-                    assert observation["factory_dispatch"]["backend"] == expected_backend
+                    assert observation["adapter_dispatch"]["backend"] == expected_backend
                     if rows < 512:
                         expected_tile = 16 if rows <= 16 else (64 if n == 4608 else 32)
-                        assert observation["factory_dispatch"]["tile_m"] == expected_tile
-                    observation["factory_class"] = type(method.linear).__name__
+                        assert observation["adapter_dispatch"]["tile_m"] == expected_tile
                     observation["selected_adapter_class"] = type(method.adapter).__name__
                 prepared_fn = _gate(method, kind, x, q, packed, unpacked, out, oracle, weight, scales, observation)
                 accepted.append(SimpleNamespace(name=name, kind=kind, method=method,
