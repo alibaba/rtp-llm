@@ -319,7 +319,7 @@ public class EndpointRegistry {
         AtomicReference<WorkerEndpoint.GenerationPin> captured =
                 new AtomicReference<>();
         endpoints.computeIfPresent(ipPort, (ignored, current) -> {
-            captured.set(current.tryPinGeneration());
+            captured.set(current.tryPinSchedulingGeneration());
             return current;
         });
         return captured.get();

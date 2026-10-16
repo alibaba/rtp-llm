@@ -40,6 +40,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final ExecutorService statusCheckExecutor;
     private final ExecutorService cacheStatusExecutor;
+    private final ExecutorService statusApplicationExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -67,6 +68,7 @@ public class EngineSyncRunner implements Runnable {
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             ExecutorService cacheStatusExecutor,
+                            ExecutorService statusApplicationExecutor,
                             EngineHealthReporter engineHealthReporter,
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
@@ -82,6 +84,7 @@ public class EngineSyncRunner implements Runnable {
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.statusApplicationExecutor = Objects.requireNonNull(statusApplicationExecutor, "statusApplicationExecutor");
         this.cacheStatusExecutor = Objects.requireNonNull(cacheStatusExecutor, "cacheStatusExecutor");
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
@@ -166,6 +169,7 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(
                         workerIpPort, site, host.getGroup());
 
+                if (workerStatus == null) { continue; }
                 if (!workerStatus.isActiveGeneration()) {
                     workerStatus.trace().record(Stage.DISCOVERY_POLL_SKIPPED);
                     logger.debug(
@@ -174,6 +178,7 @@ public class EngineSyncRunner implements Runnable {
                     continue;
                 }
 
+                workerStatus.configureStatusFreshness(statusStaleAfterUs);
                 WorkerStatus.PollLease statusPollLease =
                         workerStatus.tryBeginStatusPoll(syncCycleId);
                 if (statusPollLease != null) {
@@ -185,7 +190,7 @@ public class EngineSyncRunner implements Runnable {
                                 workerStatus, statusPollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs,
-                                cacheAwareService, statusCheckExecutor);
+                                cacheAwareService, statusApplicationExecutor);
                         statusPollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
@@ -322,10 +327,13 @@ public class EngineSyncRunner implements Runnable {
                     roleType, workerIpPort,
                     () -> createWorkerStatus(workerIpPort, site, group));
 
+            // Unchanged discovery must not wait for local status reduction.
+            if (workerStatus.getRole() == roleType && Objects.equals(workerStatus.getGroup(), group)
+                    && Objects.equals(workerStatus.getSite(), site)) { return workerStatus; }
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             RoleType generationRole = null;
             boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            if (!workerStatus.lock.tryLock()) { return null; }
             try {
                 if (!workerDirectory.isCurrentStatus(
                         roleType, workerIpPort, workerStatus)) {
@@ -349,7 +357,7 @@ public class EngineSyncRunner implements Runnable {
                 // Group/role ownership is a generation boundary. Keep the old
                 // status identity published as RETIRING until the endpoint's
                 // real retirement completion runs the exact finalizer. Cache
-                // cleanup is generation-scoped and cannot block replacement.
+                // cleanup finishes before a replacement can publish.
                 generationRole = currentRole == null ? roleType : currentRole;
                 endpointToRetire = workerDirectory.beginRetirement(
                         generationRole, workerIpPort, workerStatus, "DISCOVERY_TOPOLOGY_CHANGED", -1L);
@@ -361,7 +369,7 @@ public class EngineSyncRunner implements Runnable {
             if (!retirementStarted) {
                 return workerStatus;
             }
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole, workerIpPort, workerStatus,
                     endpointToRetire, cacheAwareService, logger);
             logger.info(
@@ -406,7 +414,7 @@ public class EngineSyncRunner implements Runnable {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
-        workerStatus.lock.lock();
+        if (!workerStatus.lock.tryLock()) { return; }
         try {
             if (!workerDirectory.isCurrentStatus(
                     roleType, workerIpPort, workerStatus)) {
@@ -424,6 +432,7 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
 
+            if (!workerStatus.tryClaimHealthRetirement(health)) { return; }
             generationRole = workerStatus.getRole();
             endpointToRetire = workerDirectory.beginRetirement(
                     generationRole, workerIpPort, workerStatus, "DISCOVERY_MISSING_AND_STATUS_EXPIRED",
@@ -434,7 +443,7 @@ public class EngineSyncRunner implements Runnable {
         }
 
         if (retirementStarted) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole, workerIpPort, workerStatus,
                     endpointToRetire, cacheAwareService, logger);
             logger.info(

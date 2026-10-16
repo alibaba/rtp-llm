@@ -334,6 +334,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         WorkerStatusResponse initial = statusResponse(role, workerStatus(svc, 0L));
         status.lock.lock();
         try {
+            status.recordSuccessfulPoll(initial.isAlive(), null);
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
                     status.freezeStatusResponse(initial), null);
             endpointRegistry.publishPreparedEndpoint(
