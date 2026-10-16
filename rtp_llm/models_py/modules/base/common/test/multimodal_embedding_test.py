@@ -119,14 +119,24 @@ class MultimodalEmbeddingTest(TestCase):
             ):
                 self._run_deepstack_embedding_test(*params)
 
-    def test_rejects_negative_multimodal_locations(self):
+    def test_negative_multimodal_location_skips_reused_prefix(self):
         embeddings = torch.zeros(4, 2, dtype=torch.half)
-        feature = torch.ones(2, 2, dtype=torch.half)
+        feature = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.half)
         locations = torch.tensor([-1], dtype=torch.int32)
 
-        with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
-            MultimodalEmbeddingInjector()(embeddings, [feature], locations)
+        output = MultimodalEmbeddingInjector()(embeddings.clone(), [feature], locations)
+        expected = embeddings.clone()
+        expected[0] = feature[1]
+        torch.testing.assert_close(output, expected)
 
+        output = MultimodalEmbeddingInjector()(
+            embeddings.clone(), [feature], torch.tensor([-2], dtype=torch.int32)
+        )
+        torch.testing.assert_close(output, embeddings)
+
+    def test_rejects_negative_deepstack_location(self):
+        embeddings = torch.zeros(4, 2, dtype=torch.half)
+        locations = torch.tensor([-1], dtype=torch.int32)
         deepstack = torch.ones(1, 2, 2, dtype=torch.half)
         with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
             MultimodalDeepstackInjector()(
@@ -154,6 +164,18 @@ class MultimodalEmbeddingTest(TestCase):
             output[2:],
             torch.zeros(2, 2, dtype=torch.half),
         )
+
+    def test_noncontiguous_embeddings_use_sequential_copy(self):
+        embeddings = torch.zeros((4, 4), dtype=torch.half)[:, ::2]
+        self.assertFalse(embeddings.is_contiguous())
+        feature = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.half)
+
+        output = MultimodalEmbeddingInjector()(
+            embeddings, [feature], torch.tensor([1], dtype=torch.int32)
+        )
+
+        self.assertIs(output, embeddings)
+        torch.testing.assert_close(output[1:3], feature)
 
 
 if __name__ == "__main__":

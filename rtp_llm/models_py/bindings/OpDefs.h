@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/HostInputMetadata.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -319,6 +320,9 @@ struct PyAttentionInputs {
 
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
+
+    // Opaque model-owned host metadata, prepared once alongside the common inputs.
+    std::vector<torch::Tensor> host_model_metadata;
 };
 
 struct BertEmbeddingInputs {
@@ -357,6 +361,10 @@ struct PyModelInputs {
     torch::Tensor        engram_token_windows;
     bool                 need_all_logits        = true;
     bool                 need_all_hidden_states = true;
+    // Optional CPU mirrors for model-specific packed-input metadata. Models
+    // must not infer business token semantics in the shared C++ execution path.
+    torch::Tensor input_ids_host;
+    torch::Tensor text_tokens_mask_host;
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;

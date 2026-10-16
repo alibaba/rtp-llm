@@ -94,15 +94,21 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
 
     local_absmax = GroupReduceMax(local_absmax, lane_id);
 
-    float y_s = local_absmax / max_8bit;
+    float y_s                   = local_absmax / max_8bit;
+    int   ue8m0_biased_exponent = 0;
     if constexpr (SCALE_UE8M0) {
-        y_s = exp2f(ceilf(log2f(fmaxf(y_s, 1e-10f))));
+        const float    raw_scale      = fmaxf(y_s, 1e-10f);
+        const uint32_t scale_bits     = __float_as_uint(raw_scale);
+        const int      floor_exponent = static_cast<int>((scale_bits >> 23) & 0xff) - 127;
+        const int      scale_exponent = floor_exponent + ((scale_bits & 0x7fffffU) != 0U);
+        ue8m0_biased_exponent         = scale_exponent + 127;
+        y_s                           = __int_as_float(ue8m0_biased_exponent << 23);
     }
 
     // TODO can optimize
     scale_element_t y_s_quant;
     if constexpr (SCALE_UE8M0) {
-        y_s_quant = (uint8_t)(((int)log2f(y_s)) + 127);
+        y_s_quant = static_cast<uint8_t>(ue8m0_biased_exponent);
     } else {
         y_s_quant = y_s;
     }

@@ -1,6 +1,7 @@
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -12,6 +13,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <chrono>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 using namespace std;
 using namespace at::indexing;
@@ -26,6 +28,7 @@ static const char* names[] = {
     "input_ids",
     "attention_mask",
     "moe_gating",
+    "text_tokens_mask",
 };
 static_assert(sizeof(names) / sizeof(names[0]) <= NUM_INPUT_TYPES, "redundant handler arg name");
 static_assert(sizeof(names) / sizeof(names[0]) >= NUM_INPUT_TYPES, "missing handler arg name");
@@ -78,6 +81,11 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         py::gil_scoped_acquire acquire;
         torch_type_  = py::module::import("torch").attr("Tensor");
         handler_args = py::cast<std::vector<std::string>>(handler_.attr("extend_forward_args")());
+        // Some Python embedding models consume packed token/length metadata on
+        // the host. Keep the pinned gather buffers for them; PyWrappedModel
+        // already owns the asynchronous model-input H2D copies and their lifetime.
+        requires_host_input_metadata_ = py::hasattr(params.py_model, "requires_host_input_metadata")
+                                            && py::cast<bool>(params.py_model.attr("requires_host_input_metadata"));
     }
 
     for (const auto& name : handler_args) {
@@ -139,6 +147,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<torch::Tensor> gathered_input_embeddings;
     std::vector<int>           gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
+    const int input_vocab_size = model_config_.input_vocab_size ? static_cast<int>(model_config_.input_vocab_size) :
+                                                                  static_cast<int>(model_config_.vocab_size);
+    const int type_vocab_size  = static_cast<int>(model_config_.type_vocab_size);
     for (auto& stream : streams) {
         int         length     = stream->inputLength();
         int         batchSize  = stream->batchSize();
@@ -153,6 +164,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
+                                                                text_token_mask.data_ptr<int>(),
+                                                                static_cast<int>(text_token_mask.numel()),
+                                                                length));
             memcpy(merged_text_mask.data() + token_idx,
                    text_token_mask.data_ptr<int>(),
                    text_token_mask.numel() * sizeof(int));
@@ -167,6 +182,20 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(merged_token_type_ids + (int)token_idx,
                stream->embeddingInput()->token_type_ids.data_ptr(),
                length * sizeof(int32_t));
+        // VisionBert uses -1 as an image-row token-type sentinel. The embedding
+        // kernel still reads the token-type table for masked rows before those
+        // rows are replaced by projected features, so normalize only masked
+        // rows to a safe table index and preserve all text-row validation.
+        normalizeMaskedTokenTypeIds(
+            merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
+        RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
+                                                         merged_tokens + token_idx,
+                                                         merged_token_type_ids + token_idx,
+                                                         merged_text_mask.data() + token_idx,
+                                                         length,
+                                                         length,
+                                                         input_vocab_size,
+                                                         type_vocab_size));
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths.data_ptr(),
                stream->batchSize() * sizeof(int32_t));
@@ -216,10 +245,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    if (!requires_host_input_metadata_) {
+        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    }
 #endif
     return model_input;
 }
@@ -328,7 +359,8 @@ absl::Status EmbeddingExecutor::updateStreams(py::object                        
 }
 
 absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&    model_request,
-                                                          const GptModelOutputs& gpu_outputs) {
+                                                          const GptModelOutputs& gpu_outputs,
+                                                          const torch::Tensor& text_tokens_mask) {
     using namespace HandlerArgs;
 
     try {
@@ -341,6 +373,13 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
         }
         if (has_arg(handler_args_, Arg::INPUT_IDS)) {
             kwargs[get_name(Arg::INPUT_IDS)] = model_request.combo_tokens;
+        }
+        // Opt-in metadata: existing handlers keep their argument set and do
+        // not incur a transfer. UQI retains this gather buffer on the host.
+        if (has_arg(handler_args_, Arg::TEXT_TOKENS_MASK)) {
+            kwargs[get_name(Arg::TEXT_TOKENS_MASK)] = text_tokens_mask.defined()
+                                                       ? py::cast(text_tokens_mask.cpu())
+                                                       : py::none();
         }
         if (has_arg(handler_args_, Arg::ATTENTION_MASK)) {
             kwargs[get_name(Arg::ATTENTION_MASK)] = py::none();  // mark to be generated by python
@@ -372,11 +411,18 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto            total_batch_size = model_request.context_batch_size;
     model_->releaseBuffers();
     model_output = std::move(model_->forward(model_input));
+    const auto result_process_start = std::chrono::steady_clock::now();
     py::gil_scoped_acquire acquire;
     // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
-    CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
+    CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output, model_input.text_tokens_mask));
     auto res = updateStreams(post, streams, total_batch_size);
+    if (metrics_reporter_) {
+        RtpEmbeddingStageMetricsCollector collector;
+        collector.result_process_latency_us =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - result_process_start).count();
+        metrics_reporter_->report<RtpEmbeddingStageMetrics, RtpEmbeddingStageMetricsCollector>(nullptr, &collector);
+    }
     model_->releaseBuffers();
     return res;
 }
