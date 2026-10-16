@@ -620,6 +620,7 @@ class MlaFlashInferDecodeOp(object):
         self._t_page_indice_d = None
         self._t_decode_page_indptr_d = None
         self._t_bs = 0
+        self._t_qo_indptr_d = None
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
             ((max_context_len + self.token_per_block - 1) // self.token_per_block)
@@ -664,6 +665,7 @@ class MlaFlashInferDecodeOp(object):
             self._t_kvlen_d = fmha_params.kvlen_d
             self._t_page_indice_d = fmha_params.page_indice_d
             self._t_decode_page_indptr_d = fmha_params.decode_page_indptr_d
+            self._t_qo_indptr_d = fmha_params.qo_indptr_d
             self._t_bs = int(fmha_params.kvlen_h.size(0))
         if self.use_cuda_graph and self.kv_indices_d.size(
             0
@@ -715,19 +717,22 @@ class MlaFlashInferDecodeOp(object):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
+        qo_bs = int(self._t_qo_indptr_d.size(0)) - 1
+        kv_bs = int(self._t_kvlen_d.size(0))
+        tokens = q_nope.shape[0]
         if (
             _use_trtllm_gen_decode()
-            # Plain decode only: the MTP verify capture flows bs*(1+gen)
-            # rows with plan metadata that disagrees (kvlen count vs row
-            # grouping); the trtllm branch scopes to tokens == requests,
-            # which is exactly the 6.94ms/step attention it targets.
-            and q_nope.shape[0] == int(self._t_kvlen_d.size(0))
-            # Large-batch regime only: the kernel halves the attention time
-            # (3.69 vs 6.94 ms/step at bs64) but the aten scatter machinery
-            # costs ~1.6ms of extra launches, which loses below ~bs32.
-            and q_nope.shape[0] >= 1
+            # Plain decode (tokens == requests) or the MTP verify
+            # (tokens == requests * (1+gen)) — the latter only when the
+            # metadata is self-consistent (qo count == kvlen count and the
+            # rows divide evenly); any disagreement falls back to the
+            # wrapper path.
+            and qo_bs == kv_bs
+            and tokens % qo_bs == 0
         ):
-            attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache)
+            attn_output = self._trtllm_decode_run(
+                q_nope, q_pe, kv_cache, tokens // qo_bs
+            )
         else:
             attn_output = torch.empty_like(q_nope)
             self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)
@@ -743,6 +748,7 @@ class MlaFlashInferDecodeOp(object):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        q_len: int = 1,
     ) -> torch.Tensor:
         """trtllm-gen MLA decode (XING4_MLA_TRTLLM_GEN_DECODE=1).
 
@@ -757,11 +763,12 @@ class MlaFlashInferDecodeOp(object):
         """
         import flashinfer
 
-        # Live read: fill_params resizes the SAME kvlen tensor each plan, so
-        # size(0) is the current request count (a plan-time python int went
-        # stale by one cycle during the MTP verify capture: 124 rows with a
-        # recorded bs of 32 instead of the live 31).
-        bs = int(self._t_kvlen_d.size(0))
+        # Live read: fill_params resizes the SAME tensors each plan, so
+        # numel reflects the current request count (a plan-time python int
+        # went stale by one cycle during the MTP verify capture: 124 rows
+        # with a recorded bs of 32 instead of the live 31). qo_indptr is
+        # authoritative for the verify's request grouping.
+        bs = int(self._t_qo_indptr_d.size(0)) - 1
         flat_pages = self._t_page_indice_d
         indptr = self._t_decode_page_indptr_d
         total_pages = int(flat_pages.numel())
@@ -798,7 +805,7 @@ class MlaFlashInferDecodeOp(object):
         # MTP verify rows flow through this op as bs x (1 + gen) tokens; the
         # API takes them natively as q_len_per_request.
         query = torch.cat([q_nope, q_pe], dim=-1).reshape(
-            bs, 1, self.num_heads, -1
+            bs, q_len, self.num_heads, -1
         )
         if MlaFlashInferPrefillOp._trtllm_gen_workspace is None:
             MlaFlashInferPrefillOp._trtllm_gen_workspace = torch.zeros(
