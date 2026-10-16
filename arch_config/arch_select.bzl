@@ -149,6 +149,28 @@ def whl_deps():
         "//conditions:default": ["torch==2.1.2"],
     })
 
+def ml_pin_reqs():
+    """Wheel pins that diverge between the PPU vendor lock and the CUDA locks.
+
+    The PPU lock (deps/requirements_lock_torch_ppu.txt) pins the transformers
+    4.57.1 family and carries no xgrammar (its wheel chain is CUDA-only; the
+    PPU bazel deps exclude it the same way). Keep wheel metadata aligned with
+    the lock of the environment the wheel is installed into.
+    """
+    return select({
+        "@rtp_llm//:using_ppu": [
+            "transformers==4.57.1",
+            "sentence-transformers==2.7.0",
+            "pyarrow==17.0.0",
+        ],
+        "//conditions:default": [
+            "transformers==5.2.0",
+            "sentence-transformers==5.2.0",
+            "pyarrow==14.0.0",
+            "xgrammar==0.2.5",
+        ],
+    })
+
 def platform_deps():
     return select({
         "@rtp_llm//:using_arm": [],
