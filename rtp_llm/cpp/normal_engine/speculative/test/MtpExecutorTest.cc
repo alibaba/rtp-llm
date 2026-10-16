@@ -1022,7 +1022,7 @@ public:
     }
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
-    void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden = false);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1930,7 +1930,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
-void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
+void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2035,6 +2035,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
             .reshape({(int64_t)(propose_step + 1), 2});
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
+
+    if (stale_python_hidden) {
+        // Graph replay publishes live HC rows through the forward result, but
+        // does not refresh the Python attribute left by capture. The commit
+        // input must retain the three accepted rows, never this stale buffer.
+        target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+        components.fake_target_model->setMtpTargetHiddenStates(
+            torch::full_like(target_output.all_hidden_states, -99.0f));
+    }
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
@@ -2146,6 +2155,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, testDecodePreservesAcceptedGraphHiddenRowsWithStalePythonBuffer) {
+    runSingleBatchDecodeScenario(/*with_prefill_only=*/false, /*stale_python_hidden=*/true);
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {
@@ -2773,6 +2786,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
+
+    // Different accept lengths select rows [0, 5, 6, 7, 8, 9], not a prefix
+    // of the dense verify result. A stale capture-time Python buffer must not
+    // replace either the live forward output or these compacted commit rows.
+    target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+    components.fake_target_model->setMtpTargetHiddenStates(
+        torch::full_like(target_output.all_hidden_states, -99.0f));
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});

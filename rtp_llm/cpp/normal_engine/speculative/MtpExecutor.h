@@ -113,9 +113,6 @@ protected:
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
     // Normalize the model's optional pre-output-projection MTP buffer into the
     // forward result. Callers then use the regular all_hidden_states ->
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
