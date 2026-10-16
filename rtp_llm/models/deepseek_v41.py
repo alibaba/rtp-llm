@@ -130,6 +130,13 @@ class DeepSeekV41(DeepSeekV4):
         cls._build_dsv4_kv_cache_config(model_config, kv_cache_config)
 
     @classmethod
+    def _post_build_model_config(cls, model_config):
+        # ModelFactory already applied the parsed cache policy. The inherited
+        # legacy hook passes None and would rebuild V4.1 descriptors without it.
+        if not model_config.kv_cache_spec_descs:
+            super()._post_build_model_config(model_config)
+
+    @classmethod
     def _build_dsv4_kv_cache_config(cls, model_config, kv_cache_config):
         from rtp_llm.models.dsv41_kv_cache import configure_v41_kv_cache
 
