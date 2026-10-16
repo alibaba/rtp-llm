@@ -937,6 +937,126 @@ class ScopeTest(JitCacheTestBase):
         self.assertIn("mixed GPU architectures", "\n".join(logs.output))
 
 
+class JitCacheEventTest(JitCacheTestBase):
+    def setUp(self):
+        super().setUp()
+        self.component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        self.entry = self.component.local_dir / "cache" / "hash"
+        self.entry.mkdir(parents=True)
+        self.products = {
+            "kernel.cu": b"source",
+            "kernel.cubin": b"binary",
+            "meta.json": b"{}",
+            ".committed": b"",
+        }
+        for name, payload in self.products.items():
+            (self.entry / name).write_bytes(payload)
+        self.manager = jit.JitCacheManager(
+            jit.Scope("test", self.root, (self.component,)), ""
+        )
+
+    def event(self, event_type, name="meta.json"):
+        return types.SimpleNamespace(
+            is_directory=False,
+            event_type=event_type,
+            src_path=str(self.entry / name),
+            dest_path=str(self.entry / name),
+        )
+
+    def test_read_only_events_do_not_read_deepjit_metadata(self):
+        for event_type in ("opened", "closed_no_write", "modified", "deleted"):
+            with self.subTest(event_type=event_type), mock.patch.object(
+                jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+            ) as inspect:
+                self.manager.on_any_event(self.event(event_type))
+                inspect.assert_not_called()
+                self.assertFalse(self.manager._dirty.is_set())
+
+    def test_unrelated_files_do_not_read_deepjit_metadata(self):
+        (self.entry / "readme.txt").write_bytes(b"not a cache trigger")
+        for event_type in ("created", "closed", "moved"):
+            with self.subTest(event_type=event_type), mock.patch.object(
+                jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+            ) as inspect:
+                self.manager.on_any_event(self.event(event_type, "readme.txt"))
+                inspect.assert_not_called()
+                self.assertFalse(self.manager._dirty.is_set())
+
+    def test_completed_entry_mutations_still_mark_dirty(self):
+        for name in self.products:
+            for event_type in ("created", "closed", "moved"):
+                with self.subTest(name=name, event_type=event_type), mock.patch.object(
+                    jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+                ) as inspect:
+                    self.manager._dirty.clear()
+                    event = self.event(event_type, name)
+                    if event_type == "moved":
+                        event.src_path = str(self.component.local_dir / "tmp" / name)
+                    self.manager.on_any_event(event)
+                    inspect.assert_called_once_with(self.entry)
+                    self.assertTrue(self.manager._dirty.is_set())
+
+    def test_incomplete_or_invalid_entries_do_not_mark_dirty(self):
+        for name, invalid_payload in (
+            (".committed", None),
+            (".committed", b"not empty"),
+            ("kernel.cubin", b""),
+            ("meta.json", b"[]"),
+            ("meta.json", b"invalid json"),
+        ):
+            with self.subTest(name=name, payload=invalid_payload):
+                path = self.entry / name
+                if invalid_payload is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(invalid_payload)
+                self.manager.on_any_event(self.event("closed", "kernel.cu"))
+                self.assertFalse(self.manager._dirty.is_set())
+                path.write_bytes(self.products[name])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux inotify read events required")
+    def test_external_metadata_read_does_not_feed_back_into_observer(self):
+        metadata = self.entry / "meta.json"
+        closed = threading.Event()
+        repeated = threading.Event()
+        read_events = []
+        manager = self.manager
+
+        class Handler(jit.FileSystemEventHandler):
+            def on_any_event(self, event):
+                manager.on_any_event(event)
+                if not event.is_directory and event.src_path == str(metadata):
+                    read_events.append(event.event_type)
+                    if event.event_type == "closed_no_write":
+                        closed.set()
+                    if len(read_events) > 2:
+                        repeated.set()
+
+        observer = jit.Observer()
+        observer.schedule(Handler(), str(self.component.local_dir), recursive=True)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as inspect:
+            observer.start()
+            try:
+                metadata.read_text()
+                self.assertTrue(closed.wait(5), "External read was not observed")
+                self.assertFalse(
+                    repeated.wait(0.25), "Metadata reads generated more events"
+                )
+            finally:
+                manager._stop.set()
+                observer.stop()
+                observer.join(5)
+            self.assertFalse(observer.is_alive())
+            self.assertEqual(read_events, ["opened", "closed_no_write"])
+            inspect.assert_not_called()
+        self.assertFalse(manager._dirty.is_set())
+
+
 @requires_shared_acl
 class ManagerTest(JitCacheTestBase):
     def setUp(self):
