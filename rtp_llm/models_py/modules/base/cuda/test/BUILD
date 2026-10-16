@@ -4,6 +4,22 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "launch_fusion_benchmark_test",
+    srcs = ["launch_fusion_benchmark_test.py"],
+    deps = py_test_deps,
+    tags = ["manual", "L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "indexer_launch_fusion_test",
+    srcs = ["indexer_launch_fusion_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "router_launch_fusion_test",
     srcs = ["router_launch_fusion_test.py"],
     deps = py_test_deps,

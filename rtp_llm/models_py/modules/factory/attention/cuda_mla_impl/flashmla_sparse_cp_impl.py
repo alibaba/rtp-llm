@@ -906,7 +906,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.block_table.device,
         )
 
-    def _gather_sharded_kv_cache(self, kv_cache, fused_kv: torch.Tensor) -> None:
+    def _gather_sharded_kv_cache(
+        self, kv_cache, fused_kv: torch.Tensor, return_rank_major: bool = False
+    ) -> Optional[torch.Tensor]:
         """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
 
           1) Drive the GPU gather kernel with *actual* owned lengths so
@@ -978,7 +980,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         gathered = all_gather(
             local_fused.contiguous(), group=Group.TP, role="mla_history"
         ).reshape(-1, local_fused.size(-1))
+        if return_rank_major:
+            return gathered
         fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+        return None
 
     def _attend_with_kvcache(
         self,
@@ -1033,8 +1038,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         ws = self._gather
         assert ws is not None and self.precomputed_kv_offsets is not None
         fused_kv = self._allocate_fused_kv()
+        restore_indices = None
         if self.kv_cache_sharded:
-            self._gather_sharded_kv_cache(kv_cache, fused_kv)
+            if os.environ.get("RTP_CP_REMAP_HISTORY_TOPK", "0") == "1":
+                rank_major = self._gather_sharded_kv_cache(
+                    kv_cache, fused_kv, return_rank_major=True
+                )
+                assert rank_major is not None
+                fused_kv = rank_major
+                restore_indices = self.sharded_kv_restore_indices
+            else:
+                self._gather_sharded_kv_cache(kv_cache, fused_kv)
         else:
             src = _as_uint8(kv_cache.kv_cache_base)
             if src.ndim == 4:
@@ -1055,7 +1069,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # points into another request's KV region in fused_kv, causing
         # cross-request KV pollution → gibberish / repeat output.
         # Preserve -1 so flash_mla_sparse_fwd skips these positions.
-        global_indices = offset_cp_topk(topk_2d, offsets).unsqueeze(1)
+        if restore_indices is None:
+            global_indices = offset_cp_topk(topk_2d, offsets).unsqueeze(1)
+        else:
+            global_indices = offset_cp_topk(
+                topk_2d, offsets, restore_indices, fused_kv.shape[0]
+            ).unsqueeze(1)
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
             q0,
@@ -1321,12 +1340,33 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # all-gathered then re-indexed by kv_restore_unpad_indices.
         q_pe = q[:, :, self.nope_head_dim :]
         if self.fmha_impl.full_rope_pos_ids is not None:
-            self.rope_impl.forward(
-                q_pe,
-                k_pe,
-                self.rope_params,
-                precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
-            )
+            if (
+                os.environ.get("RTP_CP_CONTIGUOUS_ROPE_KPE", "0") == "1"
+                and k_pe.is_cuda
+                and k_pe.ndim == 2
+                and k_pe.dtype in (torch.bfloat16, torch.float16)
+                and k_pe.stride(-1) == 1
+                and not k_pe.is_contiguous()
+                and not k_pe.requires_grad
+            ):
+                rotated_k_pe = torch.empty(
+                    k_pe.shape, dtype=k_pe.dtype, device=k_pe.device
+                )
+                self.rope_impl.forward(
+                    q_pe,
+                    k_pe,
+                    self.rope_params,
+                    precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
+                    key_output=rotated_k_pe,
+                )
+                k_pe = rotated_k_pe
+            else:
+                self.rope_impl.forward(
+                    q_pe,
+                    k_pe,
+                    self.rope_params,
+                    precomputed_pos_ids=self.fmha_impl.full_rope_pos_ids,
+                )
 
         workspace = self._glm53_prefill_workspace
         q_transform_out = None
