@@ -377,13 +377,18 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     setup.copy_stats                    = std::make_shared<BenchmarkDeviceHostCopyStats>();
     DeviceHostCopyOptions copy_options;
     if (options_.copy_strategy == "staged-sm") {
-        copy_options.staged_sm_copy_enabled   = true;
-        copy_options.staged_sm_min_tile_count = 0;
-        copy_options.staged_sm_min_bytes      = 0;
-        copy_options.cuda_batch_copy_enabled  = false;
+        copy_options.staged_sm_copy_enabled     = true;
+        copy_options.staged_sm_min_tile_count   = 0;
+        copy_options.staged_sm_min_bytes        = 0;
+        copy_options.cuda_batch_copy_enabled    = false;
+        copy_options.cuda_3d_batch_copy_enabled = false;
     } else if (options_.copy_strategy == "batch") {
+        copy_options.staged_sm_copy_enabled     = false;
+        copy_options.cuda_batch_copy_enabled    = true;
+        copy_options.cuda_3d_batch_copy_enabled = false;
+    } else if (options_.copy_strategy == "cuda-3d-batch") {
         copy_options.staged_sm_copy_enabled  = false;
-        copy_options.cuda_batch_copy_enabled = true;
+        copy_options.cuda_batch_copy_enabled = false;
     }
     const size_t max_descriptors_per_task = options_.transfer_descriptor_batch_size == 0 ?
                                                 kBenchmarkMaxDescriptorsPerTask :

@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -71,8 +72,10 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
 
     c10::cuda::CUDAGuard guard(device_index);
     // Per-thread CUDA stream avoids sharing a copy stream across concurrent executor workers.
-    auto       stream = cudaStreamPerThread;
-    const auto submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    auto                         stream = cudaStreamPerThread;
+    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(device_index));
+    const auto                   submit = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    submit_lock.unlock();
     // Drain even a failed submission: a prefix may already be in flight.
     const auto completion = cudaStreamSynchronize(stream);
     RTP_LLM_CHECK_WITH_INFO(completion == cudaSuccess,

@@ -20,7 +20,7 @@
 
 - smoke：2 个，只运行最小在线 Tree lifecycle 与 D2H Transfer 端到端路径。
 - profile：包含 Tree、mixed Transfer（含 Device↔Host 并发变体）、单方向 batch API matrix 和 e2e business matrix。`--suite profile` 默认选择全部已注册家族；只跑专项时用 `--case` 指定完整名称列表，详见 case 文档。
-- 整套 suite 的 perf 采集由 registry 的 `is_representative_perf` 标记选择代表 case（Tree、host 两种 copy strategy 及并发变体、device-disk direct、host-disk direct）；显式 `--case` 选择时 driver 对所选 case 采集。
+- 整套 suite 的 perf 采集由 registry 的 `is_representative_perf` 标记选择代表 case（Tree、host 三种 copy strategy 及并发变体、device-disk direct、host-disk direct）；显式 `--case` 选择时 driver 对所选 case 采集。
 - buffered profile working set：`full_context=32768` blocks，`swa=4096` blocks。每次 measured window 至少完整访问一轮 addressable working set。
 - task-pool 对照（tp4/tp8）不是常驻 case：driver 对同一 case 重复传 `--task-pool-size 4 --task-pool-size 8` 展开专项矩阵。每个 repetition 的两组除 pool size 外 profile、seed、repetition identity、workload definition/trace hash、capacity 与固定 100ms forward sleep 必须一致。tp32 不在正式对照矩阵内，但 runner/driver 保留任意正整数参数能力。
 
@@ -175,7 +175,7 @@ logical_coordinate = operation_index / direction_count
 working_set_index = permutation(logical_coordinate) % working_set_blocks
 ```
 
-`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy=batch` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者控制 Device↔Host copy plan 是否使用 CUDA batch copy。当前 Device→Disk 引擎合约仅接受 singleton，runner 在 wave 内并发提交 singleton 以保留 lane concurrency；其余五个方向走真实 descriptor batch。
+`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。当前 Device→Disk 引擎合约仅接受 singleton，runner 在 wave 内并发提交 singleton 以保留 lane concurrency；其余五个方向走真实 descriptor batch。
 
 正式结果必须满足：
 

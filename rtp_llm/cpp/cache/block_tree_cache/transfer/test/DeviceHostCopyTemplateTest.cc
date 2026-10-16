@@ -223,6 +223,50 @@ TEST(DeviceHostCopyTemplateTest, RejectsMixedDirectionBeforeStrategyDispatch) {
               TransferStatus::INVALID_ARGS);
 }
 
+TEST(DeviceHostCopyTemplateTest, RejectsMismatchedMemberBlocksBeforeStrategyDispatch) {
+    BlockTreeTaskPool          tasks(1, 8, "MemberBlockCountTest");
+    DeviceHostTransferExecutor executor(tasks, 8);
+    auto                       group = templateGroup(CacheGroupType::FULL);
+    std::vector<uint8_t>       host(96);
+    int                        attempts = 0;
+    executor.strategies_.clear();
+    executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
+        ++attempts;
+        return StrategyResult::done();
+    }));
+    EXPECT_EQ(executor.executeBatch(
+                  {{host.data(), 48, 48}, {host.data() + 48, 48, 48}},
+                  {TransferDescriptor::hostToDevice(0, 1, {1, 2, 3}), TransferDescriptor::hostToDevice(0, 2, {1, 2})},
+                  {group.get(), group.get()}),
+              TransferStatus::INVALID_ARGS);
+    EXPECT_EQ(attempts, 0);
+}
+
+TEST(DeviceHostCopyTemplateTest, Disabled3DBatchFallsBackToLegacyStrategy) {
+    BlockTreeTaskPool     tasks(1, 8, "Disabled3DBatchTest");
+    DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = false;
+    DeviceHostTransferExecutor executor(tasks, 8, options);
+    auto                       group = templateGroup(CacheGroupType::FULL);
+    std::vector<uint8_t>       host(48);
+    int                        three_d_attempts = 0;
+    int                        legacy_attempts  = 0;
+    executor.strategies_.clear();
+    executor.strategies_.push_back(std::make_unique<BatchProbe>([&] {
+        ++three_d_attempts;
+        return StrategyResult::done();
+    }));
+    executor.strategies_.push_back(std::make_unique<TileProbe>([&](const DeviceHostCopyPlan&) {
+        ++legacy_attempts;
+        return StrategyResult::done();
+    }));
+    EXPECT_EQ(executor.executeBatch(
+                  {{host.data(), 48, 48}}, {TransferDescriptor::hostToDevice(0, 1, {1, 2, 3})}, {group.get()}),
+              TransferStatus::OK);
+    EXPECT_EQ(three_d_attempts, 0);
+    EXPECT_EQ(legacy_attempts, 1);
+}
+
 TEST(DeviceHostCopyTemplateTest, NotApplicableFallsBackButFailedStops) {
     BlockTreeTaskPool    tasks(1, 8, "FallbackTest");
     auto                 group = templateGroup(CacheGroupType::FULL);
@@ -261,7 +305,7 @@ TEST(DeviceHostCopyTemplateTest, RejectsInvalid3DAddressesBeforeSubmission) {
     EXPECT_EQ(result.status, StrategyStatus::FAILED);
     EXPECT_EQ(result.copy_status, TransferStatus::INVALID_ARGS);
     for (const std::vector<BlockIdxType>& blocks :
-         {std::vector<BlockIdxType>{1, 2}, std::vector<BlockIdxType>{1, 2, 5}, std::vector<BlockIdxType>{1, 2, -1}}) {
+         {std::vector<BlockIdxType>{1, 2, 5}, std::vector<BlockIdxType>{1, 2, -1}}) {
         auto invalid          = desc;
         invalid.target_blocks = blocks;
         result                = strategy.tryExecute({view, view}, {desc, invalid}, {group.get(), group.get()});

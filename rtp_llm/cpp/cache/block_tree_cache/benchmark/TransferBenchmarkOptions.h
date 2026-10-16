@@ -31,9 +31,9 @@ struct TransferOptions {
     size_t transfer_descriptor_batch_size{0};
 
     // Device<->Host copy strategy. Explicit strategies disable the other
-    // optimized path; the runner observes the actual strategy and rejects
+    // optimized paths; the runner observes the actual strategy and rejects
     // fallback or mixed execution.
-    std::string copy_strategy{"auto"};  // "auto", "batch" or "staged-sm"
+    std::string copy_strategy{"auto"};  // "batch" selects 1D; "cuda-3d-batch" selects 3D.
 
     // Measured-phase duration floor (seconds). A pilot run scales the
     // operation count so the measured phase lasts at least this long.

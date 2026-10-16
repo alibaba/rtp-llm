@@ -27,18 +27,6 @@ enum class HostCoverage {
     Full,
 };
 
-std::mutex& cudaBatchSubmitMutex(int device_index) {
-    static std::mutex                                           registry_mutex;
-    static std::unordered_map<int, std::unique_ptr<std::mutex>> mutexes;
-
-    std::lock_guard<std::mutex> registry_lock(registry_mutex);
-    auto&                       mutex = mutexes[device_index];
-    if (!mutex) {
-        mutex = std::make_unique<std::mutex>();
-    }
-    return *mutex;
-}
-
 HostCoverage checkHostCoverage(const StagedMemoryCopyParams& params) {
     std::vector<std::pair<size_t, size_t>> ranges;
     ranges.reserve(params.tiles.size());
@@ -199,6 +187,18 @@ bool ensureStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch,
 
 }  // namespace
 
+std::mutex& cudaBatchSubmitMutex(int device_index) {
+    static std::mutex                                           registry_mutex;
+    static std::unordered_map<int, std::unique_ptr<std::mutex>> mutexes;
+
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    auto&                       mutex = mutexes[device_index];
+    if (!mutex) {
+        mutex = std::make_unique<std::mutex>();
+    }
+    return *mutex;
+}
+
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) {
     if (scratch.device_index >= 0) {
         (void)cudaSetDevice(scratch.device_index);
@@ -334,6 +334,14 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     cudaMemcpyAttributes attr{};
     attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     size_t attr_idx     = 0;
+#if CUDART_VERSION < 13000
+    std::vector<void*> mutable_srcs;
+    mutable_srcs.reserve(srcs.size());
+    for (auto* src : srcs) {
+        mutable_srcs.push_back(const_cast<void*>(src));
+    }
+    size_t fail_idx = 0;
+#endif
     // cuMemcpyBatchAsync_v2 in the deployed CUDA stack is not safe under
     // concurrent host submissions. Protect only the runtime API entry; each
     // call keeps its own stream and completion wait, so transfers may overlap.
@@ -342,12 +350,6 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     const auto submit_error =
         cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
 #else
-    std::vector<void*> mutable_srcs;
-    mutable_srcs.reserve(srcs.size());
-    for (auto* src : srcs) {
-        mutable_srcs.push_back(const_cast<void*>(src));
-    }
-    size_t     fail_idx     = 0;
     const auto submit_error = cudaMemcpyBatchAsync(
         dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
 #endif

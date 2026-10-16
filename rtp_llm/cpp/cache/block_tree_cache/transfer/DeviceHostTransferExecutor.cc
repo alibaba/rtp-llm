@@ -73,7 +73,7 @@ TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
     for (auto& strategy : strategies_) {
         if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
             // A raw-batch copy must not repeat any plan already completed by an earlier strategy.
-            if (any_handled) {
+            if (!options_.cuda_3d_batch_copy_enabled || any_handled) {
                 continue;
             }
             const auto result = copy3d->tryExecute(hosts, descriptors, group_sets);
