@@ -12,6 +12,8 @@ from adapters.master_control import master_url
 from adapters.mock_control import control_json
 from analysis.checks import CheckResult, evaluate
 from scenario.contracts import StageHandler, StageOutput
+from runtime.observation import poll_samples
+from adapters.background_source import BackgroundSource
 
 CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged",
     "cache_consistency", "actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"})
@@ -127,6 +129,24 @@ def execute(ctx, params, deadline):
     maximum_gap = 0
     url = master_url("127.0.0.1", ctx.ops.master_http_port, "inflight")
     metrics_url = f"http://127.0.0.1:{ctx.env.master_management_port}/prometheus"
+    diagnostic = None
+    owned_environment = ctx.env
+
+    def read_diagnostics(d):
+        if ctx.env is not owned_environment:
+            raise ValueError('diagnostic source environment changed')
+        return dict(meters=metric_values(fetch(metrics_url, min(5, d.remaining()))),
+                    master=resource(owned_environment.master), mock=resource(owned_environment.mock))
+
+    def start_diagnostics():
+        nonlocal diagnostic
+        diagnostic = BackgroundSource('cache_resources', read_diagnostics,
+            directory/'diagnostics.jsonl', identity=dict(env_epoch=ctx.env_epoch),
+            clock=ctx.clock, wall_clock=ctx.wall_clock,
+            params=dict(duration_s=deadline.remaining(), interval_s=o['sample_s'], **o['capture']))
+        ctx.add_cleanup('cache_diagnostics', diagnostic.stop_sampling,
+                        request_stop=lambda d: diagnostic.stop_event.set())
+        diagnostic.start(deadline)
 
     def fixture(e, operation, **options):
         result = control_json(ctx.ops, "cache_fixture", deadline,
@@ -190,7 +210,9 @@ def execute(ctx, params, deadline):
                 and (w["role"] != "prefill" or w.get("cache_key_size") == keys)
                 for w in rows.values()) and rebuilt == victims
             evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if ready else 0
-        meters = metric_values(fetch(metrics_url, min(5, deadline.remaining())))
+        observed = diagnostic.latest() if diagnostic is not None else None
+        diagnostics = observed['data'] if observed else {}
+        meters = diagnostics.get('meters', [])
         frame = dict(epoch_s=ctx.wall_clock(), phase=phase, snapshot_read_s=ctx.clock()-before,
             workers=rows, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
             max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
@@ -215,7 +237,9 @@ def execute(ctx, params, deadline):
             diff_scanned_keys=raw.get("diagnostic_diff_scanned_keys", metric_sum(meters, "cache_diff_scanned_keys_total", {"role": "PREFILL"})),
             worker_status_commits=metric_sum(meters, "engine_health_check_visitor_success_qps_total"),
             cache_sync_commits=metric_sum(meters, "cache_status_check_visitor_success_qps_total", {"role": "PREFILL"}),
-            master=resource(ctx.env.master), mock=resource(ctx.env.mock))
+            master=diagnostics.get('master', {}), mock=diagnostics.get('mock', {}),
+            diagnostic_source=dict(selection='latest_completed', sample={k: v for k, v in observed.items() if k != 'data'} if observed else None,
+                                   status='ok' if observed else 'pending'))
         evidence["frames"].append(frame)
         with (directory/"observations.jsonl").open("a") as f:
             f.write(json.dumps(frame)+"\n")
@@ -226,15 +250,15 @@ def execute(ctx, params, deadline):
         before = stats()
         event(phase+"_started")
         until = start+seconds
-        while ctx.clock() < until:
-            deadline.check()
-            sample(phase)
-            deadline.sleep(min(o["sample_s"], max(0, until-ctx.clock())))
+        for _ in poll_samples(deadline, o['sample_s'], lambda: sample(phase),
+                              until=until, immediate=True, boundary_sample=False):
+            pass
         after = stats()
         evidence["intensity"][phase] = interval_rates(before, after, ctx.clock()-start)
         return after
 
     try:
+        start_diagnostics()
         t = params["traffic"]
         trace = materialize(directory/"traffic.jsonl", t["source"], "cache-sync-shared-background",
                             Path(ctx.instance["source_path"]).parent,
@@ -323,6 +347,8 @@ def execute(ctx, params, deadline):
         flow.drain(deadline)
         event("drain_finished")
         evidence["client"] = flow.evidence_snapshot()
+        diagnostic.stop_sampling(deadline)
+        diagnostic.latest()
         event("performance_observation_finished")
         for e in prefill:
             fixture(e, "churn", delta=0, every=0)
@@ -378,8 +404,16 @@ def execute(ctx, params, deadline):
             return StageOutput({}, checks, [str(directory/"evidence.json")])
         raise
     finally:
-        atomic_write(path, original)
-        (directory/"evidence.json").write_text(json.dumps(evidence))
+        try:
+            atomic_write(path, original)
+        finally:
+            if diagnostic is not None:
+                diagnostic.stop_event.set()
+                try:
+                    diagnostic.stop_sampling(deadline)
+                except Exception as error:
+                    evidence['diagnostic_shutdown_error'] = repr(error)
+            (directory/"evidence.json").write_text(json.dumps(evidence))
 
 
 HANDLERS = [StageHandler("cache_recovery_cycle", validate, execute, {}, checks=CHECK_IDS)]

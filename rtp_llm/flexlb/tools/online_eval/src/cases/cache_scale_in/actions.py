@@ -134,16 +134,21 @@ def observe(ctx, p, deadline):
         event("warmup_start")
         for row in poll_samples(deadline, p["sample_s"], sample):
             t = row["t"]
-            if t >= p["baseline_s"]:
+            if t >= max(p["baseline_s"], p["warmup_min_s"]):
+                from cases.cache_scale_in.observation import measurement_samples
+                baseline_rows = measurement_samples(ctx.monitor, evidence, deadline,
+                    evidence["capture_limits"], windows=[(t-p["baseline_s"], t)])
+                align_send_counters(dict(samples=baseline_rows),
+                    flow.issued_snapshot(deadline, fields=("send_start_epoch_ms",)))
                 left = window(
-                    evidence["samples"],
+                    baseline_rows,
                     t - p["baseline_s"],
                     t - p["baseline_s"] / 2,
                     initial,
                     p["max_gap_s"],
                 )
                 right = window(
-                    evidence["samples"],
+                    baseline_rows,
                     t - p["baseline_s"] / 2,
                     t,
                     initial,
@@ -164,6 +169,7 @@ def observe(ctx, p, deadline):
                     and abs(left["hit"] - right["hit"]) <= p["baseline_max_spread"]
                 ):
                     evidence.update(baseline_start=t - p["baseline_s"], baseline_end=t)
+                    evidence["readiness_sample_source"] = "prometheus_raw_scrape"
                     event("baseline_ready", row)
                     break
             if t >= p["warmup_timeout_s"]:
@@ -240,8 +246,10 @@ def check(ctx, p, deadline):
     evidence["control_evidence"] = dict(file=control_path.name, sha256=sha256_file(control_path))
     try:
         evidence["samples"] = measurement_samples(ctx.monitor, evidence, deadline,
-                                                 evidence["capture_limits"])
+                                                 evidence["capture_limits"], directory=ctx.artifact_dir / "cache-measurement")
         evidence["gate_sample_source"] = "prometheus_raw_scrape"
+        evidence["raw_evidence"] = dict(path="cache-measurement/manifest.json",
+            sha256=sha256_file(ctx.artifact_dir / "cache-measurement/manifest.json"))
     except TimeoutError:
         raise
     except (ValueError, RuntimeError, OSError) as exc:

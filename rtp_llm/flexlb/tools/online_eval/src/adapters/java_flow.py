@@ -217,6 +217,25 @@ class JavaFlowGroup:
             out.write(json.dumps(record) + "\n")
         return record
 
+    def issued_snapshot(self, deadline, *, fields):
+        """Read the validated live send ledger without requiring terminal drain.
+
+        This proves only the recorded prefix, not complete run accounting.
+        Consumers must restrict measurement to their frozen time window.
+        """
+        deadline.check()
+        if self.collection_profile == "aggregate":
+            raise ValueError("issued request evidence requires a request journal")
+        if not fields or len(set(fields)) != len(fields) or any(not isinstance(k, str) for k in fields):
+            raise ValueError("issued snapshot requires explicit unique fields")
+        self.journal.read()
+        issued = []
+        for row in self.journal.issued.values():
+            deadline.check()
+            issued.append({key: row[key] for key in fields})
+        deadline.check()
+        return issued
+
     def evidence_snapshot(self):
         from adapters.client_journal import request_timing
         errors = []

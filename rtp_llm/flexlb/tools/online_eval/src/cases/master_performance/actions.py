@@ -53,6 +53,7 @@ def observe(ctx, p, deadline):
     evidence = new_evidence("performance_evidence_schema_version", clock, c,
         instance=ctx.instance["id"], env_epoch=ctx.env_epoch, version=2,
         gate_input=p["gate_input"],
+        capture_limits=p["observation"]["capture"],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
     )
     try:
@@ -121,12 +122,15 @@ def finish(ctx, p, deadline):
         try:
             # Query only the contract metrics; fetching all 240 engines' series
             # and discarding most of them after JSON decoding is unbounded work.
-            e["engine_tps_samples"] = []
-            names = engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
-            for metric_id in names:
-                e["engine_tps_samples"].extend(ctx.monitor.client.metric_rows(
-                    metric_id, source="mock", start=e["window"]["start_epoch_ms"] / 1000,
-                    end=e["window"]["end_epoch_ms"] / 1000))
+            from monitoring.windows import capture_window
+            engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
+            raw = capture_window(ctx.monitor.client, e["gate_input"]["fields"], source="mock",
+                windows=[(e["window"]["start_epoch_ms"] / 1000, e["window"]["end_epoch_ms"] / 1000)],
+                epoch=e["env_epoch"], deadline=deadline, limits=e["capture_limits"],
+                directory=ctx.artifact_dir / "performance-measurement")
+            e["engine_tps_samples"] = [row for rows in raw.field_rows().values() for row in rows]
+            e["raw_evidence"] = dict(path="performance-measurement/manifest.json",
+                sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json"))
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.

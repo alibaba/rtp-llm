@@ -37,6 +37,9 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
     if kind == "cache":
         e["client_attribution"] = {}
         e["capture_limits"] = dict(max_samples=1000, max_bytes=1000000)
+        raw_directory = tmp_path / "cache-measurement"
+        raw_directory.mkdir()
+        (raw_directory / "manifest.json").write_text('{}')
     f = ctx.register_resource("java_flow", flow)
     h = ctx.register_resource("gate_evidence", e)
     ctx.monitor = SimpleNamespace(archive=lambda: None)

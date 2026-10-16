@@ -236,3 +236,28 @@ class JavaFlowTest(unittest.TestCase):
             self.assertEqual(len(snapshot["records"]), 2)
             self.assertEqual(snapshot["unfinished"], [{"request_id": "pending"}])
             self.assertEqual(snapshot["records"][0]["status"], "engine_error")
+
+    def test_live_issued_projection_does_not_require_terminal_drain_or_copy_unselected_data(self):
+        from unittest.mock import Mock
+        flow = JavaFlowGroup(None, '/unused', run_id='r', group_id='g', phase_id='p', poll_s=1)
+        flow.journal = SimpleNamespace(read=Mock(), issued={'a':dict(rid='a',send_start_epoch_ms=123,
+            unselected_payload='large')}, terminal={})
+        flow.status = Mock(side_effect=AssertionError('terminal status must not be required'))
+        rows = flow.issued_snapshot(Deadline(time.monotonic()+1), fields=('send_start_epoch_ms',))
+        self.assertEqual(rows, [dict(send_start_epoch_ms=123)])
+        rows[0]['send_start_epoch_ms'] = 9
+        self.assertEqual(flow.journal.issued['a']['send_start_epoch_ms'], 123)
+        flow.collection_profile = 'aggregate'
+        with self.assertRaisesRegex(ValueError, 'journal'):
+            flow.issued_snapshot(Deadline(time.monotonic()+1), fields=('send_start_epoch_ms',))
+
+    def test_live_issued_snapshot_propagates_invalid_journal_and_deadline(self):
+        from unittest.mock import Mock
+        flow = JavaFlowGroup(None, '/unused', run_id='r', group_id='g', phase_id='p', poll_s=1)
+        flow.journal.read = Mock(side_effect=ValueError('journal was truncated'))
+        with self.assertRaisesRegex(ValueError, 'truncated'):
+            flow.issued_snapshot(Deadline(time.monotonic()+1), fields=('send_start_epoch_ms',))
+        flow.journal.read.reset_mock()
+        with self.assertRaises(TimeoutError):
+            flow.issued_snapshot(Deadline(0), fields=('send_start_epoch_ms',))
+        flow.journal.read.assert_not_called()

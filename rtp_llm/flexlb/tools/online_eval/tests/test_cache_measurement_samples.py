@@ -23,7 +23,7 @@ def prepare(hit=.8):
         e = CacheGateTest().evidence(hit=hit)
     e['clock'] = dict(origin_epoch_s=1000, origin_monotonic_s=50)
     dense = copy.deepcopy(e['samples'])
-    fields = {key: dict(metric='mock/'+key) for key in dense[0]['engines']['p0'] if key != 'grpc_addr'}
+    fields = {key: dict(metric='mock/'+key, labels={'role': 'prefill'}) for key in dense[0]['engines']['p0'] if key != 'grpc_addr'}
     e['gate_input'] = dict(fields=fields)
     # The control loop stalls for six seconds; the TSDB retains each real scrape.
     e['samples'] = [r for r in e['samples'] if not 40 <= r['t'] <= 45]
@@ -40,7 +40,8 @@ def prepare(hit=.8):
                         engine_incarnation=engine.get('engine_incarnation', 'one'),
                         engine_ip=name, grpc_port='7'), values=[[row['epoch_s'], str(engine[field])]]))
         return [rows]
-    monitor = SimpleNamespace(client=SimpleNamespace(metric_chunks=Mock(side_effect=chunks)))
+    monitor = SimpleNamespace(client=SimpleNamespace(metric_chunks=Mock(side_effect=chunks),
+        metric_definition=lambda identity: dict(unit='number', labels=['engine_name', 'engine_incarnation', 'engine_ip', 'grpc_port'])))
     return e, dense, monitor
 
 

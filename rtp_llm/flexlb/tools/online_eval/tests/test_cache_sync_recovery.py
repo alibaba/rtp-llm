@@ -219,12 +219,12 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     stub = SimpleNamespace(GetWorkerStatus=lambda request,timeout: SimpleNamespace(alive=True))
     ops = SimpleNamespace(master_http_port=1,pb2=SimpleNamespace(StatusVersionPB=lambda: None),
         pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub))
-    ctx = SimpleNamespace(ops=ops,artifact_dir=tmp_path,instance=dict(environment={},source_path=str(tmp_path/'case.yaml')),
+    ctx = SimpleNamespace(ops=ops,artifact_dir=tmp_path,env_epoch=1,instance=dict(environment={},source_path=str(tmp_path/'case.yaml')),
         env=SimpleNamespace(spec=SimpleNamespace(n_prefill=3,n_decode=1),discovery_file=discovery,
                             master_management_port=2,master=None,mock=None),
-        clock=lambda:time[0],wall_clock=lambda:100+time[0],add_cleanup=lambda *a:None,
+        clock=lambda:time[0],wall_clock=lambda:100+time[0],add_cleanup=lambda *a, **kw:None,
         record_event=lambda identity:dict(id=identity,epoch_s=100+time[0]))
-    deadline = SimpleNamespace(remaining=lambda:100,check=lambda:None,sleep=lambda value:time.__setitem__(0,time[0]+value))
+    deadline = SimpleNamespace(clock=lambda:time[0],remaining=lambda:100,check=lambda:None,sleep=lambda value:time.__setitem__(0,time[0]+value))
     monkeypatch.setattr(actions,'control_json',control)
     monkeypatch.setattr(telemetry,'fetch',fetch)
     monkeypatch.setattr(telemetry,'resource',lambda proc:{})

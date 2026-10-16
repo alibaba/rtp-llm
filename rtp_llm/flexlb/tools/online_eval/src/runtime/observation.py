@@ -70,7 +70,7 @@ class SampleSchedule:
             self.next += math.ceil((now - self.next) / self.interval) * self.interval
 
 
-def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False):
+def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False, boundary_sample=True):
     """Preserve the last sample at a boundary; all waiting uses the stage clock."""
     schedule = SampleSchedule(deadline.clock(), interval_s, immediate=immediate)
     first = True
@@ -78,6 +78,8 @@ def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False):
         deadline.check()
         target = schedule.next if until is None else min(schedule.next, until)
         deadline.sleep(max(0, target - deadline.clock()))
+        if until is not None and not boundary_sample and deadline.clock() >= until:
+            break
         first = False
         yield sample()
         # Skip elapsed ticks instead of issuing catch-up bursts. Consumer work

@@ -46,8 +46,12 @@ class SampleWorker:
         self.bytes = self.budget.bytes
         return True
 
-    def start(self, deadline):
-        self.append(self.capture(deadline))
+    def start(self, deadline, *, background_first=False):
+        deadline.check()
+        if background_first:
+            self.schedule.next = self.clock()
+        else:
+            self.append(self.capture(deadline))
         self.thread = threading.Thread(
             target=self._run, name="flexlb-scenario-observer", daemon=True
         )

@@ -53,7 +53,9 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
     """
     deadline.check()
     limits = capture_limits(limits, "capture")
-    if not fields or not windows or not isinstance(source, str) or not source or not str(epoch):
+    if (not fields or not windows or not isinstance(source, str) or not source
+            or type(epoch) not in (str, int) or not str(epoch).strip()
+            or (type(epoch) is int and epoch <= 0)):
         raise ValueError("raw window requires fields, source, epoch and windows")
     fields = copy.deepcopy(fields)
     for field, binding in fields.items():

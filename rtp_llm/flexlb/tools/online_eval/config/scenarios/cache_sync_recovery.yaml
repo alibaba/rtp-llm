@@ -84,6 +84,9 @@ parameters:
   observation:
     sample_s: 2
     max_gap_s: 10
+    capture:
+      max_samples: 5000
+      max_bytes: 67108864
     converged_samples: 5
   checks:
     max_status_age_ms: 10000

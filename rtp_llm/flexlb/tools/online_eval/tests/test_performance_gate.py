@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from runtime.deadline import Deadline
 
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
@@ -169,7 +170,8 @@ class PerformanceGateTest(unittest.TestCase):
             ctx.register_resource = lambda kind, value, **kwargs: value
             with mock.patch("cases.master_performance.actions.provenance",
                             side_effect=ValueError("artifact missing")):
-                observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None), mock.Mock())
+                observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None,
+                    observation=dict(capture=dict(max_samples=1000, max_bytes=1000000))), mock.Mock())
             frozen = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
             self.assertEqual(frozen["performance_evidence_schema_version"], 2)
             self.assertEqual(frozen["provenance"]["instance"], identity)
@@ -186,7 +188,10 @@ class PerformanceGateTest(unittest.TestCase):
         flow = mock.Mock()
         flow.evidence_snapshot.return_value = snapshot
         monitor = mock.Mock()
-        monitor.client.metric_rows.side_effect = lambda identity, **kw: [row for row in raw if row["metric_id"] == identity]
+        monitor.client.metric_chunks.side_effect = lambda identity, **kw: [[row for row in raw if row["metric_id"] == identity]]
+        monitor.client.metric_definition.return_value = dict(unit='tokens/s', labels=['role', 'engine_name'])
+        e['capture_limits'] = dict(max_samples=1000, max_bytes=10000000)
+        e['env_epoch'] = 1
         with tempfile.TemporaryDirectory() as d:
             flow.directory = Path(d)
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
@@ -197,12 +202,14 @@ class PerformanceGateTest(unittest.TestCase):
             ctx.services = SimpleNamespace(gate=mock.Mock(return_value=interrupted))
             with mock.patch.object(ctx.services, "gate", return_value=interrupted):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
-                    finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
+                    finish(ctx, dict(flow="flow", evidence="evidence"), Deadline(float('inf')))
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())
             self.assertEqual(analyze(archived)["metrics"], analyze(dict(e, flow=snapshot))["metrics"])
             self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
-            self.assertEqual(archived["engine_tps_samples"], raw)
-            self.assertEqual([call.args[0] for call in monitor.client.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
+            self.assertEqual({r['metric_id'] for r in archived['engine_tps_samples']}, {r['metric_id'] for r in raw})
+            self.assertTrue((Path(d)/'performance-measurement/manifest.json').is_file())
+            self.assertEqual({call.args[0] for call in monitor.client.metric_chunks.call_args_list}, {b["metric"] for b in e["gate_input"]["fields"].values()})
+            self.assertTrue(all(call.kwargs['deadline'] is not None for call in monitor.client.metric_chunks.call_args_list))
             monitor.archive.assert_not_called()
             monitor.client.query.assert_not_called()
             monitor.raw.assert_not_called()

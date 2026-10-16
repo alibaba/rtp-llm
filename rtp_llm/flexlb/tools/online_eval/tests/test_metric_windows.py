@@ -110,3 +110,27 @@ def test_new_metric_and_new_target_require_only_declarations():
                             deadline=Deadline(float('inf')), limits=LIMITS)
     assert set(result.field_rows()) == {'temperature', 'voltage'}
     assert all(row['source'] == 'new-target' for rows in result.store().document['metrics'].values() for row in rows)
+
+
+def test_missing_declared_series_remains_unavailable_even_after_successful_acquisition():
+    fields = dict(FIELDS, voltage=dict(metric='sensor/voltage', labels={'rack': 'west'}))
+    c = client()
+    c.metric_chunks.side_effect = lambda identity, **kw: [[]] if identity.endswith('voltage') else client().metric_chunks()
+    result = capture_window(c, fields, source='rack-probe', windows=[(0, 2)], epoch=7,
+        deadline=Deadline(float('inf')), limits=LIMITS)
+    assert result.field_rows()['voltage'] == []
+    with pytest.raises(ValueError, match='no matching series'):
+        result.store().select('sensor/voltage')
+
+
+def test_existing_case_adds_a_registered_diagnostic_metric_in_one_binding():
+    from pathlib import Path
+    from document_io import load_document
+    from scenario.program_compiler import configure_program
+    path = Path(__file__).resolve().parents[1]/'config/scenarios/cache_scale_in.yaml'
+    data = load_document(path)
+    fields = data['parameters']['observation']['inputs']['engine_counters']['fields']
+    fields['worker_status_qps'] = dict(metric='mock/worker_status_qps', labels={'role': 'prefill'})
+    program = configure_program(data, str(path))
+    assert all(v['stages'][2]['params']['gate_input']['fields']['worker_status_qps']['metric']
+               == 'mock/worker_status_qps' for v in program['variants'])

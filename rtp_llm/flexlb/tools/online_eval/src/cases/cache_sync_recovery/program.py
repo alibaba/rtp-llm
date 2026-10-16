@@ -11,7 +11,8 @@ INPUTS = InputContract.from_fields({
         "traffic_warmup_s", "measurement_s", "withdraw_s", "post_s", "seed_interval_s", "baseline_interval_s"), NONNEGATIVE)
         | dict.fromkeys(("unique_keys", "delta_keys", "churn_interval_ms", "expired_workers", "baseline_steps"), POSITIVE_COUNT)
         | {"shared_keys": COUNT},
-    "observation": {"sample_s": NONNEGATIVE, "max_gap_s": NONNEGATIVE, "converged_samples": POSITIVE_COUNT},
+    "observation": {"sample_s": NONNEGATIVE, "max_gap_s": NONNEGATIVE, "converged_samples": POSITIVE_COUNT,
+                    "capture": {"max_samples": POSITIVE_COUNT, "max_bytes": POSITIVE_COUNT}},
     "checks": dict.fromkeys(("max_status_age_ms", "min_cache_responses_per_s",
         "min_added_keys_per_s", "max_added_keys_per_s"), NONNEGATIVE),
     "traffic": JavaFlowSpec.input_fields(),
