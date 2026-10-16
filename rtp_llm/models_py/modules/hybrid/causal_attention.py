@@ -96,15 +96,22 @@ class CausalAttention(nn.Module):
             )
         else:
             qkv = self.qkv_proj(hidden_states)
-        if self.qk_fuse_norm is not None:
-            qkv = self.qk_fuse_norm(qkv)
-        attn_output = trace_call(
-            "causal_attention:fmha_impl.forward",
-            fmha_impl.forward,
-            qkv,
-            kv_cache,
-            self.layer_idx,
-        )
+        attn_output = None
+        fused_forward = getattr(fmha_impl, "forward_with_qk_norm", None)
+        if self.qk_fuse_norm is not None and fused_forward is not None:
+            attn_output = fused_forward(
+                qkv, kv_cache, self.layer_idx, self.qk_fuse_norm
+            )
+        if attn_output is None:
+            if self.qk_fuse_norm is not None:
+                qkv = self.qk_fuse_norm(qkv)
+            attn_output = trace_call(
+                "causal_attention:fmha_impl.forward",
+                fmha_impl.forward,
+                qkv,
+                kv_cache,
+                self.layer_idx,
+            )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (

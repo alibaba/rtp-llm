@@ -452,8 +452,9 @@ def quant_weight_ue8m0(
     weight_block_size: List[int],
 ):
     assert weight_block_size == [128, 128]
-    assert (
-        weight_dequant.dtype == torch.bfloat16
+    assert weight_dequant.dtype in (
+        torch.bfloat16,
+        torch.float32,
     ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
 
     *batch_dims, n, k = weight_dequant.shape
@@ -479,11 +480,20 @@ def requant_weight_ue8m0(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     weight_block_size = [128, 128]
 
+    # Keep RTP/SGLang's BF16 intermediate rounding by default.
+    # Set RTP_FP8_WEIGHT_REQUANT_FP32=1 before loading weights to align with
+    # vLLM's FP8 weight requantization: keep the dequantized intermediate in
+    # FP32 instead of rounding through BF16.
+    dequant_dtype = (
+        torch.float32
+        if os.environ.get("RTP_FP8_WEIGHT_REQUANT_FP32", "0") == "1"
+        else torch.bfloat16
+    )
     weight_dequant = block_quant_dequant(
         weight,
         weight_scale_inv,
         weight_block_size,
-        torch.bfloat16,
+        dequant_dtype,
     )
     out_w, out_s = quant_weight_ue8m0(
         weight_dequant=weight_dequant,

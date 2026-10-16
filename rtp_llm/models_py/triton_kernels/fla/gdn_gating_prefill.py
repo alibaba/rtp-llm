@@ -1,4 +1,4 @@
-"""Vectorized GDN gating across tokens, preserving CUDA's BF16 beta rounding."""
+"""Vectorized GDN gating with optional FP32 beta for FlashInfer prefill."""
 
 import torch
 import triton
@@ -22,6 +22,7 @@ def _gdn_gating_flat(
     SOFT_BETA: tl.constexpr,
     THRESHOLD: tl.constexpr,
     BLOCK: tl.constexpr,
+    STABLE_SOFTPLUS: tl.constexpr,
     FLASHINFER: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -33,23 +34,37 @@ def _gdn_gating_flat(
     al = tl.load(AL + head).to(tl.float32)
     dt = tl.load(DT + head).to(tl.float32)
     x = a + dt
-    sp = tl.where(
-        SOFT_BETA * x <= THRESHOLD,
-        (1 / SOFT_BETA) * tl.log(1 + tl.exp(SOFT_BETA * x)),
-        x,
-    )
+    if STABLE_SOFTPLUS and SOFT_BETA == 1.0:
+        # Align FP32 softplus with vLLM's FlashInfer prefill operation order.
+        sp = tl.where(x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x)))
+        sp = tl.where(x <= THRESHOLD, sp, x)
+    else:
+        sp = tl.where(
+            SOFT_BETA * x <= THRESHOLD,
+            (1 / SOFT_BETA) * tl.log(1 + tl.exp(SOFT_BETA * x)),
+            x,
+        )
     g = -tl.exp(al) * sp
     beta_value = tl.sigmoid(b)
     if FLASHINFER:
-        # The old adapter widens beta *after* the gating BF16 store.
-        beta_value = beta_value.to(B.dtype.element_ty).to(tl.float32)
         g = tl.extra.cuda.libdevice.exp(g)
+        # vLLM instead stores FP32 log-g first, then calls torch.exp separately.
     tl.store(G + i, g, mask)
     tl.store(BET + i, beta_value, mask)
 
 
 def gdn_gating_prefill(
-    alog, a, b, dt_bias, beta=1.0, threshold=20.0, *, block=256, flashinfer=False
+    alog,
+    a,
+    b,
+    dt_bias,
+    beta=1.0,
+    threshold=20.0,
+    *,
+    block=256,
+    flashinfer=False,
+    beta_fp32=False,
+    stable_softplus=False,
 ):
     if a.ndim != 2 or b.shape != a.shape or a.stride(1) != 1 or b.stride(1) != 1:
         raise ValueError("Expected matching token/head matrices with contiguous heads")
@@ -59,8 +74,12 @@ def gdn_gating_prefill(
     if not a.is_cuda or torch.version.hip is not None:
         raise ValueError("CUDA required")
     g = torch.empty((1, n, h), device=a.device, dtype=torch.float32)
+    # Align FlashInfer prefill beta with vLLM: store the FP32 sigmoid
+    # result directly, without an intermediate BF16 rounding.
     bet = torch.empty(
-        (1, n, h), device=a.device, dtype=torch.float32 if flashinfer else b.dtype
+        (1, n, h),
+        device=a.device,
+        dtype=torch.float32 if flashinfer or beta_fp32 else b.dtype,
     )
     if n:
         trace_triton(
@@ -80,6 +99,7 @@ def gdn_gating_prefill(
             beta,
             threshold,
             block,
+            stable_softplus or flashinfer,
             flashinfer,
             num_warps=4,
         )

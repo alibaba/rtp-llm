@@ -77,6 +77,8 @@ def _old_path(
     eps: float = EPS,
     group_size: int = GROUP_SIZE,
     clamp_eps: float = CLAMP_EPS,
+    *,
+    zero_centered: bool = False,
 ):
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -84,7 +86,19 @@ def _old_path(
     residual_out = residual.clone()
     if hidden_out.shape[0] > 0:
         stream_id = torch.cuda.current_stream().cuda_stream
-        rtp_llm_ops.fused_add_rmsnorm(hidden_out, residual_out, weight, eps, stream_id)
+        if zero_centered:
+            import flashinfer
+
+            flashinfer.norm.gemma_fused_add_rmsnorm(
+                hidden_out,
+                residual_out,
+                weight,
+                eps=eps,
+            )
+        else:
+            rtp_llm_ops.fused_add_rmsnorm(
+                hidden_out, residual_out, weight, eps, stream_id
+            )
     fp8, scale = _sgl_per_token_group_quant_fp8(hidden_out, group_size, clamp_eps)
     return hidden_out, residual_out, fp8, scale
 
@@ -152,14 +166,25 @@ class FusedAddRmsNormFp8QuantTest(unittest.TestCase):
         *,
         eps: float = EPS,
         group_size: int = GROUP_SIZE,
+        zero_centered: bool = False,
     ) -> None:
         ref_norm, ref_res, ref_q, ref_s = _old_path(
-            hidden, residual, weight, eps=eps, group_size=group_size
+            hidden,
+            residual,
+            weight,
+            eps=eps,
+            group_size=group_size,
+            zero_centered=zero_centered,
         )
         hidden_in = hidden.clone()
         residual_in = residual.clone()
         got = maybe_fused_add_rmsnorm_fp8_quant(
-            hidden_in, residual_in, weight, eps=eps, group_size=group_size
+            hidden_in,
+            residual_in,
+            weight,
+            eps=eps,
+            group_size=group_size,
+            zero_centered=zero_centered,
         )
         self.assertIsNotNone(got)
         got_norm, got_res, got_q, got_s = got
@@ -170,6 +195,41 @@ class FusedAddRmsNormFp8QuantTest(unittest.TestCase):
         self._assert_scale_layout(ref_s, got_s, hidden.shape[-1] // group_size)
         self.assertEqual(got_norm.data_ptr(), hidden_in.data_ptr())
         self.assertEqual(got_res.data_ptr(), residual_in.data_ptr())
+
+    def test_zero_centered_matches_gemma_and_quant(self) -> None:
+        for m, n in ((1, 128), (3, 4096), (32, 4096)):
+            with self.subTest(m=m, n=n):
+                hidden, residual, weight = _make_inputs(m, n, seed=113)
+                weight = (weight * 0.125).to(torch.bfloat16)
+                self._assert_match(hidden, residual, weight, zero_centered=True)
+
+    def test_zero_centered_preserves_bf16_abi_and_default(self) -> None:
+        hidden, residual, weight = _make_inputs(3, 4096, seed=127)
+        self.assertFalse(
+            is_supported(
+                hidden,
+                residual,
+                weight.float(),
+                zero_centered=True,
+            )
+        )
+        self.assertIsNone(
+            maybe_fused_add_rmsnorm_fp8_quant(
+                hidden,
+                residual,
+                weight.float(),
+                zero_centered=True,
+            )
+        )
+        default = fused_add_rmsnorm_fp8_quant(hidden.clone(), residual.clone(), weight)
+        explicit = fused_add_rmsnorm_fp8_quant(
+            hidden.clone(),
+            residual.clone(),
+            weight,
+            zero_centered=False,
+        )
+        for a, b in zip(default, explicit):
+            torch.testing.assert_close(a, b, atol=0, rtol=0)
 
     def test_typical_m_matches_old_path(self) -> None:
         for m in (1, 8, 32, 128, 256):

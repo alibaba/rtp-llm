@@ -39,14 +39,18 @@ def _torch_qk_rmsnorm(
     kv_head_num: int,
     size_per_head: int,
     eps: float,
+    *,
+    zero_centered: bool = False,
 ) -> torch.Tensor:
-    """Same last-dim RMS + weight as flashinfer / DSV4 ``ref_rmsnorm_rope``."""
+    """FP32 RMS/affine reference; raw weights add one only after widening."""
     m, n = hidden.shape
     qkv = hidden.reshape(m, head_num + kv_head_num * 2, size_per_head)
     q = qkv[:, :head_num, :].float()
     k = qkv[:, head_num : head_num + kv_head_num, :].float()
-    q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + eps) * q_weight.float()
-    k = k * torch.rsqrt(k.square().mean(-1, keepdim=True) + eps) * k_weight.float()
+    q_gamma = q_weight.float() + (1.0 if zero_centered else 0.0)
+    k_gamma = k_weight.float() + (1.0 if zero_centered else 0.0)
+    q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + eps) * q_gamma
+    k = k * torch.rsqrt(k.square().mean(-1, keepdim=True) + eps) * k_gamma
     qkv[:, :head_num, :] = q.to(hidden.dtype)
     qkv[:, head_num : head_num + kv_head_num, :] = k.to(hidden.dtype)
     return qkv.reshape(m, n)
@@ -127,7 +131,9 @@ class FusedQKRMSNormTest(unittest.TestCase):
         ref = _flashinfer_qk_rmsnorm(
             ref_in, q_w, k_w, head_num, kv_head_num, size_per_head, eps
         )
-        self.assertTrue(self.is_supported(got_in, q_w, k_w, head_num, kv_head_num, size_per_head))
+        self.assertTrue(
+            self.is_supported(got_in, q_w, k_w, head_num, kv_head_num, size_per_head)
+        )
         got = self.fused(got_in, q_w, k_w, head_num, kv_head_num, size_per_head, eps)
         self.assertIs(got, got_in)
         self._assert_close(got, ref)
@@ -138,6 +144,85 @@ class FusedQKRMSNormTest(unittest.TestCase):
         torch.testing.assert_close(got[:, k_end:], v, atol=0.0, rtol=0.0)
         self._assert_close(got[:, :q_end], ref[:, :q_end])
         self._assert_close(got[:, q_end:k_end], ref[:, q_end:k_end])
+
+    def test_zero_centered_fp32_plus_one_and_v_unchanged(self) -> None:
+        for m in (1, 3, 256):
+            with self.subTest(m=m):
+                hidden, q_w, k_w = _make_inputs(m, 32, 2, 256, seed=103)
+                q_w = ((q_w - 1.0) * 0.125).to(torch.bfloat16)
+                k_w = ((k_w - 1.0) * 0.125).to(torch.bfloat16)
+                ref = _torch_qk_rmsnorm(
+                    hidden.clone(),
+                    q_w,
+                    k_w,
+                    32,
+                    2,
+                    256,
+                    1e-6,
+                    zero_centered=True,
+                )
+                self.assertTrue(
+                    self.is_supported(
+                        hidden,
+                        q_w,
+                        k_w,
+                        32,
+                        2,
+                        256,
+                        zero_centered=True,
+                    )
+                )
+                got = self.maybe(
+                    hidden.clone(),
+                    q_w,
+                    k_w,
+                    32,
+                    2,
+                    256,
+                    1e-6,
+                    zero_centered=True,
+                )
+                self.assertIsNotNone(got)
+                torch.testing.assert_close(got, ref, atol=self.ATOL, rtol=self.RTOL)
+                k_end = (32 + 2) * 256
+                torch.testing.assert_close(
+                    got[:, k_end:], hidden[:, k_end:], atol=0, rtol=0
+                )
+                rounded = self.fused(
+                    hidden.clone(),
+                    q_w + 1.0,
+                    k_w + 1.0,
+                    32,
+                    2,
+                    256,
+                    1e-6,
+                )
+                self.assertFalse(torch.equal(got[:, :k_end], rounded[:, :k_end]))
+
+    def test_zero_centered_preserves_bf16_abi_and_default(self) -> None:
+        hidden, q_w, k_w = _make_inputs(3, 32, 2, 256, seed=109)
+        self.assertIsNone(
+            self.maybe(
+                hidden,
+                q_w.float(),
+                k_w.float(),
+                32,
+                2,
+                256,
+                zero_centered=True,
+            )
+        )
+        default = self.fused(hidden.clone(), q_w, k_w, 32, 2, 256)
+        explicit = self.fused(
+            hidden.clone(),
+            q_w,
+            k_w,
+            32,
+            2,
+            256,
+            zero_centered=False,
+        )
+        torch.testing.assert_close(default, explicit, atol=0, rtol=0)
 
     def test_397b_typical_m(self) -> None:
         for m in (1, 8, 32, 128, 256):

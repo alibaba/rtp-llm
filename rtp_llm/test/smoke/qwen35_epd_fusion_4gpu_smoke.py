@@ -2863,9 +2863,6 @@ def run_worker(a):
                     config["env"], getattr(a, "service_pythonpath_prefix", "")
                 )
                 if config["name"].startswith("encoder_dp"):
-                    config["env"]["RTP_MM_METRICS_JSONL_DIR"] = str(
-                        out / "encoder-metrics"
-                    )
                     config["env"]["CUDA_COREDUMP_FILE"] = str(
                         out / "cuda_coredump_%h.%p.%t"
                     )

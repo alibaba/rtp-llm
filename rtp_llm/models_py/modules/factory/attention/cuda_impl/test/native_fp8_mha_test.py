@@ -517,6 +517,72 @@ class NativeFP8MHAIntegrationTest(unittest.TestCase):
     def test_full_video_length_prefill(self):
         self._run_case([16661], [0])
 
+    def test_batch_invariant_decode_matches_serial_with_cuda_graph(self):
+        config = _config()
+        config.head_num, config.kv_head_num = 32, 2
+        batch, columns = 8, 1024
+        table = torch.arange(
+            1, batch * columns + 1, device="cuda", dtype=torch.int32
+        ).reshape(batch, columns)
+        cache = LayerKVCache()
+        cache.kv_cache_base = torch.randn(
+            batch * columns + 1,
+            2,
+            2,
+            PAGE_SIZE,
+            HEAD_DIM,
+            device="cuda",
+            dtype=torch.bfloat16,
+        ).to(torch.float8_e4m3fn)
+        query = torch.randn(batch, 32, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+        lengths = torch.tensor([24598, 8976, 30101, 40641] * 2, dtype=torch.int32)
+
+        def prepare(op, rows):
+            params = op.prepare(
+                SimpleNamespace(
+                    is_prefill=False,
+                    sequence_lengths=lengths[rows],
+                    kv_cache_kernel_block_id_device=table[rows],
+                )
+            )
+            params.max_seq_len = 65536
+            return params
+
+        with patch.dict(os.environ, {"RTP_QWEN35_NATIVE_FP8_ATTN": "1"}):
+            with patch.dict(os.environ, {"RTP_TRTLLM_DECODE_BATCH_INVARIANT": "0"}):
+                serial = FlashInferTRTLLMDecodeOp(config)
+                reference = torch.cat(
+                    [
+                        serial.forward(
+                            query[row : row + 1],
+                            cache,
+                            prepare(serial, slice(row, row + 1)),
+                        ).clone()
+                        for row in range(batch)
+                    ]
+                )
+                del serial
+            with patch.dict(os.environ, {"RTP_TRTLLM_DECODE_BATCH_INVARIANT": "1"}):
+                op = FlashInferTRTLLMDecodeOp(config)
+                for count in (2, 3, 4, 8):
+                    params = prepare(op, slice(0, count))
+                    actual = op.forward(query[:count], cache, params)
+                    torch.testing.assert_close(
+                        actual, reference[:count], rtol=0, atol=0
+                    )
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = op.forward(query[:count], cache, params)
+                    for _ in range(2):
+                        graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(
+                        captured, reference[:count], rtol=0, atol=0
+                    )
+                    del graph, captured
+                del op
+
     def test_bf16_query_decode_clears_recycled_value_tails_in_graph(self):
         config = _config()
         config.head_num, config.kv_head_num = 32, 2

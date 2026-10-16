@@ -31,7 +31,7 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
+from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 
 _DEFAULT_GROUP = 128
 _DEFAULT_EPS = 1.0e-6
@@ -47,8 +47,11 @@ def is_supported(
     residual: torch.Tensor,
     weight: torch.Tensor,
     group_size: int = _DEFAULT_GROUP,
+    *,
+    zero_centered: bool = False,
 ) -> bool:
     """CUDA-graph-safe shape/dtype/layout gate. Metadata only; no host sync."""
+    del zero_centered
     if not _fusion_enabled():
         return False
     if hidden is None or residual is None or weight is None:
@@ -104,6 +107,7 @@ def _fused_add_rmsnorm_fp8_quant_kernel(
     NUM_GROUPS: tl.constexpr,
     NUM_GROUPS_PAD: tl.constexpr,
     WRITE_NORM: tl.constexpr,
+    ZERO_CENTERED: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     if pid_m >= M:
@@ -122,6 +126,8 @@ def _fused_add_rmsnorm_fp8_quant_kernel(
     tl.store(residual_row + offs_n, x.to(tl.bfloat16), mask=n_mask)
     inv = tl.rsqrt(tl.sum(tl.where(n_mask, x * x, 0.0), axis=0) / N + EPS)
     w = tl.load(w_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32)
+    if ZERO_CENTERED:
+        w = w + 1.0
     y_bf16 = (x * inv * w).to(tl.bfloat16)
     if WRITE_NORM:
         tl.store(out_norm_ptr + pid_m * out_norm_stride_m + offs_n, y_bf16, mask=n_mask)
@@ -174,14 +180,19 @@ def fused_add_rmsnorm_fp8_quant(
     out_fp8: Optional[torch.Tensor] = None,
     out_scale: Optional[torch.Tensor] = None,
     write_norm: bool = True,
+    *,
+    zero_centered: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse residual-add RMSNorm and UE8M0 per-token-group FP8 quant.
 
     May mutate ``hidden`` / ``residual`` inplace (same as
     ``rtp_llm_ops.fused_add_rmsnorm``). Returns
-    ``(hidden_norm, residual_out, fp8, scale)``.
+    ``(hidden_norm, residual_out, fp8, scale)``. With ``zero_centered=True``,
+    raw BF16 weights receive the plus-one in FP32 inside the kernel.
     """
-    if not is_supported(hidden, residual, weight, group_size=group_size):
+    if not is_supported(
+        hidden, residual, weight, group_size=group_size, zero_centered=zero_centered
+    ):
         raise ValueError(
             "fused_add_rmsnorm_fp8_quant: unsupported "
             f"hidden={tuple(getattr(hidden, 'shape', ()))} "
@@ -208,6 +219,40 @@ def fused_add_rmsnorm_fp8_quant(
         return hidden_norm, residual_out, out_q, out_scale
 
     finfo = torch.finfo(torch.float8_e4m3fn)
+    if zero_centered and n == 4096:
+        if group_size != 128:
+            raise ValueError(
+                "Aligned Qwen decode norm requires its existing group_size=128"
+            )
+        import flashinfer
+
+        from rtp_llm.ops.compute_ops import per_token_group_quant_fp8
+
+        # Keep FlashInfer reduction/rsqrt ordering; results may differ from
+        # vLLM. Gemma norm computes raw gamma + 1 in FP32 before BF16 output.
+        norm_for_quant = hidden if write_norm else hidden.clone()
+        trace_call(
+            "fused_add_rmsnorm_fp8_quant:flashinfer.norm.gemma_fused_add_rmsnorm",
+            flashinfer.norm.gemma_fused_add_rmsnorm,
+            norm_for_quant,
+            residual,
+            weight,
+            eps=eps,
+        )
+        trace_call(
+            "fused_add_rmsnorm_fp8_quant:flashinfer_norm_existing_quant",
+            per_token_group_quant_fp8,
+            norm_for_quant,
+            out_q,
+            out_scale,
+            group_size,
+            clamp_eps,
+            finfo.min,
+            finfo.max,
+            True,
+        )
+        return hidden_norm, residual_out, out_q, out_scale
+
     num_groups = n // group_size
     scale_packs = (num_groups + 3) // 4
     default_warps, default_stages = _default_launch_config(n)
@@ -244,6 +289,7 @@ def fused_add_rmsnorm_fp8_quant(
         NUM_GROUPS=num_groups,
         NUM_GROUPS_PAD=block_n // group_size,
         WRITE_NORM=write_norm,
+        ZERO_CENTERED=bool(zero_centered),
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -257,11 +303,15 @@ def maybe_fused_add_rmsnorm_fp8_quant(
     eps: float = _DEFAULT_EPS,
     group_size: int = _DEFAULT_GROUP,
     clamp_eps: float = _DEFAULT_CLAMP_EPS,
+    *,
+    zero_centered: bool = False,
 ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Return the fused outputs, or ``None`` if disabled / unsupported."""
     if not _fusion_enabled():
         return None
-    if not is_supported(hidden, residual, weight, group_size=group_size):
+    if not is_supported(
+        hidden, residual, weight, group_size=group_size, zero_centered=zero_centered
+    ):
         return None
     return fused_add_rmsnorm_fp8_quant(
         hidden,
@@ -270,4 +320,5 @@ def maybe_fused_add_rmsnorm_fp8_quant(
         eps=eps,
         group_size=group_size,
         clamp_eps=clamp_eps,
+        zero_centered=zero_centered,
     )

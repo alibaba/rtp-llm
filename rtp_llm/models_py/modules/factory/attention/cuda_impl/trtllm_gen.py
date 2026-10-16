@@ -657,6 +657,16 @@ class FlashInferTRTLLMDecodeOp(object):
     ):
         self.attn_configs = attn_configs
         self.native_fp8 = use_native_fp8_attention(attn_configs)
+        # Opt-in accuracy control: use the same reduction geometry for each
+        # request regardless of the surrounding decode batch. CUDA Graph and
+        # the model's other batched operators are retained.
+        self.batch_invariant = (
+            os.environ.get("RTP_TRTLLM_DECODE_BATCH_INVARIANT", "0") == "1"
+        )
+        if self.batch_invariant:
+            logging.info(
+                "TRTLLM decode batch invariant: one request per attention launch"
+            )
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
         self.scaling = self.head_dim**-0.5
@@ -739,6 +749,7 @@ class FlashInferTRTLLMDecodeOp(object):
         q_scale: float = 1.0,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
+        cache_tails_cleared: bool = False,
     ) -> torch.Tensor:
         o_type = self.attn_configs.dtype if self.native_fp8 else q.dtype
         bmm1_scale = q_scale * k_scale * self.scaling
@@ -762,7 +773,9 @@ class FlashInferTRTLLMDecodeOp(object):
                 seq_lens=fmha_params.seq_lens,
             )
         elif (
-            not self.native_fp8 and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
+            not self.native_fp8
+            and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
+            and not cache_tails_cleared
         ):
             clear_fp8_value_page_tails(
                 kv_cache.kv_cache_base,
@@ -772,25 +785,40 @@ class FlashInferTRTLLMDecodeOp(object):
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
 
-        # Call TRT-LLM kernel
-        # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
-        o = trace_call(
-            "trtllm_gen:flashinfer.decode.trtllm_batch_decode_with_kv_cache",
-            flashinfer.decode.trtllm_batch_decode_with_kv_cache,
-            query=q,
+        q_len_per_req = q.shape[0] // fmha_params.seq_lens.shape[0]
+        decode_kwargs = dict(
             kv_cache=kv_cache.kv_cache_base,
             workspace_buffer=self.workspace_buffer,
-            block_tables=fmha_params.block_tables,
-            seq_lens=fmha_params.seq_lens,
             max_seq_len=fmha_params.max_seq_len,
             bmm1_scale=bmm1_scale,
             bmm2_scale=bmm2_scale,
             window_left=-1,
-            # TODO: add attention_sink operation or nvfp4 scale factor if needed
             sinks=None,
-            out_dtype=o_type,  # model_runner.dtype
-            q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
+            out_dtype=o_type,
+            q_len_per_req=q_len_per_req,
         )
+        if self.batch_invariant:
+            o = torch.empty_like(q, dtype=o_type)
+            for row in range(fmha_params.seq_lens.shape[0]):
+                token_rows = slice(row * q_len_per_req, (row + 1) * q_len_per_req)
+                trace_call(
+                    "trtllm_gen:batch_invariant_decode",
+                    flashinfer.decode.trtllm_batch_decode_with_kv_cache,
+                    query=q[token_rows],
+                    block_tables=fmha_params.block_tables[row : row + 1],
+                    seq_lens=fmha_params.seq_lens[row : row + 1],
+                    out=o[token_rows],
+                    **decode_kwargs,
+                )
+        else:
+            o = trace_call(
+                "trtllm_gen:flashinfer.decode.trtllm_batch_decode_with_kv_cache",
+                flashinfer.decode.trtllm_batch_decode_with_kv_cache,
+                query=q,
+                block_tables=fmha_params.block_tables,
+                seq_lens=fmha_params.seq_lens,
+                **decode_kwargs,
+            )
         if self.native_fp8:
             _log_fp8_execution("decode", self.native_fp8, q, kv_cache.kv_cache_base, o)
         return o.view(-1, self.local_head_num * self.head_dim).to(o_type)
@@ -852,6 +880,26 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
             return False
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
+
+    def forward_with_qk_norm(self, qkv, kv_cache, layer_idx, norm):
+        """Return None without modifying QKV when fused preprocessing is unsupported."""
+        from rtp_llm.models_py.triton_kernels.common.qk_norm_rope_cache import (
+            maybe_fused_qk_norm_rope_cache,
+        )
+
+        query = maybe_fused_qk_norm_rope_cache(qkv, norm, self, kv_cache)
+        if query is None:
+            return None
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return trace_call(
+            "trtllm_gen:qk_norm_rope_cache:fmha_impl.forward",
+            self.fmha_impl.forward,
+            query,
+            kv_cache,
+            self.fmha_params,
+        )
 
     def forward(
         self,
@@ -1059,6 +1107,27 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
+
+    def forward_with_qk_norm(self, qkv, kv_cache, layer_idx, norm):
+        """Return None without modifying QKV when fused preprocessing is unsupported."""
+        from rtp_llm.models_py.triton_kernels.common.qk_norm_rope_cache import (
+            maybe_fused_qk_norm_rope_cache,
+        )
+
+        query = maybe_fused_qk_norm_rope_cache(qkv, norm, self, kv_cache)
+        if query is None:
+            return None
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return trace_call(
+            "trtllm_gen:qk_norm_rope_cache:fmha_impl.forward",
+            self.fmha_impl.forward,
+            query,
+            kv_cache,
+            self.fmha_params,
+            cache_tails_cleared=True,
+        )
 
     def forward(
         self,

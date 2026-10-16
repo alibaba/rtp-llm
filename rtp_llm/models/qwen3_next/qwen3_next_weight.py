@@ -20,7 +20,11 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
 )
-from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.model_loader.weight_module import (
+    AtomicWeight,
+    CustomAtomicWeight,
+    WeightModule,
+)
 from rtp_llm.ops import HybridAttentionType, LinearAttentionConfig
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -223,6 +227,31 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 layer_weight.extend(self._create_mqa_weight())
             layer_weight.extend(self._create_ffn_weight())
             all_layer_weights.append(layer_weight)
+        # Align Python CUDA norms with vLLM: keep raw checkpoint gamma and
+        # add 1 after widening to FP32, avoiding BF16 rounding of gamma + 1.
+        # Existing C++/converted weights keep the legacy effective gamma.
+        # Companion keys avoid recovering raw gamma from already rounded values.
+        from rtp_llm.utils.model_weight import WeightStyle
+
+        if self.weight_style == WeightStyle.NONE:
+            norm_names = {
+                W.pre_ln_gamma,
+                W.post_ln_gamma,
+                W.final_ln_gamma,
+                W.q_ln_gamma,
+                W.k_ln_gamma,
+            }
+            for group in [weights, *all_layer_weights]:
+                companions = [
+                    CustomAtomicWeight(
+                        norm.name + ".zero_centered",
+                        [CkptWeightInfo(ckpt.name, identity) for ckpt in norm.weights],
+                        split_func=sp_id,
+                    )
+                    for norm in group
+                    if norm.name in norm_names
+                ]
+                group.extend(companions)
         return ModelWeightInfo(layer_weights=all_layer_weights, weights=weights)
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:

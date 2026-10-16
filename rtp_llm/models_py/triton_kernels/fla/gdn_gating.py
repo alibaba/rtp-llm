@@ -22,6 +22,7 @@ def fused_gdn_gating_kernel(
     beta: tl.constexpr,
     threshold: tl.constexpr,
     BLK_HEADS: tl.constexpr,
+    STABLE_SOFTPLUS: tl.constexpr = False,
 ):
     i_b, i_s, i_d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     head_off = i_d * BLK_HEADS + tl.arange(0, BLK_HEADS)
@@ -35,9 +36,17 @@ def fused_gdn_gating_kernel(
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
     # If the model is loaded in fp16, without the .float() here, A might be -inf
     x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
-    softplus_x = tl.where(
-        beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
-    )
+    if STABLE_SOFTPLUS and beta == 1.0:
+        # Align FP32 softplus with vLLM's FlashInfer prefill operation order.
+        # Decode/native callers keep stable_softplus=False.
+        softplus_x = tl.where(
+            x > 0, x + tl.log(1.0 + tl.exp(-x)), tl.log(1.0 + tl.exp(x))
+        )
+        softplus_x = tl.where(x <= threshold, softplus_x, x)
+    else:
+        softplus_x = tl.where(
+            beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+        )
     blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
     # compute beta_output = sigmoid(b)
@@ -54,17 +63,14 @@ def fused_gdn_gating(
     dt_bias: torch.Tensor,
     beta: float = 1.0,
     threshold: float = 20.0,
+    *,
+    beta_fp32: bool = False,
+    stable_softplus: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused computation of g and beta for Gated Delta Net.
+    """Fused log-g and sigmoid beta for Gated Delta Net.
 
-    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-    beta_output = sigmoid(b)
-
-    Returns:
-        g: always fp32 (gate values).
-        beta_output: fp32 on ROCm (avoids lossy sigmoid→bf16 truncation before
-            the FlyDSL megakernel re-casts to bf16 internally); preserves
-            b.dtype (typically bf16) on CUDA to keep the original contract.
+    g is always FP32. FlashInfer prefill requests FP32 beta directly;
+    other callers retain the existing CUDA b.dtype / ROCm FP32 default.
     """
     batch, num_heads = a.shape
     seq_len = 1
@@ -83,12 +89,13 @@ def fused_gdn_gating(
 
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
-    # On ROCm the FlyDSL megakernel internally casts beta to bf16, so keeping
-    # fp32 here avoids lossy sigmoid→bf16 truncation before the cast.
-    # On CUDA the downstream chunk/recurrent kernels consume beta in its
-    # original dtype (bf16), so we preserve it to avoid breaking the contract.
-    beta_dtype = torch.float32 if is_amd else b.dtype
+    # Align FlashInfer prefill beta with vLLM: store the sigmoid result
+    # directly in FP32 without an intermediate BF16 rounding. Native CUDA
+    # and ROCm defaults keep their existing dtype contract.
+    beta_dtype = torch.float32 if is_amd or beta_fp32 else b.dtype
     beta_output = torch.empty(1, batch, num_heads, dtype=beta_dtype, device=b.device)
+    if batch == 0:
+        return g, beta_output
     trace_triton(
         "gdn_gating:fused_gdn_gating_kernel[grid]",
         fused_gdn_gating_kernel,
@@ -105,6 +112,7 @@ def fused_gdn_gating(
         beta,
         threshold,
         8,
+        stable_softplus,
         num_warps=1,
     )
     return g, beta_output

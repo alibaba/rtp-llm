@@ -131,6 +131,88 @@ def errors(a, b):
 
 class GDNPrefillOptimization(unittest.TestCase):
     @torch.inference_mode()
+    def test_flashinfer_fallback_beta_precision(self):
+        """FP32 beta is independent of prepared exp(g); native defaults stay BF16."""
+        torch.manual_seed(818)
+        fixtures = [(0, 3), (1, 3), (63, 5), (2047, 64), (2048, 64), (2053, 64)]
+        for length, heads in fixtures:
+            for parameter_dtype in (torch.bfloat16, torch.float32):
+                for packed_rows in (False, True):
+                    with self.subTest(
+                        length=length,
+                        heads=heads,
+                        parameter_dtype=parameter_dtype,
+                        packed_rows=packed_rows,
+                    ):
+                        packed = torch.randn(
+                            length, heads * 2, device="cuda", dtype=torch.bfloat16
+                        )
+                        a, b = packed.split(heads, dim=1)
+                        if not packed_rows:
+                            a, b = a.contiguous(), b.contiguous()
+                        if length:
+                            b[0, 0] = 1.0
+                        alog = torch.randn(heads, device="cuda", dtype=parameter_dtype)
+                        bias = torch.randn_like(alog)
+                        native_g, native_beta = fused_gdn_gating(alog, a, b, bias)
+                        g, beta = fused_gdn_gating(alog, a, b, bias, beta_fp32=True)
+                        tiled_native_g, tiled_native_beta = gdn_gating_prefill(
+                            alog, a, b, bias
+                        )
+                        tiled_g, tiled_beta = gdn_gating_prefill(
+                            alog, a, b, bias, beta_fp32=True
+                        )
+                        _, prepared_beta = gdn_gating_prefill(
+                            alog, a, b, bias, flashinfer=True
+                        )
+                        self.assertEqual(native_beta.dtype, b.dtype)
+                        self.assertEqual(tiled_native_beta.dtype, b.dtype)
+                        for actual in (beta, tiled_beta):
+                            self.assertEqual(actual.dtype, torch.float32)
+                            self.assertEqual(actual.shape, (1, length, heads))
+                            self.assertTrue(actual.is_contiguous())
+                            self.assertTrue(torch.equal(actual, prepared_beta))
+                        self.assertTrue(torch.equal(g, native_g))
+                        self.assertTrue(torch.equal(tiled_g, tiled_native_g))
+                        self.assertTrue(torch.equal(beta.to(b.dtype), native_beta))
+                        self.assertTrue(
+                            torch.equal(tiled_beta.to(b.dtype), tiled_native_beta)
+                        )
+                        if length:
+                            self.assertTrue(torch.any(beta != native_beta.float()))
+
+    @torch.inference_mode()
+    def test_flashinfer_beta_precision(self):
+        torch.manual_seed(816)
+        for length, heads in [(0, 3), (1, 3), (63, 5), (2053, 64), (22356, 64)]:
+            for parameter_dtype in (torch.bfloat16, torch.float32):
+                with self.subTest(length=length, heads=heads, dtype=parameter_dtype):
+                    packed = torch.randn(
+                        length, heads * 2, device="cuda", dtype=torch.bfloat16
+                    )
+                    a, b = packed.split(heads, dim=1)
+                    if length:
+                        b[0, 0] = 1.0
+                    alog = torch.randn(heads, device="cuda", dtype=parameter_dtype)
+                    bias = torch.randn_like(alog)
+                    native_g, native_beta = gdn_gating_prefill(alog, a, b, bias)
+                    g, beta = gdn_gating_prefill(alog, a, b, bias, flashinfer=True)
+                    self.assertEqual(g.dtype, torch.float32)
+                    self.assertEqual(beta.dtype, torch.float32)
+                    self.assertEqual(beta.shape, (1, length, heads))
+                    self.assertTrue(beta.is_contiguous())
+                    self.assertTrue(torch.equal(beta.to(b.dtype), native_beta))
+                    torch.testing.assert_close(
+                        beta[0],
+                        torch.sigmoid(b.double()).float(),
+                        atol=1e-7,
+                        rtol=2e-7,
+                    )
+                    torch.testing.assert_close(g, native_g.exp(), atol=1e-7, rtol=2e-6)
+                    if length:
+                        self.assertTrue(torch.any(beta != native_beta.float()))
+
+    @torch.inference_mode()
     def test_norm_correctness_and_performance(self):
         OUT.mkdir(parents=True, exist_ok=True)
         torch.manual_seed(812)

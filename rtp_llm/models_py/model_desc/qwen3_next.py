@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules import (
     DenseMLP,
     Embedding,
     FMHAImplBase,
+    FusedQKRMSNorm,
     LinearFactory,
     MultimodalEmbeddingInjector,
     RMSNorm,
@@ -342,10 +343,23 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         )
         if tiled_gating:
             g, beta = gdn_gating_prefill(
-                self.alog, a, b, self.dt_bias, flashinfer=gates_prepared
+                self.alog,
+                a,
+                b,
+                self.dt_bias,
+                flashinfer=gates_prepared,
+                beta_fp32=backend == "flashinfer",
+                stable_softplus=backend == "flashinfer",
             )
         else:
-            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            g, beta = fused_gdn_gating(
+                self.alog,
+                a,
+                b,
+                self.dt_bias,
+                beta_fp32=backend == "flashinfer",
+                stable_softplus=backend == "flashinfer",
+            )
         ssm_states = (
             trace_call(
                 "qwen3_next:self._get_ssm_states", self._get_ssm_states, kv_cache_tensor
@@ -794,6 +808,22 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         return b, s
 
 
+def _has_zero_centered_norm(weights, name):
+    # ROCm keeps its existing effective-gamma implementation.
+    from rtp_llm.device.device_type import DeviceType, get_device_type
+
+    return get_device_type() == DeviceType.Cuda and name + ".zero_centered" in weights
+
+
+def _qwen_rms_res_norm(weights, name, eps):
+    # Align with vLLM: pass raw gamma so the norm adds 1 in FP32, without
+    # an intermediate BF16 rounding of gamma + 1.
+    if _has_zero_centered_norm(weights, name):
+        return RMSResNorm(weights[name + ".zero_centered"], eps=eps, zero_centered=True)
+    # Pre-sharded legacy checkpoints contain an effective gamma. Preserve it.
+    return RMSResNorm(weights[name], eps=eps)
+
+
 class Qwen3NextAttention(CausalAttention):
     def __init__(
         self,
@@ -812,6 +842,18 @@ class Qwen3NextAttention(CausalAttention):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        if _has_zero_centered_norm(weights, W.q_ln_gamma) and _has_zero_centered_norm(
+            weights, W.k_ln_gamma
+        ):
+            self.qk_fuse_norm = FusedQKRMSNorm(
+                weights[W.q_ln_gamma + ".zero_centered"],
+                weights[W.k_ln_gamma + ".zero_centered"],
+                attn_config.head_num,
+                attn_config.kv_head_num,
+                attn_config.size_per_head,
+                layernorm_eps,
+                zero_centered=True,
+            )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
             weights,
@@ -1431,11 +1473,11 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        self.input_layernorm = RMSResNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
+        self.input_layernorm = _qwen_rms_res_norm(
+            weights, W.pre_ln_gamma, config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSResNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
+        self.post_attention_layernorm = _qwen_rms_res_norm(
+            weights, W.post_ln_gamma, config.layernorm_eps
         )
 
     def forward(
@@ -1485,6 +1527,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             residual,
             self.input_layernorm.weight,
             eps=self.input_layernorm.variance_epsilon,
+            zero_centered=getattr(self.input_layernorm, "zero_centered", False),
         )
         attn_quant = None
         if fused is None:
@@ -1566,8 +1609,8 @@ class Qwen3NextModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        self.norm = _qwen_rms_res_norm(
+            weights.global_weights, W.final_ln_gamma, model_config.layernorm_eps
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:

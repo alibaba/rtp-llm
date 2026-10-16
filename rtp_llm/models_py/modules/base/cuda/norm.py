@@ -13,16 +13,48 @@ from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
+# zero_centered=True aligns these CUDA norms with vLLM's Qwen RMSNorm:
+# consume raw gamma and add 1 in FP32 inside the kernel to avoid an
+# intermediate BF16 rounding of gamma + 1.
 class RMSNorm(BaseNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+    def __init__(
+        self, weight: torch.Tensor, eps: float = 1e-6, *, zero_centered: bool = False
+    ):
         super().__init__(weight, eps)
+        self.zero_centered = zero_centered
 
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
+        if self.zero_centered:
+            if hidden_states.numel() == 0:
+                return output
+            if hidden_states.dim() != 2 or hidden_states.shape[-1] != 256:
+                # Keep FlashInfer reduction/rsqrt ordering; results may differ
+                # from vLLM while raw gamma + 1 is still computed in FP32.
+                return trace_call(
+                    "norm:flashinfer.norm.gemma_rmsnorm",
+                    flashinfer.norm.gemma_rmsnorm,
+                    hidden_states,
+                    self.weight,
+                    eps=self.variance_epsilon,
+                    out=output,
+                )
+            from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_qk_rmsnorm import (
+                vllm_style_zero_centered_rmsnorm,
+            )
+
+            return trace_call(
+                "norm:vllm_style_zero_centered_rmsnorm",
+                vllm_style_zero_centered_rmsnorm,
+                hidden_states,
+                self.weight,
+                eps=self.variance_epsilon,
+                output=output,
+            )
+        stream_id = torch.cuda.current_stream().cuda_stream
         trace_call(
             "norm:rtp_llm_ops.rmsnorm",
             rtp_llm_ops.rmsnorm,
@@ -36,12 +68,29 @@ class RMSNorm(BaseNorm):
 
 
 class RMSResNorm(BaseResNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+    def __init__(
+        self, weight: torch.Tensor, eps: float = 1e-6, *, zero_centered: bool = False
+    ):
         super().__init__(weight, eps)
+        self.zero_centered = zero_centered
 
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.zero_centered:
+            if hidden_states.numel() == 0:
+                return hidden_states, residual
+            # Keep FlashInfer reduction/rsqrt ordering; results may differ
+            # from vLLM while raw gamma + 1 is still computed in FP32.
+            trace_call(
+                "norm:flashinfer.norm.gemma_fused_add_rmsnorm",
+                flashinfer.norm.gemma_fused_add_rmsnorm,
+                hidden_states,
+                residual,
+                self.weight,
+                eps=self.variance_epsilon,
+            )
+            return hidden_states, residual
         stream_id = torch.cuda.current_stream().cuda_stream
         trace_call(
             "norm:rtp_llm_ops.fused_add_rmsnorm",
@@ -64,10 +113,12 @@ class QKRMSNorm(nn.Module):
         kv_head_num: int,
         size_per_head: int = 128,
         eps: float = 1e-6,
+        *,
+        zero_centered: bool = False,
     ):
         super().__init__()
-        self.q_norm = RMSNorm(q_weight, eps)
-        self.k_norm = RMSNorm(k_weight, eps)
+        self.q_norm = RMSNorm(q_weight, eps, zero_centered=zero_centered)
+        self.k_norm = RMSNorm(k_weight, eps, zero_centered=zero_centered)
         self.head_num = head_num
         self.kv_head_num = kv_head_num
         self.size_per_head = size_per_head
@@ -103,6 +154,8 @@ class FusedQKRMSNorm(nn.Module):
         size_per_head: int = 128,
         eps: float = 1e-6,
         enable_pdl: bool = False,
+        *,
+        zero_centered: bool = False,
     ):
         super().__init__()
         self.q_weight = q_weight
@@ -114,8 +167,11 @@ class FusedQKRMSNorm(nn.Module):
         self.q_size = self.head_num * self.size_per_head
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
+        self.zero_centered = zero_centered
 
     def forward(self, hidden_states: torch.Tensor):
+        if self.zero_centered and hidden_states.numel() == 0:
+            return hidden_states
         from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_qk_rmsnorm import (
             maybe_fused_qk_rmsnorm,
         )
@@ -128,6 +184,7 @@ class FusedQKRMSNorm(nn.Module):
             self.kv_head_num,
             self.size_per_head,
             self.eps,
+            zero_centered=self.zero_centered,
         )
         if fused is not None:
             return fused
@@ -138,6 +195,35 @@ class FusedQKRMSNorm(nn.Module):
         )
         q = qkv[:, : self.head_num, :]
         k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
+        if self.zero_centered:
+            # CUDA Gemma accepts 2D only. Packed Q/K views are not contiguous,
+            # so flatten each separately and write back; V is never modified.
+            for values, weight in ((q, self.q_weight), (k, self.k_weight)):
+                flat = values.reshape(-1, self.size_per_head)
+                if self.size_per_head != 256:
+                    normed = trace_call(
+                        "norm:flashinfer.norm.gemma_rmsnorm",
+                        flashinfer.norm.gemma_rmsnorm,
+                        flat,
+                        weight,
+                        eps=self.eps,
+                        enable_pdl=self.enable_pdl,
+                    )
+                    values.copy_(normed.reshape(values.shape))
+                    continue
+                from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_qk_rmsnorm import (
+                    vllm_style_zero_centered_rmsnorm,
+                )
+
+                normed = trace_call(
+                    "norm:vllm_style_zero_centered_rmsnorm:qk",
+                    vllm_style_zero_centered_rmsnorm,
+                    flat,
+                    weight,
+                    eps=self.eps,
+                )
+                values.copy_(normed.reshape(values.shape))
+            return qkv.reshape(m, n)
         trace_call(
             "norm:flashinfer.norm.rmsnorm",
             flashinfer.norm.rmsnorm,

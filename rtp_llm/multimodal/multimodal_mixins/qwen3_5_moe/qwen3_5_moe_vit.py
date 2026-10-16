@@ -611,6 +611,8 @@ class Qwen3_5MoeVisionMLP(nn.Module):
         ):
             # Fuse bias and tanh GELU in cuBLASLt's GEMM epilogue. This skips
             # the intermediate FP16/BF16 rounding of a separate FC1 output.
+            # To match vLLM FC1-to-GELU rounding, split FC1 and GELU and
+            # store the FP16/BF16 FC1 output before applying GELU.
             hidden = torch._addmm_activation(
                 fc1.bias,
                 x.reshape(-1, x.shape[-1]),
