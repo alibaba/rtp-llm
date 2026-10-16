@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import io
 import json
@@ -10,7 +11,8 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
+from rtp_llm.ops import CPAllGatherImpl, HWKernelConfig, RoleType, TaskType
+from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
@@ -502,6 +504,10 @@ class ServerArgsSetTest(TestCase):
                 self.assertTrue(trace_config.enabled)
                 self.assertEqual(trace_config.sampler_ratio, 0.25)
 
+    def test_invalid_cp_all_gather_impl_is_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            str2_cp_all_gather_impl("fuse")
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -527,6 +533,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS"] = "30"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
+        os.environ["RTP_CP_IMPL"] = "FUSED"
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
@@ -553,6 +560,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 2)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 8)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl, CPAllGatherImpl.FUSED
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
@@ -696,6 +706,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--output_dispatcher_worker_count",
             "4",
+            "--cp_all_gather_impl",
+            "legacy",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -717,6 +729,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 32)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl, CPAllGatherImpl.LEGACY
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
