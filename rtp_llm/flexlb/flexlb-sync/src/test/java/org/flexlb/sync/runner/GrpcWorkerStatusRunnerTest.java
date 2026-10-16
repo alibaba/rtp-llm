@@ -483,7 +483,7 @@ class GrpcWorkerStatusRunnerTest {
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
             verify(cache)
                     .removeEngineBlockCache(
-                            org.mockito.Mockito.eq(status.getIpPort()),
+                            org.mockito.Mockito.same(status),
                             org.mockito.Mockito.same(status.trace()));
             String json = logs.awaitFirst();
             assertTrue(json.contains("DEADLINE_EXCEEDED"));
@@ -712,7 +712,7 @@ class GrpcWorkerStatusRunnerTest {
         if (needsCacheKeys) {
             verify(cache)
                     .removeEngineBlockCache(
-                            org.mockito.Mockito.eq(status.getLogicalIpPort()),
+                            org.mockito.Mockito.same(status),
                             org.mockito.Mockito.same(status.trace()));
         } else {
             verifyNoInteractions(cache);

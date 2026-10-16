@@ -77,6 +77,7 @@ public class LocalSyncCacheMatchProvider
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) { return updateFromWorkerStatus(workerStatus, null); }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
+        requireCacheMutationLock(workerStatus);
         long startTime = System.nanoTime() / 1000;
         String logicalIpPort = workerStatus.getLogicalIpPort();
         String metricIpPort = workerStatus.getMetricIpPort();
@@ -108,7 +109,12 @@ public class LocalSyncCacheMatchProvider
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", logicalIpPort, e);
             WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, e.getMessage());
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0    public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
+        requireCacheMutationLock(workerStatus);
+        kvCacheManager.removeEngineCache(workerStatus.getLogicalIpPort(), trace);
+    }
+
+");
             return result;
         }
     }
@@ -137,5 +143,10 @@ public class LocalSyncCacheMatchProvider
                 .logicalIpPort(logicalIpPort)
                 .errorMessage(errorMessage)
                 .build();
+    }
+    private static void requireCacheMutationLock(WorkerStatus workerStatus) {
+        if (!workerStatus.cacheMutationLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException("Cache mutation requires the owning generation cache lock");
+        }
     }
 }

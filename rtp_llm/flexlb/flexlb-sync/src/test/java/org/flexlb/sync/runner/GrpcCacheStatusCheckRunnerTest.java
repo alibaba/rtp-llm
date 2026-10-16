@@ -201,7 +201,7 @@ class GrpcCacheStatusCheckRunnerTest {
                             return null;
                         })
                 .when(localKvCacheAwareManager)
-                .removeEngineBlockCache(status.getIpPort(), status.trace());
+                .removeEngineBlockCache(status, status.trace());
         when(engineGrpcService.getCacheStatusAsync(
                         anyString(),
                         anyInt(),
@@ -296,8 +296,7 @@ class GrpcCacheStatusCheckRunnerTest {
             } finally {
                 status.lock.unlock();
             }
-            verify(localKvCacheAwareManager)
-                    .removeEngineBlockCache(status.getIpPort(), status.trace());
+            verify(localKvCacheAwareManager).removeEngineBlockCache(status, status.trace());
             org.junit.jupiter.api.Assertions.assertTrue(
                     cleanupHeldCacheLock.get(),
                     "detached-key cleanup must serialize with the old cache writer");

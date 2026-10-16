@@ -59,7 +59,7 @@ class ExpirationCleanerTest {
         lease.statusRpcCompleted(false);
         cleaner.cleanExpiredWorkers();
         assertFalse(status.isActiveGeneration());
-        verify(cache).removeEngineBlockCache(status.getIpPort(), status.trace());
+        verify(cache).removeEngineBlockCache(status, status.trace());
     }
 
     @Test
@@ -186,12 +186,13 @@ class ExpirationCleanerTest {
             releaseFirstAwait.countDown();
             cleaning.get(5, TimeUnit.SECONDS);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-            while (!directory.statusSnapshot(RoleType.PREFILL).isEmpty() && System.nanoTime() < deadline) {
+            while (!directory.statusSnapshot(RoleType.PREFILL).isEmpty()
+                    && System.nanoTime() < deadline) {
                 java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
             }
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
-            verify(cache).removeEngineBlockCache(first.getLogicalIpPort(), first.trace());
-            verify(cache).removeEngineBlockCache(second.getLogicalIpPort(), second.trace());
+            verify(cache).removeEngineBlockCache(first, first.trace());
+            verify(cache).removeEngineBlockCache(second, second.trace());
         } finally {
             releaseFirstAwait.countDown();
             executor.shutdownNow();

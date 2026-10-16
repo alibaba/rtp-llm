@@ -67,6 +67,10 @@ public class CacheAwareService {
         return updateOrchestrator.updateFromWorkerStatus(workerStatus, pollTrace);
     }
 
+    public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
+        updateOrchestrator.removeEngineBlockCache(workerStatus, trace);
+    }
+
     public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
 
     public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {

@@ -51,6 +51,10 @@ public class CacheMetadataUpdateOrchestrator {
                 .build();
     }
 
+    public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
+        if (configuration.isLocalSyncEnabled()) { localSyncProvider.removeEngineBlockCache(workerStatus, trace); }
+    }
+
     public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
 
     public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {
