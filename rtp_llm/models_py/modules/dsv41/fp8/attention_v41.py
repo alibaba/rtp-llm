@@ -1066,6 +1066,12 @@ class AttentionV41FP8(AttentionFP8):
 
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
+            for key in ("prefill_pool_ready", "prefill_state_ready"):
+                pending = self._shared_attention.pop(key, None)
+                if pending is not None:
+                    # Direct callers also order a new forward after an
+                    # interrupted consumer, without a host-side event wait.
+                    pending.wait()
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
@@ -1259,6 +1265,7 @@ class AttentionV41FP8(AttentionFP8):
         grouped_projection=False,
         batched_groups=False,
         swa=None,
+        previous_state=None,
     ):
         """Publish global pools in sequence order, carrying pairs across tiles."""
         owner = self._owner()
@@ -1426,7 +1433,11 @@ class AttentionV41FP8(AttentionFP8):
         )
         if ratio == 2:
             # Read the previous token before tail writes can reuse its ring slot.
-            if producer_meta is not None and producer_meta.previous_slots is not None:
+            if previous_state is not None:
+                with record_function_range("dsv41.prefill.state.wait"):
+                    previous = previous_state.wait()
+                self._shared_attention.pop("prefill_state_ready", None)
+            elif producer_meta is not None and producer_meta.previous_slots is not None:
                 previous = self._read_state(
                     None, None, slots=producer_meta.previous_slots
                 )
@@ -1714,33 +1725,64 @@ class AttentionV41FP8(AttentionFP8):
         fused_indexer = prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
         )
-        if (
-            fused_indexer
-            and main_pool is not None
-            and index_pool is not None
-            and len(ends) > 1
-        ):
+        if fused_indexer and main_pool is not None and index_pool is not None:
             from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_pools import (
                 try_gather_prefill_pools,
             )
 
-            batched = try_gather_prefill_pools(
-                self,
-                main_pool,
-                index_pool,
-                ends,
-                (
-                    producer_seq_ends
-                    if producer_seq_ends is not None
-                    else starts + lengths
-                ),
-                swa=swa,
+            seq_ends = (
+                producer_seq_ends if producer_seq_ends is not None else starts + lengths
             )
+            pending = None
+            if (
+                main_pool.is_cuda
+                and cp is not None
+                and cp.cp_size > 1
+                and cp.kv_cache_sharded
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                from ._v41_cp_async import launch
+
+                output_stream = torch.cuda.current_stream(main_pool.device)
+
+                # Pool writes precede the communication stream. Its result is
+                # consumed only after independent indexer Q/weight projection.
+                with record_function_range("dsv41.prefill.pool.async_start"):
+                    pending = launch(
+                        main_pool.device,
+                        lambda: try_gather_prefill_pools(
+                            self,
+                            main_pool,
+                            index_pool,
+                            ends,
+                            seq_ends,
+                            swa=swa,
+                            output_stream=output_stream,
+                        ),
+                        inputs=(
+                            main_pool,
+                            index_pool,
+                            seq_ends,
+                            self._block_tables_by_type,
+                            swa,
+                        ),
+                    )
+                batched = pending.value
+            else:
+                batched = try_gather_prefill_pools(
+                    self, main_pool, index_pool, ends, seq_ends, swa=swa
+                )
             if batched is not None:
+                if pending is not None:
+                    self._shared_attention["prefill_pool_ready"] = pending
                 self._shared_attention["global"] = {self.layer_id: batched}
                 self._shared_attention.pop("prefill_chunk_meta", None)
                 self._shared_attention.pop("prefill_kv_workspace", None)
                 return
+            if pending is not None:
+                # Unsupported common layouts retain the original path. Join
+                # any preliminary stream work before its storage can be reused.
+                pending.wait()
         for b, end in enumerate(ends):
             count = int(end) // ratio
             idx = torch.arange(count, device=x_full.device, dtype=torch.long)
@@ -1922,6 +1964,10 @@ class AttentionV41FP8(AttentionFP8):
                 else:
                     q = fp8_roundtrip(q)
             dense_weights = weights
+            pending = shared.pop("prefill_pool_ready", None)
+            if pending is not None:
+                with record_function_range("dsv41.prefill.pool.wait"):
+                    pending.wait()
             if fused_indexer and len(globals_by_req) > 1:
                 from ._v41_batched_prefill_select import try_select_batched
 
@@ -2373,6 +2419,41 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("prefill_chunk_meta", None)
             self._shared_attention.pop("prefill_index_plan", None)
         common = self._prefill_common_setup(x, positions)
+        previous_state = None
+        if (
+            x.is_cuda
+            and self.is_kv_source
+            and self.compress_ratio == 2
+            and common.cp_on
+            and common.cp_ctx.cp_size > 1
+            and common.cp_ctx.kv_cache_sharded
+            and self._source_pool(CSA_STATE) is not None
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from ._v41_cp_async import launch
+
+            def read_previous_state():
+                starts = common.prefix_lengths.long()
+                return self._read_state(
+                    (starts - 1).clamp_min(0),
+                    torch.arange(len(starts), device=x.device),
+                )
+
+            # Snapshot the old ring state before this layer can write it, while
+            # QKV projection and SWA preparation proceed on the compute stream.
+            with record_function_range("dsv41.prefill.state.async_start"):
+                previous_state = launch(
+                    x.device,
+                    read_previous_state,
+                    inputs=(
+                        common.prefix_lengths,
+                        self._source_pool(CSA_STATE),
+                        self._block_tables_by_type,
+                    ),
+                )
+            # Forward's finally block joins this even if QKV preparation raises
+            # before the compressor consumes the snapshot.
+            self._shared_attention["prefill_state_ready"] = previous_state
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
         )
@@ -2522,6 +2603,7 @@ class AttentionV41FP8(AttentionFP8):
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
                     swa=swa,
+                    previous_state=previous_state,
                 )
             finally:
                 if raw_tiles is not None:
@@ -2575,6 +2657,12 @@ class AttentionV41FP8(AttentionFP8):
             req_ids,
             request_row_slices=getattr(common, "request_row_slices", None),
         )
+        pending = self._shared_attention.pop("prefill_pool_ready", None)
+        if pending is not None:
+            # Short prompts and shared selections skip scoring, but attention
+            # still consumes global KV. Keep their dependency at that boundary.
+            with record_function_range("dsv41.prefill.pool.wait"):
+                pending.wait()
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
         offsets, ns, swstart = self._prefill_chunk_meta(
             globals_by_req, swa, swa_starts, req_ids, x.device, common=common

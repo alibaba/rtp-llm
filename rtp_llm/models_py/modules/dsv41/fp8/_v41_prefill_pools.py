@@ -8,7 +8,8 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
 
-# Excludes the final BF16 KV workspace, which the original path also retains.
+# Excludes final BF16 KV and earlier groups' retained index outputs. Those
+# model outputs also exist in the original path; this bounds current scratch.
 # Joint direct output keeps packet (356), index outputs (68), and three int64
 # slot planes (24) alive through dequant. Use this common bound for every rank
 # and both output layouts, never choose collective groups from local readiness.
@@ -89,7 +90,15 @@ def _request_groups(counts):
 
 
 def try_gather_prefill_pools(
-    attn, main_pool, index_pool, ends, seq_ends, *, workspace=None, swa=None
+    attn,
+    main_pool,
+    index_pool,
+    ends,
+    seq_ends,
+    *,
+    workspace=None,
+    swa=None,
+    output_stream=None,
 ):
     """Return the existing [(BF16 global keys, FP4 index keys)] representation.
 
@@ -99,10 +108,10 @@ def try_gather_prefill_pools(
     """
     cp = attn._cp_ctx
     if (
-        len(ends) < 2
+        len(ends) < 1
         or cp is None
-        or cp.cp_size <= 1
-        or not cp.kv_cache_sharded
+        or cp.cp_size < 1
+        or (cp.cp_size > 1 and not cp.kv_cache_sharded)
         or attn.compress_ratio not in (1, 2)
         or len(ends) > _MAX_REQUESTS
     ):
@@ -121,22 +130,21 @@ def try_gather_prefill_pools(
     ):
         return None
 
-    # Joint CP4 is qualified at batch >=32; smaller batches stay on this path.
-    if len(ends) >= 32:
-        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool
 
-        joint = _v41_joint_pool.try_gather(
-            attn,
-            main_pool,
-            index_pool,
-            ends,
-            seq_ends,
-            groups=groups,
-            workspace=workspace,
-            swa=swa,
-        )
-        if joint is not None:
-            return joint
+    joint = _v41_joint_pool.try_gather(
+        attn,
+        main_pool,
+        index_pool,
+        ends,
+        seq_ends,
+        groups=groups,
+        workspace=workspace,
+        swa=swa,
+        output_stream=output_stream,
+    )
+    if joint is not None:
+        return joint
 
     if (
         main_pool.dtype != torch.uint8

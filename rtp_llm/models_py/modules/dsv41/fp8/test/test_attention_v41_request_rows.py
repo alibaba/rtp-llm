@@ -186,6 +186,108 @@ class PrefillRequestRowsCPU(unittest.TestCase):
                     self.assertTrue(torch.equal(actual, expected))
                     self.assertEqual(projection.call_count, 0 if shortcut else 1)
 
+    def test_pool_wait_follows_q_projection_and_precedes_first_score(self):
+        order = []
+        keys = torch.full((7, 2), float("nan"))
+
+        def wait():
+            order.append("wait")
+            keys.copy_(torch.arange(7).float()[:, None].expand(7, 2))
+
+        def project_q(weight, value):
+            order.append("q")
+            return value
+
+        def project_weights(value, weight):
+            order.append("weights")
+            return torch.nn.functional.linear(value, weight)
+
+        def prepare_q(value):
+            order.append("prepare_q")
+            return value
+
+        pending = SimpleNamespace(wait=Mock(side_effect=wait))
+        owner = SimpleNamespace(
+            is_index_source=True,
+            kv_source_layer_id=0,
+            layer_id=0,
+            index_topk=4,
+            compress_ratio=1,
+            index_n_heads=1,
+            index_head_dim=2,
+            rope_head_dim=0,
+            index_wq=None,
+            index_weights=torch.ones(1, 2),
+            freqs_cis=torch.ones(8, 1, dtype=torch.complex64),
+            _lin=project_q,
+            _shared_attention={
+                "global": {0: [(None, keys)]},
+                "ced_indexer_projection": project_weights,
+                "prefill_pool_ready": pending,
+            },
+        )
+        x = torch.ones(1, 2)
+        with patch.object(
+            attention, "rope_only", side_effect=lambda q, *a: q
+        ), patch.object(
+            attention, "fp8_roundtrip", side_effect=prepare_q
+        ), patch.object(
+            attention.prefill_topk, "try_select_tokens", return_value=None
+        ):
+            result = attention.AttentionV41FP8._select_indices(
+                owner, x, x, torch.tensor([6]), torch.tensor([0])
+            )
+        self.assertEqual(order, ["q", "weights", "prepare_q", "wait"])
+        torch.testing.assert_close(
+            result, torch.tensor([[6, 5, 4, 3]], dtype=torch.int32)
+        )
+        self.assertNotIn("prefill_pool_ready", owner._shared_attention)
+        pending.wait.assert_called_once_with()
+
+    def test_query_waits_for_kv_when_selection_does_not_read_keys(self):
+        # Covers short-key selection as well as a reused index-source selection.
+        class FirstKVConsumer(Exception):
+            pass
+
+        for index_source in (False, True):
+            order = []
+            pending = SimpleNamespace(wait=lambda: order.append("wait"))
+            selected = torch.tensor([[0, -1]], dtype=torch.int32)
+            shared = {"global": {2: []}, "prefill_pool_ready": pending}
+
+            def select(*args, **kwargs):
+                self.assertIn("prefill_pool_ready", shared)
+                order.append("selection")
+                return selected
+
+            def first_kv_consumer(*args, **kwargs):
+                self.assertEqual(order, ["selection", "wait"])
+                self.assertNotIn("prefill_pool_ready", shared)
+                raise FirstKVConsumer()
+
+            owner = SimpleNamespace(
+                compress_ratio=1,
+                is_index_source=index_source,
+                kv_source_layer_id=2,
+                _shared_attention=shared,
+                _select_indices=select,
+                _prefill_chunk_meta=first_kv_consumer,
+            )
+            common = SimpleNamespace(
+                cp_on=False,
+                position_ids=torch.tensor([0]),
+                req_id_per_token=torch.tensor([0]),
+            )
+            with self.assertRaises(FirstKVConsumer):
+                attention.AttentionV41FP8._prefill_query(
+                    owner,
+                    torch.ones(1, 2),
+                    common,
+                    SimpleNamespace(qr=torch.ones(1, 2)),
+                    None,
+                    None,
+                )
+
     def test_builder_attaches_slices_and_restores_compression_ratio(self):
         common = PrefillMeta(
             seqlen=8,
