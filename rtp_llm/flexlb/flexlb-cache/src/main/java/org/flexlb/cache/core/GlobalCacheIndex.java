@@ -127,6 +127,10 @@ public class GlobalCacheIndex {
     /**
      * Remove an engine
      *
+     * <p>The caller must keep the owning generation's cacheMutationLock held
+     * from obtaining blockCacheKeys until this method returns. The index lock
+     * protects global mappings; it does not freeze the borrowed local key set.
+     *
      * @param engineIp Engine IP
      */
     public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> blockCacheKeys, EndpointTrace trace) {
