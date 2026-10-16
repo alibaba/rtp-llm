@@ -18,6 +18,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -75,8 +76,7 @@ class PrefillCompletionProjectionTest {
                         requestReporter,
                         org.mockito.Mockito.mock(DeliveryDispatcher.class),
                         service,
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.eviction.EngineCancelChannel.class));
+                        org.mockito.Mockito.mock(EngineGrpcClient.class));
         try {
             WorkerStatus worker =
                     WorkerStatus.createDiscovered(

@@ -9,6 +9,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -25,8 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -97,11 +100,11 @@ class RequestReconciliationFailureOwnershipTest {
                                         ? DecodeResources.MutationStatus.STALE
                                         : DecodeResources.MutationStatus.APPLIED,
                                 false));
-        when(SchedulerTestSupport.cancelChannel(owner).cancel(any(), anyLong(), any(), anyLong()))
+        when(SchedulerTestSupport.engineClient(owner)
+                        .cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
-                                org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
-                                        .REQUEST_CLEANED));
+                                EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var failed =
                 new PrefillState.PrefillRequestStatus(
                         route, PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);

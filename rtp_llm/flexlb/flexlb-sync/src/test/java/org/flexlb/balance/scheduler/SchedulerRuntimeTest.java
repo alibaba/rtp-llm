@@ -2,11 +2,11 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -207,7 +207,7 @@ class SchedulerRuntimeTest {
                                 mock(RequestSchedulerReporter.class),
                                 dispatcher,
                                 service,
-                                mock(EngineCancelChannel.class)));
+                                mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
         var expected = new IllegalStateException("placement close failed");
         doThrow(expected).when(scheduler).closePlacement();
@@ -340,7 +340,7 @@ class SchedulerRuntimeTest {
                                 mock(RequestSchedulerReporter.class),
                                 SchedulerTestSupport.dispatcher(),
                                 service,
-                                mock(EngineCancelChannel.class)));
+                                mock(EngineGrpcClient.class)));
         try {
             var owner =
                     spy(
@@ -536,7 +536,7 @@ class SchedulerRuntimeTest {
                             mock(RequestSchedulerReporter.class),
                             SchedulerTestSupport.dispatcher(),
                             service,
-                            mock(EngineCancelChannel.class));
+                            mock(EngineGrpcClient.class));
             runtime.registerScheduler(
                     PlacementConfiguration.create(
                             runtime,

@@ -497,12 +497,11 @@ def inject_crash_after(ctx: CaseContext):
     and the routable-set update are not one atomic step), and after
     /start_engine the topology fully recovers.  Master-ledger residue from the empty-ack
     batch(s) is asserted to be BOUNDED and NON-GROWING, not fully clean:
-    with the production UnsupportedEngineCancelChannel the uncertain-entry
-    engine fence parks in quarantine forever (no cancel channel, and the
-    engine never saw the request so no WorkerStatus terminal ever
-    settles it) — verified in PriorityScheduler.handleEngineFenceOutcome /
-    cleanupInflight.  The engine side, which never registered the request
-    (and whose memory the crash wiped anyway), must be fully clean.
+    an empty Enqueue acknowledgement does not establish whether the request reached
+    the engine. Cleanup through EngineGrpcClient may establish cancellation evidence;
+    the scheduler retains ownership until sufficient cleanup or retirement evidence
+    arrives. The engine side, which never registered the request in this injected
+    scenario (and whose memory the crash wiped), must be fully clean.
 
     Profile semantics (v2, task #55): the fault fires at the engine's
     EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the

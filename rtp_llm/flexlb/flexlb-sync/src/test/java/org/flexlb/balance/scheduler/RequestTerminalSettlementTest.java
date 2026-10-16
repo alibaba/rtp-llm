@@ -8,6 +8,7 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -34,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
@@ -1037,12 +1039,11 @@ class RequestTerminalSettlementTest {
         var timer = mock(ExpirationTimer.class);
         AbstractRequestScheduler requestOwner =
                 RequestProtocolTestSupport.initialize(publisher, context, timer);
-        when(SchedulerTestSupport.cancelChannel(requestOwner)
-                        .cancel(any(), anyLong(), any(), anyLong()))
+        when(SchedulerTestSupport.engineClient(requestOwner)
+                        .cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
-                                org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
-                                        .REQUEST_CLEANED));
+                                EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         when(publisher.tryRegister())
                 .thenAnswer(
                         call -> {

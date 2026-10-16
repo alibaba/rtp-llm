@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -480,8 +479,8 @@ public class DeliveryDispatcher {
 
     /** Deduplication ends only at physical settlement, independently of the bounded transport session. */
     CompletableFuture<Void> cleanupDelivery(
-            DeliveryClaim claim, EngineCancelChannel channel, SchedulerRuntime runtime) {
-        return cleanup.start(claim, channel, runtime);
+            DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime) {
+        return cleanup.start(claim, client, runtime);
     }
 
     private void logDispatch(

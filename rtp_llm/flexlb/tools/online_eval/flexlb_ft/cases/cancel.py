@@ -177,7 +177,7 @@ def _engine_cancel_receipt_within(
     """Engine-side cancel receipt within a tight propagation bound.
 
     The master→engine cancel channel is a real gRPC wiring
-    (GrpcEngineCancelChannel), so the engine recording the rid in
+    (EngineGrpcClient.cancelAsync), so the engine recording the rid in
     cancelled_rids is a second-scale expectation.  The 95s TTL drain
     window is a leak safety net, NOT an acceptable propagation path:
     waiting "eventually" conflates a correct cancel with TTL-swept
@@ -262,7 +262,7 @@ def cancel_basic(ctx: CaseContext):
     issues the explicit Cancel RPC while the request is still running.
 
     Behaviour: master Cancel (typed CLIENT_CANCELLED) → under BATCH
-    dispatch the master walks the real GrpcEngineCancelChannel and the
+    dispatch the master walks the real EngineGrpcClient.cancelAsync and the
     engine records the cancellation (cancelled_rids / lifecycle).
 
     Expected (contract): stream terminates; engine-side cancel receipt
@@ -1139,7 +1139,7 @@ def cancel_preemption_victim(ctx: CaseContext):
     to EvictionManager.tryAdmit; slotDeficit=1 (engineLoad 1, limit 1)
     makes the planner select the engine-owned victim and the master
     sends the real (weak) Cancel to the ORIGINAL prefill (tokenized
-    Cancel coordinator, GrpcEngineCancelChannel), which propagates to
+    Cancel coordinator, EngineGrpcClient.cancelAsync), which propagates to
     decode (P→D stream-cancel conduction).
 
     Expected (contract): the victim's stream terminates in a

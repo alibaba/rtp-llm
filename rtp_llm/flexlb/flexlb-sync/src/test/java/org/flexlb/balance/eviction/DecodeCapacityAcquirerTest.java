@@ -12,6 +12,7 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
@@ -56,7 +57,7 @@ class DecodeCapacityAcquirerTest {
 
     private RequestSchedulerReporter reporter;
 
-    private EngineCancelChannel cancelChannel;
+    private EngineGrpcClient engineClient;
 
     private AbstractRequestScheduler requests;
 
@@ -67,12 +68,12 @@ class DecodeCapacityAcquirerTest {
     @BeforeEach
     void setUp() {
         reporter = mock(RequestSchedulerReporter.class);
-        cancelChannel = mock(EngineCancelChannel.class);
+        engineClient = mock(EngineGrpcClient.class);
         requests = mock(AbstractRequestScheduler.class);
         blockedEndpoint = mock(WorkerEndpoint.class);
         acquirer =
                 new DecodeCapacityAcquirer(
-                        cancelChannel,
+                        engineClient,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
                         reporter,
@@ -155,7 +156,7 @@ class DecodeCapacityAcquirerTest {
         acquirer =
                 org.mockito.Mockito.spy(
                         new DecodeCapacityAcquirer(
-                                cancelChannel,
+                                engineClient,
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
                                 mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
@@ -230,7 +231,7 @@ class DecodeCapacityAcquirerTest {
         acquirer =
                 org.mockito.Mockito.spy(
                         new DecodeCapacityAcquirer(
-                                cancelChannel,
+                                engineClient,
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
                                 mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
@@ -262,7 +263,7 @@ class DecodeCapacityAcquirerTest {
 
         assertNull(acquirer.tryReclaim(context, endpoint));
         verify(endpoint, org.mockito.Mockito.times(1)).resourceSnapshot();
-        verifyNoInteractions(cancelChannel, requests);
+        verifyNoInteractions(engineClient, requests);
         verify(acquirer, never()).preempt(any(), any());
         if (capacityBlocked) {
             verify(reporter)
@@ -278,7 +279,7 @@ class DecodeCapacityAcquirerTest {
     }
 
     private void assertZeroSideEffect() {
-        verifyNoInteractions(cancelChannel);
+        verifyNoInteractions(engineClient);
         verify(acquirer, never()).preempt(any(), any());
         verifyNoInteractions(requests);
         verifyNoInteractions(blockedEndpoint);

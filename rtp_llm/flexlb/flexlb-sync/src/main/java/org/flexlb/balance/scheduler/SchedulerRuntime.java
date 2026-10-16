@@ -4,9 +4,9 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Failures;
@@ -64,7 +64,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         deliveries.configureBatchIds(environment);
     }
 
-    private final EngineCancelChannel cancelChannel;
+    private final EngineGrpcClient engineClient;
     final ExecutorService deliveryCleanupExecutor =
             Executors.newThreadPerTaskExecutor(
                     Thread.ofVirtual().name("flexlb-delivery-cleanup-", 1).factory());
@@ -81,7 +81,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     }
 
     void startDeliveryCleanup(DeliveryClaim claim) {
-        dispatcher.cleanupDelivery(claim, cancelChannel, this);
+        dispatcher.cleanupDelivery(claim, engineClient, this);
     }
 
     private final ExecutorService requestWorkers =
@@ -400,7 +400,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             RequestSchedulerReporter requestReporter,
             DeliveryDispatcher dispatcher,
             ConfigService config,
-            EngineCancelChannel cancelChannel) {
+            EngineGrpcClient engineClient) {
         this(
                 requests,
                 endpoints,
@@ -408,7 +408,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                 requestReporter,
                 dispatcher,
                 config,
-                cancelChannel,
+                engineClient,
                 System::currentTimeMillis);
     }
 
@@ -419,10 +419,10 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             RequestSchedulerReporter requestReporter,
             DeliveryDispatcher dispatcher,
             ConfigService config,
-            EngineCancelChannel cancelChannel,
+            EngineGrpcClient engineClient,
             LongSupplier clock) {
         deliveries = new DeliveryExecution(config, this::recordFailure);
-        this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
+        this.engineClient = Objects.requireNonNull(engineClient, "engineClient");
         cleanupExecutor.setRemoveOnCancelPolicy(true);
         cleanupExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         cleanupExecutor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);

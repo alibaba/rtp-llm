@@ -9,6 +9,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -33,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -418,12 +420,11 @@ class RequestCompletionPublicationRaceTest {
                             })
                     .when(decode)
                     .release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-            when(SchedulerTestSupport.cancelChannel(registry)
-                            .cancel(any(), anyLong(), any(), anyLong()))
+            when(SchedulerTestSupport.engineClient(registry)
+                            .cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(
                             CompletableFuture.completedFuture(
-                                    org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
-                                            .REQUEST_CLEANED));
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
             assertTrue(claim.owner().data().getScheduler().tryStartSend(claim));
             var completions = new java.util.concurrent.atomic.AtomicInteger();
             CompletableFuture<Void> callback =

@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -30,9 +30,9 @@ class DeliveryCleanupTest {
             runtime.deliveryCleanupExecutor.shutdown();
             var cleanup = new DeliveryCleanup();
             assertDoesNotThrow(
-                    () -> cleanup.start(claim, mock(EngineCancelChannel.class), runtime).join());
+                    () -> cleanup.start(claim, mock(EngineGrpcClient.class), runtime).join());
             assertDoesNotThrow(
-                    () -> cleanup.start(claim, mock(EngineCancelChannel.class), runtime).join());
+                    () -> cleanup.start(claim, mock(EngineGrpcClient.class), runtime).join());
         } finally {
             runtime.shutdown();
         }
@@ -58,7 +58,7 @@ class DeliveryCleanupTest {
             assertDoesNotThrow(
                     () ->
                             new DeliveryCleanup()
-                                    .start(claim, mock(EngineCancelChannel.class), runtime)
+                                    .start(claim, mock(EngineGrpcClient.class), runtime)
                                     .join());
             assertTrue(runtime.signals().delivery(claim).toCompletableFuture().isDone());
         } finally {
@@ -74,7 +74,7 @@ class DeliveryCleanupTest {
     void exactIdentityDedupEndsAtPhysicalSignalRatherThanSessionStart() throws Exception {
         var runtime = runtime();
         try {
-            var channel = mock(EngineCancelChannel.class);
+            var channel = mock(EngineGrpcClient.class);
             var claim = claim();
             var equalValue =
                     new DeliveryClaim(
@@ -108,12 +108,12 @@ class DeliveryCleanupTest {
         try {
             runtime.deliveryCleanupExecutor.shutdown();
             var cleanup = new DeliveryCleanup();
-            var first = cleanup.start(claim, mock(EngineCancelChannel.class), runtime);
+            var first = cleanup.start(claim, mock(EngineGrpcClient.class), runtime);
             assertTrue(first.isCompletedExceptionally());
-            assertSame(first, cleanup.start(claim, mock(EngineCancelChannel.class), runtime));
+            assertSame(first, cleanup.start(claim, mock(EngineGrpcClient.class), runtime));
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
             runtime.signals().completeDelivery(claim);
-            var after = cleanup.start(claim, mock(EngineCancelChannel.class), runtime);
+            var after = cleanup.start(claim, mock(EngineGrpcClient.class), runtime);
             assertNotSame(first, after);
             assertDoesNotThrow(after::join);
         } finally {
@@ -139,6 +139,6 @@ class DeliveryCleanupTest {
                 mock(RequestSchedulerReporter.class),
                 new DeliveryDispatcher(null, config, null, new DeliveryMetricsReporter(null), null),
                 config,
-                mock(EngineCancelChannel.class));
+                mock(EngineGrpcClient.class));
     }
 }

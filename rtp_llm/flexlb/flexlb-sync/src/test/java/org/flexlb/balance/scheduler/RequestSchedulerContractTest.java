@@ -9,6 +9,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -300,7 +301,7 @@ class RequestSchedulerContractTest {
                             mock(RequestSchedulerReporter.class),
                             SchedulerTestSupport.dispatcher(),
                             service,
-                            mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+                            mock(EngineGrpcClient.class));
             runtime.registerScheduler(
                     PlacementConfiguration.create(
                             runtime,

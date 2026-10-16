@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -21,6 +20,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -57,7 +57,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             DeliveryDispatcher delivery,
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
-            EngineCancelChannel cancelChannel) {
+            EngineGrpcClient engineClient) {
         Objects.requireNonNull(delivery, "delivery");
         var capacity = new PlacementConfiguration().decodeAdmissionCapacity(configService);
         this.registry =
@@ -73,7 +73,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 requestReporter,
                                 delivery,
                                 configService,
-                                cancelChannel));
+                                engineClient));
         var facilities = org.mockito.Mockito.spy(runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", facilities);
@@ -107,7 +107,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 .watchDeliveryCapacity(org.mockito.ArgumentMatchers.any());
         this.decodeCapacity =
                 new DecodeCapacityAcquirer(
-                        cancelChannel, requests, runtime, requestReporter, configService, capacity);
+                        engineClient, requests, runtime, requestReporter, configService, capacity);
         this.scheduler =
                 PlacementConfiguration.create(
                         runtime,

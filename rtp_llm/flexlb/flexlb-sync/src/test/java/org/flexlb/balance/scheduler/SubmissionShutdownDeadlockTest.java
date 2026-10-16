@@ -3,12 +3,12 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -213,7 +213,7 @@ class SubmissionShutdownDeadlockTest {
                                     mock(RequestSchedulerReporter.class),
                                     SchedulerTestSupport.dispatcher(),
                                     service,
-                                    mock(EngineCancelChannel.class)));
+                                    mock(EngineGrpcClient.class)));
             scheduler =
                     (AbstractRequestScheduler)
                             PlacementConfiguration.create(

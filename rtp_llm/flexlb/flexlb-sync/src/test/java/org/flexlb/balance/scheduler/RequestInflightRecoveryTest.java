@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
@@ -20,6 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -42,8 +42,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -318,11 +320,11 @@ class RequestInflightRecoveryTest {
                                     reporter, SchedulingTestConfig.capacity(config)),
                             new PlacementAvailability());
             ReflectionTestUtils.setField(owner.runtime, "endpoints", endpoints);
-            when(SchedulerTestSupport.cancelChannel(owner)
-                            .cancel(any(), anyLong(), any(), anyLong()))
+            when(SchedulerTestSupport.engineClient(owner)
+                            .cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(
                             CompletableFuture.completedFuture(
-                                    EngineCancelChannel.CancelAck.NOT_FOUND));
+                                    EngineGrpcClient.CancelReply.NOT_FOUND));
             prefill = (PrefillEndpoint) publish(RoleType.PREFILL, "127.0.0.1");
             decode = (DecodeEndpoint) publish(RoleType.DECODE, "127.0.0.2");
             try (var pin = decode.tryPinGeneration()) {

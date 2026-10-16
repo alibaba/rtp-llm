@@ -14,6 +14,8 @@ import org.flexlb.balance.scheduler.SchedulerTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -31,6 +33,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static org.flexlb.engine.grpc.EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -40,6 +43,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -105,17 +109,20 @@ class DecodeCapacityAcquirerProtocolTest {
                                                 ? first
                                                 : second));
 
-        EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
-        when(cancelChannel.cancel(
+        EngineGrpcClient engineClient = mock(EngineGrpcClient.class);
+        when(engineClient.cancelAsync(
                         any(),
-                        anyLong(),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenReturn(
-                        CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.ACCEPTED));
+                        CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         DecodeCapacityAcquirer acquirer =
                 new DecodeCapacityAcquirer(
-                        cancelChannel,
+                        engineClient,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         runtime,
                         mock(RequestSchedulerReporter.class),
@@ -142,17 +149,17 @@ class DecodeCapacityAcquirerProtocolTest {
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
         assertEquals(
                 new DecodeResources.ReservationHandle(9L, 20L, 100L), result.join().reservation());
-        verify(cancelChannel)
-                .cancel(
-                        eq(new CancelTarget("10.0.0.1", 9090)),
-                        eq(11L),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+        verify(engineClient)
+                .cancelAsync(
+                        eq("10.0.0.1"),
+                        eq(9090),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
                         anyLong());
-        verify(cancelChannel)
-                .cancel(
-                        eq(new CancelTarget("10.0.0.1", 9090)),
-                        eq(12L),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+        verify(engineClient)
+                .cancelAsync(
+                        eq("10.0.0.1"),
+                        eq(9090),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(12L)),
                         anyLong());
         verify(endpoint).commitPreemption(1L);
         verify(endpoint, never()).abortPreemption(anyLong());
@@ -182,10 +189,17 @@ class DecodeCapacityAcquirerProtocolTest {
         org.mockito.Mockito.doReturn(signalInput).when(runtime).signals();
         when(fixture.requests().tryClaim(any(), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
-        var channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+        var channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
+                        any(),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
+                        anyLong()))
                 .thenReturn(
-                        CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.ACCEPTED));
+                        CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -229,7 +243,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests().tryClaim(any(), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
         when(fixture.endpoint().commitPreemption(anyLong())).thenReturn(null);
-        var channel = mock(EngineCancelChannel.class);
+        var channel = mock(EngineGrpcClient.class);
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -267,22 +281,25 @@ class DecodeCapacityAcquirerProtocolTest {
 
     @ParameterizedTest
     @EnumSource(
-            value = EngineCancelChannel.CancelAck.class,
+            value = EngineGrpcClient.CancelReply.class,
             names = {"ACCEPTED", "FAILED", "REQUEST_FENCED"})
     void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
-            EngineCancelChannel.CancelAck acknowledgement) throws Exception {
+            EngineGrpcClient.CancelReply acknowledgement) throws Exception {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests()
                         .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        CompletableFuture<EngineCancelChannel.CancelAck> ack = new CompletableFuture<>();
-        when(channel.cancel(
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        CompletableFuture<EngineGrpcClient.CancelReply> ack = new CompletableFuture<>();
+        when(channel.cancelAsync(
                         any(),
-                        anyLong(),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenReturn(ack);
         DecodeCapacityAcquirer acquirer =
@@ -350,18 +367,22 @@ class DecodeCapacityAcquirerProtocolTest {
                                                         == 11L
                                                 ? first
                                                 : second));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
                         any(),
-                        anyLong(),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenAnswer(
                         invocation ->
                                 CompletableFuture.completedFuture(
-                                        invocation.<Long>getArgument(1) == 11L
-                                                ? EngineCancelChannel.CancelAck.ACCEPTED
-                                                : EngineCancelChannel.CancelAck.FAILED));
+                                        invocation.<CancelRequestPB>getArgument(2).getRequestId()
+                                                        == 11L
+                                                ? EngineGrpcClient.CancelReply.ACCEPTED
+                                                : EngineGrpcClient.CancelReply.FAILED));
         DecodeCapacityAcquirer acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -388,10 +409,10 @@ class DecodeCapacityAcquirerProtocolTest {
                                 "test"));
         if (!terminalBeforeSend) {
             verify(channel)
-                    .cancel(
+                    .cancelAsync(
                             any(),
-                            eq(11L),
-                            org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                            anyInt(),
+                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
                             anyLong());
             firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
             assertFalse(
@@ -399,20 +420,20 @@ class DecodeCapacityAcquirerProtocolTest {
                     "one of two terminal observations cannot finish the aggregate");
         } else {
             verify(channel, never())
-                    .cancel(
+                    .cancelAsync(
                             any(),
-                            eq(11L),
-                            org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                            anyInt(),
+                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
                             anyLong());
         }
         var timedOut = outcome.get(3L, TimeUnit.SECONDS);
         assertFalse(timedOut.committed());
         assertTrue(timedOut.controlFailure());
         verify(channel)
-                .cancel(
+                .cancelAsync(
                         any(),
-                        eq(12L),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                        anyInt(),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(12L)),
                         anyLong());
         verify(fixture.requests(), never())
                 .onPreemption(
@@ -438,9 +459,9 @@ class DecodeCapacityAcquirerProtocolTest {
 
     @ParameterizedTest
     @EnumSource(
-            value = EngineCancelChannel.CancelAck.class,
+            value = EngineGrpcClient.CancelReply.class,
             names = {"FAILED", "NOT_FOUND", "REQUEST_FENCED", "REQUEST_CLEANED"})
-    void reversedAcknowledgementsStayBoundToTheirVictims(EngineCancelChannel.CancelAck secondReply)
+    void reversedAcknowledgementsStayBoundToTheirVictims(EngineGrpcClient.CancelReply secondReply)
             throws Exception {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> firstTerminal = new CompletableFuture<>();
@@ -462,7 +483,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests()
                         .onPreemption(
                                 eq(second),
-                                org.mockito.ArgumentMatchers.argThat(
+                                argThat(
                                         event ->
                                                 event.endpoint() == fixture.endpoint()
                                                         && event.reservation() != null)))
@@ -473,17 +494,22 @@ class DecodeCapacityAcquirerProtocolTest {
                                             12L, VictimResolution.Outcome.REQUEST_END));
                             return true;
                         });
-        CompletableFuture<EngineCancelChannel.CancelAck> firstAck = new CompletableFuture<>();
-        CompletableFuture<EngineCancelChannel.CancelAck> secondAck = new CompletableFuture<>();
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(
+        CompletableFuture<EngineGrpcClient.CancelReply> firstAck = new CompletableFuture<>();
+        CompletableFuture<EngineGrpcClient.CancelReply> secondAck = new CompletableFuture<>();
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
                         any(),
-                        anyLong(),
-                        org.mockito.ArgumentMatchers.eq(CancelReason.PRIORITY_PREEMPTED),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenAnswer(
                         invocation ->
-                                invocation.<Long>getArgument(1) == 11L ? firstAck : secondAck);
+                                invocation.<CancelRequestPB>getArgument(2).getRequestId() == 11L
+                                        ? firstAck
+                                        : secondAck);
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -513,11 +539,11 @@ class DecodeCapacityAcquirerProtocolTest {
         verify(fixture.requests(), never())
                 .onPreemption(
                         eq(second),
-                        org.mockito.ArgumentMatchers.argThat(
+                        argThat(
                                 event ->
                                         event.endpoint() == fixture.endpoint()
                                                 && event.reservation() != null));
-        firstAck.complete(EngineCancelChannel.CancelAck.ACCEPTED);
+        firstAck.complete(EngineGrpcClient.CancelReply.ACCEPTED);
         verify(fixture.requests())
                 .onPreemption(first, phaseEvent(PreemptionCancelPhase.CANCEL_REQUESTED));
         switch (secondReply) {
@@ -546,7 +572,7 @@ class DecodeCapacityAcquirerProtocolTest {
             default -> throw new AssertionError("unexpected test reply");
         }
         assertFalse(result.isDone(), "ACKs cannot replace the first victim's terminal proof");
-        if (secondReply != EngineCancelChannel.CancelAck.REQUEST_CLEANED) {
+        if (secondReply != EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
             secondTerminal.complete(
                     new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
         }
@@ -558,9 +584,9 @@ class DecodeCapacityAcquirerProtocolTest {
 
     @ParameterizedTest
     @EnumSource(
-            value = EngineCancelChannel.CancelAck.class,
+            value = EngineGrpcClient.CancelReply.class,
             names = {"REQUEST_FENCED", "REQUEST_CLEANED"})
-    void onlyDownstreamCleanupProofCanReplaceDecodeTerminal(EngineCancelChannel.CancelAck reply)
+    void onlyDownstreamCleanupProofCanReplaceDecodeTerminal(EngineGrpcClient.CancelReply reply)
             throws Exception {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
@@ -571,7 +597,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests()
                         .onPreemption(
                                 eq(claim),
-                                org.mockito.ArgumentMatchers.argThat(
+                                argThat(
                                         event ->
                                                 event.endpoint() == fixture.endpoint()
                                                         && event.reservation() != null)))
@@ -582,8 +608,15 @@ class DecodeCapacityAcquirerProtocolTest {
                                             11L, VictimResolution.Outcome.REQUEST_END));
                             return true;
                         });
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
+                        any(),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
+                        anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(reply));
         var acquirer =
                 new DecodeCapacityAcquirer(
@@ -606,13 +639,13 @@ class DecodeCapacityAcquirerProtocolTest {
                                 1_000L,
                                 () -> true,
                                 "test"));
-        if (reply == EngineCancelChannel.CancelAck.REQUEST_FENCED) {
+        if (reply == EngineGrpcClient.CancelReply.REQUEST_FENCED) {
             assertFalse(
                     outcome.isDone(), "Prefill fence alone does not prove Decode resource release");
             verify(fixture.requests(), never())
                     .onPreemption(
                             eq(claim),
-                            org.mockito.ArgumentMatchers.argThat(
+                            argThat(
                                     event ->
                                             event.endpoint() == fixture.endpoint()
                                                     && event.reservation() != null));
@@ -635,7 +668,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests()
                         .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
                 .thenReturn(Optional.of(first), Optional.empty());
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -680,7 +713,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 .thenReturn(Optional.of(first))
                 .thenThrow(
                         new IllegalStateException("Priority victim has no routable Cancel target"));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -722,7 +755,7 @@ class DecodeCapacityAcquirerProtocolTest {
         Fixture fixture = fixture();
         var stale = new DecodeResources.ReservationHandle(9L, 11L, 101L);
         when(fixture.requests().tryClaim(eq(stale), anyLong(), any())).thenReturn(Optional.empty());
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -783,12 +816,18 @@ class DecodeCapacityAcquirerProtocolTest {
                                 })
                         .when(fixture.endpoint())
                         .abortPreemption(anyLong());
-                var channel = mock(EngineCancelChannel.class);
-                when(channel.cancel(
-                                any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+                var channel = mock(EngineGrpcClient.class);
+                when(channel.cancelAsync(
+                                any(),
+                                anyInt(),
+                                argThat(
+                                        request ->
+                                                request.getReason()
+                                                        == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
+                                anyLong()))
                         .thenReturn(
                                 CompletableFuture.completedFuture(
-                                        EngineCancelChannel.CancelAck.ACCEPTED));
+                                        EngineGrpcClient.CancelReply.ACCEPTED));
                 var acquirer =
                         new DecodeCapacityAcquirer(
                                 channel,
@@ -851,10 +890,17 @@ class DecodeCapacityAcquirerProtocolTest {
                         })
                 .when(protocolRuntime)
                 .scheduleTimeout(any(Runnable.class), anyLong());
-        var channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+        var channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
+                        any(),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
+                        anyLong()))
                 .thenReturn(
-                        CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.ACCEPTED));
+                        CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
                 new DecodeCapacityAcquirer(
                         channel,
@@ -905,10 +951,17 @@ class DecodeCapacityAcquirerProtocolTest {
         var victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
-        var channel = mock(EngineCancelChannel.class);
-        when(channel.cancel(any(), anyLong(), eq(CancelReason.PRIORITY_PREEMPTED), anyLong()))
+        var channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(
+                        any(),
+                        anyInt(),
+                        argThat(
+                                request ->
+                                        request.getReason()
+                                                == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
+                        anyLong()))
                 .thenReturn(
-                        CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.ACCEPTED));
+                        CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var release = new java.util.concurrent.CountDownLatch(1);
         var settlementQueued = new java.util.concurrent.CountDownLatch(1);
         var afterSettlement = new CompletableFuture<Boolean>();

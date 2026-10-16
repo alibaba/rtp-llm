@@ -1,8 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import com.google.common.collect.MapMaker;
-import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.util.Logger;
 
 import java.util.Objects;
@@ -21,7 +20,7 @@ final class DeliveryCleanup {
             new MapMaker().weakKeys().makeMap();
 
     CompletableFuture<Void> start(
-            DeliveryClaim claim, EngineCancelChannel channel, SchedulerRuntime runtime) {
+            DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime) {
         var found = sessions.get(claim);
         if (found != null) {
             return found;
@@ -37,7 +36,7 @@ final class DeliveryCleanup {
             finished.complete(null);
             return finished;
         }
-        var session = new Session(claim, channel, runtime, settled, finished);
+        var session = new Session(claim, client, runtime, settled, finished);
         try {
             runtime.deliveryCleanupExecutor.execute(session);
         } catch (RuntimeException | Error rejected) {
@@ -55,7 +54,7 @@ final class DeliveryCleanup {
 
     private static final class Session implements Runnable {
         private final DeliveryClaim claim;
-        private final EngineCancelChannel channel;
+        private final EngineGrpcClient client;
         private final SchedulerRuntime runtime;
         private final CompletableFuture<Void> settled;
         private final CompletableFuture<Void> finished;
@@ -64,12 +63,12 @@ final class DeliveryCleanup {
 
         Session(
                 DeliveryClaim claim,
-                EngineCancelChannel channel,
+                EngineGrpcClient client,
                 SchedulerRuntime runtime,
                 CompletableFuture<Void> settled,
                 CompletableFuture<Void> finished) {
             this.claim = claim;
-            this.channel = channel;
+            this.client = client;
             this.runtime = runtime;
             this.settled = settled;
             this.finished = finished;
@@ -88,7 +87,7 @@ final class DeliveryCleanup {
                         settled.get(remaining(), TimeUnit.NANOSECONDS);
                         break;
                     }
-                    EngineCancelChannel.CancelAck reply = null;
+                    EngineGrpcClient.CancelReply reply = null;
                     Throwable lastFailure = null;
                     try {
                         reply = requestProof(evidence.reason());
@@ -132,18 +131,16 @@ final class DeliveryCleanup {
             }
         }
 
-        private EngineCancelChannel.CancelAck requestProof(CancelReason reason) throws Exception {
+        private EngineGrpcClient.CancelReply requestProof(CancelReason reason) throws Exception {
             var remote =
                     Objects.requireNonNull(
-                            channel.cancel(
-                                    new CancelTarget(
-                                            claim.item().prefillEp().getIp(),
-                                            claim.item().prefillEp().getGrpcPort()),
-                                    claim.item().requestId(),
-                                    reason,
+                            client.cancelAsync(
+                                    claim.item().prefillEp().getIp(),
+                                    claim.item().prefillEp().getGrpcPort(),
+                                    reason.toRequest(claim.item().requestId()),
                                     ACK_TIMEOUT_MS),
                             "cancel future");
-            var applied = new CompletableFuture<EngineCancelChannel.CancelAck>();
+            var applied = new CompletableFuture<EngineGrpcClient.CancelReply>();
             remote.whenComplete(
                     (reply, failure) -> {
                         if (failure != null) {
@@ -167,8 +164,8 @@ final class DeliveryCleanup {
 
         /** Late replies retain their own accepted request-work owner after this session stops retrying. */
         private void apply(
-                EngineCancelChannel.CancelAck reply,
-                CompletableFuture<EngineCancelChannel.CancelAck> applied) {
+                EngineGrpcClient.CancelReply reply,
+                CompletableFuture<EngineGrpcClient.CancelReply> applied) {
             var accepted = runtime.tryRegisterRequestWork(claim.owner());
             if (accepted == null) {
                 applied.complete(reply);
@@ -206,7 +203,7 @@ final class DeliveryCleanup {
                                                                             .UNSUPPORTED;
                                                         },
                                                         System.currentTimeMillis()));
-                                if (reply == EngineCancelChannel.CancelAck.UNSUPPORTED
+                                if (reply == EngineGrpcClient.CancelReply.UNSUPPORTED
                                         && unsupported.complete(null)) {
                                     try {
                                         Logger.warn(

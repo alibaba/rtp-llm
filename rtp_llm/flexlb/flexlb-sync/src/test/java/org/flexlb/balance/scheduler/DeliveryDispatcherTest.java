@@ -50,6 +50,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1349,11 +1350,12 @@ class DeliveryDispatcherTest {
         var items = new java.util.ArrayList<RequestRoute>();
         for (int index = 0; index < 6; index++) {
             RequestRoute original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
-            original.prefill().setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
+            ServerStatus prefill = original.prefill();
+            prefill.setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
             if (index == 4) {
-                original.prefill().setServerIp("10.0.1.2");
-                original.prefill().setHttpPort(8301);
-                original.prefill().setGrpcPort(8401);
+                prefill.setServerIp("10.0.1.2");
+                prefill.setHttpPort(8301);
+                prefill.setGrpcPort(8401);
             }
             ServerStatus decode = null;
             if (index != 1) {
@@ -1367,7 +1369,7 @@ class DeliveryDispatcherTest {
                     SchedulingTestConfig.createRoute(
                             original.ctx(),
                             null,
-                            original.prefill(),
+                            prefill,
                             decode,
                             endpoint,
                             null,
@@ -1484,7 +1486,7 @@ class DeliveryDispatcherTest {
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
                         delivery,
                         service,
-                        mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+                        mock(EngineGrpcClient.class));
         if (meters != null) {
             runtime.deliveries().configureDeliveryMetrics(meters);
         }
@@ -1546,7 +1548,7 @@ class DeliveryDispatcherTest {
                     .when(item.ctx().data().getScheduler())
                     .onDeliveryEvidence(
                             org.mockito.ArgumentMatchers.isNull(),
-                            org.mockito.ArgumentMatchers.argThat(
+                            argThat(
                                     e ->
                                             e instanceof PreparationFailure failed
                                                     && failed.route() == item));
