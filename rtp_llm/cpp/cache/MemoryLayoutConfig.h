@@ -11,6 +11,13 @@ struct MemoryLayoutConfig {
     uint32_t mla_hbm_blocks = 0;
     size_t mla_resident_tokens = 0;
     size_t mla_hbm_size_bytes = 0;
+    bool     mla_layered_prefill    = false;
+    int      mla_prefill_hbm_layers = -1;
+
+    bool mlaLayerOnHost(size_t layer) const {
+        return mla_layered_prefill && mla_prefill_hbm_layers >= 0
+               && layer >= static_cast<size_t>(mla_prefill_hbm_layers);
+    }
 
     uint32_t layer_num = 0;
     uint32_t block_num = 0;

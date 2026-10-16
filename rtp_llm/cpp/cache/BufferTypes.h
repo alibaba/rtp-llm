@@ -31,6 +31,9 @@ struct BlockBufferPtrInfo {
 struct CacheLayerLayout {
     size_t        dsa_mla_resident_tokens = 0;
     size_t        dsa_mla_hbm_blocks = 0;
+    size_t                                  dsa_prefill_staging_tokens = 0;
+    int                                     dsa_prefill_hbm_layers     = -1;
+    size_t                                  dsa_prefill_staging_layers = 0;
     std::vector<torch::Tensor> mla_hbm_cache_by_layer;
     torch::Tensor block_generations;
     std::vector<int>              layer_to_groups;

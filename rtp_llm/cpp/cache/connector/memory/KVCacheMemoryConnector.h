@@ -264,7 +264,10 @@ private:
     void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
     int  cpSizeForMetrics() const;
     int  cacheKeyTokensPerBlockForMetrics() const;
-    void reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
+    void reportEvictionLifetime(CacheBlockKind   kind,
+                                CacheBackingType backing_type,
+                                int64_t          created_time_us,
+                                CacheKeyType     cache_key);
     void reportMetricsLoop();
 
 private:

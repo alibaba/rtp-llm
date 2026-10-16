@@ -56,6 +56,15 @@ struct CacheConfig {
     // Nonzero enables complete HBM blocks, pinned overflow, and an HBM token working set.
     size_t dsa_mla_resident_tokens = 0;
     uint32_t dsa_mla_hbm_blocks = 0;
+    // One logical pool: an HBM prefix and pinned-host suffix. Rank-local staging
+    // capacity is derived from MAX_BATCH_KV_LEN (fallback MAX_BATCH_TOKENS_SIZE).
+    size_t dsa_prefill_staging_tokens = 0;
+    // -1 disables layered placement; otherwise [0, hbm_layers) is HBM.
+    int    dsa_prefill_hbm_layers     = -1;
+    size_t dsa_prefill_staging_layers = 0;
+    bool   prefillLayerOnHost(size_t layer) const {
+        return dsa_prefill_hbm_layers >= 0 && layer >= static_cast<size_t>(dsa_prefill_hbm_layers);
+    }
     size_t   seq_size_per_block        = 1;
     size_t   kernel_seq_size_per_block = 1;
 
@@ -203,6 +212,9 @@ struct CacheConfig {
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(dsa_mla_hbm_blocks);
         OUTPUT_FIELD(dsa_mla_resident_tokens);
+        OUTPUT_FIELD(dsa_prefill_staging_tokens);
+        OUTPUT_FIELD(dsa_prefill_hbm_layers);
+        OUTPUT_FIELD(dsa_prefill_staging_layers);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -2736,7 +2737,7 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
             return false;
         }
         for (const auto& evicted : evicted_items) {
-            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
+            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us, evicted.cache_key);
             releasePrefixCacheBacking(evicted);
         }
         if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
@@ -2778,7 +2779,7 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
             return false;
         }
         const auto target_backing = evicted->backing_type;
-        reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us);
+        reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us, evicted->cache_key);
         releaseCacheBacking(*evicted);
         if (target_backing == CacheBackingType::MEMORY) {
             if (tryMallocMemoryBlock(kind, mem_block)) {
@@ -3521,12 +3522,18 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
 
 void KVCacheMemoryConnector::reportEvictionLifetime(CacheBlockKind   kind,
                                                     CacheBackingType backing_type,
-                                                    int64_t          created_time_us) {
-    if (!metrics_reporter_ || created_time_us <= 0) {
+                                                    int64_t          created_time_us,
+                                                    CacheKeyType     cache_key) {
+    if (created_time_us <= 0) {
         return;
     }
     RtpLLMCacheEvictionMetricsCollector collector;
     collector.lifetime_ms = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
+    SharedBlockCache::traceEvictionLifetime(
+        cache_key, collector.lifetime_ms, backing_type == CacheBackingType::MEMORY ? "memory" : "disk");
+    if (!metrics_reporter_) {
+        return;
+    }
     kmonitor::MetricsTags tags("scope", "memory");
     tags.AddTag("kind", cacheBlockKindName(kind));
     tags.AddTag("backing", backing_type == CacheBackingType::MEMORY ? "memory" : "disk");

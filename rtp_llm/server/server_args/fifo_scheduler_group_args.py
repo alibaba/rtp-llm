@@ -43,6 +43,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help=(
             "Prefill单轮凑批的完整KV token总量上限。0表示关闭并保留"
             "MAX_BATCH_TOKENS_SIZE的原有语义；大于0时同时限制sum(KV)和sum(q)。"
+            "启用RTP_LLM_DSA_PREFILL_LAYOUT时也用于计算每卡KV staging容量。"
         ),
     )
 

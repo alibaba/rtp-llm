@@ -13,6 +13,12 @@ void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config
     write_cache_sync           = kv_cache_config.write_cache_sync;
     enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;
     load_cache_retry_times     = kv_cache_config.load_cache_retry_times;
+    // The host suffix participates in the allocator's single logical cache.
+    // It has no second-tier lookup, store or device-to-memory eviction path.
+    if (cache_manager && cache_manager->cacheConfig().dsa_prefill_hbm_layers >= 0) {
+        enable_memory_cache        = false;
+        enable_tiered_memory_cache = false;
+    }
 
     if (kv_cache_config.device_cache_min_free_blocks > 0) {
         device_cache_min_free_blocks = kv_cache_config.device_cache_min_free_blocks;

@@ -23,7 +23,8 @@ public:
         BlockPoolConfig config;
         config.pool_name      = "default";
         config.block_num      = cache_config.block_num;
-        config.mla_tiered_cache = cache_config.dsa_mla_resident_tokens > 0;
+        config.mla_tiered_cache =
+            cache_config.dsa_mla_resident_tokens > 0 || cache_config.dsa_prefill_staging_tokens > 0;
         const bool  is_hybrid = cache_config.groupNums() > 1;
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
         const auto& main_spec = cache_config.cache_specs[0];
@@ -81,6 +82,26 @@ public:
         if (config.mla_tiered_cache) {
             current_offset = 0;
             for (auto& layout : config.memory_layouts) {
+                if (cache_config.dsa_prefill_staging_tokens) {
+                    layout.mla_layered_prefill = true;
+                    // Only the primary model uses host layers; MTP stays in HBM.
+                    layout.mla_prefill_hbm_layers = &layout == &config.memory_layouts.front() ?
+                                                        cache_config.dsa_prefill_hbm_layers :
+                                                        static_cast<int>(layout.layer_num);
+                    size_t host_layers            = 0;
+                    for (size_t layer = 0; layer < layout.layer_num; ++layer) {
+                        host_layers += layout.mlaLayerOnHost(layer);
+                    }
+                    layout.kv_cache_offset_bytes    = current_offset;
+                    layout.kv_block_pool_size_bytes = host_layers * layout.block_num * layout.kv_block_stride_bytes;
+                    layout.mla_hbm_size_bytes =
+                        (layout.layer_num - host_layers) * layout.block_num * layout.kv_block_stride_bytes;
+                    current_offset += layout.kv_block_pool_size_bytes;
+                    layout.kv_scale_offset_bytes = current_offset;
+                    layout.total_size_bytes =
+                        layout.kv_block_pool_size_bytes + layout.mla_hbm_size_bytes + layout.kv_scale_pool_size_bytes;
+                    continue;
+                }
                 layout.mla_hbm_blocks = cache_config.dsa_mla_hbm_blocks;
                 layout.mla_resident_tokens = cache_config.dsa_mla_resident_tokens;
                 layout.mla_hbm_size_bytes = layout.layer_num * layout.kv_block_stride_bytes

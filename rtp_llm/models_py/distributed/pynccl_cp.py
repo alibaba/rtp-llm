@@ -114,9 +114,7 @@ class _NCCLLib:
                 ctypes.POINTER(_ncclWindow_t),
                 ctypes.c_int,
             ]
-        self._has_window_deregister = hasattr(
-            self._lib, "ncclCommWindowDeregister"
-        )
+        self._has_window_deregister = hasattr(self._lib, "ncclCommWindowDeregister")
         if self._has_window_deregister:
             self._lib.ncclCommWindowDeregister.restype = _ncclResult_t
             self._lib.ncclCommWindowDeregister.argtypes = [
@@ -137,29 +135,21 @@ class _NCCLLib:
         root_global_rank = dist.get_global_rank(process_group, 0)
 
         unique_id = _ncclUniqueId()
-        unique_id_cpu = torch.empty(128, dtype=torch.uint8)
+        unique_id_cpu = torch.empty(128, dtype=torch.uint8, device="cpu")
         if rank == 0:
             self._check(self._lib.ncclGetUniqueId(ctypes.byref(unique_id)))
-            ctypes.memmove(
-                unique_id_cpu.data_ptr(), ctypes.addressof(unique_id), 128
-            )
+            ctypes.memmove(unique_id_cpu.data_ptr(), ctypes.addressof(unique_id), 128)
 
         # A NCCL process group cannot broadcast a CPU tensor. Use the existing
         # torch communicator once to distribute the new communicator's ID.
         unique_id_device = unique_id_cpu.to(device)
-        dist.broadcast(
-            unique_id_device, src=root_global_rank, group=process_group
-        )
+        dist.broadcast(unique_id_device, src=root_global_rank, group=process_group)
         unique_id_cpu = unique_id_device.cpu().contiguous()
-        ctypes.memmove(
-            ctypes.addressof(unique_id), unique_id_cpu.data_ptr(), 128
-        )
+        ctypes.memmove(ctypes.addressof(unique_id), unique_id_cpu.data_ptr(), 128)
 
         comm = _ncclComm_t()
         self._check(
-            self._lib.ncclCommInitRank(
-                ctypes.byref(comm), world_size, unique_id, rank
-            )
+            self._lib.ncclCommInitRank(ctypes.byref(comm), world_size, unique_id, rank)
         )
         return comm
 
@@ -212,6 +202,8 @@ _LIB: "_NCCLLib | None" = None
 # A communicator is CUDA-device-specific. One-GPU-per-process is the normal
 # deployment, but include the device index in the cache key for correctness.
 _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
+_OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
+_OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
 
 # Symmetric-memory state is process-persistent. Each role gets a distinct
@@ -223,9 +215,7 @@ _SYMM_POOLS: Dict[Tuple[Any, int], Any] = {}
 _SYMM_POOL_FAILED: set[Tuple[Any, int]] = set()
 _SYMM_INIT_DONE: set[Tuple[Any, int]] = set()
 _SYMM_BASES: Dict[Tuple[Any, int, str, torch.dtype], torch.Tensor] = {}
-_SYMM_VIEWS: Dict[
-    Tuple[Any, int, str, torch.dtype, Tuple[int, ...]], torch.Tensor
-] = {}
+_SYMM_VIEWS: Dict[Tuple[Any, int, str, torch.dtype, Tuple[int, ...]], torch.Tensor] = {}
 _SYMM_WINDOWS: Dict[Tuple[Any, int, int], Any] = {}
 _SYMM_CAPACITY_NBYTES: Dict[Tuple[Any, int, int], int] = {}
 _SYMM_ROLE_STREAMS: Dict[Tuple[Any, int, str], int] = {}
@@ -273,12 +263,13 @@ def _torch_all_gather(input: torch.Tensor, group: Any) -> torch.Tensor:
     return all_gather(input, group=group)
 
 
-def _get_comm(process_group, device: torch.device):
+def _get_comm(process_group, device: torch.device, *, independent: bool = False):
     """Collectively create and cache the direct NCCL communicator at startup."""
     global _LIB
 
     key = _comm_key(process_group, device)
-    cached = _COMMS.get(key)
+    cache = _OVERLAP_COMMS if independent else _COMMS
+    cached = cache.get(key)
     if cached is not None:
         return cached
 
@@ -293,8 +284,52 @@ def _get_comm(process_group, device: torch.device):
         comm = _LIB.make_comm(process_group, resolved_device)
     _WORLD_SIZES[process_group] = dist.get_world_size(process_group)
     cached = (_LIB, comm)
-    _COMMS[key] = cached
+    cache[key] = cached
     return cached
+
+
+def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
+    """Return a persistent stream with a communicator independent of Indexer.
+
+    FMHA wrappers are recreated for each forward. Reuse the stream as well as
+    the communicator: CUDA allocator pools are stream-specific, so rotating
+    streams strands multi-GiB history buffers and triggers cache reclamation.
+    """
+    process_group = _resolve_process_group(group)
+    device = torch.device("cuda", torch.cuda.current_device())
+    _get_comm(process_group, device, independent=True)
+    key = _comm_key(process_group, device)
+    if key not in _OVERLAP_STREAMS:
+        _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device)
+    return _OVERLAP_STREAMS[key]
+
+
+def all_gather_kv_overlap(
+    input: torch.Tensor,
+    group: Any,
+    *,
+    output: torch.Tensor | None = None,
+    **_kwargs,
+) -> torch.Tensor:
+    """Enqueue history-KV communication on the caller's stream, without a CPU wait."""
+    process_group = _resolve_process_group(group)
+    lib, comm = _OVERLAP_COMMS[_comm_key(process_group, input.device)]
+    if output is None:
+        output = torch.empty(
+            (_WORLD_SIZES[process_group] * input.size(0), *input.shape[1:]),
+            dtype=input.dtype,
+            device=input.device,
+        )
+    _validate_all_gather(output, input, process_group)
+    lib.all_gather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        torch.cuda.current_stream(input.device).cuda_stream,
+    )
+    return output
 
 
 def _require_comm(process_group, device: torch.device):
@@ -323,7 +358,7 @@ def destroy() -> None:
                 "Failed to deregister GLM5 pynccl symmetric window: %s", error
             )
 
-    for lib, comm in list(_COMMS.values()):
+    for lib, comm in [*_COMMS.values(), *_OVERLAP_COMMS.values()]:
         try:
             lib.destroy_comm(comm)
         except RuntimeError as error:
@@ -340,6 +375,8 @@ def destroy() -> None:
     _SYMM_POOLS.clear()
     _SYMM_POOL_FAILED.clear()
     _COMMS.clear()
+    _OVERLAP_COMMS.clear()
+    _OVERLAP_STREAMS.clear()
     _WORLD_SIZES.clear()
     _LIB = None
 
@@ -360,9 +397,9 @@ def _symm_max_nbytes(process_group, device: torch.device) -> int | None:
         )
 
         capability_major = torch.cuda.get_device_capability(device)[0]
-        return TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES.get(
-            capability_major, {}
-        ).get(_world_size(process_group))
+        return TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES.get(capability_major, {}).get(
+            _world_size(process_group)
+        )
     except Exception:
         return None
 
@@ -628,7 +665,9 @@ def all_gather(
     if not enabled():
         return _torch_all_gather(input, group=group)
     if input.dim() == 0:
-        raise ValueError("GLM5 CP AllGather expects a tensor with at least one dimension")
+        raise ValueError(
+            "GLM5 CP AllGather expects a tensor with at least one dimension"
+        )
 
     process_group = _resolve_process_group(group)
     world_size = _world_size(process_group)
@@ -643,9 +682,7 @@ def all_gather(
     gather_stream = None
     if output is not None:
         gather_stream = torch.cuda.current_stream(input.device)
-        if not _symm_stream_allowed(
-            role, gather_stream, process_group, input.device
-        ):
+        if not _symm_stream_allowed(role, gather_stream, process_group, input.device):
             # A separate stream could still be reading the persistent role
             # buffer. Use an ordinary output instead of adding hot-path events.
             output = None

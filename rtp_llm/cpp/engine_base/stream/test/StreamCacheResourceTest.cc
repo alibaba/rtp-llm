@@ -117,6 +117,31 @@ protected:
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
 
+TEST_F(StreamCacheResourceTest, LayeredPrefillDisablesIndependentMemoryCacheOperations) {
+    prepareResource(true);
+    KVCacheConfig options;
+    options.enable_memory_cache        = true;
+    options.enable_tiered_memory_cache = true;
+    options.enable_device_cache        = true;
+    options.reuse_cache                = true;
+    options.memory_cache_size_mb       = 8;
+    ResourceContext context;
+    context.cache_manager = cache_manager_;
+    context.initCacheConfig(options, FIFOSchedulerConfig{}, 128);
+    EXPECT_TRUE(context.enable_memory_cache);
+    EXPECT_TRUE(context.enable_tiered_memory_cache);
+    // The split marker survives warmup even when its staging size is zero.
+    cache_manager_->config_.dsa_prefill_hbm_layers = 1;
+    for (size_t staging : {size_t(0), size_t(192)}) {
+        cache_manager_->config_.dsa_prefill_staging_tokens = staging;
+        context.initCacheConfig(options, FIFOSchedulerConfig{}, 128);
+        EXPECT_FALSE(context.enable_memory_cache);
+        EXPECT_FALSE(context.enable_tiered_memory_cache);
+        EXPECT_TRUE(context.enable_device_cache);
+        EXPECT_TRUE(context.reuse_cache);
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
 

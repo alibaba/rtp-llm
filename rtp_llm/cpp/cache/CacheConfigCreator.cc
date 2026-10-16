@@ -90,6 +90,113 @@ size_t nonnegativeEnv(const char* name) {
     return std::stoull(text);
 }
 
+// Layer residency changes neither logical block IDs nor connector wire strides.
+// The host budget is backing storage, not a second prefix cache or a mirror.
+void configureLayeredPrefill(CacheConfig&             config,
+                             const ModelConfig&       model,
+                             const ParallelismConfig& parallelism,
+                             const RuntimeConfig&     runtime,
+                             const KVCacheConfig&     kv_config) {
+    const size_t enabled = nonnegativeEnv("RTP_LLM_DSA_PREFILL_LAYOUT");
+    RTP_LLM_CHECK_WITH_INFO(enabled <= 1, "RTP_LLM_DSA_PREFILL_LAYOUT must be 0 or 1");
+    if (!enabled) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(kv_config.memory_cache_size_mb > 0,
+                            "layered prefill requires a positive MEMORY_CACHE_SIZE_MB");
+    const size_t host_mb = static_cast<size_t>(kv_config.memory_cache_size_mb);
+    RTP_LLM_CHECK_WITH_INFO(config.use_mla && config.is_sparse && config.groupNums() == 1
+                                && !config.use_independent_block_pools && !config.layer_to_indexer_kv_slot.empty(),
+                            "layered prefill requires DSA MLA with shared Indexer KV slots");
+    RTP_LLM_CHECK_WITH_INFO(!kv_config.enable_remote_cache && !nonnegativeEnv("RTP_LLM_DSA_MLA_HOST_CACHE_MB"),
+                            "layered prefill does not support remote or decode host caches");
+    RTP_LLM_CHECK_WITH_INFO(host_mb <= std::numeric_limits<size_t>::max() / (1024 * 1024),
+                            "layered prefill host budget overflows size_t");
+    const size_t block_tokens = config.seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(block_tokens > 0 && block_tokens <= std::numeric_limits<int32_t>::max(),
+                            "layered prefill block size must fit int32");
+    const size_t  max_blocks = std::numeric_limits<int32_t>::max() / block_tokens;
+    const auto&   scheduler  = runtime.fifo_scheduler_config;
+    const int64_t batch_tokens =
+        scheduler.max_batch_kv_len > 0 ? scheduler.max_batch_kv_len : scheduler.max_batch_tokens_size;
+    size_t staging_limit = max_blocks;
+    if (batch_tokens > 0) {
+        // The scheduler admits a singleton independently of its batch budget.
+        // CP distributes physical pages round-robin, so round each request up
+        // locally and also leave room for reserved block zero in padded tables.
+        const size_t tokens  = static_cast<size_t>(std::max(batch_tokens, model.max_seq_len));
+        const size_t cp_size = parallelism.prefill_cp_config.kv_cache_sharded && parallelism.tp_size > 1 ?
+                                   static_cast<size_t>(parallelism.tp_size) :
+                                   1;
+        RTP_LLM_CHECK_WITH_INFO(cp_size <= std::numeric_limits<size_t>::max() / block_tokens,
+                                "layered prefill CP page size overflows size_t");
+        const size_t global_page_tokens = block_tokens * cp_size;
+        const size_t pages              = tokens / global_page_tokens + (tokens % global_page_tokens != 0);
+        const size_t tails              = static_cast<size_t>(std::max<int64_t>(1, runtime.max_generate_batch_size));
+        staging_limit                   = std::min(pages, max_blocks);
+        staging_limit += std::min(tails, max_blocks - staging_limit);
+    }
+    const size_t budget          = static_cast<size_t>(config.block_num) * config.block_size_bytes;
+    const size_t host_budget     = host_mb * 1024 * 1024;
+    const size_t requested_slots = nonnegativeEnv("RTP_LLM_DSA_PREFILL_STAGING_LAYERS");
+    RTP_LLM_CHECK_WITH_INFO(requested_slots <= 64, "prefill staging layer count must be <= 64");
+    size_t host_layers = 0, slots = 0, blocks = 0;
+    // All Indexer slots (including owners in the host suffix), plus MTP, remain
+    // in HBM. Enumerate integer split points and maximize logical capacity;
+    // a tie prefers more HBM layers, reducing transfer without losing capacity.
+    auto capacity = [&](size_t host_count, size_t slot_count) {
+        const size_t host_bytes = host_count * config.kv_block_stride_bytes;
+        RTP_LLM_CHECK_WITH_INFO(host_bytes < config.block_size_bytes && slot_count > 0
+                                    && config.kv_block_stride_bytes
+                                           <= (std::numeric_limits<size_t>::max() - config.block_size_bytes)
+                                                  / slot_count,
+                                "invalid layered prefill block strides");
+        const size_t hbm_bytes   = config.block_size_bytes - host_bytes;
+        const size_t stage_bytes = slot_count * config.kv_block_stride_bytes;
+        const size_t full        = budget / (hbm_bytes + stage_bytes);
+        const size_t hbm_blocks  = full < staging_limit ? full : (budget - staging_limit * stage_bytes) / hbm_bytes;
+        return std::min({hbm_blocks, host_budget / host_bytes, max_blocks});
+    };
+    for (size_t hbm = 1; hbm < config.layer_num; ++hbm) {
+        const size_t host            = config.layer_num - hbm;
+        const size_t candidate_slots = std::min(host, requested_slots ? requested_slots : size_t(4));
+        const size_t candidate       = capacity(host, candidate_slots);
+        if (candidate >= blocks) {
+            blocks                        = candidate;
+            host_layers                   = host;
+            slots                         = candidate_slots;
+            config.dsa_prefill_hbm_layers = static_cast<int>(hbm);
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(blocks > 1, "layered prefill capacity must have usable blocks");
+    const size_t host_block_bytes     = host_layers * config.kv_block_stride_bytes;
+    const size_t hbm_block_bytes      = config.block_size_bytes - host_block_bytes;
+    const size_t tokens               = std::min(staging_limit, blocks) * block_tokens;
+    const size_t staging_bytes        = (tokens / block_tokens) * slots * config.kv_block_stride_bytes;
+    config.dsa_prefill_staging_tokens = tokens;
+    config.dsa_prefill_staging_layers = slots;
+    config.block_num                  = static_cast<uint32_t>(blocks);
+    config.finalizeBlockNums(config.block_num, runtime);
+    for (auto& sub : config.mtp_sub_configs) {
+        // MTP has no shared Indexer layers and stays entirely in HBM.
+        sub->block_num = config.block_num;
+        sub->finalizeBlockNums(config.block_num, runtime);
+    }
+    RTP_LLM_LOG_INFO("DSA layered prefill cache: placement=contiguous hbm_layers=%zu staging_layers=%zu "
+                     "logical_blocks=%zu host_layers=%zu hbm_bytes=%zu "
+                     "host_bytes=%zu staging_bytes=%zu staging_tokens=%zu budget=%zu host_budget=%zu",
+                     config.layer_num - host_layers,
+                     slots,
+                     blocks,
+                     host_layers,
+                     blocks * hbm_block_bytes,
+                     blocks * host_block_bytes,
+                     staging_bytes,
+                     tokens,
+                     budget,
+                     host_budget);
+}
+
 // Keep wire/block strides unchanged. Only residency and logical capacity
 // change; connectors still address each layer's KV and indexer tensors.
 void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_t topk, size_t query_tokens) {
@@ -267,6 +374,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
+    configureLayeredPrefill(config, model_config, parallelism_config, runtime_config, kv_cache_config);
     configurePinnedMla(config, runtime_config, model_config.attn_config.indexer_topk, 1);
     return config;
 }
@@ -539,6 +647,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         RTP_LLM_LOG_INFO("CacheConfig debugString(sub_propose_model[%zu]):\n%s", i, sub->debugString().c_str());
     }
 
+    configureLayeredPrefill(config, score_model_config, parallelism_config, runtime_config, kv_cache_config);
     configurePinnedMla(config, runtime_config, score_model_config.attn_config.indexer_topk,
                        static_cast<size_t>(sp_config.gen_num_per_cycle) + 1);
     return config;

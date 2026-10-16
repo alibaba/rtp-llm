@@ -75,6 +75,9 @@ public:
 public:
     explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
+    // Opt-in deterministic 1/64 key sampling for device/host lifetime A/Bs.
+    static void traceEvictionLifetime(CacheKeyType key, int64_t lifetime_ms, const char* scope);
+
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
     void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_slots, bool is_resident);

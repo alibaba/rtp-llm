@@ -16,7 +16,38 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     data_type_      = config_.dtype;
 
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
-    RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "kv cache tensor is empty, cannot split by layers");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0 || config_.mla_layered_prefill,
+                            "kv cache tensor is empty, cannot split by layers");
+
+    if (config_.mla_layered_prefill) {
+        RTP_LLM_CHECK_WITH_INFO(hbm_cache_tensor.defined() && config_.use_mla,
+                                "layered prefill requires HBM MLA storage");
+        const auto width =
+            config_.kv_block_stride_bytes / config_.seq_size_per_block / rtp_llm::getTypeSize(data_type_);
+        const std::vector<int64_t> shape       = {static_cast<int64_t>(config_.block_num),
+                                                  static_cast<int64_t>(config_.seq_size_per_block),
+                                                  static_cast<int64_t>(width)};
+        const size_t               layer_bytes = config_.block_num * config_.kv_block_stride_bytes;
+        size_t                     host_offset = 0;
+        size_t                     hbm_offset  = 0;
+        layer_kv_tensors_.clear();
+        layer_hbm_tensors_.clear();
+        for (size_t layer = 0; layer < config_.layer_num; ++layer) {
+            const bool  on_host = config_.mlaLayerOnHost(layer);
+            const auto& storage = on_host ? kv_cache_tensor : hbm_cache_tensor;
+            auto&       offset  = on_host ? host_offset : hbm_offset;
+            RTP_LLM_CHECK_WITH_INFO(offset + layer_bytes <= storage.nbytes(), "layered MLA storage out of bounds");
+            auto tensor = torch::from_blob(static_cast<char*>(storage.data_ptr()) + offset,
+                                           shape,
+                                           storage.options().dtype(dataTypeToTorchType(data_type_)));
+            tensor.zero_();
+            layer_kv_tensors_.push_back(tensor);
+            layer_hbm_tensors_.push_back(on_host ? torch::Tensor() : tensor);
+            offset += layer_bytes;
+        }
+        processScaleTensor(kv_scale_tensor);
+        return true;
+    }
 
     processKVTensor(kv_cache_tensor);
     if (hbm_cache_tensor.defined()) {
