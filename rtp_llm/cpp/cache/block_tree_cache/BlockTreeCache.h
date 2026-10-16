@@ -136,7 +136,7 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot() const;
+    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -181,7 +181,7 @@ public:
 private:
     void checkWatermark();
     // Caller holds mutex_.
-    void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
+    void onWorkflowSettledLocked(bool check_watermark);
 
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
@@ -192,9 +192,6 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    // Preserve the historical empty-cache wire value. The first successful
-    // topology mutation advances the version to zero.
-    int64_t                                     mutation_version_{-1};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

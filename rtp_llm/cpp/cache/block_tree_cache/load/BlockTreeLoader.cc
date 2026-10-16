@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <exception>
+#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -370,8 +371,8 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
                                       size_t                                 prepared_desc_count,
                                       uint64_t                               context_id,
                                       bool                                   release_transferred_refs) {
-    bool device_refs_released = false;
-    bool tree_data_mutated    = false;
+    bool                          device_refs_released = false;
+    std::unordered_set<TreeNode*> detached_nodes;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc           = load_descs[desc_index];
         const bool                joined_load    = joined_loads[desc_index];
@@ -411,7 +412,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
         tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
         if (desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
             evictor_.discardDetachedTransfer({desc});
-            tree_data_mutated = true;
+            detached_nodes.insert(desc.node);
             continue;
         }
         const GroupSetTransferState expected_state =
@@ -423,8 +424,9 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
         }
     }
-    if (tree_data_mutated || device_refs_released) {
-        settled_(tree_data_mutated, device_refs_released);
+    tree_->removePendingNodes(detached_nodes);
+    if (device_refs_released) {
+        settled_(true);
     }
 }
 
@@ -505,9 +507,9 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
                                        bool                                            aggregate_success,
                                        std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
-    const bool settlement_success = aggregate_success && validateLoadTaskLocked(task);
-    bool       state_settled      = false;
-    bool       tree_data_mutated  = false;
+    const bool                    settlement_success = aggregate_success && validateLoadTaskLocked(task);
+    bool                          state_settled      = false;
+    std::unordered_set<TreeNode*> detached_nodes;
 
     const auto& descriptors = task.load_descs;
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
@@ -519,7 +521,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         if (resource.transfer_detached) {
             evictor_.discardDetachedTransfer({desc});
-            tree_data_mutated = true;
+            detached_nodes.insert(desc.node);
             state_settled     = true;
             continue;
         }
@@ -532,7 +534,6 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
                 group_set->unreferenceBlocks(source_protection, BlockTreeRefType::CACHE);
                 resource.evictFromTier(desc.source_tier);
                 task.target_installed[desc_index] = true;
-                tree_data_mutated                 = true;
             }
             const bool state_changed = changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE);
@@ -557,13 +558,14 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
             state_settled = true;
         }
     }
-    settled_(tree_data_mutated, state_settled);
+    settled_(state_settled);
     load_task_runner_.releaseTaskResources(task);
     for (const TransferDescriptor& desc : task.load_descs) {
         if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
         }
     }
+    tree_->removePendingNodes(detached_nodes);
     return settlement_success;
 }
 
