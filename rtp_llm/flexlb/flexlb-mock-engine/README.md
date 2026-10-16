@@ -93,3 +93,19 @@ Memory 默认使用前缀树驱逐：读刷新 recency，在飞读写保护容�
 [Whale 镜像入口](whale/README.md) 保留组件 Docker context；部署、发现与验收统一见 [Whale runbook](../tools/online_eval/docs/whale/README.md)。Bundle 中的 `MOCK_BUNDLE_FILE_DISCOVERY=1` 显式选择文件发现，`MOCK_DISCOVERY_FILE` 指向由动态引擎接口维护的 discovery 文件。运行时逻辑拓扑在重启后按初始配置重建，不等于平台独立 Engine Pod 的生命周期。
 
 Java 测试位于 `src/test/java/org/flexlb/mockengine/`，通过 FlexLB 根目录的 Maven wrapper 执行；实际类和测试数量以源码及测试结果为准。Python 回归、dry-run 和真实场景验收见[新增 case](../tools/online_eval/docs/development/adding-cases.md)。
+
+### 大缓存同步 fixture 的编码开销
+
+合成 cache fixture 的 gRPC 响应直接从不可变的 key 几何快照编码标准
+`CacheStatusPB`，不在 Mock 中为每个版本重新构造完整 protobuf Map。
+该路径仍返回相同的 key、bool 值、版本、容量和 block size；在途响应持有自己的
+快照，不会被后续 churn 或 grow 改写。cold / changed / future version 保留全量
+语义，同版本省略仍由原有显式开关控制。普通推理缓存响应不变。
+
+协议依据为 `LocalRpcServer::GetCacheStatus` 和 `model_rpc_service.proto`；
+`CacheFixtureWireTest` 用原始 protobuf parser、完整响应字节及真实 gRPC 客户端验证。
+这只降低 Java Mock 的对象分配，不模拟 C++ 引擎的序列化 CPU 成本，也不改变
+fixture 与真实推理 KV 容量相互独立的边界。Real 的全量响应仍需复制 key 列表、
+构造 protobuf Map；这里的直接编码是 Mock 的负载生成优化，不代表 real 没有这些成本。
+该路径适合验证 Master 的解析、索引和健康隔离，不能用于验收真实引擎侧的大响应
+资源消耗或心跳延迟。实验仍须按实际响应条目/s、bytes/s 验收同步强度。

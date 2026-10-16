@@ -363,7 +363,7 @@ public final class JavaMockEngineCluster {
                     .callExecutor(rpcEngine)
                     .intercept(rpcEngine)
                     .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(service)
+                    .addService(CacheFixtureWire.bind(service))
                     .build()
                     .start();
             serversByPort.put(grpcPort, server);
@@ -5291,6 +5291,29 @@ public final class JavaMockEngineCluster {
                     .setRequestId(shape.input().getRequestId())
                     .setFlattenOutput(flatten)
                     .build();
+        }
+
+        void getCacheStatusWire(EngineRpcService.CacheVersionPB request,
+                                StreamObserver<CacheFixtureWire.Frame> observer) {
+            CacheSyncFixture fixture = cacheSyncFixture;
+            if (fixture != null && request.getNeedCacheKeys()) {
+                stats.cacheRpcs.increment();
+                var frame = fixture.wireResponse(request.getLatestCacheVersion());
+                var header = frame.header().toBuilder()
+                        .setAvailableKvCache(availableKvTokens())
+                        .setTotalKvCache(totalKvTokens)
+                        .setBlockSize(performance.blockSize()).build();
+                observer.onNext(new CacheFixtureWire.Frame(header, frame.keys()));
+                observer.onCompleted();
+                return;
+            }
+            getCacheStatus(request, new StreamObserver<>() {
+                public void onNext(EngineRpcService.CacheStatusPB value) {
+                    observer.onNext(new CacheFixtureWire.Frame(value, null));
+                }
+                public void onError(Throwable error) { observer.onError(error); }
+                public void onCompleted() { observer.onCompleted(); }
+            });
         }
 
         @Override

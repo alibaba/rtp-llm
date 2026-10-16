@@ -13,7 +13,9 @@ final class CacheSyncFixture {
     private long intervalNanos;
     private final java.util.function.LongSupplier clock;
     private int delta, changeEvery;
-    private EngineRpcService.CacheStatusPB payload;
+    private CacheFixtureWire.Keys wireKeys;
+    // Used only by direct Java callers; the gRPC path never materializes a key map.
+    private EngineRpcService.CacheStatusPB compatibilityPayload;
 
     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion) {
         this(worker, workers, unique, shared, initialVersion,
@@ -37,28 +39,10 @@ final class CacheSyncFixture {
         rebuild();
     }
 
-    private static long hash(long x) {
-        x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9L;
-        x = (x ^ (x >>> 27)) * 0x94d049bb133111ebL;
-        return x ^ (x >>> 31);
-    }
-
     private void rebuild() {
-        var builder = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version);
-        sum = xor = 0;
-        // Disjoint signed-int64 namespaces; each adjacent pair owns one shared segment.
-        for (int i = 0; i < unique; i++) {
-            long key = hash(((long) worker << 40) + offset + i);
-            builder.putCacheKeys(key, true); sum += key; xor ^= key;
-        }
-        for (int segment : new int[]{worker, (worker + workers - 1) % workers})
-            for (int i = 0; i < shared; i++) {
-                long key = hash(Long.MIN_VALUE + ((long) segment << 40) + i);
-                builder.putCacheKeys(key, true); sum += key; xor ^= key;
-            }
-        payload = builder.build();
-        // Once per changed version, never walk the protobuf map merely to observe a response.
-        payload.getSerializedSize();
+        wireKeys = CacheFixtureWire.Keys.create(worker, workers, unique, shared, offset, version);
+        sum = wireKeys.sum(); xor = wireKeys.xor();
+        compatibilityPayload = null;
     }
 
     synchronized void grow(int unique, int shared) {
@@ -87,6 +71,13 @@ final class CacheSyncFixture {
     synchronized EngineRpcService.CacheStatusPB response() { return response(-1L); }
 
     synchronized EngineRpcService.CacheStatusPB response(long latestVersion) {
+        var frame = wireResponse(latestVersion);
+        if (frame.keys() == null) return frame.header();
+        if (compatibilityPayload == null) compatibilityPayload = frame.toProto();
+        return compatibilityPayload;
+    }
+
+    synchronized CacheFixtureWire.Frame wireResponse(long latestVersion) {
         calls++;
         long epoch = intervalNanos > 0 ? Math.max(0L, clock.getAsLong() - churnStart) / intervalNanos : 0L;
         long steps = changeEvery == 0 ? 0L : intervalNanos > 0 ? epoch - appliedEpoch
@@ -98,23 +89,24 @@ final class CacheSyncFixture {
             offset += moved; version += steps; changedResponses++; changedKeys += moved;
             appliedEpoch = epoch; rebuild();
         }
-        EngineRpcService.CacheStatusPB result = payload;
+        var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
+        CacheFixtureWire.Keys keys = wireKeys;
         if (omitUnchanged && latestVersion >= 0 && latestVersion == version) {
-            result = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
+            keys = null;
             unchangedResponses++;
         } else {
             fullResponses++;
         }
-        entries += result.getCacheKeysCount();
-        bytes += result.getSerializedSize();
-        return result;
+        entries += keys == null ? 0 : keys.count();
+        bytes += header.getSerializedSize() + (keys == null ? 0 : keys.encodedSize());
+        return new CacheFixtureWire.Frame(header, keys);
     }
 
     synchronized long version() { return version; }
 
     synchronized Map<String, Object> snapshot() {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("keys", payload.getCacheKeysCount()); result.put("version", version);
+        result.put("keys", wireKeys.count()); result.put("version", version);
         result.put("responses", calls); result.put("entries", entries); result.put("key_payload_bytes", bytes);
         result.put("changed_responses", changedResponses); result.put("added_keys", changedKeys + grownKeys);
         result.put("removed_keys", changedKeys); result.put("full_responses", fullResponses);
