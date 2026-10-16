@@ -65,7 +65,7 @@ def compact_report_spec(data, original):
             '进程累计线程分配量差分；缺失保留空值。CPU、内存、同步强度和 diff 扫描量见汇总表。')
     else:
         add('age', '未参与撤出的 Worker 最长未更新时长', 's', points(rows, 'healthy_max_status_age_ms', .001),
-            '未参与撤出的 Worker 指本次未被选中执行撤出、恢复的 Worker。按最近一次成功轮询时间计算；超过10秒表示状态更新超时。')
+            '未参与撤出的 Worker 指本次未被选中执行撤出、恢复的 Worker。以 RPC 回包和已应用快照中较旧者计算；两种年龄分列在汇总表，超过10秒表示失鲜。')
         env = data.get('environment', {})
         total = env.get('n_prefill', 0)+env.get('n_decode', 0)-len(data.get('victims', []))
         visible = [dict(epoch_s=r['epoch_s'], value=total-r['missing_workers']
@@ -85,6 +85,23 @@ def compact_report_spec(data, original):
         resources.append([phase, maximum('heap_bytes'), maximum('memory_bytes', 'master'), maximum('rss_bytes', 'master')])
     sections = [s for s in spec.get('sections', []) if s.get('title') != 'Master 内存摘要']
     spec['sections'] = sections + [table('Master 内存摘要', ['阶段','堆峰值 GiB','容器内存峰值 GiB','RSS峰值 GiB'], resources)]
+    ages = []
+    for phase in data.get('phase_summary', {}):
+        group = [r for r in rows if r['phase'] == phase]
+        def maximum_age(field):
+            values = [r[field] for r in group if r.get(field) is not None]
+            return max(values) if values else None
+        applied = maximum_age('healthy_max_applied_age_ms')
+        routable = [r['routable_workers'] for r in group if r.get('routable_workers') is not None]
+        ages.append([phase, maximum_age('healthy_max_rpc_age_ms'), applied,
+                     maximum_age('stale_applied_workers') if applied is not None else None,
+                     min(routable) if routable else None])
+    spec['sections'] = [s for s in spec['sections'] if s.get('title') != '心跳与状态应用']
+    spec['sections'].append(table('心跳与状态应用', ['阶段','最长有效RPC回包年龄 ms','最长已应用快照年龄 ms','快照失鲜Worker峰值','可接收新请求Worker最少数'], ages))
+    spec['sections'].append(details('心跳与状态应用的口径', {
+        '旧版': '只有原成功轮询年龄，不能独立拆出回包与应用；新表中未采集的值留空。',
+        '新版': '回包更新存活性；已应用快照以原始回包时间计龄，超过10秒停止新调度准入。',
+        '计数范围': '均不包含本次选中撤出的Worker；Master可见端点数不等于可接收新请求数。'}))
     return spec
 
 
@@ -123,6 +140,7 @@ def report(instance, output, identity):
         outcome=dict(gate='FAIL' if any(c['status']=='FAIL' for c in checks) else 'PASS' if checks else 'INVALID',
                      validity='VALID' if validity else 'INVALID'),
         source_evidence_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), execution_result=result,
+        presentation_renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         workload_acceptance=acceptance, launched_artifacts=launched)
     data.update(verdict=data['outcome']['gate'], runtime_validity=data['outcome']['validity'])
     baseline_ready = any(e['id']=='cache_baseline_ready' for e in raw['events'])
@@ -165,8 +183,8 @@ def report(instance, output, identity):
             environment=raw['environment'], evidence=dict(source=str(source))),
         kpis=[dict(label='功能判定',value=data['outcome']['gate']),dict(label='实验有效性（含同步强度）',value=data['outcome']['validity']),
               dict(label='Full GC次数',value=sum(g['full'] for g in gc)),
-              dict(label='未参与撤出的 Worker 受影响数',value=len(raw.get('affected_workers',[])))],
-        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态轮询成功/s','条目/s','MiB/s','分配GiB/s','diff百万key/s','FullGC次/分','GC暂停占比','CPU核','未参与撤出的 Worker 最长未更新ms'],
+              dict(label='未参与撤出的 Worker 受影响数',value=len(set(raw.get('affected_workers',[]))-set(raw.get('victims',[]))))],
+        sections=[table('分阶段实测',['阶段','Mock缓存响应/s','Master P同步成功/s','状态应用成功/s','条目/s','MiB/s','分配GiB/s','diff百万key/s','FullGC次/分','GC暂停占比','CPU核','未参与撤出的 Worker 最长未更新ms'],
             [[phase, round(v['actual_rpc']['responses'],3), v['cache_success_s'], v['worker_status_success_s'], round(v['actual_rpc']['entries']),
               round(v['actual_rpc']['key_payload_bytes']/2**20,3),v['allocation_gib_s'],v['diff_million_keys_s'],
               v['full_gc_per_min'],v['gc_pause_fraction'],v['cpu_cores'],v['max_healthy_age_ms']]

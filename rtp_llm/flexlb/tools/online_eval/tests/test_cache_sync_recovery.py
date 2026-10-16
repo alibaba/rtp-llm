@@ -56,6 +56,14 @@ def test_stale_absent_or_replaced_healthy_worker_is_not_hidden_by_victim_exclusi
         assert collateral(current, baseline, {"victim"}, 10000) == ["healthy"]
 
 
+@pytest.mark.parametrize("extra", [{"applied_status_age_ms": 10001}, {"scheduling_status_fresh": False}])
+def test_fresh_rpc_does_not_hide_stale_application(extra):
+    current = dict(row(age=1), **extra)
+    baseline = {"worker": row()}
+    assert collateral({"worker": current}, baseline, set(), 10000) == ["worker"]
+    assert not converged({"worker": current}, {"worker"}, 306000, {"worker": 2}, 10000)
+
+
 def test_recovery_needs_exact_population_version_index_and_fresh_status():
     assert converged({"a": row()}, {"a"}, 306000, {"a": 2}, 10000)
     for field, value in (("cache_key_size", 305999), ("cache_indexed_version", 1),

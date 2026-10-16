@@ -53,7 +53,9 @@ def master_rows(ctx, deadline):
 
 
 def healthy(row, maximum):
-    return row["reported_alive"] and 0 <= row["status_age_ms"] <= maximum
+    return (row["reported_alive"] and 0 <= row["status_age_ms"] <= maximum
+            and 0 <= row.get("applied_status_age_ms", row["status_age_ms"]) <= maximum
+            and row.get("scheduling_status_fresh", True))
 
 
 def collateral(rows, baseline, victims, maximum):
@@ -193,7 +195,16 @@ def execute(ctx, params, deadline):
             workers=rows, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
             max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
             missing_workers=len((baseline or {}).keys()-rows.keys()-victims),
-            healthy_max_status_age_ms=max((w["status_age_ms"] for a, w in rows.items() if a not in victims), default=None),
+            healthy_max_status_age_ms=max((max(w["status_age_ms"], w.get("applied_status_age_ms", w["status_age_ms"]))
+                for a, w in rows.items() if a not in victims), default=None),
+            healthy_max_rpc_age_ms=max((w["status_age_ms"] for a,w in rows.items()
+                if a not in victims and "applied_status_age_ms" in w), default=None),
+            healthy_max_applied_age_ms=max((w["applied_status_age_ms"]
+                for a,w in rows.items() if a not in victims and "applied_status_age_ms" in w), default=None),
+            stale_applied_workers=sum(w.get("applied_status_age_ms",w["status_age_ms"]) > limits["max_status_age_ms"]
+                for a,w in rows.items() if a not in victims),
+            routable_workers=(sum(w["scheduling_status_fresh"] for a,w in rows.items() if a not in victims)
+                if all("scheduling_status_fresh" in w for w in rows.values()) else None),
             stale_workers=sum(not healthy(w, limits["max_status_age_ms"]) for w in rows.values()),
             replaced_workers=sum(a in baseline and w["generation"] != baseline[a]["generation"] for a, w in rows.items()) if baseline else 0,
             global_keys=metric_sum(meters, "cache_global_total_count"),
