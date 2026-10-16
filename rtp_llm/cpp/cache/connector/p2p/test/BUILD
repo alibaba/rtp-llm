@@ -139,5 +139,6 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
