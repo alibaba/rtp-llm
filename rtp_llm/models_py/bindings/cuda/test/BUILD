@@ -35,11 +35,7 @@ cc_test(
 cc_test(
     name = "crc_block_copy_batch_test",
     srcs = ["CrcBlockCopyBatchTest.cc"],
-    copts = copts() + select({
-        "//:using_cuda13_x86": ["-DRTP_LLM_CRC_INTERNAL_TESTS=1"],
-        "//:using_cuda13_arm": ["-DRTP_LLM_CRC_INTERNAL_TESTS=1"],
-        "//conditions:default": [],
-    }),
+    copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache:crc_dump_writer",
         "//rtp_llm/models_py/bindings:crc_block_copy",
@@ -48,6 +44,29 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
+        "//conditions:default": {"gpu": "H20_CU13"},
+    }),
+    tags = ["exclusive-if-local"],
+)
+
+# Kernel-level checksum rigor: production store() checksums vs an independent
+# byte-wise CRC32C reference and nvCOMP's batched CRC32C on identical bytes.
+cc_test(
+    name = "crc32c_checksum_test",
+    srcs = ["Crc32cChecksumTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings:crc_block_copy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:crc32"],
+        "//conditions:default": ["@nvcomp_cuda13_x86//:crc32"],
+    }),
     exec_properties = select({
         "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
         "//conditions:default": {"gpu": "H20_CU13"},

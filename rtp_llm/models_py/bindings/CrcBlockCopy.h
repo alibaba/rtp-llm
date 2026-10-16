@@ -56,11 +56,14 @@ struct CrcCopyFailure {
 using CrcSnapshotCapture = std::function<CrcCopyFailure()>;
 
 // Bounded synchronous CRC32C workspace. max_tiles limits the entire batch.
-// store/load require ordered, gap-free tiles covering exactly payload_bytes.
+// store/load require ordered, gap-free tiles covering exactly payload_bytes,
+// and tiles across items must occupy disjoint device spans: two items aliasing
+// the same device range would race in the scatter instead of failing.
 // Host storage must have encodedBytes(payload) capacity.
 // Every pointer must remain live until the method returns. Calls are serialized.
 // A failed store may have written host bytes: callers must not publish them.
-// load verifies ALL items before scattering any item into its device tiles.
+// A failed load may have scattered corrupted bytes into device tiles: callers
+// discard failed items through the reported status instead of adopting them.
 class CrcBlockCopyBatch {
 public:
     CrcBlockCopyBatch(int                            device_index,
@@ -83,10 +86,8 @@ public:
     // Explicit GPU allocations owned by this workspace; excludes pinned host and CUDA/nvCOMP internal memory.
     size_t deviceMemoryBytes() const;
 
-    CrcCopyStatus store(const std::vector<CrcCopyItem>& items,
-                        std::vector<CrcCopyFailure>*    failures = nullptr);
-    CrcCopyStatus load(const std::vector<CrcCopyItem>& items,
-                       std::vector<CrcCopyFailure>*    failures = nullptr);
+    CrcCopyStatus store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>* failures = nullptr);
+    CrcCopyStatus load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>* failures = nullptr);
 
 private:
     struct Impl;

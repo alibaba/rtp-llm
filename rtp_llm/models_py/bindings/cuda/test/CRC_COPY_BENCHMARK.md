@@ -17,7 +17,7 @@ CUDA_VISIBLE_DEVICES=0 bazelisk test \
 
 该目标标记为 `manual`、`local`、`exclusive`，不会随 `bazelisk test //...` 自动运行。显式调用时不要省略 `--cache_test_results=no`，否则可能读到 Bazel 缓存的旧测试结果。GPU lock 协调本仓库的测试任务；运行前仍需确认 GPU 没有其他工作负载。已有 `crc_block_copy_batch_test` 保持常规回归 UT，不受该目标影响。
 
-默认做两次独立进程运行，每次每个点预热 30 轮、采样 100 轮。配置为 DeepSeek V4 Flash-0731 FP8、TP4、PREFILL CP_RR/CP4、`kv_cache_sharded=true`、`seq_size_per_block=kernel_seq_size_per_block=128`、`gen_num_per_cycle=0`，分别测 FULL 与 SWA。BS 是一次调用中的本地 backing 数，覆盖每个整数 1–32。五条比较路径，共 128 个配置、640 个路径点、128000 个耗时样本；这些数据衡量单 GPU copy，不代表四 rank 并发或整模型吞吐。
+默认做两次独立进程运行，每次每个点预热 30 轮、采样 100 轮。配置为 DeepSeek V4 Flash-0731 FP8、TP4、PREFILL CP_RR/CP4、`kv_cache_sharded=true`、`seq_size_per_block=kernel_seq_size_per_block=128`、`gen_num_per_cycle=0`，分别测 FULL 与 SWA。BS 是一次调用中的本地 backing 数，默认覆盖每个整数 1–32（可用 `--blocks` 指定自定义列表，见下文）。五条比较路径，共 128 个配置、640 个路径点、128000 个耗时样本；这些数据衡量单 GPU copy，不代表四 rank 并发或整模型吞吐。
 
 模型采用 Flash-0731 的 43 个 target layer；前两层压缩比为 0，随后交替为 4 和 128；本测试通过 `gen_num_per_cycle=0` 关闭 speculative decoding，仅测这 43 层，FP8 specs 通过 `test::setDsv4KvCacheSpecs` 构造，再交给当前 main API 的 `CacheConfigCreator::createWarmupConfig` 和 `DeviceBlockPoolConfigHelper::createConfigForGroup` 解析。Benchmark 从物理 pool 的层数、KV/scale stride、offset 生成 tile，不再用硬编码的 tile 长度列表构造输入。只选择允许 prefix reuse 的 FULL/SWA group，并保留 topology 的 tag 顺序及每个 tag 的模型层映射。统计器另有独立的 shape 预期，模型配置变化时会拒绝混用数据。
 
@@ -76,6 +76,18 @@ CRC 每个 backing 传 `E=align16(P+4)=P+16`；其他路径传 payload P。CRC �
 
 两种模式都支持显式排除。默认性能比较使用 200 样本/有效点；快速验证模式不应作为正式性能结论。
 
+**自定义测量 BS 列表**
+
+默认覆盖每个整数 1–32。只需测量指定 BS 时，在主命令末尾追加：
+
+```bash
+--test_arg=--blocks=64,128,256
+```
+
+参数为逗号分隔的正整数列表；二进制只测量列出的 BS 值，配置点、路径点和样本数相应减少，可与 `--correctness-only`、`--exclude-1d-h2d` 组合。CRC 损坏检查固定在 BS 1、8、16、32 × 两个 layout，不随该列表改变；列表不含这些值时损坏检查照常执行。wrapper 把归一化后的列表传给子进程，并写入 `run_manifest.json` 与 `analysis.json` 的 `settings.blocks`（整数数组；未提供该选项时省略键，默认输出不变）。
+
+统计器从 settings 推导期望的 BS 列表：`blocks` 存在且非空时要求 metadata `block_counts` 与其完全一致，否则要求 1..32；完整矩阵、配对轮次、排除矩阵和记录计数都按该列表检查，自定义列表与默认数据不能互相通过校验。该选项只作用于本 benchmark；memcpy 归因诊断仍固定 BS=1、8、32。
+
 **输出与结果检查**
 
 输出写入 Bazel 的 `TEST_UNDECLARED_OUTPUTS_DIR`。通常在：
@@ -88,7 +100,7 @@ bazel-testlogs/rtp_llm/models_py/bindings/cuda/test/crc_copy_benchmark_test/
 
 归档包含 `copy_80.jsonl`、`copy_81.jsonl`、各进程 stdout/stderr/exitcode、`run_manifest.json`、`analysis.json`、`latency.csv` 和 `summary.md`。Bazel 版本或配置不同也可能保留未压缩输出目录。失败时已产生的原始记录仍保留；退出码失败不能解释为成功结果。需要固定输出位置时，可追加 `--test_arg=--output-dir=/absolute/empty/directory`；已有结果的目录会被拒绝，避免旧报告混入新运行。
 
-统计入口严格检查完整矩阵、同轮 source/执行位置、有效耗时、GPU/运行参数一致性和显式排除，也逐 tile 检查 tag、member、局部层号、模型层号和物理 offset。所有样本保留，p50 为中位数，p95 为 nearest rank；CRC 对比使用同轮差值及比值的中位数。`analysis.json` 给出重复运行、四个时间分段和执行位置的漂移告警，超过 10% 时应先检查环境。告警不被当作固定的性能 pass/fail 阈值。
+统计入口严格检查完整矩阵、同轮 source/执行位置、有效耗时、GPU/运行参数一致性和显式排除，也逐 tile 检查 tag、member、局部层号、模型层号和物理 offset。期望的 BS 列表取自 settings：默认 1..32，`--blocks` 时为该显式列表，metadata 的 `block_counts` 必须与其完全一致。所有样本保留，p50 为中位数，p95 为 nearest rank；CRC 对比使用同轮差值及比值的中位数。`analysis.json` 给出重复运行、四个时间分段和执行位置的漂移告警，超过 10% 时应先检查环境。告警不被当作固定的性能 pass/fail 阈值。
 
 运行前应提交待测源码，保证两项 commit 环境变量对应构建输入。Runner 要求提供完整 SHA，将 source commit、main base commit 和实际 binary SHA256 写入 manifest 及每次进程的原始 metadata；缺失这些信息时直接失败。两次进程的数据只有来源一致才能合并。请同时保留完整命令和测试产物。
 
