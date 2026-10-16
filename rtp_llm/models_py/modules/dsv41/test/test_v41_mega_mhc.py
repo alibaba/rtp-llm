@@ -184,6 +184,22 @@ class V41MegaMHCCudaTest(unittest.TestCase):
             with self.subTest(leading=leading):
                 self.check_case(make_case(leading))
 
+    @torch.inference_mode()
+    def test_long_prefill_reuses_residual_without_changing_outputs(self):
+        case = make_case((32768,))
+        for scale in (1.0, -0.75):
+            case["attn_out"].mul_(scale)
+            case["residual"].mul_(scale)
+            original = case["residual"].clone()
+            expected = try_fused_post_pre(**case)
+            self.assertIsNotNone(expected)
+            actual = try_fused_post_pre(**case, reuse_residual=True)
+            self.assertIsNotNone(actual)
+            self.assertEqual(actual[0].data_ptr(), case["residual"].data_ptr())
+            for got, ref in zip(actual, expected):
+                self.assertTrue(torch.equal(got, ref))
+            case["residual"].copy_(original)
+
     @torch.no_grad()
     def test_zero_and_rescaled_inputs(self):
         for amplitude in (0.0, 1e-5, 1.0, 32.0):

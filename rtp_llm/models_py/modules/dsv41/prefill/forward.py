@@ -485,6 +485,13 @@ def forward_layers(
     )
     if not use_prefill_fast_path:
         prefill_fast_layer_calls = None
+    else:
+        from rtp_llm.models_py.modules.dsv41.block import Block
+        from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+            PendingDecodePost,
+            can_defer_decode_post,
+        )
+        from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
     record_range_ctx = (
         _profiler.disable_record_function_ranges
         if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
@@ -620,6 +627,22 @@ def forward_layers(
             for layer_idx, layer_call in enumerate(layer_calls):
                 if engram_prefetch is not None:
                     engram_prefetch.before_layer(layer_idx)
+                prepared_attn = None
+                if use_prefill_fast_path and isinstance(h, PendingDecodePost):
+                    next_layer = v4.layers[layer_idx]
+                    prepared_attn = try_fused_post_pre(
+                        h.output,
+                        h.residual,
+                        h.post,
+                        h.comb,
+                        h.previous,
+                        next_layer.attn_hc,
+                        next_layer.attn_norm,
+                        reuse_residual=(
+                            h.residual.numel() * h.residual.element_size() > 1 << 30
+                        ),
+                    )
+                    h = h.materialize() if prepared_attn is None else prepared_attn[0]
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:
@@ -680,6 +703,35 @@ def forward_layers(
                                 block_tables_by_type=block_tables_by_type,
                             )
                         else:
+                            call_kwargs = routing_kwargs
+                            if (
+                                use_prefill_fast_path
+                                and getattr(layer_call, "__func__", None)
+                                is Block._forward_prefill_fast_fp8
+                            ):
+                                next_layer = (
+                                    v4.layers[layer_idx + 1]
+                                    if layer_idx + 1 < len(layer_calls)
+                                    else None
+                                )
+                                preserve = layer_idx in capture_ids or (
+                                    ced_tail is not None and layer_idx in (19, 20)
+                                )
+                                defer = (
+                                    next_layer is not None
+                                    and getattr(
+                                        layer_calls[layer_idx + 1], "__func__", None
+                                    )
+                                    is Block._forward_prefill_fast_fp8
+                                    and can_defer_decode_post(
+                                        v4.layers[layer_idx], next_layer, preserve
+                                    )
+                                )
+                                call_kwargs = {
+                                    **routing_kwargs,
+                                    "_prepared_attn": prepared_attn,
+                                    "_defer_ffn_post": defer,
+                                }
                             h = layer_call(
                                 h,  # [T, hc, dim]
                                 input_ids,  # [T]
@@ -687,7 +739,7 @@ def forward_layers(
                                 cu_seqlens,  # [B+1]
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
-                                **routing_kwargs,
+                                **call_kwargs,
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)

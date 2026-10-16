@@ -14,6 +14,10 @@ _ENV = {"DSV41_FUSED_CROSS_LAYER_MHC": "1", "DSV41_MEGA_MHC": "1"}
 
 
 class ReferenceNorm(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", torch.ones(8))
+
     def forward(self, x):
         value = x.float()
         return (value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-6)).to(
@@ -22,6 +26,12 @@ class ReferenceNorm(torch.nn.Module):
 
 
 class TestAttention(torch.nn.Module):
+    def can_fuse_prefill_attn_norm_input_quant(self, *_args):
+        return False
+
+    def forward(self, x, _positions, **_kwargs):
+        return x * 0.25
+
     def forward_decode(self, x, _metadata, kv_cache=None):
         return x * 0.25
 
@@ -108,6 +118,45 @@ def reference_transition(output, residual, post, comb, previous, next_hc, norm):
 
 
 class CrossLayerMHCCPUTest(unittest.TestCase):
+    def test_prefill_fast_prepared_transition_matches_materialized_path(self):
+        ids = torch.arange(10)
+        positions = ids.clone()
+        cu_seqlens = torch.tensor([0, 10])
+        hidden = torch.randn(10, 4, 8, dtype=torch.bfloat16)
+        baseline = make_blocks(count=2)
+        candidate = make_blocks(count=2)
+        for block in (*baseline, *candidate):
+            block._cp_sync_after_attn_done = True
+        first = baseline[0]._forward_prefill_fast_fp8(
+            hidden, ids, positions, cu_seqlens
+        )
+        expected = baseline[1]._forward_prefill_fast_fp8(
+            first, ids, positions, cu_seqlens
+        )
+        pending = candidate[0]._forward_prefill_fast_fp8(
+            hidden, ids, positions, cu_seqlens, _defer_ffn_post=True
+        )
+        self.assertIsInstance(pending, transition.PendingDecodePost)
+        prepared = reference_transition(
+            pending.output,
+            pending.residual,
+            pending.post,
+            pending.comb,
+            pending.previous,
+            candidate[1].attn_hc,
+            candidate[1].attn_norm,
+        )
+        actual = candidate[1]._forward_prefill_fast_fp8(
+            prepared[0], ids, positions, cu_seqlens, _prepared_attn=prepared
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            candidate[1].attn_hc.pre_mix_out,
+            baseline[1].attn_hc.pre_mix_out,
+            rtol=0,
+            atol=0,
+        )
+
     def setUp(self):
         env = patch.dict(os.environ, _ENV)
         env.start()
