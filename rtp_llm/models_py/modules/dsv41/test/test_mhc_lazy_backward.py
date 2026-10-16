@@ -108,6 +108,28 @@ class MHCLazyBackwardTest(unittest.TestCase):
                 for got, ref in zip(actual[1:], expected[1:]):
                     torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)
 
+    def test_delayed_nonstandard_shape_keeps_separate_path(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("requires Blackwell CUDA")
+        from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit, _tile_ops
+
+        fn = torch.randn(24, 512, device="cuda") / 512**0.5
+        base = torch.randn(24, device="cuda") * 0.1
+        scale = torch.randn(3, device="cuda") * 0.1
+        kwargs = dict(
+            dim=128, hc_mult=4, hc_sinkhorn_iters=20, norm_eps=1e-6, hc_eps=1e-6
+        )
+        previous = DelayedHCUnit(fn, base, scale, **kwargs)
+        unit = DelayedHCUnit(fn, base, scale, **kwargs)
+        unit.set_previous(previous)
+        previous.pre_mix_out = torch.randn(1, 2, 4, device="cuda")
+        x = torch.randn(1, 2, 4, 128, device="cuda", dtype=torch.bfloat16)
+        with torch.inference_mode(), patch.dict(
+            "os.environ", {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"}
+        ), patch.object(_tile_ops(), "mhc_pre_big_fuse") as fused:
+            unit.pre(x)
+        fused.assert_not_called()
+
     def load_kernels(self, name, kernels):
         root = Path(__file__).resolve().parents[3] / "3rdparty/tile_kernels"
         kernel = types.ModuleType(f"_test_tile.mhc.{name}_kernel")

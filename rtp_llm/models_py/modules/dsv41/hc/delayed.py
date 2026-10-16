@@ -85,7 +85,7 @@ class DelayedHCUnit(HCUnitBase):
         shape = x.shape
         if x.is_cuda and x.dtype == torch.bfloat16:
             from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
-                _has_prenorm_gemm,
+                is_supported,
                 prenorm,
                 prepare_tf32_weight,
             )
@@ -97,8 +97,13 @@ class DelayedHCUnit(HCUnitBase):
                 previous is not None
                 and not torch.is_grad_enabled()
                 and can_fuse_big_pre()
+                and residual.shape[-2:] == (4, 5120)
+                and residual.is_contiguous()
+                and self.fn.is_contiguous()
+                and torch.cuda.get_device_capability(x.device)[0] == 10
+                and (residual.shape[1] > 64 or is_supported(residual, self.fn))
             ):
-                small_deepgemm = residual.shape[1] <= 64 and _has_prenorm_gemm()
+                small_deepgemm = residual.shape[1] <= 64
                 pre, post, comb, y = ops.mhc_pre_big_fuse(
                     residual,
                     prepare_tf32_weight(self.fn) if small_deepgemm else self.fn,
