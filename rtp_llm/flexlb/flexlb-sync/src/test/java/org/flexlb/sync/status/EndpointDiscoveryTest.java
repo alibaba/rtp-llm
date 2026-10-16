@@ -14,6 +14,7 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -42,7 +43,7 @@ class EndpointDiscoveryTest {
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.DECODE, filtered.getIpPort(), filtered);
 
-        List<DecodeResources.DecodeRoutingView> result = registry.decodeRoutingSnapshot("group1");
+        List<DecodeResources.DecodeRoutingView> result = decodeRoutingSnapshot(registry, "group1");
         assertEquals(1, result.size());
         try (WorkerEndpoint.GenerationPin pin =
                 registry.captureDecodeGeneration(result.getFirst())) {
@@ -84,7 +85,7 @@ class EndpointDiscoveryTest {
         WorkerStatus status = status(RoleType.DECODE, "group1", 8080);
         RunnerTestSupport.publishEndpoint(registry, RoleType.DECODE, status.getIpPort(), status);
 
-        assertTrue(registry.decodeRoutingSnapshot("nonExistentGroup").isEmpty());
+        assertTrue(decodeRoutingSnapshot(registry, "nonExistentGroup").isEmpty());
         assertEquals(List.of(status.getIpPort()), decodeAddresses(null));
     }
 
@@ -140,7 +141,7 @@ class EndpointDiscoveryTest {
     }
 
     private List<String> decodeAddresses(String group) {
-        return registry.decodeRoutingSnapshot(group).stream()
+        return decodeRoutingSnapshot(registry, group).stream()
                 .map(DecodeResources.DecodeRoutingView::address)
                 .toList();
     }

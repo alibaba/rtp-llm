@@ -702,6 +702,23 @@ public final class RequestContext {
         if (evidence.kind() != EngineKind.RETIRED) {
             lastWorkerAtMs = Math.max(lastWorkerAtMs, evidence.nowMs());
         }
+        if (preemption != null
+                && !preemption.finished()
+                && !preemption.restorationObserved()
+                && (isDecode
+                        ? evidence.kind() == EngineKind.ALLOCATED
+                        : evidence.kind() == EngineKind.ACTIVE)) {
+            preemption =
+                    new PreemptionFacts(
+                            preemption.identity(),
+                            preemption.phase(),
+                            preemption.cancelAcknowledged(),
+                            false,
+                            preemption.pendingTerminal(),
+                            preemption.confirmationPending(),
+                            true,
+                            preemption.reconciliation());
+        }
         if (terminal && delivery != null) {
             var old = delivery;
             delivery =
@@ -795,10 +812,10 @@ public final class RequestContext {
         CancelKind currentKind =
                 placement != null
                         ? CancelKind.WAIT_PLACEMENT
-                        : preemption != null && !preemption.finished()
-                                ? CancelKind.WAIT_PREEMPTION
-                                : delivery != null && delivery.transferred()
-                                        ? CancelKind.REMOTE
+                        : delivery != null && delivery.transferred()
+                                ? CancelKind.REMOTE
+                                : preemption != null && !preemption.finished()
+                                        ? CancelKind.WAIT_PREEMPTION
                                         : route == null
                                                 ? CancelKind.GLOBAL_QUEUE
                                                 : CancelKind.WORKER_QUEUE;
@@ -1080,6 +1097,7 @@ public final class RequestContext {
                         false,
                         null,
                         false,
+                        false,
                         null);
         return new Granted<>(before, refresh(before.updatedAtMs()), registration);
     }
@@ -1108,15 +1126,14 @@ public final class RequestContext {
                 terminal != null
                         && terminal.kind() == EndKind.PRIORITY
                         && preemption.phase().acceptsPriorityTerminal();
-        boolean observed = engine.prefillObserved() || engine.decodeAccepted();
+        boolean observed = preemption.restorationObserved();
         boolean eligible =
                 authoritative
                         || priorityProof
                         || preemption.phase() == PreemptionCancelPhase.NOT_FOUND_STALE
                                 && (terminal == null
                                         ? preemption.confirmationPending() || observed
-                                        : engine.decodeAccepted()
-                                                || delivery != null && delivery.decodeProof());
+                                        : observed || delivery != null && delivery.decodeProof());
         if (!eligible) {
             return new Blocked<>(before, before, Blocker.RELEASE_PROOF);
         }
@@ -1131,6 +1148,7 @@ public final class RequestContext {
                         false,
                         terminal,
                         preemption.confirmationPending(),
+                        preemption.restorationObserved(),
                         permit);
         return new Granted<>(before, refresh(before.updatedAtMs()), permit);
     }
@@ -1176,6 +1194,7 @@ public final class RequestContext {
                         finished,
                         terminal,
                         previous.confirmationPending(),
+                        previous.restorationObserved(),
                         null);
         if (report.ledgerCommitted()) {
             if (delivery != null && terminal != null) {
@@ -1258,6 +1277,7 @@ public final class RequestContext {
                                 false,
                                 preemption.pendingTerminal(),
                                 true,
+                                preemption.restorationObserved(),
                                 preemption.reconciliation());
                 return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
             }
@@ -1345,7 +1365,8 @@ public final class RequestContext {
                 && !preemption.finished()
                 && !deliveryFailure
                 && (pendingEnd == null
-                        || pendingEnd.kind() != EndKind.INACTIVITY
+                        || pendingEnd.kind() != EndKind.FRONTEND
+                                && pendingEnd.kind() != EndKind.INACTIVITY
                                 && pendingEnd.kind() != EndKind.RETIREMENT)) {
             return new Blocked<>(before, refresh(nowMs), Blocker.PREEMPTION);
         }
@@ -1410,6 +1431,7 @@ public final class RequestContext {
                                 true,
                                 preemption.pendingTerminal(),
                                 preemption.confirmationPending(),
+                                preemption.restorationObserved(),
                                 preemption.reconciliation());
             }
             pendingEnd = null;
@@ -1545,6 +1567,7 @@ public final class RequestContext {
                             true,
                             preemption.pendingTerminal(),
                             preemption.confirmationPending(),
+                            preemption.restorationObserved(),
                             preemption.reconciliation());
         }
         if (close.prefillSettled()
@@ -1611,6 +1634,7 @@ public final class RequestContext {
         if (preemption != null
                 && !preemption.finished()
                 && !deliveryFailure
+                && evidence.kind() != EndKind.FRONTEND
                 && evidence.kind() != EndKind.INACTIVITY
                 && evidence.kind() != EndKind.RETIREMENT) {
             var previous = preemption.pendingTerminal();
@@ -1626,6 +1650,7 @@ public final class RequestContext {
                             false,
                             better ? evidence : previous,
                             preemption.confirmationPending(),
+                            preemption.restorationObserved(),
                             preemption.reconciliation());
             return;
         }
