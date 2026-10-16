@@ -268,3 +268,15 @@ def test_ring_fixture_requires_at_least_three_prefill_workers_before_launch():
     data['parameters']['procedure']['expired_workers'] = 1
     with pytest.raises(ValueError):
         configure_program(data,'case.yaml')
+
+
+def test_diagnostic_source_reduces_high_cardinality_before_retaining_samples(monkeypatch):
+    from cases.cache_sync_recovery.telemetry import diagnostic_metrics, DIAGNOSTIC_METRICS
+    raw = '\n'.join(f'engine_health_check_visitor_success_qps_total{{worker="w{i}"}} 2' for i in range(1000)).encode()
+    projected = diagnostic_metrics(raw)
+    assert projected['worker_status_commits'] == 2000
+    assert len(json.dumps(projected)) < 500
+    # One projection declaration extends parsing and capture without another field list.
+    monkeypatch.setitem(DIAGNOSTIC_METRICS, 'new_counter', ('custom_counter_total', {'role': 'PREFILL'}))
+    projected = diagnostic_metrics(raw+b'\ncustom_counter_total{role="PREFILL"} 7\n')
+    assert projected['new_counter'] == 7

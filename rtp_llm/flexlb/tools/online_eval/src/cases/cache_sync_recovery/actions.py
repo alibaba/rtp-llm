@@ -102,7 +102,7 @@ def execute(ctx, params, deadline):
     from adapters.resource_evidence import flow_evidence
     from traffic.traffic_source import materialize
     from cases.cache_sync_recovery.telemetry import (
-        fetch, metric_values, metric_sum, resource, fingerprint_matches, interval_rates,
+        fetch, diagnostic_metrics, DIAGNOSTIC_METRICS, resource, fingerprint_matches, interval_rates,
     )
     p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
     intervention = params["intervention"]
@@ -135,7 +135,7 @@ def execute(ctx, params, deadline):
     def read_diagnostics(d):
         if ctx.env is not owned_environment:
             raise ValueError('diagnostic source environment changed')
-        return dict(meters=metric_values(fetch(metrics_url, min(5, d.remaining()))),
+        return dict(metrics=diagnostic_metrics(fetch(metrics_url, min(5, d.remaining()))),
                     master=resource(owned_environment.master), mock=resource(owned_environment.mock))
 
     def start_diagnostics():
@@ -212,7 +212,7 @@ def execute(ctx, params, deadline):
             evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if ready else 0
         observed = diagnostic.latest() if diagnostic is not None else None
         diagnostics = observed['data'] if observed else {}
-        meters = diagnostics.get('meters', [])
+        measurements = diagnostics.get('metrics', {})
         frame = dict(epoch_s=ctx.wall_clock(), phase=phase, snapshot_read_s=ctx.clock()-before,
             workers=rows, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
             max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
@@ -229,17 +229,13 @@ def execute(ctx, params, deadline):
                 if all("scheduling_status_fresh" in w for w in rows.values()) else None),
             stale_workers=sum(not healthy(w, limits["max_status_age_ms"]) for w in rows.values()),
             replaced_workers=sum(a in baseline and w["generation"] != baseline[a]["generation"] for a, w in rows.items()) if baseline else 0,
-            global_keys=metric_sum(meters, "cache_global_total_count"),
             affected_workers=len(affected), reported_dead=sum(not w["reported_alive"] for w in rows.values()),
             process_allocated_bytes=raw.get("process_allocated_bytes"), scheduler_inflight=raw["scheduler_inflight"],
-            heap_bytes=metric_sum(meters, "jvm_memory_used_bytes", {"area": "heap"}),
-            direct_bytes=metric_sum(meters, "jvm_buffer_memory_used_bytes", {"id": "direct"}),
-            diff_scanned_keys=raw.get("diagnostic_diff_scanned_keys", metric_sum(meters, "cache_diff_scanned_keys_total", {"role": "PREFILL"})),
-            worker_status_commits=metric_sum(meters, "engine_health_check_visitor_success_qps_total"),
-            cache_sync_commits=metric_sum(meters, "cache_status_check_visitor_success_qps_total", {"role": "PREFILL"}),
             master=diagnostics.get('master', {}), mock=diagnostics.get('mock', {}),
             diagnostic_source=dict(selection='latest_completed', sample={k: v for k, v in observed.items() if k != 'data'} if observed else None,
                                    status='ok' if observed else 'pending'))
+        frame.update({field: measurements.get(field) for field in DIAGNOSTIC_METRICS})
+        frame['diff_scanned_keys'] = raw.get('diagnostic_diff_scanned_keys', frame['diff_scanned_keys'])
         evidence["frames"].append(frame)
         with (directory/"observations.jsonl").open("a") as f:
             f.write(json.dumps(frame)+"\n")

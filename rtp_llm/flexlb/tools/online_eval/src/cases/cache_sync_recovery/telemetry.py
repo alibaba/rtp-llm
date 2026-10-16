@@ -5,6 +5,15 @@ import re
 import urllib.request
 from pathlib import Path
 
+DIAGNOSTIC_METRICS = {
+    'global_keys': ('cache_global_total_count', {}),
+    'heap_bytes': ('jvm_memory_used_bytes', {'area': 'heap'}),
+    'direct_bytes': ('jvm_buffer_memory_used_bytes', {'id': 'direct'}),
+    'diff_scanned_keys': ('cache_diff_scanned_keys_total', {'role': 'PREFILL'}),
+    'worker_status_commits': ('engine_health_check_visitor_success_qps_total', {}),
+    'cache_sync_commits': ('cache_status_check_visitor_success_qps_total', {'role': 'PREFILL'}),
+}
+
 
 def fetch(url, timeout):
     with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -21,9 +30,7 @@ def metric_values(raw):
         if not match:
             continue
         name, labels, value = match.groups()
-        if not any(x in name for x in ("jvm_memory_used_bytes", "jvm_buffer_memory_used_bytes",
-                "cache_global_total_count", "cache_diff_scanned_keys_total", "engine_health_check_visitor_success_qps_total",
-                "cache_status_check_visitor_success_qps_total")):
+        if not any(fragment in name for fragment, _ in DIAGNOSTIC_METRICS.values()):
             continue
         number = float(value)
         if math.isfinite(number):
@@ -35,6 +42,12 @@ def metric_sum(meters, fragment, labels=None):
     values = [m["value"] for m in meters if fragment in m["name"]
               and all(m["labels"].get(k) == v for k, v in (labels or {}).items())]
     return sum(values) if values else None
+
+
+def diagnostic_metrics(raw):
+    meters = metric_values(raw)
+    return {field: metric_sum(meters, fragment, labels)
+            for field, (fragment, labels) in DIAGNOSTIC_METRICS.items()}
 
 
 def resource(proc):
