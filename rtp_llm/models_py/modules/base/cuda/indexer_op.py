@@ -78,6 +78,19 @@ def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _write_prefill_topk(
+    indices: torch.Tensor, offsets: torch.Tensor, out: torch.Tensor
+) -> None:
+    from rtp_llm.models_py.modules.base.cuda.indexer_launch_fusion import try_write_topk
+
+    canonicalize = _fp8_prefill_topk_canonicalize()
+    if try_write_topk(indices, offsets, out, canonicalize):
+        return
+    if canonicalize:
+        indices = _canonicalize_topk_indices(indices)
+    out.copy_(torch.where(indices >= 0, indices + offsets.unsqueeze(1), indices))
+
+
 def _physical_block_table(attention_inputs: Any) -> torch.Tensor:
     """Return the paged-cache block table for indexer KV reads.
 
@@ -894,13 +907,10 @@ class IndexerOp(nn.Module):
                 topk_part,
                 prefill_max_kv_len,
             )
-            if _fp8_prefill_topk_canonicalize():
-                topk_part = _canonicalize_topk_indices(topk_part)
-            topk_result[row_start:row_end] = torch.where(
-                topk_part >= 0,
-                topk_part
-                + fmha_params.topk_indices_offset[row_start:row_end].unsqueeze(1),
+            _write_prefill_topk(
                 topk_part,
+                fmha_params.topk_indices_offset[row_start:row_end],
+                topk_result[row_start:row_end],
             )
             del logits, topk_part
             row_start = row_end
@@ -1096,12 +1106,10 @@ class IndexerOp(nn.Module):
                     topk_part,
                     prefill_max_kv_len,
                 )
-                if _fp8_prefill_topk_canonicalize():
-                    topk_part = _canonicalize_topk_indices(topk_part)
-                topk_result[row_start:row_end] = torch.where(
-                    topk_part >= 0,
-                    topk_part + topk_off[row_start:row_end].unsqueeze(1),
+                _write_prefill_topk(
                     topk_part,
+                    topk_off[row_start:row_end],
+                    topk_result[row_start:row_end],
                 )
                 del logits_p, topk_part
                 row_start = row_end
