@@ -2,6 +2,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -51,6 +52,39 @@ TEST(CompleteTokenIdsTest, ImageHashIdentityAndShiftedReuseBoundaries) {
     EXPECT_TRUE(tokens.isValidReuseLength(4));
     EXPECT_FALSE(tokens.isValidReuseLength(12));
     EXPECT_FALSE(tokens.isValidReuseLength(16));
+}
+
+TEST(CompleteTokenIdsTest, ImageHashIdentityUsesLengthDelimitedBytes) {
+    // Shared with server/test/cache_key_routing_test.py. Identity RPC strings
+    // are opaque UTF-8, not hexadecimal digests or a fixed-width word list.
+    auto input               = std::make_shared<GenerateInput>();
+    input->input_ids         = torch::arange(16, torch::kInt32);
+    input->generate_config   = std::make_shared<GenerateConfig>();
+    auto          multimodal = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start              = 4;
+    image.types              = torch::zeros({8}, torch::kInt32);
+    image.n_vit_h            = 2;
+    image.n_vit_w            = 2;
+    image.content_sha256     = "ab?";
+    image.processor_identity = "p:\xe5\x9b\xbe";
+    multimodal->images.push_back(image);
+    input->v41_inputs = multimodal;
+    CompleteTokenIds tokens(1, 1, 32, 4);
+    tokens.init(input);
+    const std::vector<int32_t> expected = {-41, 4, 12, 2, 2, 3, 97, 98, 63, 5, 112, 58, 229, 155, 190};
+    EXPECT_TRUE(tokens.imageCacheIdentity(0, 4).empty());
+    EXPECT_EQ(tokens.imageCacheIdentity(4, 4), expected);
+    EXPECT_EQ(tokens.imageCacheIdentity(8, 4), expected);
+    EXPECT_TRUE(tokens.imageCacheIdentity(12, 4).empty());
+    auto complete = std::make_shared<CompleteTokenIds>(tokens, true, 0);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    initCacheKeys(resource, complete, 4, 41);
+    const CacheKeysType expected_keys = {
+        556723330460289837LL, 1094575162337917127LL, -8416381023089338704LL, 2888375575027288070LL};
+    EXPECT_EQ(resource->cacheKeys(0), expected_keys);
+    EXPECT_EQ(CPSlotMapper(0, 4, 4).canonicalCacheKeys(resource->cacheKeys(0)), (CacheKeysType{2888375575027288070LL}));
 }
 
 TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {

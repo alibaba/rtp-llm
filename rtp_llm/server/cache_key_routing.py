@@ -37,9 +37,11 @@ def get_block_cache_keys(token_ids, block_size, v41_inputs=None, cache_key_seed=
             start, end = image.start, image.start + image.types.numel()
             words = [-41, start, end, image.n_vit_h, image.n_vit_w]
             for digest in (image.content_sha256, image.processor_identity):
-                for offset in range(0, len(digest) - 7, 8):
-                    word = int(digest[offset : offset + 8], 16)
-                    words.append(word if word < 2**31 else word - 2**32)
+                # Match CompleteTokenIds::imageCacheIdentity: RPC strings are
+                # length-delimited UTF-8 bytes, not parsed hexadecimal words.
+                encoded = digest.encode("utf-8")
+                words.append(len(encoded))
+                words.extend(encoded)
             for block_index, chunk in enumerate(chunks):
                 begin = block_index * block_size
                 if end > begin and start < begin + block_size:
