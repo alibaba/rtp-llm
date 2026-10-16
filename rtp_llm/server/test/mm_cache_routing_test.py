@@ -571,6 +571,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.request.mm_token_expansion)
 
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
+        from rtp_llm.server.cache_key_routing import get_block_cache_keys
+
+        self.visitor.cache_key_seed = 41
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
         new_status = {**self.status, "server_ip": new_vit.ip}
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
@@ -596,6 +599,10 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
         self.assertEqual(last["selected_vit"], new_status)
         self.assertTrue(last["block_cache_keys"])
+        self.assertEqual(
+            last["block_cache_keys"],
+            get_block_cache_keys([1, 31, 32, 33, 34, 2], 2, cache_key_seed=41),
+        )
         self.assertEqual(last["seq_len"], 6)
         self.assertEqual(
             self.visitor.master_client.get_vit_cache_metadata.call_args.args[0], new_vit

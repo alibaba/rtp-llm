@@ -511,7 +511,12 @@ class BackendRPCServerVisitor:
                         "Incomplete replacement ViT routing hashes",
                     )
                 block_cache_keys = self._route_cache_keys(
-                    get_block_cache_keys(token_ids, self.seq_size_per_block)
+                    get_block_cache_keys(
+                        token_ids,
+                        self.seq_size_per_block,
+                        v41_inputs=input.v41_inputs,
+                        cache_key_seed=self.cache_key_seed,
+                    )
                 )
                 if full_length is None:
                     selected_vit = None
