@@ -734,10 +734,13 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv41.fp8": SimpleNamespace(_swa_ops_triton=ops),
         }
         layout = warmup.PoolLayout(7, 72, 72 * 528, 8192, 8192, 0)
-        with patch.dict(sys.modules, modules):
+        with patch.dict(sys.modules, modules), patch.object(
+            warmup, "_warm_host_swa_metadata"
+        ) as host_metadata:
             warmup._warm_swa_metadata(
                 SimpleNamespace(window_size=63), layout, 17, "private-dummy-device"
             )
+        host_metadata.assert_called_once_with(layout, "private-dummy-device")
         planner.assert_called_once_with(17)
         mapping = ops.compute_swa_slot_mapping.call_args.kwargs
         self.assertEqual(mapping["pool_entries_per_block"], 72)

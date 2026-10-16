@@ -14,7 +14,10 @@ def _upload(values, device, dtype):
     )
 
 
-@triton.jit(do_not_specialize=["columns", "max_rows", "entries", "span", "ring"])
+@triton.jit(
+    do_not_specialize=["columns", "max_rows", "entries", "span", "ring"],
+    do_not_specialize_on_alignment=["table", "prefixes", "lengths", "offsets"],
+)
 def _planned_slots(
     table,
     compact_table,
@@ -64,14 +67,82 @@ def _planned_slots(
     )
 
 
+@triton.jit(
+    do_not_specialize=["rows", "batch", "columns", "entries", "span"],
+    do_not_specialize_on_alignment=[
+        "table",
+        "prefixes",
+        "lengths",
+        "requests",
+        "positions",
+    ],
+)
+def _planned_position_slots(
+    table,
+    compact_table,
+    prefixes,
+    lengths,
+    requests,
+    positions,
+    slots,
+    compact,
+    rows,
+    batch,
+    columns,
+    entries,
+    span,
+    BLOCK: tl.constexpr,
+):
+    """Draft CP rows retain the gathered rank order, including padding."""
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    request = tl.load(requests + row, mask=row < rows, other=-1).to(tl.int64)
+    position = tl.load(positions + row, mask=row < rows, other=-1).to(tl.int64)
+    valid = (row < rows) & (request >= 0) & (request < batch)
+    prefix = tl.load(prefixes + request, mask=valid, other=0).to(tl.int64)
+    length = tl.load(lengths + request, mask=valid, other=0).to(tl.int64)
+    seq_end = prefix + length
+    column = position // span
+    block_end = tl.minimum((column + 1) * span, seq_end)
+    valid = (
+        valid
+        & (position >= prefix)
+        & (position < seq_end)
+        & (column >= 0)
+        & (column < columns)
+        & (position + entries >= block_end)
+    )
+    address = request * columns + column
+    block = tl.load(table + address, mask=valid, other=0).to(tl.int64)
+    compact_block = tl.load(compact_table + address, mask=valid, other=-1).to(tl.int64)
+    valid = valid & (block > 0) & (compact_block >= 0)
+    within = position % entries
+    tl.store(slots + row, tl.where(valid, block * entries + within, -1), row < rows)
+    tl.store(
+        compact + row,
+        tl.where(valid, compact_block * entries + within, -1),
+        row < rows,
+    )
+
+
 def try_host_slot_metadata(
-    table, host_table, cp, *, entries, span, num_blocks, read=False
+    table,
+    host_table,
+    cp,
+    *,
+    entries,
+    span,
+    num_blocks,
+    read=False,
+    request_ids=None,
+    positions=None,
 ):
     """Use the native CPU mirror to fix output sizes and alias dedup before launch.
 
     The caller binds host/device tables from the same native request descriptor.
-    Equal shapes reject native kernel-block expansion; with one kernel block per
-    physical block, BlockIds::updateKernelSlotAt preserves the physical IDs.
+    SWA uses one kernel block per physical block, so
+    BlockIds::updateKernelSlotAt preserves the physical IDs. The common native
+    descriptor pads physical and kernel tables independently across all groups;
+    their widths can differ because other groups expand physical blocks.
     Unsupported metadata retains the existing GPU validation/compaction path.
     """
     prefixes = getattr(cp, "prefix_lengths_host", None)
@@ -84,18 +155,33 @@ def try_host_slot_metadata(
         or host_table.device.type != "cpu"
         or host_table.dtype not in (torch.int32, torch.int64)
         or table.ndim != 2
-        or host_table.shape != table.shape
+        or host_table.ndim != 2
+        or host_table.shape[0] != table.shape[0]
         or prefixes is None
         or lengths is None
         or len(prefixes) != table.shape[0]
         or len(lengths) != len(prefixes)
         or not lengths
-        or any(p < 0 or n <= 0 for p, n in zip(prefixes, lengths))
+        or any(p < 0 or n < 0 for p, n in zip(prefixes, lengths))
         or entries <= 0
         or span <= 0
         or num_blocks <= 0
         or getattr(cp, "cp_size", 0) < 1
         or not getattr(cp, "kv_cache_sharded", False)
+    ):
+        return None
+    positional = request_ids is not None or positions is not None
+    if positional and (
+        read
+        or any(
+            not isinstance(t, torch.Tensor)
+            or t.device != table.device
+            or t.ndim != 1
+            or not t.is_contiguous()
+            or t.dtype not in (torch.int32, torch.int64)
+            for t in (request_ids, positions)
+        )
+        or request_ids.shape != positions.shape
     ):
         return None
     if torch.cuda.is_current_stream_capturing():
@@ -117,6 +203,8 @@ def try_host_slot_metadata(
             return None
     active = []
     for req, (prefix, length) in enumerate(zip(prefixes, lengths)):
+        if not read and not length:
+            continue
         start, end = (
             (max(0, prefix - 127), prefix) if read else (prefix, prefix + length)
         )
@@ -130,7 +218,7 @@ def try_host_slot_metadata(
                 active.append((req, column, block))
     unique = sorted({block for _, _, block in active})
     indices = {block: i for i, block in enumerate(unique)}
-    mapping = torch.full(host_table.shape, -1, dtype=torch.int32, pin_memory=True)
+    mapping = torch.full(table.shape, -1, dtype=torch.int32, pin_memory=True)
     if active:
         flat_rows = torch.tensor(
             [req * table.shape[1] + column for req, column, _ in active]
@@ -140,11 +228,34 @@ def try_host_slot_metadata(
         )
     gather = tuple(min(p, 127) for p in prefixes) if read else ()
     max_rows = max(gather) if read else max(lengths)
-    shape = (len(lengths), max_rows) if read else (sum(lengths),)
+    shape = (
+        request_ids.shape
+        if positional
+        else (len(lengths), max_rows) if read else (sum(lengths),)
+    )
     slots = torch.empty(shape, device=table.device, dtype=torch.long)
     compact = torch.empty_like(slots)
     unique_device = _upload(unique, table.device, torch.long)
-    if max_rows:
+    if positional and slots.numel():
+        lookup = mapping.to(table.device, non_blocking=True)
+        _planned_position_slots[(triton.cdiv(slots.numel(), 256),)](
+            table,
+            lookup,
+            cp.prefix_lengths,
+            cp.input_lengths_global,
+            request_ids,
+            positions,
+            slots,
+            compact,
+            slots.numel(),
+            len(lengths),
+            table.shape[1],
+            entries,
+            span,
+            BLOCK=256,
+            num_warps=4,
+        )
+    elif max_rows and not positional:
         lookup = mapping.to(table.device, non_blocking=True)
         _planned_slots[(len(lengths), triton.cdiv(max_rows, 256))](
             table,

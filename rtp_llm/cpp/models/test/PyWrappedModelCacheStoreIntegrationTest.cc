@@ -57,6 +57,12 @@ struct PyWrappedModelTestPeer {
         fusedCopy(model.d2d_copies_);
         return result;
     }
+
+    static torch_ext::PyAttentionInputs
+    buildCacheStoreInputs(PyWrappedModel& model, const GptModelInputs& inputs, const GptModelInputs& host_inputs) {
+        model.prepareAttentionInputs(inputs, true, &host_inputs);
+        return model.attention_inputs_;
+    }
 };
 
 namespace {
@@ -91,6 +97,34 @@ public:
         inputs.combo_tokens     = combo_tokens;
         inputs.is_target_verify = is_target_verify;
         return PyWrappedModelTestPeer::buildAttentionInputs(*model_, inputs);
+    }
+
+    py::dict buildCacheStoreInputs(const torch::Tensor& local_lengths,
+                                   const torch::Tensor& global_lengths,
+                                   const torch::Tensor& prefix_lengths,
+                                   const torch::Tensor& block_table_host,
+                                   const torch::Tensor& block_table_device) {
+        GptModelInputs inputs;
+        inputs.input_lengths            = local_lengths;
+        inputs.prefix_lengths           = prefix_lengths;
+        inputs.sequence_lengths         = torch::empty({0}, torch::kInt32);
+        inputs.combo_tokens             = torch::empty({local_lengths.sum().item<int64_t>()}, torch::kInt32);
+        inputs.kv_cache_block_id        = block_table_device;
+        inputs.kv_cache_kernel_block_id = block_table_device;
+        inputs.pd_separation            = true;
+        inputs.request_id               = torch::ones({local_lengths.numel()}, torch::kInt64);
+        auto host_inputs                = inputs;
+        host_inputs.input_lengths       = global_lengths;
+        host_inputs.kv_cache_block_id   = block_table_host;
+        auto result                     = PyWrappedModelTestPeer::buildCacheStoreInputs(*model_, inputs, host_inputs);
+        TORCH_CHECK(result.cache_store_inputs.has_value(), "expected cache-store host metadata");
+        const auto& store = result.cache_store_inputs.value();
+        py::dict    snapshot;
+        snapshot["attention_inputs"]     = py::cast(result);
+        snapshot["input_lengths_host"]   = store.input_lengths_host;
+        snapshot["prefix_lengths_host"]  = store.prefix_lengths_host;
+        snapshot["host_kv_cache_offset"] = store.host_kv_cache_offset;
+        return snapshot;
     }
 
 private:
@@ -1591,7 +1625,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     rtp_llm::registerExecCtxOps(m);
     py::class_<rtp_llm::test::AttentionInputBuilder>(m, "AttentionInputBuilder")
         .def(py::init<py::object>())
-        .def("build", &rtp_llm::test::AttentionInputBuilder::build);
+        .def("build", &rtp_llm::test::AttentionInputBuilder::build)
+        .def("build_cache_store_inputs", &rtp_llm::test::AttentionInputBuilder::buildCacheStoreInputs);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);

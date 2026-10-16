@@ -1,6 +1,13 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <future>
+#include <thread>
+#endif
 
 using namespace std;
 using namespace rtp_llm;
@@ -51,6 +58,48 @@ TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
 
     EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
 }
+
+#if USING_CUDA
+TEST_F(SamplerTest, testPendingGreedySamplingSourcesSurviveReuseAndGrowth) {
+    // Delay the stream without consuming a GPU SM. A bounded release thread
+    // also lets a regression that blocks the host fail instead of hanging.
+    for (const bool grow : {false, true}) {
+        Sampler sampler(SamplerInitParams{2, false});
+        auto&   source = sampler.nextGreedySamplingBuffers(2);
+        source.seed_host.fill_(37);
+        auto               old_source = source.seed_host;
+        std::promise<void> release;
+        auto               ready = release.get_future().share();
+        ASSERT_EQ(cudaLaunchHostFunc(
+                      at::cuda::getCurrentCUDAStream().stream(),
+                      [](void* data) { static_cast<std::shared_future<void>*>(data)->wait(); },
+                      &ready),
+                  cudaSuccess);
+        auto copied = source.seed_host.to(torch::kCUDA, /*non_blocking=*/true);
+        sampler.markGreedySamplingBufferReady();
+        std::thread releaser([&release] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            release.set_value();
+        });
+        const auto  start = std::chrono::steady_clock::now();
+        if (grow) {
+            sampler.ensureGreedySamplingBuffers(3);
+        } else {
+            sampler.greedy_sampling_buffer_index_ = 0;
+        }
+        auto& next = sampler.nextGreedySamplingBuffers(grow ? 3 : 2);
+        next.seed_host.fill_(91);
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        const bool distinct_storage = next.seed_host.data_ptr() != old_source.data_ptr();
+        releaser.join();
+        EXPECT_LT(elapsed, 250) << "reusing sampler staging must not wait for the GPU";
+        EXPECT_TRUE(distinct_storage);
+        EXPECT_TRUE(torch::equal(copied.cpu(), torch::full({2}, 37, torch::kInt64)));
+        EXPECT_TRUE(torch::equal(old_source, torch::full({2}, 37, torch::kInt64)));
+    }
+}
+#endif
 
 TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
     constexpr size_t batch_size     = 4;

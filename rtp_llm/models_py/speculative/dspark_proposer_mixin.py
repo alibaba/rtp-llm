@@ -57,9 +57,7 @@ def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.T
     to the host field keeps eager and unit-test callers compatible, while the
     preferred path avoids introducing a host-to-device copy inside capture.
     """
-    device_value = optional_tensor(
-        getattr(attention_inputs, f"{name}_device", None)
-    )
+    device_value = optional_tensor(getattr(attention_inputs, f"{name}_device", None))
     if device_value is not None:
         return device_value
     return optional_tensor(getattr(attention_inputs, name, None))
@@ -308,7 +306,7 @@ class DSparkProposerMixin:
         )
         if global_lengths is not None and int(global_lengths.numel()) >= batch_size:
             committed_lengths = global_lengths[:batch_size].to(
-                device=device, dtype=torch.long
+                device=device, dtype=torch.long, non_blocking=True
             )
         committed_ends = prefix_lengths + committed_lengths
 

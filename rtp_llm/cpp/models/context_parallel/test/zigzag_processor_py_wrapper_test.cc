@@ -112,10 +112,12 @@ zigzagHandleInputsWithEngram(const torch::Tensor& total_input_tokens,
 // must publish the rank-local chunk on ``model_input`` without rewriting the
 // caller's tensor, which MtpExecutor snapshots to rebuild the global batch for
 // the draft pass.
-std::tuple<torch::Tensor, torch::Tensor> zigzagHandleInputsCallerLengths(const torch::Tensor& total_input_tokens,
-                                                                         const torch::Tensor& input_lengths,
-                                                                         int                  cp_rank,
-                                                                         int                  cp_size) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+zigzagHandleInputsCallerLengths(const torch::Tensor&                total_input_tokens,
+                                const torch::Tensor&                input_lengths,
+                                int                                 cp_rank,
+                                int                                 cp_size,
+                                const std::optional<torch::Tensor>& sequence_lengths) {
     ParallelismConfig parallelism_config;
     parallelism_config.tp_rank = cp_rank;
     parallelism_config.tp_size = cp_size;
@@ -124,12 +126,17 @@ std::tuple<torch::Tensor, torch::Tensor> zigzagHandleInputsCallerLengths(const t
     GptModelInputs model_input;
     model_input.combo_tokens     = total_input_tokens.contiguous();
     model_input.input_lengths    = input_lengths;
-    model_input.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32));
+    model_input.sequence_lengths = sequence_lengths.value_or(torch::empty({0}, torch::TensorOptions(torch::kInt32)));
 
     torch_ext::PyContextParallelParams cp_params;
     processor.handleInputs(model_input, cp_params);
 
-    return std::make_tuple(input_lengths.cpu().clone(), model_input.input_lengths.cpu().clone());
+    // Return the actual tensors: converting to CPU here would hide a placement
+    // regression and cloning would hide whether the published source is pinned.
+    return {input_lengths,
+            model_input.input_lengths,
+            model_input.sequence_lengths,
+            cp_params.prefill_actual_input_lengths_cpu};
 }
 
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
@@ -270,7 +277,8 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("input_lengths"),
           py::arg("cp_rank"),
           py::arg("cp_size"),
-          "Run CP handleInputs on a caller-owned input_lengths tensor and return (caller view, published view)");
+          py::arg("sequence_lengths") = py::none(),
+          "Return actual caller lengths, local lengths, sequence lengths, and the global host snapshot");
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,

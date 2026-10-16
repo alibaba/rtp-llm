@@ -10,6 +10,31 @@ from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class NativePrefillInputsTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_eager_prefill_keeps_native_device_boundaries(self):
+        from rtp_llm.models_py.modules.dsv41.prefill import forward
+
+        attention = PyAttentionInputs()
+        attention.is_prefill = True
+        attention.input_lengths = torch.tensor([2, 3], dtype=torch.int32)
+        attention.prefix_lengths = torch.tensor([0, 9], dtype=torch.int32)
+        attention.cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.tensor(
+            [1, 2, 3, 4, 5], dtype=torch.int32, device="cuda"
+        )
+        inputs.combo_position_ids = torch.tensor([0, 1, 9, 10, 11], device="cuda")
+        inputs.attention_inputs = {"swa_kv": attention}
+        model = SimpleNamespace(set_cp_info=Mock())
+        result = torch.zeros(5, 4, device="cuda")
+        with patch.object(forward, "forward_layers", return_value=result) as layers:
+            forward.forward_prefill(model, None, None, inputs)
+        self.assertEqual(
+            layers.call_args.args[4].data_ptr(), attention.cu_seqlens_device.data_ptr()
+        )
+        self.assertEqual(layers.call_args.args[4].device, inputs.input_ids.device)
+
     @unittest.skipUnless(torch.cuda.is_available(), "native model imports need CUDA")
     def test_device_metadata_capability_after_v41_subclass_configuration(self):
         from rtp_llm.models_py.model_desc import deepseek_v41_base_model as base

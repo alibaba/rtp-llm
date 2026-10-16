@@ -243,7 +243,7 @@ protected:
     void releaseAllModelBuffers();
 
 private:
-    static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+    static torch::Tensor snapshotMutableHostInput(const torch::Tensor& tensor, TensorHolder& holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
     static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
