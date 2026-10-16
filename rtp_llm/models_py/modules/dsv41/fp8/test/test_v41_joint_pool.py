@@ -24,7 +24,7 @@ class JointPoolHostTest(unittest.TestCase):
                 )
 
     def test_unsupported_topology_and_ratio_are_common_fallbacks(self):
-        for size, ratio, sharded in ((1, 1, False), (4, 4, True)):
+        for size, ratio, sharded in ((0, 1, False), (4, 4, True)):
             attn = SimpleNamespace(
                 _cp_ctx=SimpleNamespace(cp_size=size, kv_cache_sharded=sharded),
                 compress_ratio=ratio,
@@ -130,6 +130,15 @@ class JointPoolHostTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class JointPoolCudaTest(unittest.TestCase):
+    def setUp(self):
+        # Keep these original zero-filled SUM tests as an explicit fallback
+        # oracle. Owned-row transport has independent multi-owner tests.
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_owned_pool
+
+        patcher = patch.object(_v41_owned_pool, "try_gather", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @classmethod
     def setUpClass(cls):
         if torch.cuda.get_device_capability()[0] != 10:
