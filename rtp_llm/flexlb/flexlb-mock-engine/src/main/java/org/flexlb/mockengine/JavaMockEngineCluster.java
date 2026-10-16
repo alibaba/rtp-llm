@@ -6212,6 +6212,9 @@ public final class JavaMockEngineCluster {
                 metrics.put("mock_memory_cache_pending_write_blocks", memoryCache.pendingBlocks());
                 metrics.put("mock_memory_cache_write_rejected_total", memoryCache.writeRejected());
             }
+            metrics.put("mock_engine_up", stopped ? 0 : 1);
+            CacheSyncFixture fixture = cacheSyncFixture;
+            if (fixture != null) fixture.collectMetrics(metrics);
             return metrics;
         }
         int getGrpcPort() { return grpcPort; }

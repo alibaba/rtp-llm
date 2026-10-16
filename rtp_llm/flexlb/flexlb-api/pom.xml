@@ -48,6 +48,16 @@
     </dependencies>
 
     <profiles>
+        <!-- CPU Whale bundle uses file discovery but still needs the production metric sink. -->
+        <profile>
+            <id>whale-bundle</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>kmonitor</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
         <!-- Internal profile - automatically activated when internal dependencies exists -->
         <profile>
             <id>internal</id>

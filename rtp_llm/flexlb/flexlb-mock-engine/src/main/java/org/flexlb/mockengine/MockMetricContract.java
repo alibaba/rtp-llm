@@ -7,7 +7,7 @@ import java.util.Map;
 /** Shared metric identity, role, unit and HTTP projection. Sink registration remains adapter-specific. */
 final class MockMetricContract {
     enum Type { COUNTER, GAUGE, HISTOGRAM }
-    enum Unit { COUNT, REQUESTS_PER_SECOND, TOKENS, BLOCKS, MICROSECONDS, MILLISECONDS, TOKENS_PER_SECOND, PERCENT, RATIO }
+    enum Unit { COUNT, BYTES, BYTES_PER_SECOND, REQUESTS_PER_SECOND, TOKENS, BLOCKS, MICROSECONDS, MILLISECONDS, TOKENS_PER_SECOND, PERCENT, RATIO }
     enum Role { PREFILL, DECODE, BOTH }
     enum Aggregation { SUM, WEIGHTED_MEAN, HISTOGRAM, NONE }
     enum Sampling { SNAPSHOT, EVENT, SCHEDULER }
@@ -19,6 +19,20 @@ final class MockMetricContract {
     }
 
     static final List<Metric> ALL = List.of(
+        metric("mock_engine_up", null, "Mock service running flag, independent of Master health judgment", Type.GAUGE, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_responses_per_second", null, "Produced fixture cache responses per elapsed report second", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_entries_per_second", null, "Produced fixture response key entries per elapsed report second", Type.GAUGE, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_response_bytes_per_second", null, "Produced CacheStatusPB bytes per elapsed report second; excludes framing", Type.GAUGE, Unit.BYTES_PER_SECOND, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_added_keys_per_second", null, "Fixture additions per elapsed report second including ramp growth", Type.GAUGE, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_removed_keys_per_second", null, "Fixture removals per elapsed report second", Type.GAUGE, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_keys", null, "Synthetic cache-status keys; excludes inference LRU and counts shared keys per holder", Type.GAUGE, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_responses_total", null, "Synthetic cache responses produced, not Master-applied successes", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_entries_total", null, "Key entries in produced cache responses, including unchanged full snapshots", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_response_bytes_total", null, "Produced protobuf CacheStatusPB serialized bytes; excludes RPC framing", Type.COUNTER, Unit.BYTES, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_added_keys_total", null, "Synthetic key additions including ramp growth", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_removed_keys_total", null, "Synthetic key removals", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_full_responses_total", null, "Cache responses containing full key sets", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_cache_fixture_unchanged_responses_total", null, "Same-version cache responses omitting keys", Type.COUNTER, Unit.COUNT, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("rtp_llm_rpc_worker_status_qps", "worker_status_qps", "completed WorkerStatus RPCs per second; independent scrape reader", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.BOTH, Aggregation.SUM, Sampling.EVENT),
         metric("rtp_llm_rpc_worker_status_total_rt_us", "worker_status_rt_us", "latest WorkerStatus state-read duration; excludes response encoding and network", Type.GAUGE, Unit.MICROSECONDS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
         metric("mock_worker_status_rpcs_total", "worker_status_rpcs_total", "completed WorkerStatus RPC counter for lossless rate derivation", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),

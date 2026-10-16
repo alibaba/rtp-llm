@@ -16,6 +16,7 @@ RUN /opt/conda310/bin/pip install --no-cache-dir PyYAML==6.0.2 \
     test -s /opt/flexlb-mock/tools/mock_bundle/jars/master.jar && \
     test -s /opt/flexlb-mock/tools/mock_bundle/jars/mock.jar && \
     test -s /opt/flexlb-mock/tools/mock_bundle/jars/legacy-master.jar && \
+    /opt/conda310/bin/python3 /opt/flexlb-mock/tools/mock_bundle/verify_monitoring.py /opt/flexlb-mock/tools/mock_bundle/jars && \
     "$JAVA_HOME/bin/java" -version && \
     /opt/conda310/bin/python3 -c 'import sys, yaml; sys.path.insert(0, "/opt/flexlb-mock/tools/mock_bundle"); import bundle'
 ENTRYPOINT ["/bin/bash", "/home/admin/whale_start.sh"]

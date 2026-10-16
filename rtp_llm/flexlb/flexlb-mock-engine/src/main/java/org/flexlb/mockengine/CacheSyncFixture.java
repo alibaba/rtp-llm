@@ -112,6 +112,18 @@ final class CacheSyncFixture {
 
     synchronized long version() { return version; }
 
+    /** Numeric counters only: no key traversal, protobuf copy, serialization or checksum strings. */
+    synchronized void collectMetrics(Map<String, Number> metrics) {
+        metrics.put("mock_cache_fixture_keys", payload.getCacheKeysCount());
+        metrics.put("mock_cache_fixture_responses_total", calls);
+        metrics.put("mock_cache_fixture_entries_total", entries);
+        metrics.put("mock_cache_fixture_response_bytes_total", bytes);
+        metrics.put("mock_cache_fixture_added_keys_total", changedKeys + grownKeys);
+        metrics.put("mock_cache_fixture_removed_keys_total", changedKeys);
+        metrics.put("mock_cache_fixture_full_responses_total", fullResponses);
+        metrics.put("mock_cache_fixture_unchanged_responses_total", unchangedResponses);
+    }
+
     synchronized Map<String, Object> snapshot() {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
         result.put("keys", payload.getCacheKeysCount()); result.put("version", version);

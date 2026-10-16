@@ -179,11 +179,16 @@ final class WhaleMockMonitor implements AutoCloseable {
             monitor.report(name, tags, value.doubleValue());
             String rate = switch (name) {
                 case "mock_decode_step_tokens_total" -> "mock_decode_wall_tps";
+                case "mock_cache_fixture_responses_total" -> "mock_cache_fixture_responses_per_second";
+                case "mock_cache_fixture_entries_total" -> "mock_cache_fixture_entries_per_second";
+                case "mock_cache_fixture_response_bytes_total" -> "mock_cache_fixture_response_bytes_per_second";
+                case "mock_cache_fixture_added_keys_total" -> "mock_cache_fixture_added_keys_per_second";
+                case "mock_cache_fixture_removed_keys_total" -> "mock_cache_fixture_removed_keys_per_second";
                 default -> null;
             };
             if (rate != null && !metrics.containsKey(rate)) {
                 if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
-                if (!metrics.containsKey("rtp_llm_generate_tps")) {
+                if (name.equals("mock_decode_step_tokens_total") && !metrics.containsKey("rtp_llm_generate_tps")) {
                     if (registered.add("rtp_llm_generate_tps")) monitor.register("rtp_llm_generate_tps", FlexMetricType.GAUGE);
                     monitor.report("rtp_llm_generate_tps", tags, deltas.getOrDefault(name, 0L));
                 }
