@@ -33,8 +33,8 @@ namespace rtp_llm {
 namespace {
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
-// finishes only writer submissions here and leaves actual publication for the
-// executor's pre-dispatch barrier, preserving overlap with draft computation.
+// seals writer submissions here. Both GPU-ready workers and publication are
+// drained at the executor's pre-dispatch barrier, overlapping draft computation.
 class CacheStoreWriteCycleGuard {
 public:
     CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer,
@@ -61,14 +61,15 @@ public:
         }
     }
 
-    // Normal path: let a drain failure propagate to the caller. Tracked cycles
-    // keep publication pending for MtpExecutor; legacy cycles drain everything.
+    // Tracked workers may still wait on GPU events. Only seal the queue here;
+    // MtpExecutor drains workers and propagates failures after draft forward.
+    // Legacy cycles retain the existing full-drain behavior.
     void finish() {
         if (!active_) {
             return;
         }
         if (track_store_completions_) {
-            writer_->finishSubmissions();
+            writer_->sealSubmissions();
             active_ = false;
         } else {
             active_ = false;

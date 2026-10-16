@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -78,7 +79,7 @@ public:
         }
     }
 
-    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&) = delete;
+    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&)            = delete;
     ScopedDeviceResetForTest& operator=(const ScopedDeviceResetForTest&) = delete;
 
 private:
@@ -426,6 +427,113 @@ TEST_F(CacheStoreAsyncWriterTest, FinishSubmissionsDoesNotFinishPublication) {
 
     complete(nullptr);
     EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SealingDefersWorkerAndLatePublicationUntilFinalBarrier) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto               completion_state = writer.active_store_completion_state_;
+    std::promise<void> release_worker;
+    auto               worker_gate = release_worker.get_future().share();
+    std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+    auto                                                         completion = registered.get_future();
+    writer.submit([completion_state, worker_gate, &registered] {
+        // A bounded gate models the worker's GPU-ready event without letting
+        // a regression hang the test. Registration happens only after it.
+        worker_gate.wait_for(std::chrono::seconds(2));
+        registered.set_value(CacheStoreAsyncWriter::registerStoreCompletionOn(completion_state));
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    writer.sealSubmissions();
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(250));
+    EXPECT_EQ(CacheStoreAsyncWriter::State::SEALED, writer.state_);
+    EXPECT_EQ(writer.active_store_completion_state_, completion_state);
+    EXPECT_ANY_THROW(writer.submit([] {}));
+    EXPECT_ANY_THROW(writer.init(/*track_store_completions=*/true));
+
+    auto final_barrier = std::async(std::launch::async, [&writer] { writer.waitStoreCompletions(); });
+    // Zero registered callbacks is not enough while a worker still waits for
+    // the GPU. The final barrier must include late callback registrations.
+    EXPECT_EQ(final_barrier.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    release_worker.set_value();
+    auto complete = completion.get();
+    EXPECT_EQ(final_barrier.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    complete(nullptr);
+    EXPECT_NO_THROW(final_barrier.get());
+    EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
+    EXPECT_EQ(writer.finished_store_completion_state_, nullptr);
+    writer.init(/*track_store_completions=*/true);
+    writer.sealSubmissions();
+    EXPECT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SealedWorkerFailurePropagatesAtFinalBarrier) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto               orphaned_completion = writer.registerStoreCompletion();
+    std::promise<void> release_worker;
+    auto               worker_gate = release_worker.get_future().share();
+    writer.submit([worker_gate] {
+        worker_gate.wait_for(std::chrono::seconds(2));
+        throw std::runtime_error("sealed worker failed");
+    });
+    EXPECT_NO_THROW(writer.sealSubmissions());
+    release_worker.set_value();
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_NO_THROW(orphaned_completion(nullptr));
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+    writer.init(/*track_store_completions=*/true);
+    EXPECT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, CancelledSealedCycleDrainsWorkersBeforeReuse) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto               completion_state = writer.active_store_completion_state_;
+    std::promise<void> release_worker;
+    auto               worker_gate = release_worker.get_future().share();
+    std::atomic<bool>  worker_done{false};
+    writer.submit([completion_state, worker_gate, &worker_done] {
+        worker_gate.wait_for(std::chrono::seconds(2));
+        auto complete = CacheStoreAsyncWriter::registerStoreCompletionOn(completion_state);
+        complete(nullptr);  // Harmless registration/completion after cancellation.
+        worker_done.store(true, std::memory_order_release);
+    });
+    writer.sealSubmissions();
+    writer.cancelStoreCompletions(std::make_exception_ptr(std::runtime_error("cancelled sealed cycle")));
+    auto final_barrier = std::async(std::launch::async, [&writer] { writer.waitAllDone(); });
+    EXPECT_EQ(final_barrier.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    release_worker.set_value();
+    EXPECT_THROW(final_barrier.get(), std::runtime_error);
+    EXPECT_TRUE(worker_done.load(std::memory_order_acquire));
+    writer.init(/*track_store_completions=*/true);
+    EXPECT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SealedShutdownRetainsLateWorkerCompletionState) {
+    std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+    auto                                                         completion = registered.get_future();
+    std::promise<void>                                           worker_entered;
+    auto                                                         entered = worker_entered.get_future();
+    std::promise<void>                                           release_worker;
+    auto                                                         worker_gate = release_worker.get_future().share();
+    {
+        CacheStoreAsyncWriter writer;
+        writer.init(/*track_store_completions=*/true);
+        auto completion_state = writer.active_store_completion_state_;
+        writer.submit([completion_state, worker_gate, &worker_entered, &registered] {
+            worker_entered.set_value();
+            worker_gate.wait_for(std::chrono::seconds(2));
+            registered.set_value(CacheStoreAsyncWriter::registerStoreCompletionOn(completion_state));
+        });
+        EXPECT_EQ(entered.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+        writer.sealSubmissions();
+        release_worker.set_value();
+        // The destructor drains worker references and marks callbacks terminal.
+    }
+    ASSERT_EQ(completion.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_NO_THROW(completion.get()(nullptr));
 }
 
 TEST_F(CacheStoreAsyncWriterTest, DelayedPublicationCompletesBeforeTerminalTimeout) {
