@@ -221,6 +221,54 @@ class ScrVipTest(unittest.TestCase):
                     scr_vip.topology(self.pc, self.reader, wait=True)
                 device.assert_not_called()
 
+    def test_c2_part_names_resolve_vip_and_underlay(self):
+        self._write_rows(
+            {
+                "prefill_part1": {
+                    "name": "prefill_part1",
+                    "ip": "22.0.1.3",
+                    "real_ip": "10.44.53.83",
+                },
+                "prefill_part0": {
+                    "name": "prefill_part0",
+                    "ip": "22.0.1.2",
+                    "real_ip": "10.44.53.114",
+                },
+            }
+        )
+        self.assertEqual(
+            scr_vip.read_topology(4, 2, self.reader), {0: "22.0.1.2", 1: "22.0.1.3"}
+        )
+        self.assertEqual(
+            scr_vip.real_ip_by_vip(self.pc, self.reader),
+            {"22.0.1.2": "10.44.53.114", "22.0.1.3": "10.44.53.83"},
+        )
+        for phase in ("checkpoint", "restore"):
+            for rank in range(4):
+                with self.subTest(phase=phase, rank=rank), patch.dict(
+                    os.environ, {"SCR_PHASE": phase}
+                ), patch.object(scr_vip, "validate_device") as device:
+                    self.pc.world_rank = rank
+                    self.pc.local_rank = rank % 2
+                    expected = "22.0.1.2" if rank < 2 else "22.0.1.3"
+                    self.assertEqual(
+                        scr_vip.internal_ip(self.pc, "10.44.53.83", self.reader),
+                        expected,
+                    )
+                    device.assert_called_once_with(expected)
+
+    def test_part_aliases_do_not_allow_duplicate_or_invalid_ranks(self):
+        for name in ("prefill_part0", "prefill_part-1", "prefill_part1-extra"):
+            with self.subTest(name=name):
+                self._write_rows(
+                    {
+                        "model-rank-0": self.rows["model-rank-0"],
+                        name: self.rows["model-rank-1"],
+                    }
+                )
+                with self.assertRaises(ValueError):
+                    scr_vip.read_topology(4, 2, self.reader)
+
     def test_incomplete_duplicate_and_unmerged_maps_fail(self):
         bad_maps = [
             {},

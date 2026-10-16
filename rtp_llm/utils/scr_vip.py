@@ -10,13 +10,12 @@ advertisements still use Pod IPs.
 import ipaddress
 import json
 import os
-import re
 import socket
 import subprocess
 import time
 from pathlib import Path
 
-from rtp_llm.utils.gang_info import GangInfoReader
+from rtp_llm.utils.gang_info import GangInfoReader, get_gang_member
 
 VIP_INTERFACE = "scr_vxlan0"
 NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
@@ -36,25 +35,25 @@ def _read_topology(world_size: int, local_world_size: int, gang_info: GangInfoRe
         raise ValueError("SCR gang info must be an object")
     nodes = {}
     real_ip_by_vip = {}
-    for name, info in rows.items():
-        match = re.search(r"(?:^|-)rank-(\d+)$", name)
-        if match is None:
-            raise ValueError(f"SCR gang member has no node rank: {name}")
-        rank = int(match.group(1))
+    node_count = world_size // local_world_size
+    if len(rows) != node_count:
+        raise ValueError("SCR gang info does not match the complete node topology")
+    for rank in range(node_count):
+        info = get_gang_member(rows, rank)
+        if info is None:
+            raise ValueError(f"SCR gang info is missing node {rank}")
         vip = str(ipaddress.IPv4Address(info["ip"]))
         real = str(ipaddress.IPv4Address(info["real_ip"]))
         for address in (vip, real):
             parsed = ipaddress.IPv4Address(address)
             if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
                 raise ValueError("SCR gang addresses must be unicast")
-        if vip == real or rank in nodes or vip in nodes.values():
+        if vip == real or vip in nodes.values():
             raise ValueError(
                 "SCR gang info requires distinct VIPs and unique node ranks"
             )
         nodes[rank] = vip
         real_ip_by_vip[vip] = real
-    if set(nodes) != set(range(world_size // local_world_size)):
-        raise ValueError("SCR gang info does not match the complete node topology")
     return nodes, real_ip_by_vip
 
 
