@@ -101,6 +101,11 @@ def main():
     parser.add_argument("--correctness-only", action="store_true")
     parser.add_argument("--staged-memcpy-profile", action="store_true")
     parser.add_argument(
+        "--blocks",
+        help="Comma-separated positive backing counts, e.g. 64,128,256; "
+        "default measures every integer 1..32",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(
@@ -119,6 +124,16 @@ def main():
         parser.error(
             "iterations must be positive, warmup nonnegative, seed in [0, 2147483566]"
         )
+    blocks = None
+    if args.blocks is not None:
+        try:
+            blocks = [int(part) for part in args.blocks.split(",")]
+        except ValueError:
+            blocks = []
+        if not blocks or any(n < 1 for n in blocks):
+            parser.error("--blocks must be comma-separated positive integers")
+        blocks = sorted(set(blocks))
+        args.blocks = ",".join(str(n) for n in blocks)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(
@@ -150,6 +165,8 @@ def main():
             "correctness_only",
         )
     }
+    if blocks is not None:
+        settings["blocks"] = blocks
     manifest["settings"] = settings
     manifest_path = output / "run_manifest.json"
     try:
@@ -192,6 +209,9 @@ def main():
                 command.append("--exclude-1d-h2d")
             if args.correctness_only:
                 command.append("--correctness-only")
+            if args.blocks is not None:
+                command.append("--blocks")
+                command.append(args.blocks)
             print(shlex.join(command), flush=True)
             stdout_path, stderr_path = (
                 output / f"copy_{repeat}.stdout",
