@@ -11,17 +11,25 @@ profiles:
 - batch-window
 environment:
   backend: java_mock
-  perf_preset: glm_5_3_l20d
+  perf_preset: deepseek_v4_flash_l20c
   model_override:
-    baseline: glm_5_3_l20d
+    baseline: deepseek_v4_flash_l20c
     reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
   discovery: discovery_file
+  n_prefill: 48
+  n_decode: 192
   prefill_cache_policy:
     device_tree: false
     memory_tree: false
   config_overrides:
     cache_affinity_max_extra_ttft_ms: 1000000000
   master_test_control: true
+  profile_overrides:
+    batch-window:
+      max_inflight_per_prefill_worker: 2
+      max_collection_wait_ms: 350
+      max_predicted_execution_ms: 500
+      max_requests: 32
 execution:
   timeout_s: 3600
   stage_timeout_s: 60
@@ -41,15 +49,15 @@ parameters:
       kind: trace
       model: prefix_lineage
       parameters:
-        path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
-        count: 587711
+        path: ../../data/traffic_trace/deepseek_v4_flash_20260923_0920_16m.xz
+        count: 844864
         output_tokens: 420
         priority: 50
     client:
       playback:
-        duration_s: 1350
+        duration_s: 620
         mode: uniform
-        qps: 240.0
+        qps: 900.0
         max_laps: 1
       limits:
         max_concurrency: 32768
@@ -58,21 +66,21 @@ parameters:
       transport:
         channels: 16
         event_loop_threads: 16
-    max_requests: 324001
+    max_requests: 558001
     poll_s: 0.1
     jvm_xms: 1g
-    jvm_xmx: 48g
+    jvm_xmx: 8g
   procedure:
-    target_p: 64
+    target_p: 24
     removal_mode: graceful
     drain_timeout_ms: 30000
     topology_timeout_s: 37
     analysis_timeout_s: 300
-    warmup_min_s: 900
+    warmup_min_s: 240
     post_affinity_ms: 1000000000
     startup_timeout_s: 900
   observation:
-    warmup_timeout_s: 1050
+    warmup_timeout_s: 300
     sample_s: 1
     window_s: 10
     step_s: 1
@@ -164,8 +172,8 @@ parameters:
           offset_s: 240
   analysis:
     collapse:
-      absolute_min_hit: 0.45
-      max_drop: 0.25
+      absolute_min_hit: 0
+      max_drop: 0.1
       sustain_s: 30
   checks:
     offered_load:
@@ -182,7 +190,7 @@ parameters:
       - baseline
       unit: ratio
       op: ge
-      expected: 0.85
+      expected: 0.46
     baseline_stability:
       metric: cache_gate/baseline_half_spread
       windows:
@@ -205,6 +213,49 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
+data_archives:
+  default: deepseek
+  entries:
+    deepseek:
+      environment:
+        master_jvm_heap: 8g
+        mock_heap: 32g
+    glm:
+      environment:
+        perf_preset: glm_5_3_l20d
+        model_override:
+          baseline: glm_5_3_l20d
+          reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
+        n_prefill: 125
+        n_decode: 536
+        profile_overrides:
+          batch-window:
+            max_collection_wait_ms: 10
+            max_predicted_execution_ms: 550
+      parameters:
+        traffic:
+          source:
+            parameters:
+              path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
+              count: 587711
+          client:
+            playback:
+              duration_s: 1350
+              qps: 240.0
+          max_requests: 324001
+          jvm_xmx: 48g
+        procedure:
+          target_p: 64
+          warmup_min_s: 900
+        observation:
+          warmup_timeout_s: 1050
+        analysis:
+          collapse:
+            absolute_min_hit: 0.45
+            max_drop: 0.25
+        checks:
+          baseline_hit:
+            expected: 0.85
 variants:
 - id: affinity_disabled
   parameters:

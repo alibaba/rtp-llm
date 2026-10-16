@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
     'case_schema_version', 'case', 'program', 'default_variant', 'metadata', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
-    'variants', 'profile_overrides', 'reporting', 'reports',
+    'data_archives', 'variants', 'profile_overrides', 'reporting', 'reports',
 )
 VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'charts', 'sections')
 VIEW_BLOCK_FIELDS = {
@@ -19,6 +19,7 @@ VIEW_BLOCK_FIELDS = {
                   'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),
 }
 BLOCK_FIELDS = {
+    'data_archives': ('default', 'entries'),
     'reporting': ('time_axis',),
     'time_axis': ('origin', 'range'),
     'range': ('from', 'until'),
@@ -64,13 +65,15 @@ def fields(kind, path):
             return CURVE_FIELDS
         if len(path) == 2 and path[0] == 'sections':
             return ('title', 'columns', 'opened')
-    if kind == 'scenarios' and path in {
+    if kind == 'scenarios' and (path in {
         ('parameters', 'observation'), ('variants', '[]', 'parameters', 'observation'),
-    }:
+    } or len(path) == 5 and path[:2] == ('data_archives', 'entries')
+            and path[-2:] == ('parameters', 'observation')):
         return OBSERVATION_FIELDS
     # Trace/source.parameters is a producer-specific contract, not case.parameters.
     if kind == 'scenarios' and path[-1] in BLOCK_FIELDS and (
         path[-1] != 'parameters' or len(path) == 1
+        or len(path) == 4 and path[:2] == ('data_archives', 'entries')
     ):
         return BLOCK_FIELDS[path[-1]]
     return ()

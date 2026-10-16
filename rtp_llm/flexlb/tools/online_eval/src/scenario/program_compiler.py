@@ -36,16 +36,22 @@ def configure_program(config, source):
     seen = set()
     numeric_contracts = {}
     default = VariantDeclaration.read({"id": config.default_variant}, source)
-    for row in (default, *config.variants):
+    from scenario.data_archives import archive_variants
+    axes = {}
+    for row, archive, behavior in archive_variants(config, (default, *config.variants), source):
         identity = row.identity
         if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
             raise ScenarioError(f"{source}: missing or duplicate configuration id {identity!r}")
         seen.add(identity)
+        if archive is not None:
+            axes[identity] = dict(data_archive=archive, variant=behavior)
         document["variants"].append(_build_variant(
             config, row, identity, module, config.profiles, source, numeric_contracts,
         ))
     document["implementation"] = _implementation(config, module, name)
     document["implementation"]["numeric_parameters"] = numeric_contracts
+    if axes:
+        document["implementation"]["variant_axes"] = axes
     return document
 
 

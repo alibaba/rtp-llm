@@ -1,7 +1,7 @@
 report_view_schema_version: 1
 kind: selected
 report:
-  subtitle: 期望 {expected_behavior} · 观察 {observed_behavior} · {verdict} · 采集 {monitoring_status}
+  subtitle: 缓存判定 {verdict} · 期望 {expected_behavior} · 观察 {observed_behavior} · 采集 {monitoring_status}；请求失败单列，PASS 不代表缩容无损
   id: cache-scale-in
   producer: cache-gate
 metrics:
@@ -437,6 +437,14 @@ charts:
     - master/system_cpu_usage_percent
     - master/cpu_available_processors
 sections:
+  request_outcomes:
+    title: 整轮请求终态（含撤除切换与延后失败）
+    columns:
+    - 请求归属
+    - 发出
+    - 终态
+    - 失败
+    opened: true
   audit:
     title: 监控曲线审计
     columns:

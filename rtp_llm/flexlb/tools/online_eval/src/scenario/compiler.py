@@ -122,7 +122,7 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
         fail(source + ".program_schema_version", "only program_schema_version 1 is supported")
     mapping(doc["implementation"], source + ".implementation",
             {"language", "program", "path", "sha256", "case_sources", "case_sources_sha256", "configuration",
-             "configuration_sha256", "numeric_parameters"})
+             "configuration_sha256", "numeric_parameters", "variant_axes"})
     sid = identifier(doc["id"], source + ".id")
     if sid in seen:
         fail(source, f"duplicate scenario id {sid}")

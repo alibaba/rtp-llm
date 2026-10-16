@@ -14,6 +14,26 @@ from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details, view_table
 
 
+def request_outcomes(evidence):
+    """Display the whole ledger, including victims, unknown routes and late failures."""
+    attribution = evidence.get('client_attribution') or {}
+    failures = attribution.get('failures', [])
+    complete = attribution.get('complete') is True
+    rows = [['整轮（完整账本）' if complete else '整轮（账本不完整）',
+             attribution.get('issued_count'), attribution.get('terminal_count'),
+             len(failures) if complete else '不可确认']]
+    for group, counts in attribution.get('counts', {}).items():
+        rows.append([group, counts['sent'], counts['terminal'], counts['failed']])
+    inactive = sum('REQUEST_INACTIVE' in (failure.get('error') or '') for failure in failures)
+    kpis = [dict(id='case.request_failures', label='整轮请求失败',
+                 value=len(failures) if complete else '不可确认',
+                 tone='danger' if failures or not complete else 'success'),
+            dict(id='case.inactive_failures', label='REQUEST_INACTIVE 失败',
+                 value=inactive if complete else '不可确认',
+                 tone='danger' if inactive or not complete else 'success')]
+    return rows, kpis
+
+
 def prepare_report(directory, evidence, *, presentation=None):
     from monitoring.metric_store import MetricStore
     from reporting.view_config import view
@@ -117,6 +137,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
     monitor_warnings = prepared["monitor_warnings"]
+    request_rows, request_kpis = request_outcomes(evidence)
     spec = dict(
         run_id=evidence["provenance"]["instance"],
         title=title(evidence["provenance"]["instance"]),
@@ -129,9 +150,10 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
             dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
             dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
                  tone="danger" if monitor_warnings else "success"),
-        ],
+        ] + request_kpis,
         panels=project_panels(curves, presentation),
         sections=[
+            view_table(presentation, 'request_outcomes', request_rows),
             view_table(presentation, "audit", audit),
             view_details(presentation, "monitoring", dict(status=monitoring_status, warnings=monitor_warnings)),
             view_details(presentation, "checks", result),
@@ -192,6 +214,7 @@ def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
     validate_section_contract(path, data, {
+        "request_outcomes": 4,
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,
     }, fail)

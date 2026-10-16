@@ -28,11 +28,12 @@ from scenario.catalog import handlers
 import adapters.java_mock_resources as resource_plan
 root=Path(resource_plan.__file__).resolve().parents[2]
 plans=compile_scenarios(load_scenarios(root/'config/scenarios/cache_scale_in.yaml'), handlers=handlers())
-assert plans[0]['environment']['n_prefill']==125
-assert plans[0]['environment']['n_decode']==536
-source=plans[0]['stages'][1]['params']['source']['parameters']
+large=next(p for p in plans if p['variant_id']=='glm')
+assert large['environment']['n_prefill']==125
+assert large['environment']['n_decode']==536
+source=large['stages'][1]['params']['source']['parameters']
 assert source['path'].endswith('glm-5.3_20260921_2126_3h.xz')
-assert plans[0]['stages'][1]['params']['client']['playback']['qps']==240
+assert large['stages'][1]['params']['client']['playback']['qps']==240
 budget = JavaMockBudget(661, 0)
 lease = plan_lane_leases([[budget]], master_base=61000, mock_base=61010, mock_stride=704)[0]
 assert lease.intervals()[-1] == ('mock', 61009, 61712)

@@ -110,7 +110,7 @@ python3 tools/online_eval/scripts/commands/validate_case.py \
 | 2 | `metadata`、`profiles` | 用途、测试性质与运行形态 |
 | 3 | `environment`、`execution` | 模型/拓扑、采集策略与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |
-| 5 | `variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
+| 5 | `data_archives`、`variants`、`profile_overrides` | 数据档案、行为测试点和覆盖 |
 | 6 | `reporting`、`reports` | 时间轴与交付视图 |
 
 `parameters` 按 `traffic` → `procedure` → `observation` → `analysis` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
@@ -127,6 +127,10 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 每个 case 顶层必须声明 `program: default`，Python 必须注册 `default` builder。首个变体身份缺省为 `default`，可用 `default_variant` 指定名字；`variants` 只追加额外测试点，不能与首个变体重名。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
 ## 数据、运行策略与参数约束
+
+流量及配套模型需要成套切换时，可声明 `data_archives: {default: <档案名>, entries: {<档案名>: {environment: ..., parameters: ...}}}`。顶层保存公共数据；`entries` 中每个档案只覆盖差异，不定义流程，`default` 必须指向其中一项。每个档案与 `variants` 自动做组合，覆盖顺序为顶层数据 → 档案 → 行为变体；映射递归合并，列表和标量替换，环境沿用 `config_overrides/profile_overrides` 的字段合并规则。可用 `parameter_schema` 收紧该档案的数值约束，不能放宽 program 契约。
+
+默认档案保留 `default` 及原变体 ID；其他档案的正向 ID 为档案名，行为变体 ID 为 `<档案名>__<变体名>`。展开后的 ID 必须唯一；通过 `--instances case::variant::profile` 精确选择，以 `list_cases.py` 为准。编译产物 `implementation.variant_axes` 记录每个 ID 对应的数据档案与行为，原始声明、有效参数及配置 SHA 随运行冻结。两套档案各自保存经过标定的门槛，不将某一流量的命中率阈值当成公共默认。
 
 | 段 | 负责什么 | 主要消费者 |
 |---|---|---|

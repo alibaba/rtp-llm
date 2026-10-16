@@ -101,7 +101,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "cache_sync_recovery::recovery",
             },
         )
-        self.assertEqual(len(plans), 18)
+        self.assertEqual(len(plans), 22)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_quick_suite_is_request_completion_for_every_master_profile(self):

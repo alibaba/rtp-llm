@@ -391,6 +391,23 @@ class CacheGateTest(unittest.TestCase):
             expression,
         )
 
+    def test_report_keeps_withdrawal_failures_visible_when_cache_passes(self):
+        evidence = self.evidence(0.8)
+        evidence['client_attribution'] = dict(complete=True, issued_count=100,
+            terminal_count=100, counts={'unknown': dict(sent=100, terminal=100, failed=2)},
+            failures=[dict(error='REQUEST_INACTIVE'), dict(error='queue stopped')])
+        result = analyze(evidence)
+        self.assertEqual(result['verdict'], 'PASS')
+        with tempfile.TemporaryDirectory() as directory:
+            spec = write_report(directory, evidence, result)
+        kpis = {item.get('id'): item for item in spec['kpis']}
+        self.assertEqual(kpis['case.request_failures']['value'], 2)
+        self.assertEqual(kpis['case.inactive_failures']['value'], 1)
+        section = next(s for s in spec['sections'] if s.get('id') == 'case.request_outcomes')
+        self.assertTrue(section['opened'])
+        self.assertEqual(section['rows'][0][-1], 2)
+        self.assertEqual(result['verdict'], 'PASS')
+
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
              mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
@@ -398,7 +415,7 @@ class CacheGateTest(unittest.TestCase):
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
             )
-        self.assertEqual(len(plans), 4)
+        self.assertEqual(len(plans), 8)
         self.assertEqual(
             plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
         )
@@ -414,7 +431,7 @@ class CacheGateTest(unittest.TestCase):
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
                  mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
-            self.assertEqual(len(plans), 4)
+            self.assertEqual(len(plans), 8)
         changed["parameters"]["procedure"]["removal_mode"] = "silent"
         with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())

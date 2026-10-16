@@ -18,14 +18,21 @@ def validate_cases(source, *, profile=None):
         implementation = plan['implementation']
         configuration = implementation['configuration']
         parameters = copy.deepcopy(configuration.get('parameters', {}))
+        axes = implementation.get('variant_axes', {}).get(plan['variant_id'])
+        behavior = plan['variant_id']
+        if axes is not None:
+            archive = configuration['data_archives']['entries'][axes['data_archive']]
+            parameters = merge_data(parameters, archive.get('parameters', {}))
+            behavior = axes['variant']
         for variant in configuration.get('variants', []):
-            if variant['id'] == plan['variant_id']:
+            if variant['id'] == behavior:
                 parameters = merge_data(parameters, variant.get('parameters', {}))
         capability = registry().cases[implementation['program']].definition
         frozen = implementation.get('monitoring_query_plan')
         metric_plan = frozen['definition'] if frozen else None
         instances.append(dict(
             id=plan['id'], source=plan['source_path'],
+            **(dict(variant_axes=copy.deepcopy(axes)) if axes is not None else {}),
             parameters=parameters,
             numeric_parameters=implementation['numeric_parameters'][plan['variant_id']],
             stages=[dict(id=stage['id'], action=stage['action'],
