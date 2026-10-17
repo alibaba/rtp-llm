@@ -38,6 +38,15 @@ def requirement(names):
             continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
+        # The pip requirement macro raises at BUILD expansion time when the
+        # package is absent from ITS repo, regardless of which select branch
+        # the lane takes. The ARM torch-cpu lock carries no flash_attn /
+        # flash-attn-3 wheels, so the deferred names must skip the cpu and
+        # arm repo lookups too (the using_cpu/using_arm selects already
+        # exclude flash_attn at the consumer level, so empty is equivalent).
+        deferred_arm_only = name in _CUDA13_ARM_DEFERRED
+        cpu_deps = [] if deferred_arm_only else [requirement_cpu(name)]
+        arm_deps = [] if deferred_arm_only else [requirement_arm(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
@@ -58,8 +67,8 @@ def requirement(names):
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "//conditions:default": [requirement_cpu(name)],
+                "@rtp_llm//:using_arm": arm_deps,
+                "//conditions:default": cpu_deps,
             }),
             visibility = ["//visibility:public"],
         )
