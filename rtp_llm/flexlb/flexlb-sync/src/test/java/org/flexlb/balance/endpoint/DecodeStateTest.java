@@ -1,12 +1,13 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
@@ -184,7 +185,7 @@ class DecodeStateTest {
         response.setLatestFinishedVersion(status.appliedStatusCursor().latestFinishedTaskVersion() + 1);
         status.lock.lock();
         try {
-            return state.calibrate(status.prepareNewStatus(status.freezeStatusResponse(response), null));
+            return state.calibrate(WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

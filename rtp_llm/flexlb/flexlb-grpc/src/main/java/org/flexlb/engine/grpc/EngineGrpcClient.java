@@ -135,8 +135,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    reportSuccessfulCall(response, serviceType, startTime, false, ip, port);
-                    resultFuture.complete(response);
+                    try {
+                        reportSuccessfulCall(response, serviceType, startTime, false, ip, port);
+                    } finally {
+                        resultFuture.complete(response);
+                    }
                 }
 
                 @Override
@@ -190,8 +193,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             Futures.addCallback(listenableFuture, new FutureCallback<R>() {
                 @Override
                 public void onSuccess(R response) {
-                    reportSuccessfulCall(response, serviceType, originalStartTime, true, ip, port);
-                    resultFuture.complete(response);
+                    try {
+                        reportSuccessfulCall(response, serviceType, originalStartTime, true, ip, port);
+                    } finally {
+                        resultFuture.complete(response);
+                    }
                 }
 
                 @Override

@@ -74,6 +74,20 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>test-fixtures</id>
+                        <phase>test-compile</phase>
+                        <goals><goal>test-jar</goal></goals>
+                        <configuration>
+                            <includes><include>org/flexlb/testfixture/**</include></includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
                     <source>21</source>

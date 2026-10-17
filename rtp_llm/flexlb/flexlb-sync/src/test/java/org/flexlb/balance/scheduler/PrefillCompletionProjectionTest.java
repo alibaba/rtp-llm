@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -10,9 +11,9 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -50,18 +51,18 @@ class PrefillCompletionProjectionTest {
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
         try {
-            WorkerStatus worker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+            WorkerStatus worker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
                     RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test"));
             PrefillEndpoint prefill;
             worker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status(1L, Map.of(), Map.of())), null))
+                        WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status(1L, Map.of(), Map.of()))))
                         .endpoint();
             } finally {
                 worker.lock.unlock();
             }
-            WorkerStatus decodeWorker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
+            WorkerStatus decodeWorker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(
                     RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test"));
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
             applyStatus(decode, decodeStatus(1L, Map.of()));
@@ -170,7 +171,7 @@ class PrefillCompletionProjectionTest {
         worker.lock.lock();
         try {
             projection = endpoint.applyPreparedStatus(worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
+                    WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }

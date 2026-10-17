@@ -5,6 +5,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -26,9 +27,15 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PrefillRequestCapacityTest {
+    private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
             PrefillActiveIndex.ordered(16, Comparator.comparingLong(ScheduledRequest::requestId)), () -> { });
+
+    @BeforeEach
+    void workerIsAvailable() {
+        when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
+    }
 
     @Test
     void waitingPreparedAndCommittedRequestsShareOneCount() {
@@ -101,14 +108,14 @@ class PrefillRequestCapacityTest {
         var generation = new EndpointGenerationLifecycle(() -> { });
         var reservation = state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
         try (var handoff = reservation.commit(List.of(first, second), 0L)) { }
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
         assertTrue(enqueue(item(3), 0L));
         assertTrue(state.terminalizeCommittedItem(first));
         assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
         assertTrue(state.terminalizeCommittedItem(second));
         assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.batchAvailability(1).isAvailable());
+        assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
     }
 
     @Test
