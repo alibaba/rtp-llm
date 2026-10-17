@@ -18,7 +18,7 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.schedule.WorkerRetirementCleaner;
+import org.flexlb.sync.schedule.ExpirationCleaner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -415,7 +415,7 @@ class GrpcWorkerStatusRunnerTest {
                 mock(EngineHealthReporter.class), grpc, 30L, cache, Runnable::run).run();
 
         var timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         try {
             for (int attempt = 1; attempt <= 3; attempt++) {
                 var rpc = new CompletableFuture<EngineRpcService.WorkerStatusPB>();
@@ -580,7 +580,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.failedFuture(
                         io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
-        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         for (int failure = 1; failure <= 3; failure++) {
             WorkerStatus.PollLease lease = status.tryBeginStatusPoll(1L);
             assertNotNull(lease);

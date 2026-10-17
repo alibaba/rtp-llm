@@ -34,7 +34,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class WorkerRetirementCleanerTest {
+class ExpirationCleanerTest {
 
     @Test
     void onlyConsecutiveRpcFailuresTriggerRetirement() {
@@ -43,7 +43,7 @@ class WorkerRetirementCleanerTest {
         WorkerStatus status = status("127.0.0.1", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
-        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         cleaner.retireUnavailableWorkers();
         assertTrue(status.isActiveGeneration());
         for (int failures = 1; failures <= 3; failures++) {
@@ -62,7 +62,7 @@ class WorkerRetirementCleanerTest {
         var directory = new WorkerDirectory(mock(EndpointRegistry.class));
         WorkerStatus worker = status("127.0.0.1", 8080);
         directory.currentOrDiscover(RoleType.PREFILL, worker.getIpPort(), () -> worker);
-        var cleaner = new WorkerRetirementCleaner(mock(CacheAwareService.class), directory);
+        var cleaner = new ExpirationCleaner(mock(CacheAwareService.class), directory);
         var emitted = new CountDownLatch(1);
         var line = new AtomicReference<String>();
         var appender = new AppenderBase<ILoggingEvent>() {
@@ -112,7 +112,7 @@ class WorkerRetirementCleanerTest {
             context.registerBean(WorkerDirectory.class, () -> mock(WorkerDirectory.class));
             context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));
             context.registerBean(ScheduledAnnotationBeanPostProcessor.class);
-            context.registerBean(WorkerRetirementCleaner.class);
+            context.registerBean(ExpirationCleaner.class);
             context.refresh();
             var tasks = context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks();
             assertEquals(1, tasks.size());
@@ -158,7 +158,7 @@ class WorkerRetirementCleanerTest {
             return null;
         }).when(firstDetached).retireAndAwait();
 
-        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<?> cleaning = executor.submit(

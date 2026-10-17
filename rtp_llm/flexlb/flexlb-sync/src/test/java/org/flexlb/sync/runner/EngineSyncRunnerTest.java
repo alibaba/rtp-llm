@@ -12,7 +12,7 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.schedule.WorkerRetirementCleaner;
+import org.flexlb.sync.schedule.ExpirationCleaner;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -337,7 +337,7 @@ class EngineSyncRunnerTest {
                 status.lock.unlock();
             }
 
-            new WorkerRetirementCleaner(localKvCacheAwareManager, directory).retireUnavailableWorkers();
+            new ExpirationCleaner(localKvCacheAwareManager, directory).retireUnavailableWorkers();
 
             assertFalse(directory.isCurrentStatus(RoleType.PREFILL, status.getIpPort(), status));
             assertNull(registry.get(RoleType.PREFILL, status.getIpPort()));

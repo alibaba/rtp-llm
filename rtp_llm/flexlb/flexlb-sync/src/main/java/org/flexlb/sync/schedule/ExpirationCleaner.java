@@ -25,7 +25,7 @@ import java.util.Objects;
  * via Spring {@link Scheduled}.
  */
 @Component
-public class WorkerRetirementCleaner {
+public class ExpirationCleaner {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
@@ -33,7 +33,7 @@ public class WorkerRetirementCleaner {
     private final WorkerDirectory workerDirectory;
 
     @Autowired
-    public WorkerRetirementCleaner(
+    public ExpirationCleaner(
             CacheAwareService cacheAwareService,
             WorkerDirectory workerDirectory) {
         this.cacheAwareService = Objects.requireNonNull(
