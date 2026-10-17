@@ -5,7 +5,6 @@
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
-#include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_scaled_mm.h"
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
@@ -30,24 +29,9 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     rtp_ops_m.def(
         "per_token_quant_fp8", &per_token_quant_fp8, py::arg("input"), py::arg("output_q"), py::arg("output_s"));
 
-    // Only available when compiling device code for >= sm100.
+    // NVFP4 mm/quant live in rtp_kernel.nvfp4. Keep the grouped experts
+    // quantizers here; they are not part of that port.
 #if defined(ENABLE_FP4)
-    rtp_ops_m.def("cutlass_scaled_fp4_mm",
-                  &cutlass_scaled_fp4_mm_sm100a_sm120a,
-                  py::arg("out"),
-                  py::arg("a"),
-                  py::arg("b"),
-                  py::arg("a_sf"),
-                  py::arg("b_sf"),
-                  py::arg("alpha"));
-
-    rtp_ops_m.def("scaled_fp4_quant",
-                  &scaled_fp4_quant_sm100a_sm120a,
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("output_sf"),
-                  py::arg("input_sf"));
-
     rtp_ops_m.def("scaled_fp4_experts_quant",
                   &scaled_fp4_experts_quant_sm100a,
                   py::arg("output"),

@@ -18,6 +18,7 @@ from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils import jit_cache_env
 from rtp_llm.utils.util import str_to_bool
 
 PREFILL_ROLE_NAME = "prefill"
@@ -308,6 +309,13 @@ class SeparatedCaseRunner(CaseRunner):
         }
         test_srcdir = os.environ.get("TEST_SRCDIR")
         if test_srcdir:
+            # The gpu_lock launcher copies pip packages out of runfiles into a
+            # stable cache (_JIT_CACHE_PATHS); those entries must shadow the
+            # runfiles below. flashinfer records imported source paths in its
+            # shared workspace's ninja files, and bazel removes the runfiles
+            # tree once this test finishes, so servers importing from runfiles
+            # leave dangling ninja references for every sibling test.
+            stable_prefix = jit_cache_env.backend_pythonpath_prefix()
             flashinfer_packages = [
                 Path(test_srcdir) / f"pip_gpu_cuda13_torch_{package}/site-packages"
                 for package in ("flashinfer_python", "flashinfer_cubin")
@@ -317,10 +325,11 @@ class SeparatedCaseRunner(CaseRunner):
                     inherited = role_env.get(
                         "PYTHONPATH", os.environ.get("PYTHONPATH", "")
                     )
+                    leading = stable_prefix + [
+                        str(path) for path in flashinfer_packages
+                    ]
                     role_env["PYTHONPATH"] = os.pathsep.join(
-                        [*(str(path) for path in flashinfer_packages), inherited]
-                        if inherited
-                        else [str(path) for path in flashinfer_packages]
+                        [*leading, inherited] if inherited else leading
                     )
         frontend_envs = (
             self.create_env_from_args(self.env_args[FRONTEND_ROLE_NAME])
