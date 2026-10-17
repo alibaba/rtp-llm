@@ -3,8 +3,8 @@ import functools
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -19,6 +19,10 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -52,6 +56,43 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+
+def _sm120_inference_device(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> Optional[int]:
+    """Resolve an SM120 inference target even while conversion uses CPU.
+
+    ``force_cpu_load_weights`` and the loader's memory-pressure fallback run
+    post-processing on CPU before moving the result to its final device.  The
+    physical weight layout is a consumer contract, so it must follow that
+    final device rather than the temporary tensor location.
+    """
+    if kernel_weight.is_cuda:
+        return kernel_weight.device.index
+    exported_device = load_config.exported_device
+    if (
+        exported_device is not None
+        and exported_device.get_device_type() == DeviceType.Cuda
+    ):
+        return int(exported_device.get_device_id())
+    return None
+
+
+def _preserve_output_major_fp8_layout(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> bool:
+    """CUTLASS SM120 consumes checkpoint-native ``(N, K)`` weights.
+
+    Applies only when that backend is compiled in (``--config=cuda13_sm120``);
+    otherwise SM120 keeps the DeepGEMM layout.
+    """
+    target_device = _sm120_inference_device(kernel_weight, load_config)
+    return (
+        target_device is not None
+        and is_sm120(target_device)
+        and sm120_blockwise_fp8_available(target_device)
+    )
 
 
 def dequant_weight_split_k(
@@ -861,9 +902,16 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        # Scale encoding and physical matrix layout are separate contracts.
+        # DeepGEMM-disabled legacy backends consume the historical reshaped
+        # layout, while CUTLASS SM120 consumes checkpoint-native (N, K).
+        target_device = _sm120_inference_device(kernel_weight, load_config)
+        preserve_output_major = self.kernel.name not in (
+            W.moe_w1,
+            W.moe_w2,
+        ) and _preserve_output_major_fp8_layout(kernel_weight, load_config)
+        use_e8m0 = is_deep_gemm_e8m0_used(target_device) and not preserve_output_major
+        if not use_e8m0 and not preserve_output_major:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -872,7 +920,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0 and not preserve_output_major:
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
                     if scale_weight.dim() == 2
@@ -894,7 +942,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # UE8M0 representation directly from source weights.  Legacy/pre-quantized
             # inputs still arrive with floating-point block scales and require
             # the old dequantize/requantize conversion here.
-            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
+            if use_e8m0 and scale_weight.dtype != torch.int32:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -1015,8 +1063,14 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        preserve_output_major = is_dense_weight and _preserve_output_major_fp8_layout(
+            kernel[self.kernel.name], load_config
+        )
         direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+            self.scale is not None
+            and is_dense_weight
+            and is_deep_gemm_e8m0_used()
+            and not preserve_output_major
         )
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(
@@ -1053,14 +1107,21 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
+        # Generic BF16 descriptors produce input-major [K, N], including
+        # composite QKV and FFN merges. Both dense FP8 backends consume [N, K].
+        transpose_kernel = quant_kernel.dim() == 2
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2 and not direct_ue8m0:
+        elif transpose_kernel and not direct_ue8m0:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
+            transpose_scale = (
+                scale.dim() == 2
+                and not direct_ue8m0
+            )
+            scale = scale.T if transpose_scale else scale
             # Packed UE8M0 scales intentionally use a non-contiguous TMA
             # layout (stride(-2) == 1).  Do not normalize that layout here.
             scale = scale.to(device) if direct_ue8m0 else scale.contiguous().to(device)
