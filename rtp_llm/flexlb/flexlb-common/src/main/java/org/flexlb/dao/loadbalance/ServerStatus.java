@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.CommonUtils;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -49,6 +51,23 @@ public class ServerStatus {
 
     @JsonProperty("message")
     private String message;
+
+    public static ServerStatus forWorker(
+            RoleType role,
+            long requestId,
+            WorkerStatus.TopologySnapshot topology,
+            WorkerStatus.EngineObservation observation) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(role);
+        result.setRequestId(requestId);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setDpRank(observation.dpRank());
+        return result;
+    }
 
     /**
      * Returns an independent copy, or null when the source is null.

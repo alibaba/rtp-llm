@@ -21,23 +21,10 @@ public final class DeliveryTestSupport {
         return service;
     }
 
-    public static DeliveryDispatcher route(
-            DeliveryMetricsReporter reporter, DecodeResources.AdmissionCapacity capacity) {
+    public static DeliveryDispatcher route(DeliveryMetricsReporter reporter) {
         var config = SchedulingTestConfig.newConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        return new DeliveryDispatcher(null, service(config), null, reporter, null);
-    }
-
-    /** Config-only fixture used by projection tests; execution is owned by each test's Runtime. */
-    public static DeliveryDispatcher batch(
-            java.util.function.Supplier<? extends CapacityBoundary.Attempt<?>> unused,
-            java.util.function.LongSupplier unusedIds,
-            DeliveryMetricsReporter reporter,
-            DecodeResources.AdmissionCapacity capacity,
-            int maxInflight) {
-        var config = SchedulingTestConfig.batchConfig();
-        config.getDispatcher().setMaxInflightPerPrefillWorker(maxInflight);
-        return new DeliveryDispatcher(null, service(config), null, reporter, null);
+        return new DeliveryDispatcher(null, service(config), reporter);
     }
 
     public static DeliveryDispatcher parked(CapacityBoundary boundary) {
@@ -61,9 +48,7 @@ public final class DeliveryTestSupport {
             super(
                     null,
                     service(SchedulingTestConfig.newConfig()),
-                    null,
-                    new DeliveryMetricsReporter(null),
-                    null);
+                    new DeliveryMetricsReporter(null));
         }
 
         CapacityBoundary selectBoundary(

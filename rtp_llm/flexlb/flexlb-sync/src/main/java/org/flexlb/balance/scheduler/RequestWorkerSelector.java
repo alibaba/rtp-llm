@@ -5,7 +5,6 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -19,7 +18,6 @@ import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -62,26 +60,28 @@ public class RequestWorkerSelector {
                     "trafficPolicy",
                     policyGroup);
         }
-        String group = policyGroup;
-        try (PinnedRouting routing = new PinnedRouting(new ArrayList<>(requiredRoles.size()))) {
+        RequestRoute routing = new RequestRoute(context);
+        boolean complete = false;
+        Throwable primary = null;
+        try {
+            String group = policyGroup;
             if (request.getSelectedVit() != null) {
-                WorkerAssignment vit =
+                ServerStatus vit =
                         vitCacheSelector == null || !requiredRoles.contains(RoleType.VIT)
                                 ? null
-                                : vitCacheSelector.selectPinned(context, policyGroup);
+                                : vitCacheSelector.selectPinned(context, policyGroup, routing);
                 if (vit == null) {
                     return PlacementResult.rejected(
                             Response.error(StrategyErrorType.VIT_ROUTE_STALE));
                 }
-                routing.selections().add(vit);
-                group = vit.group();
+                group = vit.getGroup();
             }
             for (RoleType role : requiredRoles) {
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
-                PlacementResult<WorkerAssignment, RoleType> result =
-                        selectRole(request, metadata, role, group);
+                PlacementResult<ServerStatus, RoleType> result =
+                        selectRole(request, metadata, role, group, routing);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
@@ -100,22 +100,26 @@ public class RequestWorkerSelector {
                                         "unexpected selector result: " + result.status());
                     };
                 }
-                WorkerAssignment selection = result.value();
-                try {
-                    routing.selections().add(selection);
-                } catch (RuntimeException | Error appendFailure) {
-                    Failures.append(appendFailure, Failures.close(selection));
-                    throw appendFailure;
-                }
+                ServerStatus selection = result.value();
                 if (StringUtils.isBlank(policyGroup)) {
-                    group = selection.group();
+                    group = selection.getGroup();
                 }
             }
-            var result =
-                    PlacementResult.<RequestRoute, PlacementKey>success(
-                            RequestRoute.prepare(context, routing.selections()));
-            routing.selections().clear(); // The completed result now owns both stateful selections.
+            var result = PlacementResult.<RequestRoute, PlacementKey>success(routing.prepare());
+            complete = true;
             return result;
+        } catch (RuntimeException | Error failure) {
+            primary = failure;
+            throw failure;
+        } finally {
+            if (!complete) {
+                Throwable cleanup = Failures.close(routing);
+                if (primary != null) {
+                    Failures.append(primary, cleanup);
+                } else {
+                    Failures.rethrow(cleanup, "route selection cleanup failed");
+                }
+            }
         }
     }
 
@@ -159,34 +163,27 @@ public class RequestWorkerSelector {
                         .orElse(null);
     }
 
-    private PlacementResult<WorkerAssignment, RoleType> selectRole(
-            Request request, SchedulingMetadata metadata, RoleType role, String group) {
+    private PlacementResult<ServerStatus, RoleType> selectRole(
+            Request request,
+            SchedulingMetadata metadata,
+            RoleType role,
+            String group,
+            RequestRoute routing) {
         return switch (role) {
-            case PREFILL, PDFUSION -> prefillSelector.select(request, metadata, role, group);
-            case DECODE -> decodeSelector.select(request, metadata, group);
+            case PREFILL, PDFUSION ->
+                    prefillSelector.select(request, metadata, role, group, routing);
+            case DECODE -> decodeSelector.select(request, metadata, group, routing);
             case VIT ->
                     selectedOrBlocked(
-                            vitSelector.select(request.getRequestId(), role, group), role);
+                            vitSelector.select(request.getRequestId(), role, group, routing), role);
             case FRONTEND ->
                     throw new IllegalArgumentException(
                             "Endpoint selection is not supported for FRONTEND");
         };
     }
 
-    private static PlacementResult<WorkerAssignment, RoleType> selectedOrBlocked(
-            WorkerAssignment selected, RoleType role) {
+    private static PlacementResult<ServerStatus, RoleType> selectedOrBlocked(
+            ServerStatus selected, RoleType role) {
         return selected == null ? PlacementResult.blocked(role) : PlacementResult.success(selected);
-    }
-
-    /** Owns selected generation pins until RequestRoute takes them or selection exits. */
-    private record PinnedRouting(List<WorkerAssignment> selections) implements AutoCloseable {
-        @Override
-        public void close() {
-            Throwable failure = null;
-            for (int index = selections.size() - 1; index >= 0; index--) {
-                failure = Failures.append(failure, Failures.close(selections.get(index)));
-            }
-            Failures.rethrow(failure, "route selection cleanup failed");
-        }
     }
 }

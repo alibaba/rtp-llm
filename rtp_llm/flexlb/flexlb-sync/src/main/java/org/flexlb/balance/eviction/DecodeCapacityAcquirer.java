@@ -9,7 +9,7 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.AdmissionHandle;
-import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.QueuedRequestScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
@@ -108,7 +108,7 @@ public class DecodeCapacityAcquirer {
 
     private final RequestSchedulerReporter reporter;
     private volatile boolean shutdown;
-    private final EngineGrpcClient engineClient;
+    private final DeliveryDispatcher dispatcher;
     private final RequestRepository requests;
     private final RequestTaskScheduler runtime;
     private final AtomicLong tokenSequence = new AtomicLong(1);
@@ -118,14 +118,14 @@ public class DecodeCapacityAcquirer {
 
     @Autowired
     public DecodeCapacityAcquirer(
-            EngineGrpcClient engineClient,
+            DeliveryDispatcher dispatcher,
             RequestRepository requests,
             RequestTaskScheduler runtime,
             RequestSchedulerReporter reporter,
             ConfigService configService,
             AdmissionCapacity capacity) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.engineClient = Objects.requireNonNull(engineClient, "engineClient");
+        this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.requests = Objects.requireNonNull(requests, "requests");
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.capacity = Objects.requireNonNull(capacity, "capacity");
@@ -233,7 +233,8 @@ public class DecodeCapacityAcquirer {
                                     capability.claims.stream()
                                             .map(owned -> owned.acknowledgement)
                                             .toArray(CompletableFuture[]::new))
-                            .thenCompose(ignored -> handleAcknowledgements(context, capability));
+                            .thenCompose(
+                                    ignored -> coordinateAcknowledgements(context, capability));
             return protocol.handle(
                     (result, failure) -> {
                         if (failure != null) {
@@ -249,8 +250,40 @@ public class DecodeCapacityAcquirer {
         }
     }
 
-    private CompletableFuture<PreemptionResult> handleAcknowledgements(
+    /** Freeze completion versus timeout at the ACK boundary, before coordination can queue. */
+    private CompletableFuture<PreemptionResult> coordinateAcknowledgements(
             RequestContext context, AttemptCapability capability) {
+        var resolutions =
+                capability.claims.stream()
+                        .map(
+                                owned ->
+                                        runtime.signals()
+                                                .preemption(owned.claim)
+                                                .toCompletableFuture())
+                        .toArray(CompletableFuture<?>[]::new);
+        var completed = CompletableFuture.allOf(resolutions);
+        var settlement = completed.handle((ignored, failure) -> capability.allVictimsResolved());
+        // Detach the attempt's observer when this wait ends; victim signals remain authoritative.
+        settlement.whenComplete((ignored, failure) -> completed.cancel(false));
+        if (!settlement.isDone()) {
+            var deadline =
+                    runtime.scheduleTimeout(
+                            () -> settlement.complete(false),
+                            Math.max(1L, capability.command.preemptionTimeoutMs()));
+            settlement.whenComplete((ignored, failure) -> deadline.cancel());
+        }
+        // Only signal observation and timer registration run on the ACK thread.
+        return CompletableFuture.completedFuture(null)
+                .thenComposeAsync(
+                        ignored -> handleAcknowledgements(context, capability, settlement),
+                        work -> runtime.executeRequestWork(context, work))
+                .whenComplete((ignored, failure) -> settlement.cancel(false));
+    }
+
+    private CompletableFuture<PreemptionResult> handleAcknowledgements(
+            RequestContext context,
+            AttemptCapability capability,
+            CompletableFuture<Boolean> settlement) {
         PreemptionCommand command = capability.command;
         // A transport-unknown ACK is not a negative acknowledgement: the
         // Prefill may have installed the intent before the reply was lost.
@@ -331,36 +364,27 @@ public class DecodeCapacityAcquirer {
         }
 
         if (pendingResolutions.isEmpty()) {
+            settlement.complete(capability.allVictimsResolved());
             return CompletableFuture.completedFuture(
-                    capability.finish(hasNotFound, capability.allVictimsResolved()));
+                    capability.finish(hasNotFound, settlement.getNow(false)));
         }
-        // The completion budget begins only after the ACK phase has ended; a
-        // 40ms ACK followed by a 100ms cleanup therefore gets the full cleanup
-        // window rather than sharing one 50ms deadline.
-        CompletableFuture<?>[] resolutions =
-                pendingResolutions.stream()
-                        .map(
-                                pending ->
-                                        runtime.signals()
-                                                .preemption(pending.claim)
-                                                .handle((resolution, failure) -> null)
-                                                .toCompletableFuture())
-                        .toArray(CompletableFuture<?>[]::new);
+        // Keep early rejection when the waited victims resolve but a NOT_FOUND victim has not.
+        if (pendingResolutions.size() != capability.claims.size()) {
+            var pending =
+                    CompletableFuture.allOf(
+                            pendingResolutions.stream()
+                                    .map(
+                                            owned ->
+                                                    runtime.signals()
+                                                            .preemption(owned.claim)
+                                                            .toCompletableFuture())
+                                    .toArray(CompletableFuture<?>[]::new));
+            pending.whenComplete(
+                    (ignored, failure) -> settlement.complete(capability.allVictimsResolved()));
+            settlement.whenComplete((ignored, failure) -> pending.cancel(false));
+        }
         final boolean ackNotFound = hasNotFound;
-        // Only this aggregate wait expires. Canonical request resolutions remain
-        // live so late worker facts can still settle their exact claims.
-        CompletableFuture<Boolean> settlement =
-                CompletableFuture.allOf(resolutions)
-                        .handle((ignored, failure) -> capability.allVictimsResolved());
-        // The timer only expires the wait. Endpoint/request settlement runs in the
-        // background request pool and remains part of shutdown drain.
-        RequestTaskScheduler.Cancellation deadline =
-                runtime.scheduleTimeout(
-                        () -> settlement.complete(false),
-                        Math.max(1, command.preemptionTimeoutMs()));
-        settlement.whenComplete((unused, failure) -> deadline.cancel());
-        // First completion fixes eligibility, even if the deadline fires before
-        // this continuation is registered. Late facts still settle victim resources.
+        // Late facts still settle victims; they cannot change the frozen admission result.
         return settlement.thenApplyAsync(
                 resolved -> capability.finish(ackNotFound, resolved),
                 work -> runtime.executeRequestWork(context, work));
@@ -369,16 +393,8 @@ public class DecodeCapacityAcquirer {
     private CompletableFuture<EngineGrpcClient.CancelReply> cancel(
             ClaimedVictim victim, long timeoutMs) {
         try {
-            var target = victim.claim.cancelTarget();
-            if (target == null) {
-                return CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED);
-            }
             CompletableFuture<EngineGrpcClient.CancelReply> stage =
-                    engineClient.cancelAsync(
-                            target.prefillIp(),
-                            target.prefillGrpcPort(),
-                            CancelReason.PRIORITY_PREEMPTED.toRequest(victim.requestId()),
-                            timeoutMs);
+                    dispatcher.preempt(victim.claim, timeoutMs);
             if (stage == null) {
                 return CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED);
             }

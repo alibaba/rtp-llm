@@ -49,13 +49,7 @@ class PlacementConfigurationTest {
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         var batchDispatcher =
-                spy(
-                        new DeliveryDispatcher(
-                                null,
-                                service,
-                                null,
-                                mock(DeliveryMetricsReporter.class),
-                                environment));
+                spy(new DeliveryDispatcher(null, service, mock(DeliveryMetricsReporter.class)));
         RequestRepository repository;
         try (var spring = new AnnotationConfigApplicationContext()) {
             spring.setEnvironment(environment);

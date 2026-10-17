@@ -7,7 +7,6 @@ import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
@@ -543,15 +542,12 @@ public final class EndpointTestSupport {
 
     static DeliveryDispatcher routeStrategy(TestRequestRuntime runtime) {
         DeliveryDispatcher route =
-                org.flexlb.balance.scheduler.DeliveryTestSupport.route(
-                        NOOP_TELEMETRY,
-                        SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()));
+                org.flexlb.balance.scheduler.DeliveryTestSupport.route(NOOP_TELEMETRY);
         return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
     }
 
     static DeliveryDispatcher liveRouteStrategy(TestRequestRuntime runtime) {
-        return org.flexlb.balance.scheduler.DeliveryTestSupport.route(
-                NOOP_TELEMETRY, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()));
+        return org.flexlb.balance.scheduler.DeliveryTestSupport.route(NOOP_TELEMETRY);
     }
 
     private static final CapacityBoundary PARKED_BOUNDARY =

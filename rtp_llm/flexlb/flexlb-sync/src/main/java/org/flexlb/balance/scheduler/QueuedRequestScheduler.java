@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
@@ -934,7 +935,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                             decodeAdmissionCapacity)
                                     .handle();
             if (routing.decodeEp() != null && plan.pendingDecodeRollback == null) {
-                return PlacementResult.blocked(routing.decodePlacementKey());
+                return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
             }
         }
         RequestRoute route = RequestRoute.create(context, routing, plan.pendingDecodeRollback);
@@ -945,7 +946,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         PlacementResult<RequestRoute, PlacementKey> result =
                 switch (this.commitRoute(route, new QueuePublication(plan, route))) {
                     case SUCCESS -> PlacementResult.success(route);
-                    case BLOCKED -> PlacementResult.blocked(routing.prefillPlacementKey());
+                    case BLOCKED -> PlacementResult.blocked(routing.placementKey(RoleType.PREFILL));
                     case CLOSED -> PlacementResult.closed();
                     case REJECTED ->
                             throw new IllegalStateException(

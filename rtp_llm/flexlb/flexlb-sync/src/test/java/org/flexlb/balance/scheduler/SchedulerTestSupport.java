@@ -34,9 +34,7 @@ public final class SchedulerTestSupport {
                 new DeliveryDispatcher(
                         null,
                         DeliveryTestSupport.service(SchedulingTestConfig.newConfig()),
-                        null,
-                        new DeliveryMetricsReporter(null),
-                        null));
+                        new DeliveryMetricsReporter(null)));
     }
 
     static DeliveryDispatcher dispatcher(SchedulerRuntime runtime) {
@@ -416,7 +414,6 @@ public final class SchedulerTestSupport {
                         org.flexlb.config.ConfigService.class,
                         org.mockito.AdditionalAnswers.delegatesTo(service));
         org.mockito.Mockito.doReturn(config).when(dispatcherService).loadBalanceConfig();
-        return new DeliveryDispatcher(
-                client, dispatcherService, null, new DeliveryMetricsReporter(null), null);
+        return new DeliveryDispatcher(client, dispatcherService, new DeliveryMetricsReporter(null));
     }
 }

@@ -247,7 +247,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                         false),
                                 null);
                     }
-                    case WAIT_PREEMPTION -> {}
                 }
             }
             return requests.getRequestState(ctx.data().getRequestId(), batchId);
@@ -829,12 +828,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             var after = update.after();
             var delivery = after.delivery();
-            if (delivery != null
-                    && delivery.abandonment() != null
-                    && (update.before().delivery() == null
-                            || update.before().delivery().abandonment() == null)) {
-                runtime.startDeliveryCleanup(delivery.identity());
-            }
             if (evidence instanceof CleanupAcknowledgement ack
                     && after.cancellation() != null
                     && (ack.kind() == CancelEvidenceKind.CLEANED
@@ -1004,8 +997,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (route == null) {
                 return Optional.empty();
             }
-            var target =
-                    new CancelTarget(route.prefill().getServerIp(), route.prefill().getGrpcPort());
+            var prefill = route.prefill();
+            var target = new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
             var claim = ctx.beginPreemption(reservation, attempt, target);
             return claim instanceof Granted<PreemptionRegistration> granted
                     ? Optional.of(granted.value())
@@ -1316,7 +1309,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                             Failures.run(
                                                     failure,
                                                     () ->
-                                                            runtime.startDeliveryCleanup(
+                                                            runtime.dispatcher.stop(
                                                                     delivery.identity()));
                                 }
                                 ctx.completeClose(
@@ -1553,14 +1546,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                                     ctx.data().getRequestId(),
                                                                     VictimResolution.Outcome
                                                                             .REQUEST_END)));
-                }
-                if (remaining.delivery() != null && remaining.delivery().abandonment() != null) {
-                    notification =
-                            Failures.run(
-                                    notification,
-                                    () ->
-                                            runtime.startDeliveryCleanup(
-                                                    remaining.delivery().identity()));
                 }
             }
             failure = Failures.append(failure, notification);

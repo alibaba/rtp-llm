@@ -62,7 +62,8 @@ class RoutePublicationTest {
                                     e ->
                                             e instanceof PreparationFailure evidence
                                                     && evidence.route() == failed
-                                                    && evidence.cause() == failure));
+                                                    && evidence.detail()
+                                                            .equals(failure.getMessage())));
             verify(f.owner)
                     .onDeliveryEvidence(
                             eq(f.claims.getFirst()),

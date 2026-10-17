@@ -81,8 +81,7 @@ public final class ContextResult {
         GLOBAL_QUEUE,
         WORKER_QUEUE,
         REMOTE,
-        WAIT_PLACEMENT,
-        WAIT_PREEMPTION
+        WAIT_PLACEMENT
     }
 
     public enum CancelEvidenceKind {
@@ -208,13 +207,8 @@ public final class ContextResult {
             implements DeliveryEvidence {}
 
     public record PreparationFailure(
-            DeliveryClaim delivery, RequestRoute route, Throwable cause, String detail, long nowMs)
-            implements DeliveryEvidence {
-        public PreparationFailure(
-                DeliveryClaim delivery, RequestRoute route, String detail, long nowMs) {
-            this(delivery, route, null, detail, nowMs);
-        }
-    }
+            DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
+            implements DeliveryEvidence {}
 
     public interface GrantValue {
         RequestContext owner();
@@ -348,56 +342,7 @@ public final class ContextResult {
             @lombok.experimental.Delegate SnapshotFacts facts,
             long lastWorkerAtMs,
             long updatedAtMs,
-            long inactivityExpiresAtMs) {
-        public Snapshot(
-                Identity key,
-                long createdAtMs,
-                Phase phase,
-                RequestRoute route,
-                PlacementFacts placement,
-                DeliveryFacts delivery,
-                EngineFacts engine,
-                PreemptionFacts preemption,
-                CancellationFacts cancellation,
-                End outcome,
-                EndEvidence pendingEnd,
-                ResponseSelection selectedResponse,
-                CloseFacts close,
-                ExpirationTimer.Plan deadlines,
-                RequestState terminalRecord,
-                long lastWorkerAtMs,
-                long updatedAtMs,
-                boolean deliveryReleasable,
-                boolean preparedDelivery,
-                boolean localEndEligible,
-                boolean frontendCancelEligible,
-                long inactivityExpiresAtMs) {
-            this(
-                    new SnapshotFacts(
-                            key,
-                            createdAtMs,
-                            phase,
-                            route,
-                            placement,
-                            delivery,
-                            engine,
-                            preemption,
-                            cancellation,
-                            outcome,
-                            pendingEnd,
-                            selectedResponse,
-                            close,
-                            deadlines,
-                            terminalRecord,
-                            deliveryReleasable,
-                            preparedDelivery,
-                            localEndEligible,
-                            frontendCancelEligible),
-                    lastWorkerAtMs,
-                    updatedAtMs,
-                    inactivityExpiresAtMs);
-        }
-    }
+            long inactivityExpiresAtMs) {}
 
     public record Update(UpdateKind kind, Snapshot before, Snapshot after) {
         public Update {

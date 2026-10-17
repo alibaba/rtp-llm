@@ -60,7 +60,8 @@ class CostBasedPrefillStrategyBlockerTest {
                     var request = Request.builder().requestId(1L).seqLen(100L).build();
 
                     var result =
-                            strategy.select(
+                            StrategyTestSupport.select(
+                                    strategy,
                                     request,
                                     SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                                     role,

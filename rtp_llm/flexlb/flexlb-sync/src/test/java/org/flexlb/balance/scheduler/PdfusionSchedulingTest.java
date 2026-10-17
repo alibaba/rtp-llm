@@ -90,7 +90,7 @@ class PdfusionSchedulingTest {
                         call ->
                                 java.util.concurrent.CompletableFuture.completedFuture(
                                         LinearDeliveryFixture.ack(call.getArgument(2))));
-        DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, reporter);
         EndpointRegistry endpoints =
                 new EndpointRegistry(
                         service,

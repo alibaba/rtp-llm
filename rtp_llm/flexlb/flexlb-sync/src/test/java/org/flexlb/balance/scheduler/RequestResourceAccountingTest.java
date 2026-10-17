@@ -623,10 +623,7 @@ class RequestResourceAccountingTest {
                             service,
                             SchedulerTestSupport.repository(projector),
                             reporter,
-                            DeliveryTestSupport.route(
-                                    reporter,
-                                    SchedulingTestConfig.capacity(
-                                            SchedulingTestConfig.newConfig())),
+                            DeliveryTestSupport.route(reporter),
                             new PlacementAvailability());
             runtime = requests.runtime;
             org.springframework.test.util.ReflectionTestUtils.setField(

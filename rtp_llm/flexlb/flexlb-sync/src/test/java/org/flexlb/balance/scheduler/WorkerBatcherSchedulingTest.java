@@ -479,7 +479,10 @@ class WorkerBatcherSchedulingTest {
                                         e ->
                                                 e instanceof ContextResult.PreparationFailure failed
                                                         && failed.route() == request
-                                                        && failed.cause() == admissionFailure));
+                                                        && failed.detail()
+                                                                .equals(
+                                                                        admissionFailure
+                                                                                .getMessage())));
             }
             assertEquals(0, state.progress().queueDepth());
             assertTrue(state.retireGenerationOwnership().ownedItems().isEmpty());
@@ -530,7 +533,8 @@ class WorkerBatcherSchedulingTest {
                                     e ->
                                             e instanceof ContextResult.PreparationFailure failed
                                                     && failed.route() == request
-                                                    && failed.cause() == failure));
+                                                    && failed.detail()
+                                                            .equals(failure.getMessage())));
             verify(endpoint, times(1)).signal(PrefillEndpoint.Signal.PLACEMENT);
             assertEquals(0, state.progress().queueDepth());
         } finally {

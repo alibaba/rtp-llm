@@ -711,7 +711,6 @@ public final class WorkerBatcher {
                                                                         .PreparationFailure(
                                                                         null,
                                                                         member.route(),
-                                                                        cause,
                                                                         String.valueOf(
                                                                                 cause.getMessage()),
                                                                         System
@@ -760,7 +759,6 @@ public final class WorkerBatcher {
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
-                                            failure,
                                             String.valueOf(failure.getMessage()),
                                             System.currentTimeMillis()));
                 } catch (Throwable ownerFailure) {
@@ -930,7 +928,6 @@ public final class WorkerBatcher {
                                 new ContextResult.PreparationFailure(
                                         null,
                                         item,
-                                        failure.cause(),
                                         String.valueOf(failure.cause().getMessage()),
                                         System.currentTimeMillis()));
             }

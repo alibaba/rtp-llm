@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -76,8 +77,12 @@ public class CostBasedPrefillStrategy {
                 affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
     }
 
-    public PlacementResult<WorkerAssignment, RoleType> select(
-            Request request, SchedulingMetadata metadata, RoleType roleType, String group) {
+    public PlacementResult<ServerStatus, RoleType> select(
+            Request request,
+            SchedulingMetadata metadata,
+            RoleType roleType,
+            String group,
+            RequestRoute route) {
         long requestId = request.getRequestId();
         long seqLen = request.getSeqLen();
 
@@ -149,8 +154,8 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
         long selectedTtft = survivors.projectedTtftMs(selectedIndex);
-        WorkerAssignment assignment =
-                buildWorkerAssignment(
+        ServerStatus assignment =
+                buildServerStatus(
                         best,
                         roleType,
                         requestId,
@@ -158,26 +163,21 @@ public class CostBasedPrefillStrategy {
                         selectedPrefillMs,
                         bestCacheHit,
                         survivors.ownershipVersion(selectedIndex),
-                        selectedPin);
-        try {
-            if (selectedTtft >= 0L) {
-                reportSelectedEstimates(roleType, best, selectedTtft, selectedPrefillMs);
-            }
-            cacheMetricsReporter.reportCacheHitMetrics(
-                    roleType, bestCacheHit, seqLen > 0 ? bestCacheHit / (double) seqLen : 0.0);
-            cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(
-                    roleType, survivors.routingCacheMatchTokens(selectedIndex), seqLen);
-            cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(
-                    roleType, survivors.maximumRoutingCacheMatchTokens);
-            return PlacementResult.success(assignment);
-        } catch (Throwable failure) {
-            try (assignment) {
-                throw failure;
-            }
+                        selectedPin,
+                        route);
+        if (selectedTtft >= 0L) {
+            reportSelectedEstimates(roleType, best, selectedTtft, selectedPrefillMs);
         }
+        cacheMetricsReporter.reportCacheHitMetrics(
+                roleType, bestCacheHit, seqLen > 0 ? bestCacheHit / (double) seqLen : 0.0);
+        cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(
+                roleType, survivors.routingCacheMatchTokens(selectedIndex), seqLen);
+        cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(
+                roleType, survivors.maximumRoutingCacheMatchTokens);
+        return PlacementResult.success(assignment);
     }
 
-    private static PlacementResult<WorkerAssignment, RoleType> classifyAdmissionFailure(
+    private static PlacementResult<ServerStatus, RoleType> classifyAdmissionFailure(
             List<EndpointRegistry.PrefillRoutingEntry> directory,
             int priority,
             RoleType role,
@@ -234,7 +234,7 @@ public class CostBasedPrefillStrategy {
         return AdmissionRejectReason.RESOURCE_EXHAUSTED;
     }
 
-    private static PlacementResult<WorkerAssignment, RoleType> blockedWithDiagnostics(
+    private static PlacementResult<ServerStatus, RoleType> blockedWithDiagnostics(
             Response failure, RoleType role, int workerCount, Map<String, ?> details) {
         return PlacementResult.blocked(
                 role,
@@ -547,7 +547,7 @@ public class CostBasedPrefillStrategy {
         }
     }
 
-    private WorkerAssignment buildWorkerAssignment(
+    private ServerStatus buildServerStatus(
             PrefillEndpoint ep,
             RoleType roleType,
             long requestId,
@@ -555,7 +555,8 @@ public class CostBasedPrefillStrategy {
             long selectedPrefillMs,
             long bestCacheHit,
             long placementVersion,
-            WorkerEndpoint.GenerationPin selectedPin) {
+            WorkerEndpoint.GenerationPin selectedPin,
+            RequestRoute route) {
         try {
             // Populate DebugInfo so RequestRoute.hitCache() can read
             // hitCacheLen for batch metrics.
@@ -568,15 +569,14 @@ public class CostBasedPrefillStrategy {
             WorkerStatus workerStatus = ep.getStatus();
             WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
             WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
-            ServerStatus result =
-                    WorkerAssignment.workerMetadata(roleType, requestId, topology, status);
+            ServerStatus result = ServerStatus.forWorker(roleType, requestId, topology, status);
             if (projectedTtftMs >= 0L) {
                 result.setPrefillTime(projectedTtftMs);
             }
             result.setDebugInfo(debugInfo);
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
             selectedPin = null;
-            return WorkerAssignment.prefill(ownedPin, result, selectedPrefillMs, placementVersion);
+            return route.add(ownedPin, result, selectedPrefillMs, placementVersion);
         } finally {
             if (selectedPin != null) {
                 selectedPin.close();

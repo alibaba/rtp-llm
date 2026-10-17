@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -192,14 +191,18 @@ class RequestWorkerSelectorTest {
         DecodeResources.ReservationHandle reservation =
                 new DecodeResources.ReservationHandle(1L, 7L, 2L);
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
         when(decodeSelector.select(
-                        context.data().getRequest(), context.data().getSchedulingMetadata(), "g1"))
-                .thenReturn(PlacementResult.success(decode.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, decode));
         var capture = stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((PrefillEndpoint) prefill.endpoint)
                         .reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
@@ -261,14 +264,18 @@ class RequestWorkerSelectorTest {
         DecodeResources.ReservationHandle reservation =
                 new DecodeResources.ReservationHandle(1L, 8L, 2L);
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
         when(decodeSelector.select(
-                        context.data().getRequest(), context.data().getSchedulingMetadata(), "g1"))
-                .thenReturn(PlacementResult.success(decode.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, decode));
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint)
                         .tryReserveQueuedRequest(
@@ -289,10 +296,11 @@ class RequestWorkerSelectorTest {
                 scheduler(router, context).submit(context).join().getCode());
         verify(prefillSelector)
                 .select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null);
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
         verify((DecodeEndpoint) decode.endpoint)
                 .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         verify(prefill.pin).close();
@@ -305,13 +313,14 @@ class RequestWorkerSelectorTest {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         RequestContext context = directContext(81L);
         SelectionFixture selected = selection(RoleType.PREFILL, 81L, "p", 8001, "g1");
-        when(selected.selection.prefillWorkMs()).thenReturn(0L);
+        selected.status.setPrefillTime(0L);
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(selected.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, selected));
         PrefillEndpoint endpoint = (PrefillEndpoint) selected.endpoint;
         long committedAtMs = System.currentTimeMillis();
         stubRouteCommit(
@@ -351,16 +360,18 @@ class RequestWorkerSelectorTest {
             SelectionFixture decode = selection(RoleType.DECODE, 9L, "d", 8002, "g1");
             var reservation = new DecodeResources.ReservationHandle(1L, 9L, 2L);
             when(prefillSelector.select(
-                            context.data().getRequest(),
-                            context.data().getSchedulingMetadata(),
-                            RoleType.PREFILL,
-                            null))
-                    .thenReturn(PlacementResult.success(prefill.selection));
+                            org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                            org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                            org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                            org.mockito.ArgumentMatchers.eq(null),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                    .thenAnswer(call -> selected(call, prefill));
             when(decodeSelector.select(
-                            context.data().getRequest(),
-                            context.data().getSchedulingMetadata(),
-                            "g1"))
-                    .thenReturn(PlacementResult.success(decode.selection));
+                            org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                            org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                            org.mockito.ArgumentMatchers.eq("g1"),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                    .thenAnswer(call -> selected(call, decode));
             stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
             when(((PrefillEndpoint) prefill.endpoint)
                             .reserveUnqueuedRoute(eq(prefill.pin), any(RequestRoute.class), eq(1L)))
@@ -438,10 +449,11 @@ class RequestWorkerSelectorTest {
                             ? new AssertionError("selection failed")
                             : new IllegalStateException("selection failed");
             when(prefillSelector.select(
-                            context.data().getRequest(),
-                            context.data().getSchedulingMetadata(),
-                            RoleType.PREFILL,
-                            null))
+                            org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                            org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                            org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                            org.mockito.ArgumentMatchers.eq(null),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                     .thenThrow(failure);
             if (fatal) {
                 assertEquals(
@@ -551,9 +563,7 @@ class RequestWorkerSelectorTest {
         org.mockito.Mockito.doReturn(PlacementResult.Status.SUCCESS)
                 .when(scheduler)
                 .commitRoute(any(), any());
-        try (var route =
-                        RequestRoute.prepare(
-                                context, List.of(prefill.selection(), selectedDecode.selection()));
+        try (var route = selectedRoute(context, prefill, selectedDecode);
                 var plan = RequestProtocolTestSupport.plan(context, route)) {
             var placement = scheduler.enqueueRoute(plan);
             assertEquals(PlacementResult.Status.SUCCESS, placement.status());
@@ -599,9 +609,7 @@ class RequestWorkerSelectorTest {
                 .when(decode)
                 .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
 
-        try (var route =
-                RequestRoute.prepare(
-                        context, List.of(prefill.selection(), selectedDecode.selection()))) {
+        try (var route = selectedRoute(context, prefill, selectedDecode)) {
             var actual =
                     assertThrows(
                             IllegalStateException.class,
@@ -629,7 +637,7 @@ class RequestWorkerSelectorTest {
         var endpoint = (DecodeEndpoint) decode.endpoint();
         var reservation = new DecodeResources.ReservationHandle(1L, 703L, 1L);
         var cleanupFailure = new IllegalStateException("pin cleanup failed after publication");
-        var route = RequestRoute.prepare(context, List.of(prefill.selection(), decode.selection()));
+        var route = selectedRoute(context, prefill, decode);
         var scheduler = queueScheduler(context);
         var plan = RequestProtocolTestSupport.plan(context, route);
         when(endpoint.markQueued(decode.pin(), reservation))
@@ -660,7 +668,7 @@ class RequestWorkerSelectorTest {
     void attachingCapacityDoesNotAssignRequestFifoIdentity() {
         var context = context(708L);
         var prefill = selection(RoleType.PREFILL, 708L, "p", 8001, "g1");
-        try (var selected = RequestRoute.prepare(context, List.of(prefill.selection()))) {
+        try (var selected = selectedRoute(context, prefill)) {
             var route = RequestRoute.create(context, selected, null);
             assertSame(context, route.ctx());
             assertEquals(0L, context.data().getWorkerEnqueueSequence());
@@ -672,7 +680,7 @@ class RequestWorkerSelectorTest {
     void callerAndDeliveredResponseChangesCannotMutateTheRouteTemplate() {
         var context = context(707L);
         var prefill = selection(RoleType.PREFILL, 707L, "p", 8001, "g1");
-        try (var route = RequestRoute.prepare(context, List.of(prefill.selection()))) {
+        try (var route = selectedRoute(context, prefill)) {
             prefill.status().setGroup("caller changed");
             var exported = route.successResponse(true);
             exported.setCode(503);
@@ -691,17 +699,8 @@ class RequestWorkerSelectorTest {
         var context = context(706L);
         var prefill = selection(RoleType.PREFILL, 706L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 706L, "d", 8002, "g1");
-        try (var prefillSelection = prefill.selection();
-                var decodeSelection = decode.selection()) {
-            when(decodeSelection.requestId()).thenReturn(999L);
-            assertThrows(
-                    IllegalStateException.class,
-                    () ->
-                            RequestRoute.prepare(
-                                    context, List.of(prefillSelection, decodeSelection)));
-            verify(prefillSelection, never()).assignToRequest();
-            verify(decodeSelection, never()).assignToRequest();
-        }
+        decode.status().setRequestId(999L);
+        assertThrows(IllegalStateException.class, () -> selectedRoute(context, prefill, decode));
         verify(prefill.pin()).close();
         verify(decode.pin()).close();
     }
@@ -728,8 +727,7 @@ class RequestWorkerSelectorTest {
         doThrow(cleanup)
                 .when(endpoint)
                 .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
-        var routing =
-                RequestRoute.prepare(context, List.of(prefill.selection(), decode.selection()));
+        var routing = selectedRoute(context, prefill, decode);
         var actual =
                 assertThrows(
                         IllegalStateException.class,
@@ -770,10 +768,7 @@ class RequestWorkerSelectorTest {
                                 false));
         var scheduler = queueScheduler(context);
         var plan =
-                RequestProtocolTestSupport.plan(
-                        context,
-                        RequestRoute.prepare(
-                                context, List.of(prefill.selection(), decode.selection())));
+                RequestProtocolTestSupport.plan(context, selectedRoute(context, prefill, decode));
         try (plan) {
             assertTrue(
                     RequestProtocolTestSupport.adopt(
@@ -901,10 +896,11 @@ class RequestWorkerSelectorTest {
         RequestWorkerSelector router = router();
         RequestContext context = context(111L);
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
         PlacementResult<RequestRoute, PlacementKey> blocked =
@@ -921,13 +917,17 @@ class RequestWorkerSelectorTest {
         RequestContext context = context(12L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 12L, "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
         when(decodeSelector.select(
-                        context.data().getRequest(), context.data().getSchedulingMetadata(), "g1"))
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                 .thenReturn(
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
@@ -938,7 +938,7 @@ class RequestWorkerSelectorTest {
 
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), rejected.failure().getCode());
-        verify(prefill.selection).close();
+        verify(prefill.pin).close();
     }
 
     @Test
@@ -949,29 +949,37 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 120L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 120L, "d", 8002, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
         when(decodeSelector.select(
-                        context.data().getRequest(), context.data().getSchedulingMetadata(), "g1"))
-                .thenReturn(PlacementResult.success(decode.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, decode));
         var primary = new IllegalStateException("selection failed");
         var decodeClose = new IllegalStateException("Decode pin close failed");
         var prefillClose = new IllegalStateException("Prefill pin close failed");
-        when(vitSelector.select(context.data().getRequestId(), RoleType.VIT, "g1"))
+        when(vitSelector.select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                 .thenThrow(primary);
-        doThrow(decodeClose).when(decode.selection).close();
-        doThrow(prefillClose).when(prefill.selection).close();
+        doThrow(decodeClose).when(decode.pin).close();
+        doThrow(prefillClose).when(prefill.pin).close();
 
         assertSame(
                 primary,
                 assertThrows(IllegalStateException.class, () -> router().select(context, null)));
 
-        var order = org.mockito.Mockito.inOrder(decode.selection, prefill.selection);
-        order.verify(decode.selection).close();
-        order.verify(prefill.selection).close();
+        var order = org.mockito.Mockito.inOrder(decode.pin, prefill.pin);
+        order.verify(decode.pin).close();
+        order.verify(prefill.pin).close();
         assertEquals(List.of(decodeClose), List.of(primary.getSuppressed()));
         assertEquals(List.of(prefillClose), List.of(decodeClose.getSuppressed()));
     }
@@ -984,11 +992,12 @@ class RequestWorkerSelectorTest {
         SelectionFixture prefill =
                 selection(RoleType.PREFILL, context.data().getRequestId(), "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
 
         PlacementResult<RequestRoute, PlacementKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
@@ -997,7 +1006,7 @@ class RequestWorkerSelectorTest {
         assertTrue(admitted.value().successResponse(false).isSuccess());
         assertEquals(
                 List.of(prefill.status), admitted.value().successResponse(false).getServerStatus());
-        verify(prefill.selection).assignToRequest();
+
         verify(prefill.pin, never()).close();
 
         admitted.value().close();
@@ -1013,8 +1022,13 @@ class RequestWorkerSelectorTest {
         var changed = inputs.toBuilder().seqLen(4_096L).build();
         assertEquals(4_096L, changed.getSeqLen());
         var prefill = selection(RoleType.PREFILL, 30L, "p", 8001, "g1");
-        when(prefillSelector.select(same(inputs), same(metadata), eq(RoleType.PREFILL), isNull()))
-                .thenReturn(PlacementResult.success(prefill.selection));
+        when(prefillSelector.select(
+                        same(inputs),
+                        same(metadata),
+                        eq(RoleType.PREFILL),
+                        isNull(),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
 
         var result = router().select(context, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
@@ -1024,7 +1038,12 @@ class RequestWorkerSelectorTest {
             assertEquals(50, route.priority());
         }
         verify(prefillSelector)
-                .select(same(inputs), same(metadata), eq(RoleType.PREFILL), isNull());
+                .select(
+                        same(inputs),
+                        same(metadata),
+                        eq(RoleType.PREFILL),
+                        isNull(),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
     }
 
     @Test
@@ -1035,13 +1054,18 @@ class RequestWorkerSelectorTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 31L, "p", 8001, "selected-group");
         SelectionFixture vit = selection(RoleType.VIT, 31L, "v", 8002, "selected-group");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
-        when(vitSelector.select(context.data().getRequestId(), RoleType.VIT, "selected-group"))
-                .thenReturn(vit.selection);
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
+        when(vitSelector.select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("selected-group"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, vit).value());
 
         PlacementResult<RequestRoute, PlacementKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
@@ -1050,11 +1074,17 @@ class RequestWorkerSelectorTest {
 
         verify(prefillSelector)
                 .select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null);
-        verify(vitSelector).select(context.data().getRequestId(), RoleType.VIT, "selected-group");
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
+        verify(vitSelector)
+                .select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("selected-group"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
         verify(vit.pin).close();
         verify(prefill.pin).close();
     }
@@ -1074,13 +1104,18 @@ class RequestWorkerSelectorTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 41L, "p", 8001, "other");
         SelectionFixture vit = selection(RoleType.VIT, 41L, "v", 8002, "other");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        "forced"))
-                .thenReturn(PlacementResult.success(prefill.selection));
-        when(vitSelector.select(context.data().getRequestId(), RoleType.VIT, "forced"))
-                .thenReturn(vit.selection);
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq("forced"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
+        when(vitSelector.select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("forced"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, vit).value());
 
         PlacementResult<RequestRoute, PlacementKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
@@ -1089,11 +1124,17 @@ class RequestWorkerSelectorTest {
 
         verify(prefillSelector)
                 .select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        "forced");
-        verify(vitSelector).select(context.data().getRequestId(), RoleType.VIT, "forced");
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq("forced"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
+        verify(vitSelector)
+                .select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("forced"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
     }
 
     @Test
@@ -1103,12 +1144,17 @@ class RequestWorkerSelectorTest {
         RequestContext context = context(51L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 51L, "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
-        when(vitSelector.select(context.data().getRequestId(), RoleType.VIT, "g1"))
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
+        when(vitSelector.select(
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.VIT),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                 .thenReturn(null);
 
         PlacementResult<RequestRoute, PlacementKey> blocked =
@@ -1116,7 +1162,7 @@ class RequestWorkerSelectorTest {
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(RoleType.VIT, "g1", null), blocked.blocker());
-        verify(prefill.selection).close();
+        verify(prefill.pin).close();
     }
 
     @Test
@@ -1126,13 +1172,17 @@ class RequestWorkerSelectorTest {
         RequestContext context = context(52L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 52L, "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
         when(decodeSelector.select(
-                        context.data().getRequest(), context.data().getSchedulingMetadata(), "g1"))
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq("g1"),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
         PlacementResult<RequestRoute, PlacementKey> blocked =
@@ -1140,8 +1190,7 @@ class RequestWorkerSelectorTest {
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new PlacementKey(RoleType.DECODE, "g1", null), blocked.blocker());
-        verify(prefill.selection).close();
-        verify(prefill.selection, never()).assignToRequest();
+        verify(prefill.pin).close();
     }
 
     @Test
@@ -1151,18 +1200,18 @@ class RequestWorkerSelectorTest {
         RequestContext context = context(61L);
         SelectionFixture foreign = selection(RoleType.PREFILL, 999L, "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(foreign.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, foreign));
 
         assertThrows(
                 IllegalStateException.class,
                 () -> router.select(context, router.resolvePolicyGroup(context)));
 
-        verify(foreign.selection).close();
-        verify(foreign.selection, never()).assignToRequest();
+        verify(foreign.pin).close();
     }
 
     @Test
@@ -1175,11 +1224,12 @@ class RequestWorkerSelectorTest {
         RequestContext context = context(71L);
         SelectionFixture prefill = selection(RoleType.PREFILL, 71L, "p", 8001, "g1");
         when(prefillSelector.select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null))
-                .thenReturn(PlacementResult.success(prefill.selection));
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                .thenAnswer(call -> selected(call, prefill));
 
         PlacementResult<RequestRoute, PlacementKey> admitted =
                 router.select(context, router.resolvePolicyGroup(context));
@@ -1188,10 +1238,11 @@ class RequestWorkerSelectorTest {
 
         verify(prefillSelector)
                 .select(
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null);
+                        org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                        org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
+                        org.mockito.ArgumentMatchers.eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.eq(null),
+                        org.mockito.ArgumentMatchers.any(RequestRoute.class));
     }
 
     private RequestScheduler scheduler(RequestWorkerSelector router, RequestContext context) {
@@ -1214,23 +1265,31 @@ class RequestWorkerSelectorTest {
             RequestContext context,
             RoleType role,
             String group,
-            PlacementResult<WorkerAssignment, RoleType> result) {
+            PlacementResult<ServerStatus, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION ->
                     when(prefillSelector.select(
-                                    context.data().getRequest(),
-                                    context.data().getSchedulingMetadata(),
-                                    role,
-                                    group))
+                                    org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                                    org.mockito.ArgumentMatchers.eq(
+                                            context.data().getSchedulingMetadata()),
+                                    org.mockito.ArgumentMatchers.eq(role),
+                                    org.mockito.ArgumentMatchers.eq(group),
+                                    org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                             .thenReturn(result);
             case DECODE ->
                     when(decodeSelector.select(
-                                    context.data().getRequest(),
-                                    context.data().getSchedulingMetadata(),
-                                    group))
+                                    org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
+                                    org.mockito.ArgumentMatchers.eq(
+                                            context.data().getSchedulingMetadata()),
+                                    org.mockito.ArgumentMatchers.eq(group),
+                                    org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                             .thenReturn(result);
             case VIT ->
-                    when(vitSelector.select(context.data().getRequestId(), role, group))
+                    when(vitSelector.select(
+                                    org.mockito.ArgumentMatchers.eq(context.data().getRequestId()),
+                                    org.mockito.ArgumentMatchers.eq(role),
+                                    org.mockito.ArgumentMatchers.eq(group),
+                                    org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                             .thenReturn(result.value());
             case FRONTEND -> throw new IllegalArgumentException();
         }
@@ -1246,17 +1305,14 @@ class RequestWorkerSelectorTest {
         var decode = selection(RoleType.DECODE, 990L, "shared", 8080, "g1");
         when(prefill.endpoint().ipPort()).thenReturn("shared:8080");
         when(decode.endpoint().ipPort()).thenReturn("shared:8080");
-        when(prefill.selection().placementVersion()).thenReturn(11L);
-        when(decode.selection().placementVersion()).thenReturn(23L);
         var prefillEndpoint = (PrefillEndpoint) prefill.endpoint();
         var decodeEndpoint = (DecodeEndpoint) decode.endpoint();
         when(prefillEndpoint.ownership.progress())
                 .thenReturn(new PrefillState.Progress(0L, 0L, 11L, 0, 0, 0L));
         when(decodeEndpoint.placementVersion()).thenReturn(23L);
-        try (var route =
-                RequestRoute.prepare(context, List.of(prefill.selection(), decode.selection()))) {
-            var prefillKey = route.prefillPlacementKey();
-            var decodeKey = route.decodePlacementKey();
+        try (var route = selectedRoute(context, prefill, decode)) {
+            var prefillKey = route.placementKey(RoleType.PREFILL);
+            var decodeKey = route.placementKey(RoleType.DECODE);
             assertSame(prefillEndpoint, route.blockedEndpointIfCurrent(prefillKey));
             assertSame(decodeEndpoint, route.blockedEndpointIfCurrent(decodeKey));
             // Changing one role does not invalidate the other role at the same address.
@@ -1309,7 +1365,6 @@ class RequestWorkerSelectorTest {
 
     private static SelectionFixture selection(
             RoleType role, long requestId, String ip, int httpPort, String group) {
-        WorkerAssignment selection = mock(WorkerAssignment.class);
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         WorkerEndpoint endpoint =
                 switch (role) {
@@ -1330,30 +1385,58 @@ class RequestWorkerSelectorTest {
         status.setServerIp(ip);
         status.setHttpPort(httpPort);
         status.setGroup(group);
-        when(selection.serverStatus()).thenAnswer(ignored -> ServerStatus.copyOf(status));
-        when(selection.requestId()).thenReturn(requestId);
-        when(selection.role()).thenReturn(role);
-        when(selection.group()).thenReturn(group);
-        when(selection.prefillWorkMs()).thenReturn(1L);
-        when(selection.generationPin()).thenReturn(pin);
-        when(selection.endpoint()).thenReturn(endpoint);
-        var selectionOpen = new java.util.concurrent.atomic.AtomicBoolean(true);
+        status.setPrefillTime(1L);
+        var open = new java.util.concurrent.atomic.AtomicBoolean(true);
+        when(pin.isOpen()).thenAnswer(call -> open.get());
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            if (selectionOpen.compareAndSet(true, false)) {
-                                pin.close();
-                            }
+                            open.set(false);
                             return null;
                         })
-                .when(selection)
+                .when(pin)
                 .close();
+        when(endpoint.getIp()).thenReturn(ip);
+        when(endpoint.getHttpPort()).thenReturn(httpPort);
         when(pin.endpoint()).thenReturn(endpoint);
-        return new SelectionFixture(selection, pin, endpoint, status);
+        return new SelectionFixture(pin, endpoint, status);
+    }
+
+    private static PlacementResult<ServerStatus, RoleType> selected(
+            org.mockito.invocation.InvocationOnMock call, SelectionFixture selected) {
+        RequestRoute route = call.getArgument(call.getArguments().length - 1);
+        return PlacementResult.success(
+                route.add(
+                        selected.pin(),
+                        selected.status(),
+                        selected.status().getPrefillTime(),
+                        selected.endpoint() instanceof PrefillEndpoint ep
+                                ? ep.ownership.progress().ownershipVersion()
+                                : selected.endpoint() instanceof DecodeEndpoint ep
+                                        ? ep.placementVersion()
+                                        : 0L));
+    }
+
+    private static RequestRoute selectedRoute(
+            RequestContext context, SelectionFixture... selections) {
+        return SchedulingTestConfig.prepareRoute(
+                        context,
+                        route -> {
+                            for (var selected : selections) {
+                                route.add(
+                                        selected.pin(),
+                                        selected.status(),
+                                        selected.status().getPrefillTime(),
+                                        selected.endpoint() instanceof PrefillEndpoint ep
+                                                ? ep.ownership.progress().ownershipVersion()
+                                                : selected.endpoint() instanceof DecodeEndpoint ep
+                                                        ? ep.placementVersion()
+                                                        : 0L);
+                            }
+                            return PlacementResult.success(route);
+                        })
+                .value();
     }
 
     private record SelectionFixture(
-            WorkerAssignment selection,
-            WorkerEndpoint.GenerationPin pin,
-            WorkerEndpoint endpoint,
-            ServerStatus status) {}
+            WorkerEndpoint.GenerationPin pin, WorkerEndpoint endpoint, ServerStatus status) {}
 }

@@ -9,6 +9,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -173,7 +174,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                         null)
                                 .handle();
         if (routing.decodeEp() != null && pendingDecodeRollback == null) {
-            return PlacementResult.blocked(routing.decodePlacementKey());
+            return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
         }
         Throwable failure = null;
         RequestRoute acquired = null;
@@ -187,7 +188,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                     DeliveryDispatcher.Member.prepare(route, decodeAdmissionCapacity);
             if (!attempt.accepted()) {
                 return switch (attempt.boundary().status()) {
-                    case UNAVAILABLE -> PlacementResult.blocked(routing.decodePlacementKey());
+                    case UNAVAILABLE ->
+                            PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
                     case OWNERSHIP_LOST ->
                             PlacementResult.rejected(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));

@@ -39,7 +39,6 @@ class PreemptionRegistrationTest {
         assertTrue(
                 context.snapshot().preemption().cancelAcknowledged(),
                 "later UNKNOWN preserves the accepted cancellation");
-        assertTrue(context.snapshot().preemption().phase().acceptsRequestFenced());
         assertTrue(finish(registration));
         assertFalse(finish(registration));
         assertTrue(context.snapshot().preemption().finished());
@@ -56,7 +55,6 @@ class PreemptionRegistrationTest {
         assertEquals(
                 PreemptionCancelPhase.NOT_FOUND_STALE, context.snapshot().preemption().phase());
         assertFalse(context.snapshot().preemption().phase().isLocallyReleasable());
-        assertTrue(context.snapshot().preemption().phase().acceptsRequestFenced());
         assertInstanceOf(Blocked.class, context.beginReconciliation(registration));
         assertTrue(finish(registration));
         assertTrue(context.snapshot().preemption().finished());

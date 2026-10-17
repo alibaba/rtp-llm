@@ -73,7 +73,7 @@ class DecodeCapacityAcquirerTest {
         blockedEndpoint = mock(WorkerEndpoint.class);
         acquirer =
                 new DecodeCapacityAcquirer(
-                        engineClient,
+                        mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
                         reporter,
@@ -156,7 +156,7 @@ class DecodeCapacityAcquirerTest {
         acquirer =
                 org.mockito.Mockito.spy(
                         new DecodeCapacityAcquirer(
-                                engineClient,
+                                mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
                                 mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
@@ -231,7 +231,7 @@ class DecodeCapacityAcquirerTest {
         acquirer =
                 org.mockito.Mockito.spy(
                         new DecodeCapacityAcquirer(
-                                engineClient,
+                                mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
                                 mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),

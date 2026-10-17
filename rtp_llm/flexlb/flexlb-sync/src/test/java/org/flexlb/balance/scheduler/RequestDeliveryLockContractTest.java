@@ -122,9 +122,7 @@ class RequestDeliveryLockContractTest {
                 new DeliveryDispatcher(
                         null,
                         DeliveryTestSupport.service(config),
-                        null,
-                        new DeliveryMetricsReporter(null),
-                        null);
+                        new DeliveryMetricsReporter(null));
         var state =
                 new PrefillState(
                         new java.util.concurrent.locks.ReentrantLock(),
