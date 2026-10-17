@@ -1,10 +1,28 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 
 _CUDA13_ONLY = select({
     "@//:using_cuda13_x86": [],
     "@//:using_cuda13_arm": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
+
+dsv4_sm120_py_test(
+    name = "test_sm120_dispatch_quant_pack",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_combine",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 py_test(
     name = "timeline_test",
@@ -40,6 +58,7 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
 
 py_test(

@@ -8,6 +8,7 @@ and only fuses the final add+cast when possible.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,6 +16,9 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
     shared_expert_mode,
     strict_fused_moe_enabled,
@@ -27,7 +31,19 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
 )
 
 from .expert import require_silu_mul_split
-from .quantized_linear import create_fp8_linear
+from .quantized_linear import create_fp8_linear, pack_ue8m0_block_scale_for_deepgemm
+
+logger = logging.getLogger(__name__)
+_SM120_FUSED_LOGGED = False
+# On SM120 builds with the CUTLASS FP8 backend, the DeepGEMM fused shared
+# expert is opt-in; it needs DeepGEMM-packed scales prepared from the
+# checkpoint originals.
+_SM120_FUSED_ENABLED = os.environ.get("DSV4_SM120_FUSED_SHARED_EXPERT", "0") == "1"
+_SM120_PACKED_SCALE = "_sm120_packed_scale"
+
+
+def _uses_sm120_cutlass_linear(tensor: torch.Tensor) -> bool:
+    return tensor.is_cuda and sm120_blockwise_fp8_available(tensor.device)
 
 
 @dataclass(frozen=True)
@@ -144,6 +160,17 @@ class W13SharedExpert(nn.Module):
         self.w13 = create_fp8_linear(w13_w, w13_s)
         self.w2 = create_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
         self.swiglu_limit = swiglu_limit
+        # Checkpoint UE8M0 scales for the opt-in SM120 fused path: the CUTLASS
+        # linear keeps compact scales, while DeepGEMM needs the int32-packed
+        # layout repacked once at prepare() time.
+        self._sm120_w13_scale_e8m0 = (
+            w13_s if w13_s.dtype == torch.float8_e8m0fnu else None
+        )
+        self._sm120_w2_scale_e8m0 = (
+            expert_weights["w2_s"]
+            if expert_weights["w2_s"].dtype == torch.float8_e8m0fnu
+            else None
+        )
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if x.dim() > 2:
@@ -203,13 +230,26 @@ class FusedSharedExpertFastPath:
         scale = getattr(linear, "weight_scales", None)
         if weight is None or scale is None:
             raise RuntimeError("shared expert FP8 linear does not expose weight/scale")
+        packed = getattr(linear, _SM120_PACKED_SCALE, None)
+        if packed is not None:
+            scale = packed
         return weight, scale
 
     @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
+        if not all(hasattr(shared_experts, name) for name in ("w13", "w2")):
+            return False
+        if _uses_sm120_cutlass_linear(x):
+            # Engage only with DeepGEMM-packed scales prepared from the
+            # checkpoint originals; otherwise the CUTLASS linears run.
+            return _SM120_FUSED_ENABLED and all(
+                getattr(getattr(shared_experts, name), _SM120_PACKED_SCALE, None)
+                is not None
+                for name in ("w13", "w2")
+            )
+        return True
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
@@ -234,6 +274,7 @@ class FusedSharedExpertFastPath:
         """Validate the loader-prepared merged w13; no runtime concatenation."""
         if not hasattr(shared_experts, "w13"):
             raise RuntimeError("shared expert requires loader-prepared w13")
+        self._prepare_sm120_packed_scales(shared_experts)
         w13_w, w13_s = self._linear_parts(shared_experts.w13)
         w2_w, w2_s = self._linear_parts(shared_experts.w2)
         if w13_w.dim() != 2:
@@ -247,6 +288,31 @@ class FusedSharedExpertFastPath:
         self._prepared_shared_experts = shared_experts
         self._w13_parts = (w13_w, w13_s)
         self._w2_parts = (w2_w, w2_s)
+
+    @staticmethod
+    def _prepare_sm120_packed_scales(shared_experts: nn.Module) -> None:
+        """Repack checkpoint UE8M0 scales for the opt-in SM120 fused path.
+
+        Idempotent. Skipped when the originals were not retained, which keeps
+        the fused path off (see ``can_run``).
+        """
+        weight = getattr(getattr(shared_experts, "w13", None), "weight", None)
+        if (
+            not _SM120_FUSED_ENABLED
+            or not isinstance(weight, torch.Tensor)
+            or not _uses_sm120_cutlass_linear(weight)
+        ):
+            return
+        for name in ("w13", "w2"):
+            linear = getattr(shared_experts, name)
+            if getattr(linear, _SM120_PACKED_SCALE, None) is not None:
+                continue
+            raw = getattr(shared_experts, f"_sm120_{name}_scale_e8m0", None)
+            if raw is None:
+                continue
+            setattr(
+                linear, _SM120_PACKED_SCALE, pack_ue8m0_block_scale_for_deepgemm(raw)
+            )
 
     @staticmethod
     def _tma_aligned_rows(rows: int, element_size: int) -> int:
@@ -406,6 +472,11 @@ class FusedSharedExpertFastPath:
         out = views.out_bf16
         if T == 0:
             return out
+
+        global _SM120_FUSED_LOGGED
+        if not _SM120_FUSED_LOGGED and _uses_sm120_cutlass_linear(x):
+            _SM120_FUSED_LOGGED = True
+            logger.info("SM120 fused shared expert engaged (packed-UE8M0 scales)")
 
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
         from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
@@ -573,7 +644,8 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    # The SM120 CUTLASS linear is the intended default, not a fallback.
+    if strict_fused_moe_enabled() and not _uses_sm120_cutlass_linear(x):
         raise RuntimeError(
             "MOE_STRICT_FUSED=1 forbids the generic Expert.forward "
             "shared-expert fallback"

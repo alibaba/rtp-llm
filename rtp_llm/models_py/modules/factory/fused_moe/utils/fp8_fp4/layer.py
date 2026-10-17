@@ -7,7 +7,6 @@ from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
@@ -54,6 +53,11 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -101,6 +105,13 @@ class Fp8Fp4MoeRuntimeConfig:
         self.moe_strategy = str(moe_strategy or "auto")
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
+        # Physical MoE topology for executors that own their communication.
+        # ``tp_size`` below stays 1: the routed experts are EP-sharded.
+        self.moe_cp_enabled = bool(moe_cp_enabled)
+        self.moe_cp_size = int(moe_cp_size)
+        self.moe_tp_size = int(moe_tp_size)
+        self.moe_tp_rank = int(moe_tp_rank)
+        self.attn_tp_size = int(attn_tp_size)
 
         self.tp_size = 1
         self.tp_rank = 0
@@ -151,6 +162,11 @@ class Fp8Fp4MoeLayer(nn.Module):
         warmup_include_capacity: bool = False,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -192,6 +208,11 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
@@ -286,11 +307,15 @@ class Fp8Fp4MoeLayer(nn.Module):
                 observer("topk_indices", topk_ids)
 
         def run_routed_experts() -> torch.Tensor:
+            # This layer owns the final cast after adding the shared expert.
+            # Rounding a routed FP32 sum earlier changes DSV4 continuations.
+            expert_args = {"preserve_output_dtype": True}
             if gate_payload is not None:
                 return self.fused_moe.forward_gate_pack(
                     hidden_states=x,
                     gate_payload=gate_payload,
                     activation="silu",
+                    extra_expert_args=expert_args,
                 )
             assert topk_weights is not None and topk_ids is not None
             return self.fused_moe(
@@ -298,6 +323,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation="silu",
+                extra_expert_args=expert_args,
             )
 
         if self._shared_executor is None:

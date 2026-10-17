@@ -1,5 +1,10 @@
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 
+_CUDA_ONLY = select({
+    "@//:using_cuda": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 py_test(
     name = "test_config_resolver",
     srcs = ["test_config_resolver.py"],
@@ -13,6 +18,14 @@ py_test(
 py_test(
     name = "test_strategy_registry",
     srcs = ["test_strategy_registry.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_sm120_strategy_select",
+    srcs = ["test_sm120_strategy_select.py"],
     deps = [
         "//rtp_llm:testlib",
     ],
@@ -60,4 +73,14 @@ dsv4_py_test(
         "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "test_cutedsl_availability",
+    srcs = ["test_cutedsl_availability.py"],
+    deps = [
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA_ONLY,
 )

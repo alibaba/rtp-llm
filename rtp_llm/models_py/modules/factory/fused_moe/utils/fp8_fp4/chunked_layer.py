@@ -23,6 +23,27 @@ _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
+_SYNCHRONIZED_CHUNK_STRATEGIES = frozenset({"mega_moe", "mega_moe_se"})
+
+
+def _requires_synchronized_chunks(layer: nn.Module) -> bool:
+    """Whether every EP rank must run the same number of eager MoE chunks.
+
+    Mega kernels and executors that exchange variable-size payloads over a
+    collective (``requires_synchronized_chunk_schedule``) need it.
+    """
+    if getattr(layer, "strategy_name", None) in _SYNCHRONIZED_CHUNK_STRATEGIES:
+        return True
+    moe = getattr(layer, "_moe", None)
+    executor = getattr(getattr(moe, "fused_moe", None), "fused_experts", None)
+    return getattr(executor, "requires_synchronized_chunk_schedule", False) is True
+
+
+def _single_round_dispatch(layer: nn.Module) -> bool:
+    """Whether the executor must see the whole eager batch in one call."""
+    moe = getattr(layer, "_moe", None)
+    executor = getattr(getattr(moe, "fused_moe", None), "fused_experts", None)
+    return getattr(executor, "single_round_dispatch", False) is True
 
 
 def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
@@ -104,8 +125,7 @@ def synchronized_moe_chunk_plan(
         return
 
     needs_sync = any(
-        getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
+        _requires_synchronized_chunks(getattr(layer, "ffn", layer))
         and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
         and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
         for layer in layers
@@ -155,6 +175,11 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
     ) -> None:
         super().__init__()
         if layer_weights is None:
@@ -190,6 +215,11 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             moe_w1_layout=moe_w1_layout,
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -221,7 +251,11 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                     f"max_tokens_per_rank={max_tokens}"
                 )
             return False
-        return self.chunking_enabled and tokens > max_tokens
+        return (
+            self.chunking_enabled
+            and tokens > max_tokens
+            and not _single_round_dispatch(self)
+        )
 
     def _synchronized_chunk_tokens(
         self,
@@ -231,7 +265,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
     ) -> int:
         if (
-            self.strategy_name not in {"mega_moe", "mega_moe_se"}
+            not _requires_synchronized_chunks(self)
             or self._is_decode_role
             or is_decode_forward
             or not self.chunking_enabled
