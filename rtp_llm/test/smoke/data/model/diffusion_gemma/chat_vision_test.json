@@ -28,7 +28,7 @@
           "temperature": 0.0,
           "top_p": 0.01
         },
-        "expected_result": {
+        "result": {
           "goldens": []
         }
       },
@@ -57,7 +57,7 @@
           "temperature": 0.0,
           "top_p": 0.01
         },
-        "expected_result": {
+        "result": {
           "goldens": []
         }
       },
@@ -92,7 +92,7 @@
           "temperature": 0.0,
           "top_p": 0.01
         },
-        "expected_result": {
+        "result": {
           "goldens": []
         }
       }

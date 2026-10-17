@@ -21,7 +21,7 @@
         },
         "enable_thinking": false
       },
-      "expected_result": {
+      "result": {
         "goldens": []
       }
     }
