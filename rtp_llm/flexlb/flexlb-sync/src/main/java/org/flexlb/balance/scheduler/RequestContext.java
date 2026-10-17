@@ -69,8 +69,8 @@ public final class RequestContext {
     private static final long HANDOFF_GRACE_MS = 10_000L;
     private final RequestData data;
     private Identity key;
-    private static final Snapshot EMPTY =
-            new Snapshot(
+    private static final SnapshotFacts EMPTY =
+            new SnapshotFacts(
                     null,
                     0L,
                     Phase.OPEN,
@@ -86,13 +86,10 @@ public final class RequestContext {
                     new CloseFacts(null, null, true, true, false, false, false, false),
                     new ExpirationTimer.Plan(0L, null, null, null),
                     null,
-                    0L,
-                    0L,
                     true,
                     false,
                     true,
-                    true,
-                    0L);
+                    true);
     private Phase phase = Phase.OPEN;
     private RequestRoute route;
     private PlacementFacts placement;
@@ -117,7 +114,7 @@ public final class RequestContext {
 
     public RequestContext(FlexlbConfig config) {
         data = new RequestData(Objects.requireNonNull(config));
-        state = new Snapshot(EMPTY.facts(), 0L, 0L, 0L);
+        state = new Snapshot(EMPTY, 0L, 0L, 0L);
     }
 
     public RequestData data() {
@@ -814,11 +811,7 @@ public final class RequestContext {
                         ? CancelKind.WAIT_PLACEMENT
                         : delivery != null && delivery.transferred()
                                 ? CancelKind.REMOTE
-                                : preemption != null && !preemption.finished()
-                                        ? CancelKind.WAIT_PREEMPTION
-                                        : route == null
-                                                ? CancelKind.GLOBAL_QUEUE
-                                                : CancelKind.WORKER_QUEUE;
+                                : route == null ? CancelKind.GLOBAL_QUEUE : CancelKind.WORKER_QUEUE;
         if (cancellation != null
                 && (cancellation.reason() != request.reason()
                         || cancellation.operation() != null
@@ -1555,8 +1548,9 @@ public final class RequestContext {
         if (preemption != null
                 && close.decodeSettled()
                 && (close.expired()
-                        || delivery != null
-                                && delivery.abandonment() != null
+                        || delivery == null
+                        || delivery.send() == SendState.NOT_SENT
+                        || delivery.abandonment() != null
                                 && delivery.prefillProof()
                                 && delivery.decodeProof())) {
             preemption =

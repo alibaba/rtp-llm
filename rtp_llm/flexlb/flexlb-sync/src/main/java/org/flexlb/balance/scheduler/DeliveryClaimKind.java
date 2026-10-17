@@ -14,9 +14,5 @@ public enum DeliveryClaimKind {
     BATCH_ENQUEUE,
 
     /** The route decision may have been returned to the caller. */
-    ROUTE_DECISION;
-
-    public boolean isClaimed() {
-        return this != NONE;
-    }
+    ROUTE_DECISION
 }

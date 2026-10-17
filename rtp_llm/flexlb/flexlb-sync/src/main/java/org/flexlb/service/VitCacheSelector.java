@@ -3,7 +3,7 @@ package org.flexlb.service;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.strategy.WorkerAssignment;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -149,7 +149,8 @@ public class VitCacheSelector {
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized WorkerAssignment selectPinned(RequestContext ctx, String group) {
+    public synchronized ServerStatus selectPinned(
+            RequestContext ctx, String group, RequestRoute route) {
         ServerStatus result =
                 ctx.data().getRequest().getSelectedVit() == null
                         ? select(ctx, group)
@@ -166,7 +167,7 @@ public class VitCacheSelector {
             pin.close();
             return null;
         }
-        return WorkerAssignment.stateless(pin, result);
+        return route.add(pin, result, -1L, 0L);
     }
 
     private static ServerStatus errorStatus(StrategyErrorType error) {

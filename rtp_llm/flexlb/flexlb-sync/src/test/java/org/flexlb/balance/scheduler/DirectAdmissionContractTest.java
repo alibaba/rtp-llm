@@ -11,7 +11,6 @@ import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -119,7 +118,12 @@ class DirectAdmissionContractTest {
             fixture.assertNoWaitingQueue();
             verify(fixture.requests, times(2)).commitRoute(any(), any());
             verify(fixture.prefillSelector, times(2))
-                    .select(any(), any(), eq(RoleType.PREFILL), any());
+                    .select(
+                            any(),
+                            any(),
+                            eq(RoleType.PREFILL),
+                            any(),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class));
         }
     }
 
@@ -420,20 +424,24 @@ class DirectAdmissionContractTest {
             try (var mutation = fixture.scheduler.claimAdmissionHandle(104L, future);
                     var completion = RequestProtocolTestSupport.finishOnExit(mutation);
                     var admission =
-                            RequestRoute.prepare(
-                                    context,
-                                    List.of(
-                                            WorkerAssignment.prefill(
-                                                    prefill.tryPinGeneration(),
-                                                    Fixture.metadata(prefill, 104L),
-                                                    30_000L,
-                                                    prefill.ownership
-                                                            .progress()
-                                                            .ownershipVersion()),
-                                            WorkerAssignment.decode(
-                                                    fixture.decode.tryPinGeneration(),
-                                                    Fixture.metadata(fixture.decode, 104L),
-                                                    fixture.decode.placementVersion())))) {
+                            SchedulingTestConfig.prepareRoute(
+                                            context,
+                                            route -> {
+                                                route.add(
+                                                        prefill.tryPinGeneration(),
+                                                        Fixture.metadata(prefill, 104L),
+                                                        30_000L,
+                                                        prefill.ownership
+                                                                .progress()
+                                                                .ownershipVersion());
+                                                route.add(
+                                                        fixture.decode.tryPinGeneration(),
+                                                        Fixture.metadata(fixture.decode, 104L),
+                                                        -1L,
+                                                        fixture.decode.placementVersion());
+                                                return PlacementResult.success(route);
+                                            })
+                                    .value()) {
                 var thrown =
                         assertThrows(
                                 IllegalStateException.class,
@@ -471,17 +479,19 @@ class DirectAdmissionContractTest {
                             eq(context.data().getRequest()),
                             eq(context.data().getSchedulingMetadata()),
                             eq(RoleType.PREFILL),
-                            any()))
+                            any(),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                     .thenAnswer(
                             call ->
                                     PlacementResult.success(
-                                            WorkerAssignment.prefill(
-                                                    prefill.tryPinGeneration(),
-                                                    Fixture.metadata(prefill, 108L),
-                                                    30_000L,
-                                                    prefill.ownership
-                                                            .progress()
-                                                            .ownershipVersion())));
+                                            call.getArgument(4, RequestRoute.class)
+                                                    .add(
+                                                            prefill.tryPinGeneration(),
+                                                            Fixture.metadata(prefill, 108L),
+                                                            30_000L,
+                                                            prefill.ownership
+                                                                    .progress()
+                                                                    .ownershipVersion())));
             assertFalse(fixture.scheduler.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.awaitRequestWork(fixture.runtime);
             assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 108L));
@@ -523,23 +533,28 @@ class DirectAdmissionContractTest {
                 try (var handle = queue.claimAdmissionHandle(109L, future);
                         var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
                     assertNotNull(handle);
-                    var selections = new java.util.ArrayList<WorkerAssignment>();
-                    selections.add(
-                            WorkerAssignment.prefill(
-                                    prefill.tryPinGeneration(),
-                                    Fixture.metadata(prefill, 109L),
-                                    30_000L,
-                                    prefill.ownership.progress().ownershipVersion()));
-                    if (separateDecode) {
-                        selections.add(
-                                WorkerAssignment.decode(
-                                        fixture.decode.tryPinGeneration(),
-                                        Fixture.metadata(fixture.decode, 109L),
-                                        fixture.decode.placementVersion()));
-                    }
-                    var plan =
-                            RequestProtocolTestSupport.plan(
-                                    context, RequestRoute.prepare(context, selections));
+                    var selected =
+                            SchedulingTestConfig.prepareRoute(
+                                            context,
+                                            route -> {
+                                                route.add(
+                                                        prefill.tryPinGeneration(),
+                                                        Fixture.metadata(prefill, 109L),
+                                                        30_000L,
+                                                        prefill.ownership
+                                                                .progress()
+                                                                .ownershipVersion());
+                                                if (separateDecode) {
+                                                    route.add(
+                                                            fixture.decode.tryPinGeneration(),
+                                                            Fixture.metadata(fixture.decode, 109L),
+                                                            -1L,
+                                                            fixture.decode.placementVersion());
+                                                }
+                                                return PlacementResult.success(route);
+                                            })
+                                    .value();
+                    var plan = RequestProtocolTestSupport.plan(context, selected);
                     try (plan) {
                         if (wakeFails) {
                             org.junit.jupiter.api.Assertions.assertSame(
@@ -682,8 +697,7 @@ class DirectAdmissionContractTest {
                             mock(RecentCacheKeyTraceReporter.class));
             var projector = requests;
             var placement = new PlacementAvailability();
-            queuedDelivery =
-                    spy(DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(config)));
+            queuedDelivery = spy(DeliveryTestSupport.route(reporter));
             endpoints =
                     new EndpointRegistry(
                             service,
@@ -714,7 +728,12 @@ class DirectAdmissionContractTest {
             applyWorkerStatus(decode, Map.of(), Map.of());
             prefillSelector = mock(CostBasedPrefillStrategy.class);
             var decodeSelector = mock(DecodeSelector.class);
-            when(prefillSelector.select(any(), any(), eq(RoleType.PREFILL), any()))
+            when(prefillSelector.select(
+                            any(),
+                            any(),
+                            eq(RoleType.PREFILL),
+                            any(),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                     .thenAnswer(
                             call -> {
                                 var request =
@@ -723,13 +742,20 @@ class DirectAdmissionContractTest {
                                 var pin = prefill.tryPinGeneration();
                                 assertNotNull(pin);
                                 return PlacementResult.success(
-                                        WorkerAssignment.prefill(
-                                                pin,
-                                                metadata(prefill, request.getRequestId()),
-                                                30_000L,
-                                                prefill.ownership.progress().ownershipVersion()));
+                                        call.getArgument(4, RequestRoute.class)
+                                                .add(
+                                                        pin,
+                                                        metadata(prefill, request.getRequestId()),
+                                                        30_000L,
+                                                        prefill.ownership
+                                                                .progress()
+                                                                .ownershipVersion()));
                             });
-            when(decodeSelector.select(any(), any(), any()))
+            when(decodeSelector.select(
+                            any(),
+                            any(),
+                            any(),
+                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                     .thenAnswer(
                             call -> {
                                 var request =
@@ -738,10 +764,12 @@ class DirectAdmissionContractTest {
                                 var pin = decode.tryPinGeneration();
                                 assertNotNull(pin);
                                 return PlacementResult.success(
-                                        WorkerAssignment.decode(
-                                                pin,
-                                                metadata(decode, request.getRequestId()),
-                                                decode.placementVersion()));
+                                        call.getArgument(3, RequestRoute.class)
+                                                .add(
+                                                        pin,
+                                                        metadata(decode, request.getRequestId()),
+                                                        -1L,
+                                                        decode.placementVersion()));
                             });
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));

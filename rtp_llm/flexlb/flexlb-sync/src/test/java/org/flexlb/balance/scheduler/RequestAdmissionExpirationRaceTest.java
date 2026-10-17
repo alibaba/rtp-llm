@@ -227,11 +227,7 @@ class RequestAdmissionExpirationRaceTest {
                 registry.onDeliveryEvidence(
                         null,
                         new ContextResult.PreparationFailure(
-                                null,
-                                item,
-                                new IllegalStateException("preparation failed"),
-                                "preparation failed",
-                                System.currentTimeMillis()));
+                                null, item, "preparation failed", System.currentTimeMillis()));
                 assertSame(
                         cleanupFailure,
                         assertThrows(
@@ -325,11 +321,7 @@ class RequestAdmissionExpirationRaceTest {
                 registry.onDeliveryEvidence(
                         null,
                         new ContextResult.PreparationFailure(
-                                null,
-                                item,
-                                new IllegalStateException("preparation failed"),
-                                "preparation failed",
-                                System.currentTimeMillis()));
+                                null, item, "preparation failed", System.currentTimeMillis()));
                 if (clientCancellation) {
                     assertFalse(future.isDone());
                 } else {

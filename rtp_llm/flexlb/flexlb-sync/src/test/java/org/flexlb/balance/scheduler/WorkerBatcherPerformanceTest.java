@@ -272,9 +272,7 @@ class WorkerBatcherPerformanceTest {
                 new DeliveryDispatcher(
                         null,
                         DeliveryTestSupport.service(config),
-                        null,
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
-                        null);
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         var facilities = mock(SchedulerRuntime.class);
         var boundary =

@@ -1,15 +1,11 @@
 package org.flexlb.balance.projection;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -320,16 +316,7 @@ class RouteProjectionTest {
     private static RouteProjection.DeliveryProjection projection(boolean batch) {
         return batch
                 ? org.flexlb.balance.projection.RouteProjection.forDelivery(
-                        org.flexlb.balance.scheduler.DeliveryTestSupport.batch(
-                                        () ->
-                                                CapacityBoundary.Attempt.rejected(
-                                                        CapacityBoundary.OWNERSHIP_LOST),
-                                        () -> 1L,
-                                        Mockito.mock(DeliveryMetricsReporter.class),
-                                        SchedulingTestConfig.capacity(
-                                                SchedulingTestConfig.newConfig()),
-                                        2)
-                                .mode())
+                        org.flexlb.config.DispatcherConfig.Type.BATCH)
                 : routeProjection();
     }
 
@@ -585,10 +572,7 @@ class RouteProjectionTest {
 
     private static RouteProjection.DeliveryProjection routeProjection() {
         return org.flexlb.balance.projection.RouteProjection.forDelivery(
-                org.flexlb.balance.scheduler.DeliveryTestSupport.route(
-                                Mockito.mock(DeliveryMetricsReporter.class),
-                                SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()))
-                        .mode());
+                org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
     }
 
     private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {

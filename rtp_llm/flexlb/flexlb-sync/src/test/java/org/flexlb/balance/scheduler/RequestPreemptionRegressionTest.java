@@ -185,7 +185,9 @@ class RequestPreemptionRegressionTest {
 
         assertAll(
                 "frontend cancellation progresses while remote ownership remains unresolved",
-                () -> verify(scheduler.runtime, times(1)).startDeliveryCleanup(delivery),
+                () ->
+                        verify(SchedulerTestSupport.dispatcher(scheduler.runtime), times(1))
+                                .stop(delivery),
                 () -> {
                     var result = response.getNow(null);
                     assertNotNull(

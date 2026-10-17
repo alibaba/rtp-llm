@@ -363,7 +363,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             return future;
                         });
 
-        dispatcher = new DeliveryDispatcher(grpcClient, configService, null, reporter, null);
+        dispatcher = new DeliveryDispatcher(grpcClient, configService, reporter);
         MockEngineClients.stubCancellation(grpcClient, services, preemptionSupported);
         schedulerRuntime =
                 new RequestSchedulerTestRuntime(
