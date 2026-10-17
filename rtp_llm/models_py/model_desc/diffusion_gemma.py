@@ -29,6 +29,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     Embedding,
     LinearFactory,
+    MultimodalEmbeddingInjector,
     RMSNorm,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
@@ -178,7 +179,7 @@ class DiffusionGemmaAttnOp:
             )
 
             self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
-            from flashinfer.attention import (
+            from flashinfer import (
                 BatchPrefillWithPagedKVCacheWrapper,
                 BatchPrefillWithRaggedKVCacheWrapper,
             )
@@ -879,6 +880,7 @@ class DiffusionGemmaModel(GptModelBase):
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
         self.embed_scale = float(math.sqrt(config.hidden_size))
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layer_types = diffusion_gemma_layer_types(config.num_layers)
         self.layers = nn.ModuleList(
             [
@@ -999,8 +1001,21 @@ class DiffusionGemmaModel(GptModelBase):
     ) -> PyModelOutputs:
         """Encoder-mode causal forward (prompt prefill / canvas commit)."""
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        inputs_embeds = self.embed_tokens(
+            input_ids, None, None, text_tokens_mask
+        )
         hidden_states = inputs_embeds * self.embed_scale
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        mm_features = (
+            multimodal_inputs.multimodal_features if multimodal_inputs is not None else None
+        )
+        mm_feature_locs = (
+            multimodal_inputs.mm_features_locs if multimodal_inputs is not None else None
+        )
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states, mm_features, mm_feature_locs
+        )
         positions = self._positions(inputs)
         attn = inputs.attention_inputs
         primary = next(iter(attn.values())) if isinstance(attn, dict) else attn
