@@ -29,7 +29,20 @@
           "top_p": 0.01
         },
         "result": {
-          "goldens": []
+          "id": "chat-",
+          "object": "chat.completion",
+          "created": 0,
+          "model": "",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": "stop"
+            }
+          ]
         }
       },
       {
@@ -58,7 +71,20 @@
           "top_p": 0.01
         },
         "result": {
-          "goldens": []
+          "id": "chat-",
+          "object": "chat.completion",
+          "created": 0,
+          "model": "",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": "stop"
+            }
+          ]
         }
       },
       {
@@ -93,7 +119,20 @@
           "top_p": 0.01
         },
         "result": {
-          "goldens": []
+          "id": "chat-",
+          "object": "chat.completion",
+          "created": 0,
+          "model": "",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": "stop"
+            }
+          ]
         }
       }
     ]
