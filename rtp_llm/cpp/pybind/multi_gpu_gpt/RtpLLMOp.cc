@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -521,6 +522,7 @@ void RtpLLMOp::stop() {
             pybind11::gil_scoped_release release;
             telemetry::TelemetryRuntime::shutdown();
         }
+        LogitsProcessorFactory::shutdown();
         stopKmonitorFactory();
     }
 }

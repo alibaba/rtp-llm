@@ -1,6 +1,8 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -147,6 +149,18 @@ int expectCapOk(ErrorResult<int>&& result) {
 }
 
 }  // namespace
+
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesMetricsBeforeProcessExit) {
+    auto config                = grammarConfig();
+    config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    auto reporter              = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    std::weak_ptr<kmonitor::MetricsReporter> retained_reporter = reporter;
+    LogitsProcessorFactory::init(ModelConfig{}, config, "", std::move(reporter));
+    EXPECT_FALSE(retained_reporter.expired());
+    LogitsProcessorFactory::shutdown();
+    EXPECT_TRUE(retained_reporter.expired());
+    LogitsProcessorFactory::shutdown();
+}
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
