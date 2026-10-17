@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.scheduler.RequestRoute;
+
 import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
 
 import org.flexlb.config.ConfigTestSupport;
@@ -155,6 +157,7 @@ class DecodeSelectorTest {
                 views.get("127.0.0.2:8080");
         WorkerEndpoint.GenerationPin replacementPin =
                 Mockito.mock(WorkerEndpoint.GenerationPin.class);
+        Mockito.when(replacementPin.isOpen()).thenReturn(true);
         Mockito.when(replacementPin.endpoint()).thenReturn(
                 decodeEndpoint(registry, replacement.address()));
         Mockito.when(replacementPin.generationId()).thenReturn(
@@ -171,14 +174,13 @@ class DecodeSelectorTest {
                 .thenReturn(replacementPin);
 
         var inputs = request(1_000, 1_001L);
-        PlacementResult<WorkerAssignment, RoleType> result =
-                new DecodeSelector(racing, configService, SchedulingTestConfig.capacity(configService.loadBalanceConfig())).select(
-                        inputs, SCHEDULING, null);
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(new DecodeSelector(racing, configService, SchedulingTestConfig.capacity(configService.loadBalanceConfig())), inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        WorkerAssignment selected = result.value();
+        RequestRoute selected = result.value();
         Assertions.assertEquals(
-                "127.0.0.2", selected.serverStatus().getServerIp());
+                "127.0.0.2", selected.decode().getServerIp());
         Mockito.verify(replacementPin, Mockito.never()).close();
         selected.close();
         Mockito.verify(replacementPin).close();
@@ -220,7 +222,7 @@ class DecodeSelectorTest {
                 target.add(view);
                 throw new IllegalStateException("capture failed");
             }).doCallRealMethod().when(registry).decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
-            Assertions.assertThrows(IllegalStateException.class, () -> selector.select(request(1L, 1L), SCHEDULING, null));
+            Assertions.assertThrows(IllegalStateException.class, () -> StrategyTestSupport.select(selector, request(1L, 1L), SCHEDULING, null));
             assertScratchReleased(scratchCache().get());
             Assertions.assertEquals("127.0.0.1", selectStatus(selector, request(1L, 2L), null).getServerIp());
             assertScratchReleased(scratchCache().get());
@@ -432,7 +434,7 @@ class DecodeSelectorTest {
 
         var inputs = request(100L, 1_001L);
         IllegalStateException error = Assertions.assertThrows(IllegalStateException.class,
-                () -> strategy.select(inputs, SCHEDULING, null));
+                () -> StrategyTestSupport.select(strategy, inputs, SCHEDULING, null));
 
         Assertions.assertTrue(error.getMessage().contains("Decode cost formula produced no finite score"));
     }
@@ -562,8 +564,7 @@ class DecodeSelectorTest {
         Request inputs = request(257L, 3_050L);
         inputs = inputs.toBuilder().maxNewTokens(1).build();
 
-        PlacementResult<WorkerAssignment, RoleType> result = strategy.select(
-                inputs, SCHEDULING, null);
+        PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
         Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
@@ -575,8 +576,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 0L, 0L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
-        PlacementResult<WorkerAssignment, RoleType> result = strategy.select(
-                request(1_000_000L, 3_051L), SCHEDULING, null);
+        PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(strategy, request(1_000_000L, 3_051L), SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         result.value().close();
@@ -615,12 +615,11 @@ class DecodeSelectorTest {
 
         Request inputs = request(100, 3L);
 
-        PlacementResult<WorkerAssignment, RoleType> fifoPlacement = strategy.select(
-                inputs, SCHEDULING, null);
+        PlacementResult<RequestRoute, RoleType> fifoPlacement = StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
         Assertions.assertEquals(
                 PlacementResult.Status.SUCCESS, fifoPlacement.status());
-        WorkerAssignment fifoSelection = fifoPlacement.value();
-        ServerStatus fifoResult = fifoSelection.serverStatus();
+        RequestRoute fifoSelection = fifoPlacement.value();
+        ServerStatus fifoResult = fifoSelection.decode();
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(inputs.getRequestId(), fifoResult.getRequestId());
         Assertions.assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 3L),
@@ -643,8 +642,7 @@ class DecodeSelectorTest {
             reservePinned(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
 
             var inputs = request(100L, 1_001L);
-            var result = availableStrategy(registry).select(
-                    inputs, SCHEDULING, null);
+            var result = StrategyTestSupport.select(availableStrategy(registry), inputs, SCHEDULING, null);
 
             Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
             Assertions.assertEquals(RoleType.DECODE, result.blocker());
@@ -688,13 +686,12 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
-            PlacementResult<WorkerAssignment, RoleType> result = strategy.select(
-                    request(100L, requestId), SCHEDULING, null);
+            PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(strategy, request(100L, requestId), SCHEDULING, null);
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-            try (WorkerAssignment selected = result.value()) {
-                counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
+            try (RequestRoute selected = result.value()) {
+                counts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                 Assertions.assertFalse(EndpointTestSupport.isQueued(decodeEndpoint(registry,
-                        selected.serverStatus().getServerIp() + ":8080")
+                        selected.decode().getServerIp() + ":8080")
                         .resourceSnapshot(), requestId), "selection cannot claim capacity");
             }
         }
@@ -792,7 +789,7 @@ class DecodeSelectorTest {
         Request inputs = request(500L, 991L);
         inputs = inputs.toBuilder().maxNewTokens(10_000).build();
         Assertions.assertEquals(PlacementResult.Status.REJECTED,
-                availableStrategy(decodeRegistry()).select(inputs, SCHEDULING, null).status());
+                StrategyTestSupport.select(availableStrategy(decodeRegistry()), inputs, SCHEDULING, null).status());
     }
 
     @ParameterizedTest
@@ -857,13 +854,13 @@ class DecodeSelectorTest {
             DecodeSelector strategy,
             Request inputs,
             String group) {
-        PlacementResult<WorkerAssignment, RoleType> result =
-                strategy.select(inputs, SCHEDULING, group);
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }
-        try (WorkerAssignment selected = result.value()) {
-            return selected.serverStatus();
+        try (RequestRoute selected = result.value()) {
+            return selected.decode();
         }
     }
 }

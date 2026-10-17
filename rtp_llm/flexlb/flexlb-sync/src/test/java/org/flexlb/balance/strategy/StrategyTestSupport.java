@@ -29,6 +29,60 @@ final class StrategyTestSupport {
     private StrategyTestSupport() {
     }
 
+    static RequestRoute scope(org.flexlb.dao.loadbalance.Request request) {
+        var context = new org.flexlb.balance.scheduler.RequestContext(config());
+        context.data().setRequest(request);
+        return new RequestRoute(context);
+    }
+
+    static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(
+            org.flexlb.dao.loadbalance.Request request,
+            java.util.function.Function<RequestRoute, org.flexlb.balance.PlacementResult<org.flexlb.dao.loadbalance.ServerStatus, RoleType>> action) {
+        RequestRoute route = scope(request);
+        try {
+            var result = action.apply(route);
+            if (result.status() == org.flexlb.balance.PlacementResult.Status.SUCCESS) {
+                return org.flexlb.balance.PlacementResult.success(route);
+            }
+            route.close();
+            return new org.flexlb.balance.PlacementResult<>(result.status(), null, result.failure(), result.blocker(), result.diagnostics());
+        } catch (RuntimeException | Error failure) {
+            org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
+            throw failure;
+        }
+    }
+
+    static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(DecodeSelector selector,
+            org.flexlb.dao.loadbalance.Request request, org.flexlb.dao.SchedulingMetadata metadata, String group) {
+        return select(request, route -> selector.select(request, metadata, group, route));
+    }
+
+    static org.flexlb.balance.PlacementResult<RequestRoute, RoleType> select(CostBasedPrefillStrategy selector,
+            org.flexlb.dao.loadbalance.Request request, org.flexlb.dao.SchedulingMetadata metadata, RoleType role, String group) {
+        return select(request, route -> selector.select(request, metadata, role, group, route));
+    }
+
+    static RequestRoute select(VitWorkerSelector selector, long id, RoleType role, String group) {
+        RequestRoute route = scope(org.flexlb.dao.loadbalance.Request.builder().requestId(id).build());
+        try {
+            if (selector.select(id, role, group, route) != null) { return route; }
+            route.close();
+            return null;
+        } catch (RuntimeException | Error failure) {
+            org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
+            throw failure;
+        }
+    }
+
+    static org.flexlb.dao.loadbalance.ServerStatus vit(RequestRoute route) {
+        return org.flexlb.dao.loadbalance.ServerStatus.copyOf(
+                (org.flexlb.dao.loadbalance.ServerStatus) org.springframework.test.util.ReflectionTestUtils.getField(route, "vit"));
+    }
+
+    static WorkerEndpoint.GenerationPin decodePin(RequestRoute route) {
+        return org.springframework.test.util.ReflectionTestUtils.invokeMethod(route, "decodePin");
+    }
+
     static FlexlbConfig config() {
         FlexlbConfig config = new FlexlbConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);

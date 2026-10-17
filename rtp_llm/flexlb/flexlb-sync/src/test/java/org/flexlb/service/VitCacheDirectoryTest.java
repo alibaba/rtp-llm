@@ -373,13 +373,16 @@ class VitCacheDirectoryTest {
         assertFalse(selector.validate(ctx, "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
         ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
-        try (var pinned = selector.selectPinned(ctx, "one")) {
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            var pinned = selector.selectPinned(ctx, "one", scope);
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
-            assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+            assertEquals(a.getGenerationId(), pinned.getWorkerGeneration());
         }
         live.put(a.getIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one", scope));
+        }
     }
 
 }

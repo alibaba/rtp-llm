@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -68,7 +67,7 @@ class QueuedDecodeWithdrawalTest {
         registry = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class), mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
         queue = (QueuedRequestScheduler) registry;
-        eviction = new DecodeCapacityAcquirer(mock(EngineGrpcClient.class), SchedulerTestSupport.repository(registry),
+        eviction = new DecodeCapacityAcquirer(SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)), SchedulerTestSupport.repository(registry),
                 SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), service,
                 registry.decodeAdmissionCapacity);
         org.mockito.Mockito.doReturn(true).when(queue).requeue(any());
@@ -139,21 +138,21 @@ class QueuedDecodeWithdrawalTest {
         var future = RequestProtocolTestSupport.register(registry, context);
         context.data().setFuture(future);
         var prefill = mock(PrefillEndpoint.class);
-        var selection = mock(WorkerAssignment.class);
         var pin = mock(WorkerEndpoint.GenerationPin.class);
         var prefillStatus = new ServerStatus();
         prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setRequestId(100);
         prefillStatus.setSuccess(true);
-        when(selection.endpoint()).thenReturn(prefill);
+
         when(pin.endpoint()).thenReturn(prefill);
+        when(pin.isOpen()).thenReturn(true);
         when(prefill.ipPort()).thenReturn("127.0.0.1:9000");
-        when(selection.generationPin()).thenReturn(pin);
-        when(selection.serverStatus()).thenReturn(prefillStatus);
-            when(selection.requestId()).thenReturn(prefillStatus.getRequestId());
-            when(selection.role()).thenReturn(prefillStatus.getRole());
-            when(selection.group()).thenReturn(prefillStatus.getGroup());
-        when(selection.prefillWorkMs()).thenReturn(1L);
+
+
+
+
+
+
         var decodeStatus = new ServerStatus();
         decodeStatus.setSuccess(true);
         decodeStatus.setRole(RoleType.DECODE);
@@ -167,10 +166,13 @@ class QueuedDecodeWithdrawalTest {
             return true;
         }).when(queue).requeue(victim);
         when(prefill.offerPinned(eq(pin), any(), org.mockito.ArgumentMatchers.any())).thenReturn(accepted);
-        var manager = new DecodeCapacityAcquirer(mock(EngineGrpcClient.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry), org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config));
+        var manager = new DecodeCapacityAcquirer(SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry), org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry), mock(RequestSchedulerReporter.class), SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config));
         try (var handle = registry.claimAdmissionHandle(100, future); var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(handle);
-             var plan = RequestProtocolTestSupport.plan(context, RequestRoute.prepare(context,
-                List.of(selection, WorkerAssignment.decode(decode.tryPinGeneration(), decodeStatus, decode.placementVersion()))))) {
+             var plan = RequestProtocolTestSupport.plan(context, SchedulingTestConfig.prepareRoute(context, route -> {
+                 route.add(pin, prefillStatus, 1L, 0L);
+                 route.add(decode.tryPinGeneration(), decodeStatus, -1L, decode.placementVersion());
+                 return org.flexlb.balance.PlacementResult.success(route);
+             }).value())) {
             assertNotNull(handle);
             var reservation = manager.tryReclaim(context, decode);
             assertNotNull(reservation);
@@ -208,7 +210,7 @@ class QueuedDecodeWithdrawalTest {
         assertNull(EndpointTestSupport.decodeReservation(decode, 40));
         assertFalse(victim.future().isDone());
         verify(queue).requeue(victim);
-        verify(selection).close();
+        verify(pin).close();
     }
 
     @Test

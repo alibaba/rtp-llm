@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.scheduler.RequestRoute;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -57,8 +59,8 @@ public class DecodeSelector {
         this.costFormula = config.getRouter().getRoles().getDecode().getCostEstimator().compiledFormula();
     }
 
-    public PlacementResult<WorkerAssignment, RoleType> select(
-            Request request, SchedulingMetadata metadata, String group) {
+    public PlacementResult<ServerStatus, RoleType> select(
+            Request request, SchedulingMetadata metadata, String group, RequestRoute route) {
         Scratch cached = SCRATCH.get();
         Scratch scratch = cached.inUse ? new Scratch() : cached;
         scratch.inUse = true;
@@ -114,7 +116,7 @@ public class DecodeSelector {
                 DecodeRoutingView selected = candidates.get(selectedIndex);
                 WorkerEndpoint.GenerationPin pin = endpointRegistry.captureDecodeGeneration(selected);
                 if (pin != null) {
-                    return PlacementResult.success(buildWorkerAssignment(selected, pin, request.getRequestId()));
+                    return PlacementResult.success(buildServerStatus(selected, pin, request.getRequestId(), route));
                 }
             }
             return PlacementResult.blocked(RoleType.DECODE);
@@ -128,7 +130,7 @@ public class DecodeSelector {
         }
     }
 
-    private PlacementResult<WorkerAssignment, RoleType> classifyCapacityFailure(
+    private PlacementResult<ServerStatus, RoleType> classifyCapacityFailure(
             Request request, SchedulingMetadata metadata, List<DecodeRoutingView> views) {
         Response failure = null;
         boolean uniformFailure = true;
@@ -220,10 +222,10 @@ public class DecodeSelector {
                         + " exceeds every worker KV admission budget; maximum=" + maximum);
     }
 
-    private WorkerAssignment buildWorkerAssignment(
+    private ServerStatus buildServerStatus(
             DecodeRoutingView selected,
             WorkerEndpoint.GenerationPin selectedPin,
-            long requestId) {
+            long requestId, RequestRoute route) {
         try {
             checkState(selectedPin.generationId() == selected.generationId()
                     && (selectedPin.endpoint() instanceof DecodeEndpoint),
@@ -231,13 +233,12 @@ public class DecodeSelector {
             WorkerStatus.TopologySnapshot topology = selected.topology();
             WorkerStatus.EngineObservation status =
                     selected.workerStatus().fields();
-            ServerStatus result = WorkerAssignment.workerMetadata(RoleType.DECODE, requestId, topology, status);
+            ServerStatus result = ServerStatus.forWorker(RoleType.DECODE, requestId, topology, status);
 
-            // WorkerAssignment consumes the pin even if its validation rejects.
+            // The route scope consumes the pin, including validation failures.
             WorkerEndpoint.GenerationPin factoryPin = selectedPin;
             selectedPin = null;
-            return WorkerAssignment.decode(
-                    factoryPin, result, selected.admissionVersion());
+            return route.add(factoryPin, result, -1L, selected.admissionVersion());
         } finally {
             if (selectedPin != null) {
                 selectedPin.close();

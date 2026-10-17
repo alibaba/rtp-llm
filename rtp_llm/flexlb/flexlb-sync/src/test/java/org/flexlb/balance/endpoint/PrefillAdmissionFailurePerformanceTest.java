@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.balance.strategy.WorkerAssignment;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -53,14 +53,14 @@ class PrefillAdmissionFailurePerformanceTest {
                 directory.add(new EndpointRegistry.PrefillRoutingEntry(status.getIpPort(), endpoint));
             }
             directory = List.copyOf(directory);
-            PlacementResult<WorkerAssignment, RoleType> result = null;
+            PlacementResult<ServerStatus, RoleType> result = null;
             for (int i = 0; i < 10_000; i++) {
-                result = (PlacementResult<WorkerAssignment, RoleType>) classify.invokeExact(directory, 50, RoleType.PREFILL, (String) null);
+                result = (PlacementResult<ServerStatus, RoleType>) classify.invokeExact(directory, 50, RoleType.PREFILL, (String) null);
             }
             long before = bean.getThreadAllocatedBytes(threadId);
             long started = System.nanoTime();
             for (int i = 0; i < 10_000; i++) {
-                result = (PlacementResult<WorkerAssignment, RoleType>) classify.invokeExact(directory, 50, RoleType.PREFILL, (String) null);
+                result = (PlacementResult<ServerStatus, RoleType>) classify.invokeExact(directory, 50, RoleType.PREFILL, (String) null);
             }
             long nsPerFailure = (System.nanoTime() - started) / 10_000;
             long bytesPerFailure = (bean.getThreadAllocatedBytes(threadId) - before) / 10_000;

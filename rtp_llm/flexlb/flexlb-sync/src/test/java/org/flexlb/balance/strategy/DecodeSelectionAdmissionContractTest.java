@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.scheduler.RequestRoute;
+
 import org.flexlb.config.ConfigTestSupport;
 
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -52,13 +54,13 @@ class DecodeSelectionAdmissionContractTest {
 
             for (long requestId = 100L; requestId < 106L; requestId++) {
                 Request request = fixture.request(requestId);
-                PlacementResult<WorkerAssignment, RoleType> result = fixture.strategy.select(request, org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE), null);
+                PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(fixture.strategy, request, org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE), null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                try (WorkerAssignment selected = result.value()) {
-                    assertEquals(FREE_IP, selected.serverStatus().getServerIp(),
+                try (RequestRoute selected = result.value()) {
+                    assertEquals(FREE_IP, selected.decode().getServerIp(),
                             "free placement capacity must win over a queued endpoint with only dispatch capacity");
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
-                    WorkerEndpoint.GenerationPin pin = selected.generationPin();
+                    WorkerEndpoint.GenerationPin pin = StrategyTestSupport.decodePin(selected);
                     DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
                     DecodeResources.ReservationHandle reservation = endpoint.tryReserveQueuedRequest(
                             pin,
@@ -96,10 +98,10 @@ class DecodeSelectionAdmissionContractTest {
             Map<String, Integer> selectedCounts = new HashMap<>();
 
             for (long requestId = 200L; requestId < 206L; requestId++) {
-                PlacementResult<WorkerAssignment, RoleType> result = fixture.strategy.select(fixture.request(requestId), org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE), null);
+                PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(fixture.strategy, fixture.request(requestId), org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE), null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                try (WorkerAssignment selected = result.value()) {
-                    selectedCounts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
+                try (RequestRoute selected = result.value()) {
+                    selectedCounts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                 }
             }

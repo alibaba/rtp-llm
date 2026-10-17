@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.dao.route.RoleType;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -121,7 +123,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                 : routing.decodeEp().tryReserveQueuedRequest(routing.decodePin(), routing.requestId(),
                         request.getHardKvTokens(), request.getExpectedKvTokens(), routing.priority(), null).handle();
         if (routing.decodeEp() != null && pendingDecodeRollback == null) {
-            return PlacementResult.blocked(routing.decodePlacementKey());
+            return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
         }
         Throwable failure = null;
         RequestRoute acquired = null;
@@ -133,7 +135,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             CapacityBoundary.Attempt<DeliveryDispatcher.Member> attempt = DeliveryDispatcher.Member.prepare(route, decodeAdmissionCapacity);
             if (!attempt.accepted()) {
                 return switch (attempt.boundary().status()) {
-                    case UNAVAILABLE -> PlacementResult.blocked(routing.decodePlacementKey());
+                    case UNAVAILABLE -> PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
                     case OWNERSHIP_LOST -> PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
                     case FAILED -> throw new IllegalStateException("route admission failed", attempt.boundary().cause());
                 };

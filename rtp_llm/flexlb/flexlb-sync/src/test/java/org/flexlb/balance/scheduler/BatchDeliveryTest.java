@@ -272,7 +272,7 @@ class BatchDeliveryTest {
     }
 
     @Test
-    void completionFailureCannotReclassifyOrSuppressItsSiblings() {
+    void failedFactIsRetriedWithoutReclassifyingOrSuppressingItsSiblings() {
         try (var f = new LinearDeliveryFixture(true)) {
             f.expectedShutdownFailure = new IllegalStateException("owner callback failed");
             f.throwCompletionFor = 1;
@@ -280,7 +280,8 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1).status());
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(2).status());
-            assertEquals(Map.of(1L, 1, 2L, 1), f.completionCounts);
+            assertEquals(Map.of(1L, 3, 2L, 1), f.completionCounts);
+            verify(f.grpc, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
         }
     }
 
@@ -345,7 +346,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Map<Long, Long> predictions = new ConcurrentHashMap<>();
     final Map<Long, DeliveryResult> results = new ConcurrentHashMap<>();
     final Map<Long, Integer> completionCounts = new ConcurrentHashMap<>();
-    final Map<Long, Throwable> preparationFailures = new ConcurrentHashMap<>();
+    final Map<Long, String> preparationFailures = new ConcurrentHashMap<>();
     final Set<Long> lostClaims = ConcurrentHashMap.newKeySet();
     final Set<Long> refusedSends = ConcurrentHashMap.newKeySet();
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
@@ -375,7 +376,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         doReturn(1).when(sizing).getBatchDispatchCompletionThreads();
         doReturn(sizing).when(config).getInternalRuntime();
         var service = SchedulingTestConfig.configService(config);
-        dispatcher = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         runtime = spy(new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), reporter,
                 mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineGrpcClient.class)));
         var execution = spy(runtime.deliveries());
@@ -430,7 +431,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                 events.add("complete-" + claim.item().requestId());
                 if (claim.item().requestId() == throwCompletionFor) { throw expectedShutdownFailure; }
             } else if (evidence instanceof PreparationFailure failed) {
-                preparationFailures.put(failed.route().requestId(), failed.cause());
+                preparationFailures.put(failed.route().requestId(), failed.detail());
             }
             return null;
         }).when(owner).onDeliveryEvidence(any(), any());

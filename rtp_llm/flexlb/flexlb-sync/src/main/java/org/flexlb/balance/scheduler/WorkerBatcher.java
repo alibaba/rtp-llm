@@ -485,7 +485,7 @@ public final class WorkerBatcher {
                     Throwable cause = failure;
                     for (Member member : prep.members) {
                         failure = Failures.run(failure, () -> member.route().ctx().data().getScheduler().onDeliveryEvidence(null,
-                                new ContextResult.PreparationFailure(null, member.route(), cause, String.valueOf(cause.getMessage()), System.currentTimeMillis())));
+                                new ContextResult.PreparationFailure(null, member.route(), String.valueOf(cause.getMessage()), System.currentTimeMillis())));
                     }
                 }
                 if (prep.committed != null) { prep.primaryFailure = failure; Logger.error("Committed delivery failed", failure); return null; }
@@ -504,7 +504,7 @@ public final class WorkerBatcher {
                     DeliveryClaimKind.ROUTE_DECISION, 0L, member.decode()); }
             catch (Throwable failure) {
                 try { member.route().ctx().data().getScheduler().onDeliveryEvidence(null,
-                            new ContextResult.PreparationFailure(null, member.route(), failure, String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
+                            new ContextResult.PreparationFailure(null, member.route(), String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
                 catch (Throwable ownerFailure) { runtime.recordFailure(ownerFailure); }
             }
         }
@@ -596,8 +596,7 @@ public final class WorkerBatcher {
             if (failure == null) {
                 item.ctx().data().getScheduler().onQueueEvent(item, AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
             } else {
-                item.ctx().data().getScheduler().onDeliveryEvidence(null, new ContextResult.PreparationFailure(null,
-                        item, failure.cause(), String.valueOf(failure.cause().getMessage()), System.currentTimeMillis()));
+                item.ctx().data().getScheduler().onDeliveryEvidence(null, new ContextResult.PreparationFailure(null, item, String.valueOf(failure.cause().getMessage()), System.currentTimeMillis()));
             }
         } catch (Throwable callbackFailure) {
             item.ctx().data().getScheduler().runtime.recordFailure(callbackFailure);

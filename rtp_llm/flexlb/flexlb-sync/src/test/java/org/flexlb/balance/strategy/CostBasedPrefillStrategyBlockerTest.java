@@ -48,7 +48,7 @@ class CostBasedPrefillStrategyBlockerTest {
                             .requestId(1L)
                             .seqLen(100L).build();
 
-                    var result = strategy.select(request, SchedulingMetadata.explicit(50, Long.MAX_VALUE), role, "target");
+                    var result = StrategyTestSupport.select(strategy, request, SchedulingMetadata.explicit(50, Long.MAX_VALUE), role, "target");
                     var failure = result.failure();
 
                     // Missing provenance dominates; mixed known blockers are capacity, not arbitrary priority.

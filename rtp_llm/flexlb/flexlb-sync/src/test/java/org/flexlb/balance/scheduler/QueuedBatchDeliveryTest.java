@@ -37,10 +37,8 @@ import java.util.concurrent.TimeUnit;
 import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -89,7 +87,7 @@ class QueuedBatchDeliveryTest {
             sent.add(call.getArgument(2));
             return reply;
         });
-        dispatcher = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         var execution = org.mockito.Mockito.spy(registry.runtime.deliveries());
         ReflectionTestUtils.setField(registry.runtime, "deliveries", execution);
         org.mockito.Mockito.doReturn(201L).when(execution).nextBatchId();
@@ -293,7 +291,7 @@ class QueuedBatchDeliveryTest {
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(item)));
         verify(registry).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
                 argThat(e -> e instanceof ContextResult.PreparationFailure failed
-                        && failed.route() == item && failed.cause() == failure));
+                        && failed.route() == item && failed.detail().equals(failure.getMessage())));
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
         assertOccupancy(0, 0);

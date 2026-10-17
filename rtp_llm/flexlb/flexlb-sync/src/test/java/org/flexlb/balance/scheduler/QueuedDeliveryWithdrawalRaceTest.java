@@ -146,7 +146,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                 return CompletableFuture.completedFuture(reply.build());
             });
             var reporter = mock(DeliveryMetricsReporter.class);
-            var dispatcher = new DeliveryDispatcher(client, service, null, reporter, null);
+            var dispatcher = new DeliveryDispatcher(client, service, reporter);
             var repository = new RequestRepository();
             var availability = new PlacementAvailability();
             var directory = new EndpointRegistry(service, repository, reporter, dispatcher, availability);
@@ -224,7 +224,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                 assertTrue(((ExecutorService)ReflectionTestUtils.getField(runtime.deliveries(), field)).isTerminated(),
                         field + " must terminate after the execution registrations drain");
             }
-            for (String field : List.of("requestWorkers", "requestRecovery", "cleanupExecutor", "deliveryCleanupExecutor")) {
+            for (String field : List.of("requestWorkers", "requestRecovery", "cleanupExecutor")) {
                 assertTrue(((ExecutorService)ReflectionTestUtils.getField(runtime, field)).isTerminated(),
                         field + " must terminate after the execution registrations drain");
             }

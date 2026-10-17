@@ -51,7 +51,8 @@ class DeliverySettlementSignalContractTest {
             assertEquals(side == Side.PREFILL ? 1L : 0L,
                     fixture.prefill.ownership.progress().outstandingRequests());
             assertFalse(fixture.settled.isDone(), "a release still owns real resources");
-            assertFalse(fixture.session.isDone(), "remote ACK does not finish local settlement");
+            assertEquals(DeliveryCleanup.Result.REMOTE_CLEANED, fixture.session.get(2, TimeUnit.SECONDS),
+                    "remote stop completes independently of local settlement");
             assertSame(fixture.session, fixture.cleanupSession(), "retain the exact cleanup registration");
             assertEquals(1, fixture.cleanupRegistry().size());
 
@@ -74,7 +75,7 @@ class DeliverySettlementSignalContractTest {
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
-            assertFalse(fixture.session.isDone());
+            assertEquals(DeliveryCleanup.Result.REMOTE_CLEANED, fixture.session.get(2, TimeUnit.SECONDS));
             assertSame(fixture.session, fixture.cleanupSession());
             assertEquals(1, fixture.cleanupRegistry().size());
             assertSame(fixture.releaseFailure, ReflectionTestUtils.getField(fixture.runtime, "failure"));
@@ -109,7 +110,7 @@ class DeliverySettlementSignalContractTest {
         final AtomicBoolean failRelease;
         final IllegalStateException releaseFailure = new IllegalStateException("real Decode release paused by failure");
         final boolean expectsFailure;
-        CompletableFuture<Void> session;
+        CompletableFuture<DeliveryCleanup.Result> session;
 
         Fixture(Side side, boolean persistentFailure) {
             expectsFailure = persistentFailure;
@@ -206,7 +207,7 @@ class DeliverySettlementSignalContractTest {
             proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         }
 
-        CompletableFuture<Void> cleanupSession() { return dispatcher.cleanupDelivery(claim, channel, runtime); }
+        CompletableFuture<DeliveryCleanup.Result> cleanupSession() { return dispatcher.stop(claim); }
 
         Map<?, ?> cleanupRegistry() {
             return (Map<?, ?>) ReflectionTestUtils.getField(

@@ -7,8 +7,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.WorkSnapshot;
 import static org.flexlb.balance.scheduler.ContextResult.*;
-import static org.flexlb.balance.scheduler.SchedulerTestSupport.stage;
-import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -108,7 +106,7 @@ class RequestDeliveryLockContractTest {
             return org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(submission);
         }).when(execution).tryReserveDelivery();
         org.mockito.Mockito.doReturn(901L).when(execution).nextBatchId();
-        DeliveryDispatcher strategy = new DeliveryDispatcher(null, DeliveryTestSupport.service(config), null, new DeliveryMetricsReporter(null), null);
+        DeliveryDispatcher strategy = new DeliveryDispatcher(null, DeliveryTestSupport.service(config), new DeliveryMetricsReporter(null));
         var state = new PrefillState(new java.util.concurrent.locks.ReentrantLock(),
                 org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(1, WorkerBatcher.PRIORITY_QUEUE_ORDER),
                 System::currentTimeMillis);

@@ -321,7 +321,7 @@ public abstract class FlexLBMockTestBase {
      * Override when an integration fixture needs deterministic dispatcher sizing.
      */
     protected DeliveryDispatcher createDispatcher() {
-        return new DeliveryDispatcher(grpcClient, configService, null, reporter, null);
+        return new DeliveryDispatcher(grpcClient, configService, reporter);
     }
 
     protected org.flexlb.balance.scheduler.RequestRepository requestRegistry() {

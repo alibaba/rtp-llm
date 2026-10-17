@@ -154,7 +154,7 @@ class RequestAdmissionExpirationRaceTest {
             try (var admission = registry.claimAdmissionHandle(302L, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue((registry.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
-                registry.onDeliveryEvidence(null, new ContextResult.PreparationFailure(null, item, new IllegalStateException("preparation failed"), "preparation failed", System.currentTimeMillis()));
+                registry.onDeliveryEvidence(null, new ContextResult.PreparationFailure(null, item, "preparation failed", System.currentTimeMillis()));
                 assertSame(cleanupFailure, assertThrows(IllegalStateException.class, () -> {
                     if (abort) {
                         admission.terminate(Response.error(StrategyErrorType.DISPATCH_FAILED));
@@ -211,7 +211,7 @@ class RequestAdmissionExpirationRaceTest {
                 if (clientCancellation) {
                     registry.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 }
-                registry.onDeliveryEvidence(null, new ContextResult.PreparationFailure(null, item, new IllegalStateException("preparation failed"), "preparation failed", System.currentTimeMillis()));
+                registry.onDeliveryEvidence(null, new ContextResult.PreparationFailure(null, item, "preparation failed", System.currentTimeMillis()));
                 if (clientCancellation) {
                     assertFalse(future.isDone());
                 } else {

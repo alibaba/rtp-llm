@@ -73,7 +73,7 @@ class PdfusionSchedulingTest {
         when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(call -> java.util.concurrent.CompletableFuture.completedFuture(
                         LinearDeliveryFixture.ack(call.getArgument(2))));
-        DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, reporter);
         EndpointRegistry endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(lifecycle), reporter, delivery, availability);
         WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
         WorkerStatusResponse status = new WorkerStatusResponse();

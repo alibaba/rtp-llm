@@ -23,8 +23,7 @@ public final class SchedulerTestSupport {
     }
 
     public static DeliveryDispatcher dispatcher() {
-        return spy(new DeliveryDispatcher(null, DeliveryTestSupport.service(SchedulingTestConfig.newConfig()),
-                null, new DeliveryMetricsReporter(null), null));
+        return spy(new DeliveryDispatcher(null, DeliveryTestSupport.service(SchedulingTestConfig.newConfig()), new DeliveryMetricsReporter(null)));
     }
     static DeliveryDispatcher dispatcher(SchedulerRuntime runtime) {
         return (DeliveryDispatcher) ReflectionTestUtils.getField(runtime, "dispatcher");
@@ -250,6 +249,6 @@ public final class SchedulerTestSupport {
         var dispatcherService = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class,
                 org.mockito.AdditionalAnswers.delegatesTo(service));
         org.mockito.Mockito.doReturn(config).when(dispatcherService).loadBalanceConfig();
-        return new DeliveryDispatcher(client, dispatcherService, null, new DeliveryMetricsReporter(null), null);
+        return new DeliveryDispatcher(client, dispatcherService, new DeliveryMetricsReporter(null));
     }
 }
